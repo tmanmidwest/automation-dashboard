@@ -223,7 +223,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'name', label: 'Template name', type: 'text', required: true, placeholder: 'ubuntu-2404-cloudinit' },
           { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'imageUrl', label: 'Cloud image URL', type: 'text', required: true, placeholder: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img', help: 'A .img/.qcow2 cloud image with cloud-init preinstalled.' },
-          { key: 'isoStorage', label: 'Download to storage', type: 'select', optionsSource: 'isoStorages', dependsOn: ['node'], required: true, help: 'A storage that accepts ISO content (the image is staged here).' },
+          { key: 'isoStorage', label: 'Download to storage', type: 'select', optionsSource: 'isoStorages', dependsOn: ['node'], required: true, help: 'Where the image is staged. With a non-root token, enable the "Import" content type on this storage (Datacenter → Storage → Edit → Content).' },
           { key: 'diskStorage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true, help: 'Where the imported template disk will live.' },
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
@@ -449,8 +449,18 @@ export class ProxmoxConnector implements Connector {
       case 'isoStorages': {
         const node = String(values.node ?? '');
         if (!node) return [];
-        const storages = await api.nodeStorages(node, 'iso');
-        return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
+        // Storages that can stage the image: ISO content (root path-import) or Import content (non-root).
+        const storages = await api.nodeStorages(node);
+        return storages
+          .filter((s) => {
+            const c = (s.content || '').split(',');
+            return c.includes('iso') || c.includes('import');
+          })
+          .map((s) => ({
+            label: s.storage,
+            value: s.storage,
+            description: (s.content || '').includes('import') ? 'import-capable' : s.type,
+          }));
       }
       case 'bridges': {
         const node = String(values.node ?? '');
@@ -666,17 +676,34 @@ export class ProxmoxConnector implements Connector {
     let newid: number | undefined;
     let converted = false;
     try {
-      // 1) Download the cloud image onto an ISO-capable (file-based) storage.
+      // Decide how to stage the image so `import-from` accepts it:
+      //  - Storage with the 'import' content type → download there, import by volid (works for non-root tokens).
+      //  - Else a root@pam token → download as ISO, import by absolute file path.
+      //  - Else → Proxmox forbids non-root path imports; explain the fix.
       const urlName = imageUrl.split('/').pop() || `${name}.img`;
       const filename = urlName.match(/\.(img|qcow2|raw)$/i) ? urlName : `${name}.img`;
-      const imageVolid = `${isoStorage}:iso/${filename}`;
+      const storages = await api.nodeStorages(node);
+      const store = storages.find((s) => s.storage === isoStorage);
+      const supportsImport = (store?.content || '').split(',').includes('import');
+      const isRoot = api.tokenUser.startsWith('root@');
+
+      let content: 'import' | 'iso';
+      if (supportsImport) content = 'import';
+      else if (isRoot) content = 'iso';
+      else {
+        throw new Error(
+          `Proxmox only lets the root user import a disk from a file path. To build templates with this token, enable the "Import" content type on the "${isoStorage}" storage (Datacenter → Storage → ${isoStorage} → Edit → Content → add "Import"), then retry — or use a root@pam API token for this connector.`,
+        );
+      }
+
+      const imageVolid = `${isoStorage}:${content}/${filename}`;
       // Idempotent: skip the download if the image is already staged (e.g. a retry).
-      const existing = await api.storageContent(node, isoStorage, 'iso').catch(() => []);
+      const existing = await api.storageContent(node, isoStorage, content).catch(() => []);
       if (existing.some((it) => it.volid === imageVolid)) {
         onProgress(`${filename} already present in ${isoStorage}, skipping download.`);
       } else {
-        onProgress(`Downloading ${filename} to ${isoStorage}…`);
-        const dlParams: Record<string, unknown> = { content: 'iso', url: imageUrl, filename };
+        onProgress(`Downloading ${filename} to ${isoStorage} (${content})…`);
+        const dlParams: Record<string, unknown> = { content, url: imageUrl, filename };
         if (values.checksum) {
           dlParams.checksum = String(values.checksum).trim();
           dlParams['checksum-algorithm'] = 'sha256';
@@ -685,13 +712,15 @@ export class ProxmoxConnector implements Connector {
         await api.waitForTask(node, dlUpid, LONG);
       }
 
-      // Resolve the image's absolute path: `import-from` rejects an iso-type volid,
-      // but accepts a filesystem path. ISO content lives at <storage path>/template/iso/.
-      const storeCfg = await api.storageConfig(isoStorage);
-      if (!storeCfg.path) {
-        throw new Error(`Storage "${isoStorage}" has no filesystem path; pick a directory/NFS storage for the download.`);
+      // Resolve the import source.
+      let importFrom: string;
+      if (content === 'import') {
+        importFrom = imageVolid; // an 'import'-type volid is accepted directly
+      } else {
+        const storeCfg = await api.storageConfig(isoStorage);
+        if (!storeCfg.path) throw new Error(`Storage "${isoStorage}" has no filesystem path.`);
+        importFrom = `${storeCfg.path.replace(/\/$/, '')}/template/iso/${filename}`;
       }
-      const importFrom = `${storeCfg.path.replace(/\/$/, '')}/template/iso/${filename}`;
 
       // 2) Create the VM shell (serial console — cloud images expect it).
       newid = await api.nextId();

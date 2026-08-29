@@ -41,6 +41,11 @@ export class ProxmoxApiError extends Error {
 export class ProxmoxApi {
   constructor(private readonly auth: ProxmoxAuth) {}
 
+  /** The user part of the token id, e.g. "root@pam" from "root@pam!cerebro". */
+  get tokenUser(): string {
+    return (this.auth.tokenId || '').split('!')[0];
+  }
+
   private request<T>(method: string, path: string, body?: Record<string, unknown>): Promise<T> {
     const url = new URL(`${this.auth.baseUrl.replace(/\/$/, '')}/api2/json${path}`);
     const isHttps = url.protocol === 'https:';
