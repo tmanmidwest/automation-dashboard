@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Proxmox: build template from cloud image (Phase C2)
+- **Build template from image** — give a cloud image URL (e.g. an Ubuntu cloud image) and
+  Cerebro downloads it, imports it as a disk, adds a cloud-init drive, and converts it to a
+  reusable template — entirely over the Proxmox API (no SSH). The new template then appears
+  in "Deploy from template". Runs as a tracked job with step-by-step progress.
+- Requires Proxmox 8.x (uses the config `import-from` disk-import API) and node internet access.
+
+### Added — Proxmox create wizards (Phase C1)
+- **Create VM** — a streamlined wizard: name, node, OS type, installation ISO, disk
+  storage/size, cores, memory, network bridge, BIOS (SeaBIOS/UEFI), and start-on-create.
+- **Create container (LXC)** — hostname, node, OS template, root-fs storage/size, cores,
+  memory/swap, root password and/or SSH key, bridge, DHCP or static IP, unprivileged, start.
+- New dynamic option sources (live from the cluster): ISOs, container templates, root-fs
+  storages, and network bridges — all cascade off the chosen node.
+- Both run as tracked async jobs, reusing the Phase B operations engine.
+
+### Added — Proxmox snapshots (Phase B2)
+- **Snapshots** in the VM/LXC detail drawer: list existing snapshots (with time and
+  description), **take** a new one (optionally including RAM), **roll back**, or **delete**.
+- Each snapshot operation runs as a tracked async job (Proxmox snapshot ops are async).
+- New connector-contract concept: **sub-resources** — a resource kind can declare nested
+  collections (like snapshots) with their own create operation and per-item actions.
+
 ### Added — Connector operations engine + Deploy-from-template (Phase B)
 - New connector-contract capability: **parameterized operations** with form schemas,
   **cascading dynamic dropdowns** (a field's options are fetched live from the connector

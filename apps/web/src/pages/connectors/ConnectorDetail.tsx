@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation,
@@ -44,6 +44,14 @@ export function ConnectorDetail() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [confirmName, setConfirmName] = useState('');
   const [deleting, setDeleting] = useState(false);
+
+  // Snapshots (sub-resources) within the drawer
+  const [snapshots, setSnapshots] = useState<ConnectorResource[]>([]);
+  const [snapLoading, setSnapLoading] = useState(false);
+  const [snapOp, setSnapOp] = useState<ConnectorOperation | null>(null);
+  const [subBusy, setSubBusy] = useState<string | null>(null);
+
+  const snapSub = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources?.find((s) => s.id === 'snapshot');
 
   useEffect(() => {
     async function load() {
@@ -117,6 +125,7 @@ export function ConnectorDetail() {
   async function openDetail(res: ConnectorResource) {
     setDetailFor(res);
     setDetail(null);
+    setSnapshots([]);
     setConfirmName('');
     setDetailLoading(true);
     try {
@@ -126,6 +135,46 @@ export function ConnectorDetail() {
       setDetailFor(null);
     } finally {
       setDetailLoading(false);
+    }
+    if (snapSub) void loadSnapshots(res.id);
+  }
+
+  async function loadSnapshots(resourceId: string) {
+    setSnapLoading(true);
+    try {
+      setSnapshots(await api.get<ConnectorResource[]>(`/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(resourceId)}/subresources/snapshot`));
+    } catch {
+      setSnapshots([]);
+    } finally {
+      setSnapLoading(false);
+    }
+  }
+
+  /** Runs a resource-scoped operation as a job and waits for it to finish. */
+  async function runSub(operationId: string, values: Record<string, unknown>, busyKey: string) {
+    if (!detailFor) return;
+    setSubBusy(busyKey);
+    setMsg(null);
+    try {
+      const { jobId } = await api.post<{ jobId: string }>(
+        `/api/connectors/instances/${id}/operations/${operationId}`,
+        { resourceId: detailFor.id, values: { ...values, kind } },
+      );
+      let status = 'running';
+      let message = '';
+      for (let i = 0; i < 60 && status === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const job = await api.get<{ status: string; message?: string }>(`/api/connectors/instances/${id}/jobs/${jobId}`);
+        status = job.status;
+        message = job.message ?? '';
+      }
+      setMsg({ ok: status === 'success', text: message || (status === 'success' ? 'Done.' : 'Operation failed.') });
+      await loadSnapshots(detailFor.id);
+      loadResources();
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Operation failed' });
+    } finally {
+      setSubBusy(null);
     }
   }
 
@@ -311,6 +360,56 @@ export function ConnectorDetail() {
             ))}
           </div>
         )}
+
+        {snapSub && detailFor && (
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs uppercase tracking-wider text-muted-foreground">{snapSub.label}</p>
+              {canAct && snapSub.createOperationId && (
+                <Button size="sm" variant="outline"
+                  onClick={() => setSnapOp(manifest.operations?.find((o) => o.id === snapSub.createOperationId) ?? null)}>
+                  <Camera className="h-4 w-4" /> Take snapshot
+                </Button>
+              )}
+            </div>
+            {snapLoading ? (
+              <div className="text-center text-muted-foreground py-3"><Loader2 className="h-4 w-4 animate-spin inline" /></div>
+            ) : snapshots.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No snapshots.</p>
+            ) : (
+              <div className="space-y-2">
+                {snapshots.map((s) => (
+                  <div key={s.id} className="rounded-md border border-border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{s.name}
+                          {s.status && <span className="ml-2 text-xs text-muted-foreground">({s.status})</span>}</p>
+                        {s.details?.created && <p className="text-xs text-muted-foreground">{String(s.details.created)}</p>}
+                        {s.details?.description && <p className="text-xs text-muted-foreground italic">{String(s.details.description)}</p>}
+                      </div>
+                      {canAct && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          {snapSub.itemActions?.map((a) => (
+                            <Button key={a.id} size="sm" variant="outline"
+                              className={cn(a.intent === 'destructive' && 'text-destructive border-destructive/40 hover:bg-destructive/10')}
+                              disabled={subBusy === `${s.id}:${a.id}`}
+                              onClick={() => {
+                                if (a.confirm && !confirm(`${a.confirm}\n\nSnapshot: ${s.name}`)) return;
+                                runSub(a.operationId, { [a.paramKey]: s.id }, `${s.id}:${a.id}`);
+                              }}>
+                              {subBusy === `${s.id}:${a.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                              {a.label}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </Sheet>
 
       {activeOp && (
@@ -321,8 +420,23 @@ export function ConnectorDetail() {
           onClose={() => setActiveOp(null)}
           onDone={(createdId) => {
             setActiveOp(null);
-            if (createdId && activeOp.kind !== kind) setKind(activeOp.kind);
+            if (createdId && activeOp.kind && activeOp.kind !== kind) setKind(activeOp.kind);
             setTimeout(loadResources, 800);
+          }}
+        />
+      )}
+
+      {snapOp && detailFor && (
+        <OperationDialog
+          instanceId={id!}
+          operation={snapOp}
+          resourceId={detailFor.id}
+          extraValues={{ kind }}
+          open={!!snapOp}
+          onClose={() => setSnapOp(null)}
+          onDone={() => {
+            setSnapOp(null);
+            if (detailFor) loadSnapshots(detailFor.id);
           }}
         />
       )}

@@ -171,6 +171,16 @@ export class ProxmoxApi {
     return parseInt(String(id), 10);
   }
 
+  /** Storage content of a given type (iso | vztmpl | images | backup). */
+  async storageContent(node: string, storage: string, content: string): Promise<Array<{ volid: string; size?: number; format?: string }>> {
+    return this.request('GET', `/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storage)}/content?content=${encodeURIComponent(content)}`);
+  }
+
+  /** Network interfaces on a node (used to list bridges). */
+  async networks(node: string): Promise<Array<{ iface: string; type: string; active?: number }>> {
+    return this.request('GET', `/nodes/${encodeURIComponent(node)}/network`);
+  }
+
   // ── Provisioning ──
 
   /** Clone a VM/template. Returns the task UPID. */
@@ -178,9 +188,47 @@ export class ProxmoxApi {
     return this.request('POST', `/nodes/${encodeURIComponent(node)}/qemu/${vmid}/clone`, params);
   }
 
+  /** Create a new VM. Returns the task UPID. */
+  async createVm(node: string, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/qemu`, params);
+  }
+
+  /** Create a new LXC container. Returns the task UPID. */
+  async createLxc(node: string, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/lxc`, params);
+  }
+
+  /** Download a file (e.g. a cloud image) from a URL onto a storage. Returns the task UPID. */
+  async downloadUrl(node: string, storage: string, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storage)}/download-url`, params);
+  }
+
+  /** Convert a VM into a template. */
+  async convertToTemplate(node: string, vmid: number): Promise<unknown> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/qemu/${vmid}/template`);
+  }
+
   /** Update a guest's config (cloud-init fields, cores, memory, ...). */
   async updateConfig(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<unknown> {
     return this.request('PUT', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/config`, params);
+  }
+
+  // ── Snapshots ──
+
+  async listSnapshots(node: string, type: 'qemu' | 'lxc', vmid: number): Promise<Array<{ name: string; description?: string; snaptime?: number; parent?: string; vmstate?: number }>> {
+    return this.request('GET', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/snapshot`);
+  }
+
+  async createSnapshot(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/snapshot`, params);
+  }
+
+  async rollbackSnapshot(node: string, type: 'qemu' | 'lxc', vmid: number, snapname: string): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`);
+  }
+
+  async deleteSnapshot(node: string, type: 'qemu' | 'lxc', vmid: number, snapname: string): Promise<string> {
+    return this.request('DELETE', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/snapshot/${encodeURIComponent(snapname)}`);
   }
 
   /** Poll a task's status by UPID. */

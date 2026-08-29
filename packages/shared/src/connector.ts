@@ -74,6 +74,32 @@ export interface ConnectorResourceKind {
   label: string;
   /** Actions this kind supports, e.g. ["start", "stop", "restart"]. */
   actions: ConnectorAction[];
+  /** Nested collections a resource of this kind contains (e.g. snapshots). */
+  subResources?: ConnectorSubResourceKind[];
+}
+
+/** A collection nested under a resource (e.g. a VM's snapshots). */
+export interface ConnectorSubResourceKind {
+  /** e.g. "snapshot" */
+  id: string;
+  /** e.g. "Snapshots" */
+  label: string;
+  labelSingular?: string;
+  /** Operation id (in manifest.operations, scope 'resource') that creates one. */
+  createOperationId?: string;
+  /** Per-item actions, each backed by a resource-scoped operation. */
+  itemActions?: ConnectorSubResourceAction[];
+}
+
+export interface ConnectorSubResourceAction {
+  id: string;
+  label: string;
+  /** Operation id (in manifest.operations) invoked for this action. */
+  operationId: string;
+  /** The value key under which the sub-resource's id is passed to the operation. */
+  paramKey: string;
+  confirm?: string;
+  intent?: 'default' | 'destructive';
 }
 
 export interface ConnectorAction {
@@ -162,7 +188,8 @@ export interface ConnectorOperation {
   description?: string;
   /** 'create' produces a new resource of `kind`; 'resource' acts on an existing resourceId. */
   scope: 'create' | 'resource';
-  kind: string;
+  /** The resource kind this operation relates to. Optional for kind-agnostic resource ops. */
+  kind?: string;
   icon?: string;
   submitLabel?: string;
   intent?: 'default' | 'destructive';
@@ -202,6 +229,13 @@ export interface Connector {
     kind: string,
     resourceId: string,
   ): Promise<ConnectorResourceDetail>;
+  /** Optional: list a nested collection under a resource (e.g. a VM's snapshots). */
+  listSubResources?(
+    ctx: ConnectorContext,
+    kind: string,
+    resourceId: string,
+    subKind: string,
+  ): Promise<ConnectorResource[]>;
   /** Optional: permanently delete a resource. */
   deleteResource?(
     ctx: ConnectorContext,

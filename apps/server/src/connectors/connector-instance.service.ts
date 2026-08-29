@@ -171,6 +171,19 @@ export class ConnectorInstanceService {
     return connector.deleteResource(ctx, kind, resourceId);
   }
 
+  async listSubResources(id: string, kind: string, resourceId: string, subKind: string) {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.listSubResources) return [];
+    const ctx = await this.buildContext(instance);
+    try {
+      return await connector.listSubResources(ctx, kind, resourceId, subKind);
+    } catch (err) {
+      throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
+    }
+  }
+
   // ── Operations (Phase B) ──
 
   operations(instance: ConnectorInstance) {

@@ -166,6 +166,17 @@ export class ConnectorsController {
     return this.instances.describeResource(id, kind, resourceId);
   }
 
+  @Get('instances/:id/resources/:kind/:resourceId/subresources/:subKind')
+  @RequirePermissions('connectors:read')
+  async subResources(
+    @Param('id') id: string,
+    @Param('kind') kind: string,
+    @Param('resourceId') resourceId: string,
+    @Param('subKind') subKind: string,
+  ) {
+    return this.instances.listSubResources(id, kind, resourceId, subKind);
+  }
+
   @Delete('instances/:id/resources/:kind/:resourceId')
   @RequirePermissions('connectors:action')
   async deleteResource(

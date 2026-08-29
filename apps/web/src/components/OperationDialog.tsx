@@ -20,6 +20,7 @@ export function OperationDialog({
   instanceId,
   operation,
   resourceId,
+  extraValues,
   open,
   onClose,
   onDone,
@@ -27,6 +28,8 @@ export function OperationDialog({
   instanceId: string;
   operation: ConnectorOperation;
   resourceId?: string;
+  /** Values merged into the submission (e.g. { kind } for resource-scoped ops). */
+  extraValues?: Record<string, unknown>;
   open: boolean;
   onClose: () => void;
   onDone: (createdResourceId?: string) => void;
@@ -116,7 +119,7 @@ export function OperationDialog({
     try {
       const { jobId: jid } = await api.post<{ jobId: string }>(
         `/api/connectors/instances/${instanceId}/operations/${operation.id}`,
-        { resourceId, values },
+        { resourceId, values: { ...values, ...extraValues } },
       );
       setJobId(jid);
     } catch (err) {

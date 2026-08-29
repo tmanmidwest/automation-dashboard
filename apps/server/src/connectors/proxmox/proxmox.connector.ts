@@ -11,9 +11,21 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
+import type { ConnectorSubResourceKind } from '@cerebro/shared';
 import { ProxmoxApi, ProxmoxAuth, ProxmoxResource } from './proxmox-api';
 
 const POWER_ACTIONS = ['start', 'stop', 'shutdown', 'reboot', 'suspend', 'resume', 'reset'];
+
+const SNAPSHOTS_SUBRESOURCE: ConnectorSubResourceKind = {
+  id: 'snapshot',
+  label: 'Snapshots',
+  labelSingular: 'snapshot',
+  createOperationId: 'snapshot-create',
+  itemActions: [
+    { id: 'rollback', label: 'Rollback', operationId: 'snapshot-rollback', paramKey: 'snapshot', confirm: 'Roll back to this snapshot? Any changes since it was taken will be lost.' },
+    { id: 'delete', label: 'Delete', operationId: 'snapshot-delete', paramKey: 'snapshot', confirm: 'Delete this snapshot?', intent: 'destructive' },
+  ],
+};
 
 const KIND_TO_TYPE: Record<string, 'qemu' | 'lxc'> = { qemu: 'qemu', lxc: 'lxc' };
 
@@ -90,6 +102,7 @@ export class ProxmoxConnector implements Connector {
           { id: 'reset', label: 'Reset', mutating: true, confirm: 'Hard-reset this VM (like the reset button)?', showWhenStatus: ['running'] },
           { id: 'stop', label: 'Stop (force)', mutating: true, confirm: 'Force-stop this VM? Unsaved data may be lost.', showWhenStatus: ['running', 'paused'], intent: 'destructive' },
         ],
+        subResources: [SNAPSHOTS_SUBRESOURCE],
       },
       {
         id: 'lxc',
@@ -100,6 +113,7 @@ export class ProxmoxConnector implements Connector {
           { id: 'reboot', label: 'Reboot', mutating: true, confirm: 'Reboot this container?', showWhenStatus: ['running'] },
           { id: 'stop', label: 'Stop (force)', mutating: true, confirm: 'Force-stop this container?', showWhenStatus: ['running'], intent: 'destructive' },
         ],
+        subResources: [SNAPSHOTS_SUBRESOURCE],
       },
     ],
     operations: [
@@ -126,6 +140,97 @@ export class ProxmoxConnector implements Connector {
           { key: 'start', label: 'Start VM after creation', type: 'boolean', default: true },
         ],
       },
+      {
+        id: 'snapshot-create',
+        label: 'Take snapshot',
+        description: 'Capture the current state so you can roll back to it later.',
+        scope: 'resource',
+        submitLabel: 'Take snapshot',
+        fields: [
+          { key: 'snapname', label: 'Snapshot name', type: 'text', required: true, placeholder: 'before-upgrade', help: 'Letters, numbers, and hyphens.' },
+          { key: 'description', label: 'Description', type: 'text', placeholder: 'Optional note' },
+          { key: 'vmstate', label: 'Include RAM (VM state)', type: 'boolean', default: false, help: 'Snapshot the running memory too (VMs only).' },
+        ],
+      },
+      { id: 'snapshot-rollback', label: 'Rollback snapshot', scope: 'resource', fields: [] },
+      { id: 'snapshot-delete', label: 'Delete snapshot', scope: 'resource', fields: [] },
+      {
+        id: 'create-vm',
+        label: 'Create VM',
+        description: 'Create a new virtual machine and boot it from an installation ISO.',
+        scope: 'create',
+        kind: 'qemu',
+        icon: 'plus',
+        submitLabel: 'Create VM',
+        fields: [
+          { key: 'name', label: 'VM name', type: 'text', required: true, placeholder: 'debian-01' },
+          { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
+          { key: 'ostype', label: 'OS type', type: 'select', default: 'l26', options: [
+            { label: 'Linux (6.x/5.x)', value: 'l26' }, { label: 'Windows 11', value: 'win11' },
+            { label: 'Windows 10', value: 'win10' }, { label: 'Other', value: 'other' },
+          ] },
+          { key: 'iso', label: 'Installation ISO', type: 'select', optionsSource: 'isos', dependsOn: ['node'], required: true, help: 'Upload ISOs to a storage in Proxmox first.' },
+          { key: 'storage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true },
+          { key: 'disksize', label: 'Disk size (GB)', type: 'number', default: 32 },
+          { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
+          { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
+          { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'bios', label: 'BIOS', type: 'select', default: 'seabios', options: [
+            { label: 'SeaBIOS (default)', value: 'seabios' }, { label: 'UEFI (OVMF)', value: 'ovmf' },
+          ] },
+          { key: 'start', label: 'Start after creation (begin install)', type: 'boolean', default: true },
+        ],
+      },
+      {
+        id: 'create-lxc',
+        label: 'Create container',
+        description: 'Create a new LXC container from an OS template.',
+        scope: 'create',
+        kind: 'lxc',
+        icon: 'plus',
+        submitLabel: 'Create container',
+        fields: [
+          { key: 'hostname', label: 'Hostname', type: 'text', required: true, placeholder: 'ct-01' },
+          { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
+          { key: 'ostemplate', label: 'OS template', type: 'select', optionsSource: 'containerTemplates', dependsOn: ['node'], required: true, help: 'Download templates in Proxmox (CT Templates) first.' },
+          { key: 'storage', label: 'Root FS storage', type: 'select', optionsSource: 'rootfsStorages', dependsOn: ['node'], required: true },
+          { key: 'disksize', label: 'Disk size (GB)', type: 'number', default: 8 },
+          { key: 'cores', label: 'CPU cores', type: 'number', default: 1 },
+          { key: 'memory', label: 'Memory (MB)', type: 'number', default: 512 },
+          { key: 'swap', label: 'Swap (MB)', type: 'number', default: 512 },
+          { key: 'password', label: 'Root password', type: 'password', help: 'Set a root password and/or an SSH key below.' },
+          { key: 'sshkeys', label: 'SSH public key(s)', type: 'textarea', placeholder: 'ssh-ed25519 AAAA... user@host' },
+          { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'ipmode', label: 'IP configuration', type: 'select', default: 'dhcp', options: [
+            { label: 'DHCP', value: 'dhcp' }, { label: 'Static', value: 'static' },
+          ] },
+          { key: 'ipaddress', label: 'IP address (CIDR)', type: 'text', placeholder: '192.168.1.50/24', showWhen: { field: 'ipmode', equals: 'static' } },
+          { key: 'gateway', label: 'Gateway', type: 'text', placeholder: '192.168.1.1', showWhen: { field: 'ipmode', equals: 'static' } },
+          { key: 'unprivileged', label: 'Unprivileged container', type: 'boolean', default: true },
+          { key: 'start', label: 'Start after creation', type: 'boolean', default: true },
+        ],
+      },
+      {
+        id: 'build-template',
+        label: 'Build template from image',
+        description:
+          'Download a cloud image (e.g. Ubuntu cloud image), import it as a disk, add a cloud-init drive, and convert it to a reusable template you can then Deploy from. The node needs internet access to fetch the image.',
+        scope: 'create',
+        kind: 'qemu',
+        icon: 'package',
+        submitLabel: 'Build template',
+        fields: [
+          { key: 'name', label: 'Template name', type: 'text', required: true, placeholder: 'ubuntu-2404-cloudinit' },
+          { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
+          { key: 'imageUrl', label: 'Cloud image URL', type: 'text', required: true, placeholder: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img', help: 'A .img/.qcow2 cloud image with cloud-init preinstalled.' },
+          { key: 'isoStorage', label: 'Download to storage', type: 'select', optionsSource: 'isoStorages', dependsOn: ['node'], required: true, help: 'A storage that accepts ISO content (the image is staged here).' },
+          { key: 'diskStorage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true, help: 'Where the imported template disk will live.' },
+          { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
+          { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
+          { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'checksum', label: 'SHA-256 checksum', type: 'text', placeholder: 'optional', help: 'Optional — verifies the downloaded image.' },
+        ],
+      },
     ],
     help: {
       overview:
@@ -139,7 +244,9 @@ export class ProxmoxConnector implements Connector {
       ],
       requiredPermissions: [
         'PVEAuditor on / — required to list VMs and containers (read-only).',
-        'VM.PowerMgmt (included in PVEVMAdmin) on / or per-VM — required to start, stop, shutdown, and reboot guests.',
+        'VM.PowerMgmt (included in PVEVMAdmin) on / or per-VM — start, stop, shutdown, reboot, snapshots.',
+        'VM.Allocate + VM.Config.* (PVEVMAdmin) — required to create VMs/containers and build templates.',
+        'Datastore.AllocateSpace + Datastore.AllocateTemplate (PVEDatastoreAdmin) — required to import disks and download images for template building.',
         'Sys.Audit — recommended, lets the connection test read /version and cluster status.',
       ],
       referenceLinks: [
@@ -333,22 +440,88 @@ export class ProxmoxConnector implements Connector {
         const storages = await api.nodeStorages(node, 'images');
         return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
       }
+      case 'rootfsStorages': {
+        const node = String(values.node ?? '');
+        if (!node) return [];
+        const storages = await api.nodeStorages(node, 'rootdir');
+        return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
+      }
+      case 'isoStorages': {
+        const node = String(values.node ?? '');
+        if (!node) return [];
+        const storages = await api.nodeStorages(node, 'iso');
+        return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
+      }
+      case 'bridges': {
+        const node = String(values.node ?? '');
+        if (!node) return [];
+        const nets = await api.networks(node);
+        return nets.filter((n) => n.type === 'bridge').map((n) => ({ label: n.iface, value: n.iface }));
+      }
+      case 'isos':
+        return this.storageVolids(api, String(values.node ?? ''), 'iso');
+      case 'containerTemplates':
+        return this.storageVolids(api, String(values.node ?? ''), 'vztmpl');
       default:
         return [];
     }
   }
 
+  /** Aggregates content volids of a given type across all storages on a node. */
+  private async storageVolids(api: ProxmoxApi, node: string, content: string): Promise<ConnectorOption[]> {
+    if (!node) return [];
+    const storages = await api.nodeStorages(node);
+    const eligible = storages.filter((s) => (s.content || '').split(',').includes(content));
+    const out: ConnectorOption[] = [];
+    for (const s of eligible) {
+      const items = await api.storageContent(node, s.storage, content).catch(() => []);
+      for (const it of items) out.push({ label: it.volid.split('/').pop() || it.volid, value: it.volid, description: s.storage });
+    }
+    return out;
+  }
+
+  async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
+    if (subKind !== 'snapshot') return [];
+    const type = KIND_TO_TYPE[kind];
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    const vmid = parseInt(resourceId, 10);
+    const res = await this.locate(api, type, vmid);
+    if (!res) throw new Error(`${type} ${vmid} not found.`);
+    const snaps = await api.listSnapshots(res.node, type, vmid);
+    return snaps
+      // Proxmox includes a synthetic "current" entry representing the live state.
+      .filter((s) => s.name !== 'current')
+      .sort((a, b) => (a.snaptime ?? 0) - (b.snaptime ?? 0))
+      .map((s) => ({
+        id: s.name,
+        kind: 'snapshot',
+        name: s.name,
+        status: s.vmstate ? 'with RAM' : undefined,
+        details: {
+          created: s.snaptime ? new Date(s.snaptime * 1000).toLocaleString() : null,
+          description: s.description?.trim() || null,
+          parent: s.parent ?? null,
+        },
+      }));
+  }
+
   async runOperation(
     ctx: ConnectorContext,
     operationId: string,
-    _resourceId: string | undefined,
+    resourceId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    if (operationId === 'snapshot-create') return this.snapshotCreate(api, resourceId, values, onProgress);
+    if (operationId === 'snapshot-rollback') return this.snapshotRollback(api, resourceId, values, onProgress);
+    if (operationId === 'snapshot-delete') return this.snapshotDelete(api, resourceId, values, onProgress);
+    if (operationId === 'create-vm') return this.createVm(api, values, onProgress);
+    if (operationId === 'create-lxc') return this.createLxc(api, values, onProgress);
+    if (operationId === 'build-template') return this.buildTemplate(api, values, onProgress);
     if (operationId !== 'deploy-template') {
       return { ok: false, message: `Unknown operation "${operationId}".` };
     }
-    const api = new ProxmoxApi(this.authFrom(ctx));
 
     const [tplNode, tplVmidStr] = String(values.templateId ?? '').split(':');
     const tplVmid = parseInt(tplVmidStr, 10);
@@ -394,5 +567,214 @@ export class ProxmoxConnector implements Connector {
 
     ctx.log('info', `Deployed VM ${newid} (${name}) from template ${tplVmid}.`);
     return { ok: true, message: `Deployed ${name} as VM ${newid} on ${targetNode}.`, createdResourceId: String(newid) };
+  }
+
+  // ── Create operations ──
+
+  private async createVm(api: ProxmoxApi, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const node = String(values.node ?? '');
+    const name = String(values.name ?? '').trim();
+    if (!node) return { ok: false, message: 'Choose a node.' };
+    if (!name) return { ok: false, message: 'A VM name is required.' };
+    try {
+      const newid = await api.nextId();
+      const storage = String(values.storage);
+      const disksize = Number(values.disksize || 32);
+      onProgress(`Creating VM ${newid} (${name})…`);
+      const params: Record<string, unknown> = {
+        vmid: newid,
+        name,
+        cores: Number(values.cores || 2),
+        sockets: 1,
+        memory: Number(values.memory || 2048),
+        ostype: String(values.ostype || 'l26'),
+        scsihw: 'virtio-scsi-single',
+        scsi0: `${storage}:${disksize}`,
+        ide2: `${values.iso},media=cdrom`,
+        net0: `virtio,bridge=${values.bridge}`,
+        boot: 'order=scsi0;ide2',
+        bios: String(values.bios || 'seabios'),
+      };
+      if (values.bios === 'ovmf') params.efidisk0 = `${storage}:1,efitype=4m`;
+      const upid = await api.createVm(node, params);
+      await api.waitForTask(node, upid);
+      if (values.start === true || values.start === 'true') {
+        onProgress('Starting the VM…');
+        await api.setStatus(node, 'qemu', newid, 'start');
+      }
+      return { ok: true, message: `Created VM ${newid} (${name}) on ${node}.`, createdResourceId: String(newid) };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Create failed.' };
+    }
+  }
+
+  private async createLxc(api: ProxmoxApi, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const node = String(values.node ?? '');
+    const hostname = String(values.hostname ?? '').trim();
+    if (!node) return { ok: false, message: 'Choose a node.' };
+    if (!hostname) return { ok: false, message: 'A hostname is required.' };
+    if (!values.password && !values.sshkeys) {
+      return { ok: false, message: 'Set a root password or an SSH key.' };
+    }
+    try {
+      const newid = await api.nextId();
+      const storage = String(values.storage);
+      const disksize = Number(values.disksize || 8);
+      const ip =
+        values.ipmode === 'static' && values.ipaddress
+          ? `${values.ipaddress}${values.gateway ? `,gw=${values.gateway}` : ''}`
+          : 'dhcp';
+      onProgress(`Creating container ${newid} (${hostname})…`);
+      const params: Record<string, unknown> = {
+        vmid: newid,
+        hostname,
+        ostemplate: String(values.ostemplate),
+        storage,
+        rootfs: `${storage}:${disksize}`,
+        cores: Number(values.cores || 1),
+        memory: Number(values.memory || 512),
+        swap: Number(values.swap || 512),
+        net0: `name=eth0,bridge=${values.bridge},ip=${ip}`,
+        unprivileged: values.unprivileged === false || values.unprivileged === 'false' ? 0 : 1,
+        password: values.password || undefined,
+        'ssh-public-keys': values.sshkeys ? String(values.sshkeys).trim() : undefined,
+        start: values.start === true || values.start === 'true' ? 1 : 0,
+      };
+      const upid = await api.createLxc(node, params);
+      await api.waitForTask(node, upid);
+      return { ok: true, message: `Created container ${newid} (${hostname}) on ${node}.`, createdResourceId: String(newid) };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Create failed.' };
+    }
+  }
+
+  /**
+   * Build a cloud-init template from an image URL, API-only (no SSH/CLI):
+   * download-url → create VM shell → import disk via `import-from` → cloud-init drive → template.
+   * Requires Proxmox 8.x for the config `import-from` feature.
+   */
+  private async buildTemplate(api: ProxmoxApi, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const node = String(values.node ?? '');
+    const name = String(values.name ?? '').trim();
+    const imageUrl = String(values.imageUrl ?? '').trim();
+    const isoStorage = String(values.isoStorage ?? '');
+    const diskStorage = String(values.diskStorage ?? '');
+    if (!node || !name || !imageUrl || !isoStorage || !diskStorage) {
+      return { ok: false, message: 'Name, node, image URL, and both storages are required.' };
+    }
+    const LONG = 30 * 60 * 1000; // image downloads / imports can take a while
+    try {
+      // 1) Download the cloud image onto an ISO-capable storage.
+      const urlName = imageUrl.split('/').pop() || `${name}.img`;
+      const filename = urlName.match(/\.(img|qcow2|raw)$/i) ? urlName : `${name}.img`;
+      onProgress(`Downloading ${filename} to ${isoStorage}…`);
+      const dlParams: Record<string, unknown> = { content: 'iso', url: imageUrl, filename };
+      if (values.checksum) {
+        dlParams.checksum = String(values.checksum).trim();
+        dlParams['checksum-algorithm'] = 'sha256';
+      }
+      const dlUpid = await api.downloadUrl(node, isoStorage, dlParams);
+      await api.waitForTask(node, dlUpid, LONG);
+      const imageVolid = `${isoStorage}:iso/${filename}`;
+
+      // 2) Create the VM shell (serial console — cloud images expect it).
+      const newid = await api.nextId();
+      onProgress(`Creating VM ${newid} shell…`);
+      const createUpid = await api.createVm(node, {
+        vmid: newid,
+        name,
+        cores: Number(values.cores || 2),
+        sockets: 1,
+        memory: Number(values.memory || 2048),
+        ostype: 'l26',
+        scsihw: 'virtio-scsi-single',
+        net0: `virtio,bridge=${values.bridge}`,
+        serial0: 'socket',
+        vga: 'serial0',
+        agent: 1,
+      });
+      await api.waitForTask(node, createUpid);
+
+      // 3) Import the downloaded image as scsi0 (PVE8 import-from).
+      onProgress('Importing the disk (this can take a while)…');
+      const importRes = await api.updateConfig(node, 'qemu', newid, {
+        scsi0: `${diskStorage}:0,import-from=${imageVolid}`,
+      });
+      if (typeof importRes === 'string' && importRes.startsWith('UPID')) {
+        await api.waitForTask(node, importRes, LONG);
+      }
+
+      // 4) Cloud-init drive + boot order.
+      onProgress('Adding cloud-init drive and boot settings…');
+      await api.updateConfig(node, 'qemu', newid, {
+        ide2: `${diskStorage}:cloudinit`,
+        boot: 'order=scsi0',
+      });
+
+      // 5) Convert to template.
+      onProgress('Converting to a template…');
+      const tplRes = await api.convertToTemplate(node, newid);
+      if (typeof tplRes === 'string' && tplRes.startsWith('UPID')) {
+        await api.waitForTask(node, tplRes);
+      }
+
+      return { ok: true, message: `Template "${name}" built (VMID ${newid}). It's now available under "Deploy from template".`, createdResourceId: String(newid) };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Template build failed.' };
+    }
+  }
+
+  // ── Snapshot operations (resource-scoped; kind comes in via values.kind) ──
+
+  private async resolveGuest(api: ProxmoxApi, values: Record<string, unknown>, resourceId?: string) {
+    const type = KIND_TO_TYPE[String(values.kind ?? 'qemu')] ?? 'qemu';
+    const vmid = parseInt(String(resourceId ?? ''), 10);
+    const res = await this.locate(api, type, vmid);
+    if (!res) throw new Error(`${type} ${vmid} not found.`);
+    return { type, vmid, node: res.node };
+  }
+
+  private async snapshotCreate(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const snapname = String(values.snapname ?? '').trim();
+    if (!snapname) return { ok: false, message: 'A snapshot name is required.' };
+    try {
+      const { type, vmid, node } = await this.resolveGuest(api, values, resourceId);
+      onProgress(`Creating snapshot "${snapname}"…`);
+      const params: Record<string, unknown> = { snapname, description: values.description || undefined };
+      if (type === 'qemu' && (values.vmstate === true || values.vmstate === 'true')) params.vmstate = 1;
+      const upid = await api.createSnapshot(node, type, vmid, params);
+      await api.waitForTask(node, upid);
+      return { ok: true, message: `Snapshot "${snapname}" created.` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Snapshot failed.' };
+    }
+  }
+
+  private async snapshotRollback(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const snap = String(values.snapshot ?? '');
+    if (!snap) return { ok: false, message: 'No snapshot specified.' };
+    try {
+      const { type, vmid, node } = await this.resolveGuest(api, values, resourceId);
+      onProgress(`Rolling back to "${snap}"…`);
+      const upid = await api.rollbackSnapshot(node, type, vmid, snap);
+      await api.waitForTask(node, upid);
+      return { ok: true, message: `Rolled back to "${snap}".` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Rollback failed.' };
+    }
+  }
+
+  private async snapshotDelete(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const snap = String(values.snapshot ?? '');
+    if (!snap) return { ok: false, message: 'No snapshot specified.' };
+    try {
+      const { type, vmid, node } = await this.resolveGuest(api, values, resourceId);
+      onProgress(`Deleting snapshot "${snap}"…`);
+      const upid = await api.deleteSnapshot(node, type, vmid, snap);
+      await api.waitForTask(node, upid);
+      return { ok: true, message: `Snapshot "${snap}" deleted.` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Delete failed.' };
+    }
   }
 }
