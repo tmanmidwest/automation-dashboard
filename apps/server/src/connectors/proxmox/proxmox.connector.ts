@@ -157,7 +157,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'ciuser', label: 'Cloud-init user', type: 'text', placeholder: 'ubuntu', help: 'Default login user created on first boot.' },
           { key: 'cipassword', label: 'Cloud-init password', type: 'password', help: 'Optional if you provide an SSH key.' },
           { key: 'sshkeys', label: 'SSH public key(s)', type: 'textarea', placeholder: 'ssh-ed25519 AAAA... user@host', help: 'One key per line.' },
-          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'text', placeholder: 'local:snippets/cerebro-guest.yaml', help: 'Optional cloud-init snippet volume (e.g. install qemu-guest-agent). Blank inherits the template\'s.' },
+          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'select', optionsSource: 'snippets', dependsOn: ['node'], help: 'Optional cloud-init snippet (e.g. install qemu-guest-agent). Blank inherits the template\'s.' },
           { key: 'ipmode', label: 'IP configuration', type: 'select', default: 'dhcp', options: [{ label: 'DHCP', value: 'dhcp' }, { label: 'Static', value: 'static' }] },
           { key: 'ipaddress', label: 'IP address (CIDR)', type: 'text', placeholder: '192.168.1.50/24', showWhen: { field: 'ipmode', equals: 'static' } },
           { key: 'gateway', label: 'Gateway', type: 'text', placeholder: '192.168.1.1', showWhen: { field: 'ipmode', equals: 'static' } },
@@ -309,7 +309,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
-          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'text', placeholder: 'local:snippets/cerebro-guest.yaml', help: 'Optional cloud-init snippet volume. Installs qemu-guest-agent and raises the console resolution on first boot. Create it once on a snippets-enabled storage (see the setup reference).' },
+          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'select', optionsSource: 'snippets', dependsOn: ['node'], help: 'Optional. Runs a cloud-init snippet on first boot (e.g. install qemu-guest-agent, raise console resolution). Add snippets to a snippets-enabled storage in Proxmox.' },
           { key: 'checksum', label: 'SHA-256 checksum', type: 'text', placeholder: 'optional', help: 'Optional — verifies the downloaded image.' },
         ],
       },
@@ -634,6 +634,8 @@ export class ProxmoxConnector implements Connector {
         return this.storageVolids(api, String(values.node ?? ''), 'iso');
       case 'containerTemplates':
         return this.storageVolids(api, String(values.node ?? ''), 'vztmpl');
+      case 'snippets':
+        return this.storageVolids(api, String(values.node ?? ''), 'snippets');
       default:
         return [];
     }
