@@ -231,6 +231,16 @@ export class ProxmoxApi {
     return this.request('POST', `/nodes/${encodeURIComponent(node)}/vzdump`, params);
   }
 
+  /** Request a websocket VNC proxy session. Returns a one-time ticket + port. */
+  async vncproxy(node: string, type: 'qemu' | 'lxc', vmid: number): Promise<{ ticket: string; port: string | number; user?: string }> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/vncproxy`, { websocket: 1 });
+  }
+
+  /** The configured base URL and auth, for building relay targets (e.g. the VNC websocket). */
+  get connection() {
+    return { baseUrl: this.auth.baseUrl, tokenId: this.auth.tokenId, tokenSecret: this.auth.tokenSecret, verifyTls: this.auth.verifyTls };
+  }
+
   /** Update a guest's config (cloud-init fields, cores, memory, ...). */
   async updateConfig(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<unknown> {
     return this.request('PUT', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/config`, params);

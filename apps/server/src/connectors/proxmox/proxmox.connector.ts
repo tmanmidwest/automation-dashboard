@@ -7,6 +7,7 @@ import type {
   ConnectorDetailGroup,
   ConnectorDetailItem,
   ConnectorOption,
+  ConnectorConsoleTarget,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
@@ -108,6 +109,7 @@ export class ProxmoxConnector implements Connector {
           { id: 'stop', label: 'Stop (force)', mutating: true, confirm: 'Force-stop this VM? Unsaved data may be lost.', showWhenStatus: ['running', 'paused'], intent: 'destructive' },
         ],
         subResources: [SNAPSHOTS_SUBRESOURCE],
+        console: true,
       },
       {
         id: 'lxc',
@@ -119,6 +121,7 @@ export class ProxmoxConnector implements Connector {
           { id: 'stop', label: 'Stop (force)', mutating: true, confirm: 'Force-stop this container?', showWhenStatus: ['running'], intent: 'destructive' },
         ],
         subResources: [SNAPSHOTS_SUBRESOURCE],
+        console: true,
       },
       {
         id: 'template',
@@ -494,6 +497,30 @@ export class ProxmoxConnector implements Connector {
       ctx.log('error', `Proxmox delete ${type} ${vmid} failed: ${message}`);
       return { ok: false, message };
     }
+  }
+
+  async openConsole(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorConsoleTarget> {
+    const type = this.typeForKind(kind);
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    const vmid = parseInt(resourceId, 10);
+    const res = await this.locate(api, type, vmid);
+    if (!res) throw new Error(`${type} ${vmid} not found.`);
+    if (res.status !== 'running') throw new Error('Start the guest to open its console.');
+
+    const { ticket, port } = await api.vncproxy(res.node, type, vmid);
+    const conn = api.connection;
+    const u = new URL(conn.baseUrl);
+    const wsProto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url =
+      `${wsProto}//${u.host}/api2/json/nodes/${encodeURIComponent(res.node)}/${type}/${vmid}` +
+      `/vncwebsocket?port=${encodeURIComponent(String(port))}&vncticket=${encodeURIComponent(ticket)}`;
+    return {
+      url,
+      headers: { Authorization: `PVEAPIToken=${conn.tokenId}=${conn.tokenSecret}` },
+      rejectUnauthorized: conn.verifyTls,
+      type: 'vnc',
+      password: ticket,
+    };
   }
 
   // ── Operations (Phase B) ──

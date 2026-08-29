@@ -23,5 +23,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // noVNC 1.7 uses top-level await, which needs a modern target.
+    target: 'es2022',
   },
+  esbuild: { target: 'es2022' },
 });

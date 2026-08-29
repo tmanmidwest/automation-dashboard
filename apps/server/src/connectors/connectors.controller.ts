@@ -20,6 +20,7 @@ import type {
 } from '@cerebro/shared';
 import { ConnectorRegistry } from './connector-registry.service';
 import { ConnectorInstanceService } from './connector-instance.service';
+import { ConsoleService } from './console.service';
 import { AuditService } from '../logging/audit.service';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
 import type { ConnectorInstance } from '@prisma/client';
@@ -44,12 +45,17 @@ class RunOperationDto {
   @IsOptional() @IsString() resourceId?: string;
   @IsObject() values!: Record<string, unknown>;
 }
+class ConsoleDto {
+  @IsString() kind!: string;
+  @IsString() resourceId!: string;
+}
 
 @Controller('api/connectors')
 export class ConnectorsController {
   constructor(
     private readonly registry: ConnectorRegistry,
     private readonly instances: ConnectorInstanceService,
+    private readonly consoles: ConsoleService,
     private readonly audit: AuditService,
   ) {}
 
@@ -236,6 +242,19 @@ export class ConnectorsController {
       meta: { jobId },
     });
     return { jobId };
+  }
+
+  @Post('instances/:id/console')
+  @RequirePermissions('connectors:action')
+  async openConsole(@Param('id') id: string, @Body() dto: ConsoleDto, @CurrentUser() user: SessionUser) {
+    const target = await this.instances.openConsole(id, dto.kind, dto.resourceId);
+    const token = this.consoles.issue(target);
+    await this.audit.record({
+      actorId: user.id, actorEmail: user.email,
+      action: 'connectors.console_opened', target: `${id}/${dto.kind}/${dto.resourceId}`,
+    });
+    // Never return the upstream url/headers — only what the browser client needs.
+    return { token, type: target.type, password: target.password, wsPath: '/api/console/ws' };
   }
 
   @Get('instances/:id/jobs/:jobId')

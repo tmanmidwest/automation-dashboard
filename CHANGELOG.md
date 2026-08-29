@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Interactive console (Phase D)
+- **noVNC console** for running VMs and containers: open a full-screen browser console
+  from a guest's detail drawer (with a Ctrl+Alt+Del button).
+- The backend relays a WebSocket to Proxmox's VNC endpoint — attaching the API-token
+  auth and honoring the connector's TLS setting — so the browser never talks to Proxmox
+  directly. Access is gated by `connectors:action`, brokered with one-time tokens, and
+  the console open is audit-logged.
+- New connector-contract capability: `openConsole` + a per-kind `console` flag.
+
 ### Added — Proxmox: migrate & backup (Phase D)
 - **Migrate** a VM or container to another node (live/online for running VMs, restart
   migration for containers), with an option to move local disks.

@@ -76,6 +76,27 @@ export interface ConnectorResourceKind {
   actions: ConnectorAction[];
   /** Nested collections a resource of this kind contains (e.g. snapshots). */
   subResources?: ConnectorSubResourceKind[];
+  /** Whether resources of this kind offer an interactive console. */
+  console?: boolean;
+}
+
+/**
+ * Where the backend should relay a console WebSocket to, and how the browser client
+ * should authenticate. The core relays bytes; it doesn't understand the protocol.
+ */
+export interface ConnectorConsoleTarget {
+  /** Upstream WebSocket URL to relay to. */
+  url: string;
+  /** Headers for the upstream connection (e.g. auth token). */
+  headers?: Record<string, string>;
+  /** WebSocket subprotocols to request upstream. */
+  protocols?: string[];
+  /** Verify the upstream TLS certificate. */
+  rejectUnauthorized?: boolean;
+  /** Console protocol for the browser client. */
+  type: 'vnc';
+  /** One-time password handed to the browser client (e.g. VNC/RFB password). */
+  password?: string;
 }
 
 /** A collection nested under a resource (e.g. a VM's snapshots). */
@@ -246,6 +267,12 @@ export interface Connector {
     kind: string,
     resourceId: string,
   ): Promise<{ ok: boolean; message: string }>;
+  /** Optional: open an interactive console; returns where the core should relay to. */
+  openConsole?(
+    ctx: ConnectorContext,
+    kind: string,
+    resourceId: string,
+  ): Promise<ConnectorConsoleTarget>;
   /** Optional: resolve dynamic dropdown options for an operation form field. */
   resolveOptions?(
     ctx: ConnectorContext,

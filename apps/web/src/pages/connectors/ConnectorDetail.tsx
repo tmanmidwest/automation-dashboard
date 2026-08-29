@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation,
@@ -419,8 +419,14 @@ export function ConnectorDetail() {
         )}
       >
         {detailLoading && <div className="text-center text-muted-foreground py-8"><Loader2 className="h-5 w-5 animate-spin inline" /></div>}
-        {canAct && resourceOps.length > 0 && (
+        {canAct && (resourceOps.length > 0 || (activeKind?.console && detailFor)) && (
           <div className="flex flex-wrap gap-2 mb-5">
+            {activeKind?.console && detailFor?.status === 'running' && (
+              <Button size="sm" variant="outline"
+                onClick={() => navigate(`/connectors/${id}/console/${kind}/${encodeURIComponent(detailFor.id)}`)}>
+                <MonitorPlay className="h-4 w-4" /> Console
+              </Button>
+            )}
             {resourceOps.map((op) => (
               <Button key={op.id} size="sm" variant="outline" onClick={() => setResourceOp(op)}>
                 <Cpu className="h-4 w-4" /> {op.label}

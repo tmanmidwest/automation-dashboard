@@ -7,6 +7,8 @@ import session from 'express-session';
 import RedisStore from 'connect-redis';
 import { Redis } from 'ioredis';
 import { AppModule } from './app.module';
+import { ConsoleService } from './connectors/console.service';
+import { attachConsoleRelay } from './connectors/console-relay';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -39,6 +41,9 @@ async function bootstrap() {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: false }),
   );
+
+  // Raw WebSocket relay for interactive consoles (noVNC, etc.).
+  attachConsoleRelay(app.getHttpServer(), app.get(ConsoleService));
 
   const port = parseInt(process.env.PORT ?? '3000', 10);
   await app.listen(port, '0.0.0.0');

@@ -9,6 +9,7 @@ import { Dashboard } from '@/pages/Dashboard';
 import { ConnectorsList } from '@/pages/connectors/ConnectorsList';
 import { ConnectorSetup } from '@/pages/connectors/ConnectorSetup';
 import { ConnectorDetail } from '@/pages/connectors/ConnectorDetail';
+import { Console } from '@/pages/connectors/Console';
 import { Users } from '@/pages/Users';
 import { Logs } from '@/pages/Logs';
 import { About } from '@/pages/About';
@@ -59,6 +60,7 @@ function Router() {
       <Route path="/connectors/new/:connectorId" element={<Protected><RequirePerm perm="connectors:write"><ConnectorSetup /></RequirePerm></Protected>} />
       <Route path="/connectors/:id" element={<Protected><RequirePerm perm="connectors:read"><ConnectorDetail /></RequirePerm></Protected>} />
       <Route path="/connectors/:id/edit" element={<Protected><RequirePerm perm="connectors:write"><ConnectorSetup /></RequirePerm></Protected>} />
+      <Route path="/connectors/:id/console/:kind/:resourceId" element={<Protected><RequirePerm perm="connectors:action"><Console /></RequirePerm></Protected>} />
       <Route path="/users" element={<Protected><RequirePerm perm="users:read"><Users /></RequirePerm></Protected>} />
       <Route path="/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />
       <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
