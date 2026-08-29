@@ -5,6 +5,7 @@ import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } fro
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { cn } from '@/lib/utils';
+import { Brand } from '@/components/Brand';
 
 function useCountUp(target: number, ms = 700) {
   const [n, setN] = useState(0);
@@ -31,12 +32,60 @@ function uptimeSince(iso?: string): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
+const SWEEP_SECONDS = 3.6; // must match .cb-sweep / .cb-spin duration in index.css
+
+/** Colour a blip by what it actually is — provider + resource kind. */
+function guestColor(kind: string): string {
+  if (kind === 'ec2') return 'hsl(32 95% 56%)';       // AWS EC2 — amber
+  if (kind === 'lxc') return 'hsl(var(--accent))';     // Proxmox container — teal
+  if (kind === 'qemu') return 'hsl(var(--primary))';   // Proxmox VM — cyan
+  return 'hsl(var(--accent) / 0.7)';
+}
+
+/** Short provider tag from a resource kind, for the sector rim label. */
+function providerTag(kind: string): string {
+  if (kind === 'ec2') return 'AWS';
+  if (kind === 'qemu' || kind === 'lxc') return 'PROXMOX';
+  return 'SYS';
+}
+
+interface Blip { g: OverviewGuest; i: number; x: number; y: number; aDeg: number }
+
 function RadarScope({ guests, hovered, onHover }: { guests: OverviewGuest[]; hovered: number | null; onHover: (i: number | null) => void }) {
-  const blips = guests.slice(0, 30).map((g, i) => {
-    const ang = (i * 137.5 * Math.PI) / 180;
-    const rad = 30 + ((i * 43) % 108);
-    return { g, i, x: 150 + Math.cos(ang) * rad, y: 150 + Math.sin(ang) * rad };
+  // Group the real systems by connector so each provider owns an angular wedge
+  // of the scope — AWS clusters in one arc, Proxmox in another — instead of a
+  // meaningless scatter. Original indices are preserved for hover-sync with the
+  // "Live signals" list.
+  const items = guests.slice(0, 30).map((g, i) => ({ g, i }));
+  const order: string[] = [];
+  const byConn = new Map<string, { g: OverviewGuest; i: number }[]>();
+  for (const it of items) {
+    const key = it.g.connector || 'system';
+    if (!byConn.has(key)) { byConn.set(key, []); order.push(key); }
+    byConn.get(key)!.push(it);
+  }
+  const C = order.length || 1;
+
+  const blips: Blip[] = [];
+  const sectors: { conn: string; tag: string; midDeg: number; startDeg: number }[] = [];
+  order.forEach((conn, ci) => {
+    const arr = byConn.get(conn)!;
+    const secStart = -90 + ci * (360 / C);
+    const secWidth = 360 / C;
+    const pad = Math.min(14, secWidth * 0.1);
+    const aStart = secStart + pad;
+    const aEnd = secStart + secWidth - pad;
+    sectors.push({ conn, tag: providerTag(arr[0]?.g.kind ?? ''), midDeg: secStart + secWidth / 2, startDeg: secStart });
+    const n = arr.length;
+    arr.forEach((it, j) => {
+      const frac = n > 1 ? j / (n - 1) : 0.5;
+      const aDeg = C === 1 ? aStart + (j / Math.max(1, n)) * (aEnd - aStart) : aStart + frac * (aEnd - aStart);
+      const radius = 46 + ((j % 4) * 22) + (Math.floor(j / 4) % 2) * 11; // stagger so they don't sit on one arc
+      const a = (aDeg * Math.PI) / 180;
+      blips.push({ g: it.g, i: it.i, x: 150 + Math.cos(a) * radius, y: 150 + Math.sin(a) * radius, aDeg });
+    });
   });
+
   return (
     <div className="relative h-[300px] w-[300px]">
       <div className="absolute inset-2 rounded-full cb-sweep"
@@ -45,20 +94,51 @@ function RadarScope({ guests, hovered, onHover }: { guests: OverviewGuest[]; hov
         {[142, 104, 66, 28].map((r) => <circle key={r} cx="150" cy="150" r={r} fill="none" stroke="hsl(var(--accent) / 0.22)" strokeWidth="1" />)}
         <line x1="8" y1="150" x2="292" y2="150" stroke="hsl(var(--accent) / 0.14)" strokeWidth="1" />
         <line x1="150" y1="8" x2="150" y2="292" stroke="hsl(var(--accent) / 0.14)" strokeWidth="1" />
+
+        {/* Spokes + rim labels delineate each connector's wedge. */}
+        {C > 1 && sectors.map((s) => {
+          const a = (s.startDeg * Math.PI) / 180;
+          return <line key={`spoke-${s.conn}`} x1="150" y1="150" x2={150 + Math.cos(a) * 142} y2={150 + Math.sin(a) * 142} stroke="hsl(var(--accent) / 0.12)" strokeWidth="1" strokeDasharray="2 4" />;
+        })}
+        {sectors.map((s) => {
+          const a = (s.midDeg * Math.PI) / 180;
+          const lx = 150 + Math.cos(a) * 128;
+          const ly = 150 + Math.sin(a) * 128;
+          return (
+            <text key={`lbl-${s.conn}`} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
+              className="fill-muted-foreground" style={{ fontSize: 8, letterSpacing: '0.12em', opacity: 0.75 }}>
+              {s.tag}
+            </text>
+          );
+        })}
+
         <g className="cb-spin" style={{ transformOrigin: 'center' }}>
           <line x1="150" y1="150" x2="150" y2="10" stroke="hsl(var(--accent))" strokeWidth="1.5" style={{ filter: 'drop-shadow(0 0 4px hsl(var(--accent)/0.8))' }} />
         </g>
-        {blips.map(({ g, i, x, y }) => {
+
+        {blips.map(({ g, i, x, y, aDeg }) => {
           const on = g.status === 'running';
           const hot = hovered === i;
-          const color = on ? 'hsl(var(--primary))' : 'hsl(var(--accent) / 0.65)';
+          const color = guestColor(g.kind);
+          const isContainer = g.kind === 'lxc';
+          // Ping in phase with the sweep: fire as the sweep line passes this angle.
+          const delay = ((((aDeg + 90) % 360) + 360) % 360) / 360 * SWEEP_SECONDS;
+          const r = hot ? 6 : on ? 4.5 : 3;
+          const glow = on || hot ? `drop-shadow(0 0 6px ${color})` : undefined;
           return (
             <g key={i} onMouseEnter={() => onHover(i)} onMouseLeave={() => onHover(null)} style={{ cursor: 'pointer' }}>
               {hot && <circle cx={x} cy={y} r="10" fill="none" stroke={color} strokeWidth="1" opacity="0.8" />}
-              <circle cx={x} cy={y} r={hot ? 6 : on ? 4.5 : 3} fill={color} className={on && !hot ? 'cb-ping' : ''}
-                style={{ animationDelay: `${(i * 0.4) % 3.6}s`, filter: on || hot ? `drop-shadow(0 0 6px ${color})` : undefined }}>
-                <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
-              </circle>
+              {isContainer ? (
+                <rect x={x - r} y={y - r} width={r * 2} height={r * 2} rx={1.5} fill={on ? color : 'transparent'} stroke={color} strokeWidth={on ? 0 : 1.4}
+                  className={on && !hot ? 'cb-ping' : ''} style={{ animationDelay: `${delay}s`, filter: glow, transformBox: 'fill-box', transformOrigin: 'center' }}>
+                  <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
+                </rect>
+              ) : (
+                <circle cx={x} cy={y} r={r} fill={on ? color : 'transparent'} stroke={color} strokeWidth={on ? 0 : 1.4}
+                  className={on && !hot ? 'cb-ping' : ''} style={{ animationDelay: `${delay}s`, filter: glow }}>
+                  <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
+                </circle>
+              )}
             </g>
           );
         })}
@@ -182,6 +262,9 @@ export function Dashboard() {
           <div className="absolute inset-0 pointer-events-none opacity-[0.12] cb-gridfloor" />
           {alert && <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle at 50% 55%, transparent 45%, hsl(var(--destructive) / 0.10))' }} />}
 
+          {/* Cerebro logo, top-centre — always visible on the radar even with the nav collapsed. */}
+          <Brand className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none" />
+
           <HudBox pos="top-4 left-5">
             <div className="text-muted-foreground/70">Systems online</div>
             <div className={cn('text-sm', offline.length ? 'text-amber-400' : 'text-emerald-400')}>
@@ -233,8 +316,13 @@ export function Dashboard() {
               {guests.map((g, i) => (
                 <div key={i} onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}
                   className={cn('flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors', hovered === i ? 'bg-muted/60' : 'hover:bg-muted/40')}>
-                  <span className={cn('h-2 w-2 rounded-full shrink-0', g.status === 'running' ? 'bg-primary shadow-[0_0_6px_hsl(var(--primary))]' : 'bg-muted-foreground/50')} />
-                  {g.kind === 'lxc' ? <Boxes className="h-3.5 w-3.5 text-muted-foreground shrink-0" /> : <Server className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
+                  <span className="h-2 w-2 rounded-full shrink-0"
+                    style={g.status === 'running'
+                      ? { background: guestColor(g.kind), boxShadow: `0 0 6px ${guestColor(g.kind)}` }
+                      : { background: 'hsl(var(--muted-foreground) / 0.5)' }} />
+                  {g.kind === 'lxc'
+                    ? <Boxes className="h-3.5 w-3.5 shrink-0" style={{ color: guestColor(g.kind) }} />
+                    : <Server className="h-3.5 w-3.5 shrink-0" style={{ color: guestColor(g.kind) }} />}
                   <span className="text-sm truncate">{g.name}</span>
                   <span className="ml-auto text-[10px] font-mono uppercase tracking-wider text-muted-foreground shrink-0">{g.node}</span>
                 </div>
