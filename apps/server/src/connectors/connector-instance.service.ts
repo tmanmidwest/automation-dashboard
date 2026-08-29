@@ -5,8 +5,8 @@ import { LoggingService } from '../logging/logging.service';
 import { ConnectorRegistry } from './connector-registry.service';
 import { JobService } from './job.service';
 import type {
-  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget,
-  DashboardOverview, OverviewMetric, OverviewGuest,
+  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget, ConnectorNode,
+  DashboardOverview, OverviewMetric, OverviewGuest, OverviewSource,
 } from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
 
@@ -241,7 +241,21 @@ export class ConnectorInstanceService {
     return this.jobs.get(jobId);
   }
 
+  async listNodes(id: string): Promise<ConnectorNode[]> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.listNodes) return [];
+    const ctx = await this.buildContext(instance);
+    try {
+      return await connector.listNodes(ctx);
+    } catch (err) {
+      throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
+    }
+  }
+
   private overviewCache?: { at: number; data: DashboardOverview };
+  private lastGoodOverview?: { at: number; data: DashboardOverview };
 
   /** Aggregated telemetry across all enabled connectors (short-cached to survive polling). */
   async dashboardOverview(): Promise<DashboardOverview> {
@@ -250,6 +264,7 @@ export class ConnectorInstanceService {
     const instances = (await this.list()).filter((i) => i.enabled);
     const metricMap = new Map<string, { label: string; unit?: string; values: number[] }>();
     const guests: OverviewGuest[] = [];
+    const sources: OverviewSource[] = [];
     let ok = 0;
 
     await Promise.all(
@@ -260,17 +275,19 @@ export class ConnectorInstanceService {
           const ctx = await this.buildContext(inst);
           const ov = await connector.overview(ctx);
           ok++;
+          sources.push({ name: inst.name, ok: true });
           for (const m of ov.metrics) {
             const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [] };
             e.values.push(m.value);
             metricMap.set(m.key, e);
           }
           for (const g of ov.guests) guests.push({ ...g, connector: inst.name });
-        } catch {
-          // Skip connectors that fail (unreachable, etc.).
+        } catch (err) {
+          sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
         }
       }),
     );
+    sources.sort((a, b) => Number(a.ok) - Number(b.ok) || a.name.localeCompare(b.name));
 
     // Percentages average across connectors; everything else sums.
     const metrics: OverviewMetric[] = [...metricMap.entries()].map(([key, e]) => {
@@ -280,7 +297,17 @@ export class ConnectorInstanceService {
       return { key, label: e.label, value, unit: e.unit };
     });
 
-    const data: DashboardOverview = { connectors: { total: instances.length, ok }, metrics, guests: guests.slice(0, 60) };
+    let data: DashboardOverview = { connectors: { total: instances.length, ok }, sources, metrics, guests: guests.slice(0, 60) };
+
+    // Smooth transient failures: if this poll reached no connectors but some are
+    // configured, keep serving the last good telemetry (up to 20s) — but with the
+    // CURRENT source health, so the alert surfaces immediately.
+    if (ok === 0 && instances.length > 0 && this.lastGoodOverview && Date.now() - this.lastGoodOverview.at < 20000) {
+      data = { ...this.lastGoodOverview.data, connectors: data.connectors, sources };
+    } else if (ok > 0) {
+      this.lastGoodOverview = { at: Date.now(), data };
+    }
+
     this.overviewCache = { at: Date.now(), data };
     return data;
   }

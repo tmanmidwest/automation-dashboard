@@ -254,6 +254,17 @@ export interface ConnectorOverview {
   guests: { name: string; kind: string; status: string; node: string }[];
 }
 
+/** An infrastructure host/node a connector manages (e.g. a Proxmox node). */
+export interface ConnectorNode {
+  name: string;
+  status: string;
+  cpuPct: number;
+  memUsedBytes?: number;
+  memTotalBytes?: number;
+  vcpus?: number;
+  uptimeSeconds?: number;
+}
+
 /** The runtime interface every connector module must implement. */
 export interface Connector {
   manifest: ConnectorManifest;
@@ -286,6 +297,8 @@ export interface Connector {
   ): Promise<{ ok: boolean; message: string }>;
   /** Optional: an at-a-glance summary for the dashboard (counts, usage, resource sample). */
   overview?(ctx: ConnectorContext): Promise<ConnectorOverview>;
+  /** Optional: list the infrastructure nodes/hosts this connector manages. */
+  listNodes?(ctx: ConnectorContext): Promise<ConnectorNode[]>;
   /** Optional: open an interactive console; returns where the core should relay to. */
   openConsole?(
     ctx: ConnectorContext,

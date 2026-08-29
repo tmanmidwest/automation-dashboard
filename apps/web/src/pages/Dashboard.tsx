@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } from '@cerebro/shared';
 import { api } from '@/lib/api';
@@ -67,9 +68,13 @@ function RadarScope({ guests, hovered, onHover }: { guests: OverviewGuest[]; hov
   );
 }
 
-function StatTile({ icon: Icon, label, value, sub }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; sub?: string }) {
-  return (
-    <div className="relative overflow-hidden rounded-xl border border-border/60 bg-card/70 p-4 backdrop-blur">
+function HudBox({ pos, children }: { pos: string; children: React.ReactNode }) {
+  return <div className={cn('absolute z-10 hidden md:block font-mono text-[11px] uppercase tracking-[0.18em] leading-relaxed', pos)}>{children}</div>;
+}
+
+function StatTile({ icon: Icon, label, value, sub, to }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; sub?: string; to?: string }) {
+  const inner = (
+    <>
       <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-primary to-accent" />
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</span>
@@ -77,14 +82,20 @@ function StatTile({ icon: Icon, label, value, sub }: { icon: React.ComponentType
       </div>
       <div className="mt-2 text-2xl font-semibold tabular-nums">{value}</div>
       {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
-    </div>
+    </>
+  );
+  const base = 'relative overflow-hidden rounded-xl border border-border/60 bg-card/70 p-4 backdrop-blur';
+  return to ? (
+    <Link to={to} className={cn(base, 'block transition-all hover:border-primary/50 hover:bg-card')}>{inner}</Link>
+  ) : (
+    <div className={base}>{inner}</div>
   );
 }
 
-function GaugeTile({ icon: Icon, label, pct }: { icon: React.ComponentType<{ className?: string }>; label: string; pct: number }) {
+function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{ className?: string }>; label: string; pct: number; to?: string }) {
   const color = pct >= 85 ? 'bg-destructive' : pct >= 60 ? 'bg-amber-500' : 'bg-gradient-to-r from-primary to-accent';
-  return (
-    <div className="relative overflow-hidden rounded-xl border border-border/60 bg-card/70 p-4 backdrop-blur">
+  const inner = (
+    <>
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</span>
         <Icon className="h-4 w-4 text-accent/70" />
@@ -93,7 +104,13 @@ function GaugeTile({ icon: Icon, label, pct }: { icon: React.ComponentType<{ cla
       <div className="mt-2 h-1.5 w-full rounded-full bg-muted overflow-hidden">
         <div className={cn('h-full rounded-full transition-all duration-700', color)} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-    </div>
+    </>
+  );
+  const base = 'relative overflow-hidden rounded-xl border border-border/60 bg-card/70 p-4 backdrop-blur';
+  return to ? (
+    <Link to={to} className={cn(base, 'block transition-all hover:border-primary/50 hover:bg-card')}>{inner}</Link>
+  ) : (
+    <div className={base}>{inner}</div>
   );
 }
 
@@ -105,13 +122,24 @@ export function Dashboard() {
   const [userCount, setUserCount] = useState(0);
   const [hovered, setHovered] = useState<number | null>(null);
   const startedRef = useRef(Date.now());
+  const lastPollRef = useRef(Date.now());
   const [, tick] = useState(0);
 
   useEffect(() => {
     api.get<VersionInfo>('/api/version').then(setVersion).catch(() => {});
     api.get<Array<unknown>>('/api/users').then((u) => setUserCount(u.length)).catch(() => {});
     const poll = () => {
-      api.get<DashboardOverview>('/api/connectors/overview').then(setOverview).catch(() => {});
+      api.get<DashboardOverview>('/api/connectors/overview').then((data) => {
+        lastPollRef.current = Date.now();
+        setOverview((prev) => {
+          const empty = data.metrics.length === 0 && data.guests.length === 0;
+          // Keep the last good telemetry if a poll momentarily returns nothing.
+          if (empty && prev && (prev.metrics.length > 0 || prev.guests.length > 0)) {
+            return { ...prev, connectors: data.connectors };
+          }
+          return data;
+        });
+      }).catch(() => {});
       api.get<AuditLogEntry[]>('/api/logs/audit?limit=14').then(setAudit).catch(() => {});
     };
     poll();
@@ -122,6 +150,14 @@ export function Dashboard() {
 
   const metric = (k: string) => overview?.metrics.find((m) => m.key === k)?.value ?? 0;
   const guests = overview?.guests ?? [];
+
+  const sources = overview?.sources ?? [];
+  const offline = sources.filter((s) => !s.ok);
+  const secsSinceScan = Math.floor((Date.now() - lastPollRef.current) / 1000);
+  const stale = secsSinceScan > 15;
+  const runningGuests = guests.filter((g) => g.status === 'running').length;
+  const idleGuests = guests.length - runningGuests;
+  const alert = offline.length > 0 || stale;
 
   const vms = useCountUp(metric('vmsRunning'));
   const cts = useCountUp(metric('ctsRunning'));
@@ -142,8 +178,43 @@ export function Dashboard() {
 
       {/* Radar + live signals */}
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <div className="relative overflow-hidden rounded-2xl border border-border/60 cerebro-aurora">
+        <div className={cn('relative overflow-hidden rounded-2xl border cerebro-aurora transition-colors', alert ? 'border-amber-500/40' : 'border-border/60')}>
           <div className="absolute inset-0 pointer-events-none opacity-[0.12] cb-gridfloor" />
+          {alert && <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle at 50% 55%, transparent 45%, hsl(var(--destructive) / 0.10))' }} />}
+
+          <HudBox pos="top-4 left-5">
+            <div className="text-muted-foreground/70">Systems online</div>
+            <div className={cn('text-sm', offline.length ? 'text-amber-400' : 'text-emerald-400')}>
+              {overview?.connectors.ok ?? 0}/{overview?.connectors.total ?? 0}
+            </div>
+          </HudBox>
+
+          <HudBox pos="top-4 right-5 text-right">
+            <div className="text-muted-foreground/70">Last scan</div>
+            {stale ? <div className="text-destructive animate-pulse">Signal lost</div> : <div className="text-accent/90">{secsSinceScan}s ago</div>}
+          </HudBox>
+
+          <HudBox pos="bottom-4 left-5">
+            {offline.length > 0 ? (
+              <div className="space-y-0.5">
+                {offline.slice(0, 3).map((s) => (
+                  <div key={s.name} className="text-destructive flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-pulse" /> {s.name} · unreachable
+                  </div>
+                ))}
+                {offline.length > 3 && <div className="text-destructive/70">+{offline.length - 3} more</div>}
+              </div>
+            ) : (
+              <div className="text-emerald-400 flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> All systems nominal</div>
+            )}
+          </HudBox>
+
+          <HudBox pos="bottom-4 right-5 text-right">
+            <div className="text-muted-foreground/70">Signals</div>
+            <div className="text-primary">{runningGuests} active</div>
+            {idleGuests > 0 && <div className="text-amber-400/80">{idleGuests} idle</div>}
+          </HudBox>
+
           <div className="relative grid place-items-center py-6 min-h-[340px]">
             <RadarScope guests={guests} hovered={hovered} onHover={setHovered} />
           </div>
@@ -175,11 +246,11 @@ export function Dashboard() {
 
       {/* Telemetry tiles */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-        <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} />
-        <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} />
-        <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" />
-        <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} />
-        <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} />
+        <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/qemu" />
+        <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} to="/overview/lxc" />
+        <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" to="/overview/nodes" />
+        <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} to="/overview/nodes" />
+        <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
         <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
       </div>
 

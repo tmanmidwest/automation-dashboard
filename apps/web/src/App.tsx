@@ -6,6 +6,7 @@ import { Brand } from '@/components/Brand';
 import { Login } from '@/pages/Login';
 import { Setup } from '@/pages/Setup';
 import { Dashboard } from '@/pages/Dashboard';
+import { OverviewResources } from '@/pages/OverviewResources';
 import { ConnectorsList } from '@/pages/connectors/ConnectorsList';
 import { ConnectorSetup } from '@/pages/connectors/ConnectorSetup';
 import { ConnectorDetail } from '@/pages/connectors/ConnectorDetail';
@@ -56,6 +57,7 @@ function Router() {
       <Route path="/setup" element={<Gate><Setup /></Gate>} />
 
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
+      <Route path="/overview/:kind" element={<Protected><RequirePerm perm="connectors:read"><OverviewResources /></RequirePerm></Protected>} />
       <Route path="/connectors" element={<Protected><RequirePerm perm="connectors:read"><ConnectorsList /></RequirePerm></Protected>} />
       <Route path="/connectors/new/:connectorId" element={<Protected><RequirePerm perm="connectors:write"><ConnectorSetup /></RequirePerm></Protected>} />
       <Route path="/connectors/:id" element={<Protected><RequirePerm perm="connectors:read"><ConnectorDetail /></RequirePerm></Protected>} />

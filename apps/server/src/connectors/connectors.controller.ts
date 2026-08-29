@@ -171,6 +171,12 @@ export class ConnectorsController {
     return this.instances.listResources(id, kind);
   }
 
+  @Get('instances/:id/nodes')
+  @RequirePermissions('connectors:read')
+  async nodes(@Param('id') id: string) {
+    return this.instances.listNodes(id);
+  }
+
   @Get('instances/:id/resources/:kind/:resourceId')
   @RequirePermissions('connectors:read')
   async resourceDetail(

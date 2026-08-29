@@ -9,6 +9,7 @@ import type {
   ConnectorOption,
   ConnectorConsoleTarget,
   ConnectorOverview,
+  ConnectorNode,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
@@ -550,6 +551,23 @@ export class ProxmoxConnector implements Connector {
       .map((r) => ({ name: r.name || `${r.type}-${r.vmid}`, kind: r.type, status: r.status ?? 'unknown', node: r.node }));
 
     return { metrics, guests };
+  }
+
+  async listNodes(ctx: ConnectorContext): Promise<ConnectorNode[]> {
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    const nodes = await api.nodes();
+    return nodes
+      .slice()
+      .sort((a, b) => a.node.localeCompare(b.node))
+      .map((n) => ({
+        name: n.node,
+        status: n.status,
+        cpuPct: Math.round((n.cpu ?? 0) * 100),
+        memUsedBytes: n.mem,
+        memTotalBytes: n.maxmem,
+        vcpus: n.maxcpu,
+        uptimeSeconds: n.uptime,
+      }));
   }
 
   async openConsole(ctx: ConnectorContext, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {

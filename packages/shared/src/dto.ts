@@ -92,9 +92,17 @@ export interface OverviewGuest {
   connector: string;
 }
 
+export interface OverviewSource {
+  name: string;
+  ok: boolean;
+  message?: string;
+}
+
 /** Aggregated dashboard telemetry across all connectors. */
 export interface DashboardOverview {
   connectors: { total: number; ok: number };
+  /** Per-connector reachability, for surfacing issues on the dashboard. */
+  sources: OverviewSource[];
   metrics: OverviewMetric[];
   guests: OverviewGuest[];
 }
