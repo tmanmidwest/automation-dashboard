@@ -1,0 +1,103 @@
+// Cerebro data model
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A role is a named bundle of permission strings (see @cerebro/shared Permission).
+/// Modeled as data so granular/per-connector roles can be added without a migration.
+model Role {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  /// Array of Permission strings.
+  permissions String[]
+  /// Built-in roles cannot be deleted from the UI.
+  builtin     Boolean  @default(false)
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  displayName  String
+  /// Null for users that only authenticate via OIDC.
+  passwordHash String?
+  /// 'local' or 'oidc'
+  authProvider String    @default("local")
+  /// Subject claim from the OIDC provider, when applicable.
+  oidcSubject  String?   @unique
+  disabled     Boolean   @default(false)
+  role         Role      @relation(fields: [roleId], references: [id])
+  roleId       String
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([roleId])
+}
+
+/// Non-secret application settings (SMTP host/port, OIDC issuer, feature flags...).
+/// Values are stored as JSON. Secret values live in the Secret table instead.
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+/// The encrypted secrets vault. Ciphertext only — plaintext never touches the DB.
+model Secret {
+  key       String   @id
+  /// AES-256-GCM: iv:authTag:ciphertext (base64), see CryptoService.
+  ciphertext String
+  updatedAt DateTime @updatedAt
+}
+
+/// An installed connector instance (e.g. a specific Proxmox server).
+model ConnectorInstance {
+  id           String   @id @default(cuid())
+  /// Manifest id, e.g. "proxmox".
+  connectorId  String
+  /// User-facing label, e.g. "Home Proxmox".
+  name         String
+  enabled      Boolean  @default(true)
+  /// Non-secret config values as JSON. Secret fields are stored in Secret as `connector:<id>:<field>`.
+  config       Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([connectorId])
+}
+
+model AppLog {
+  id        String   @id @default(cuid())
+  level     String   // debug | info | warn | error
+  context   String
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([createdAt])
+}
+
+/// Immutable record of who did what. Append-only; never edited from the UI.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorEmail String?
+  action     String
+  target     String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([createdAt])
+}

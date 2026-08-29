@@ -1,0 +1,75 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Cerebro theme tokens.
+  Default is the dark "Cerebro" look: deep slate-indigo with a Cerebro-red accent.
+  A light variant is provided; swap these blocks to add more themes later.
+*/
+@layer base {
+  :root {
+    --background: 222 30% 8%;
+    --foreground: 210 40% 96%;
+    --card: 222 28% 11%;
+    --card-foreground: 210 40% 96%;
+    --muted: 222 20% 18%;
+    --muted-foreground: 215 20% 65%;
+    --primary: 350 85% 55%;            /* Cerebro red */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 221 45% 30%;          /* Xavier blue */
+    --secondary-foreground: 210 40% 96%;
+    --accent: 199 89% 55%;             /* electric cyan */
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 20% 20%;
+    --input: 222 20% 22%;
+    --ring: 350 85% 55%;
+    --sidebar: 224 32% 6%;
+    --sidebar-foreground: 210 30% 88%;
+    --radius: 0.7rem;
+  }
+
+  .light {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 40% 94%;
+    --muted-foreground: 215 16% 47%;
+    --primary: 350 85% 50%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 221 60% 45%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 199 89% 48%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --ring: 350 85% 50%;
+    --sidebar: 222 47% 11%;
+    --sidebar-foreground: 210 30% 88%;
+    --radius: 0.7rem;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Subtle animated Cerebro backdrop for auth screens. */
+.cerebro-aurora {
+  background:
+    radial-gradient(60% 50% at 20% 10%, hsl(var(--secondary) / 0.35), transparent 60%),
+    radial-gradient(50% 50% at 85% 20%, hsl(var(--primary) / 0.28), transparent 55%),
+    radial-gradient(60% 60% at 50% 100%, hsl(var(--accent) / 0.18), transparent 60%);
+}

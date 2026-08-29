@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+dist
+**/dist
+**/*.tsbuildinfo
+apps/server/public
+.git
+.gitignore
+.env
+.env.*
+*.log
+.DS_Store
+README.md
+docs

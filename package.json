@@ -1,0 +1,26 @@
+{
+  "name": "cerebro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cerebro — self-hosted management dashboard with pluggable connectors",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @cerebro/shared && npm run build --workspace @cerebro/web && npm run build --workspace @cerebro/server",
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev --workspace @cerebro/server\" \"npm run dev --workspace @cerebro/web\"",
+    "dev:server": "npm run dev --workspace @cerebro/server",
+    "dev:web": "npm run dev --workspace @cerebro/web",
+    "prisma:generate": "npm run prisma:generate --workspace @cerebro/server",
+    "prisma:migrate": "npm run prisma:migrate --workspace @cerebro/server",
+    "db:seed": "npm run db:seed --workspace @cerebro/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

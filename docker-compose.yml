@@ -1,0 +1,72 @@
+# Cerebro — bundled stack (app + Postgres + Redis)
+# Docker Desktop:  docker compose up -d
+# Portainer:       Stacks → Add stack → paste this file, set env vars
+#
+# The app image builds the React UI and serves it from the NestJS server,
+# so only one app container is exposed.
+
+services:
+  app:
+    image: ${CEREBRO_IMAGE:-cerebro:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Injected into the UI/version screen at build time.
+        GIT_SHA: ${GIT_SHA:-dev}
+    container_name: cerebro-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://cerebro:cerebro_change_me@db:5432/cerebro?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  db:
+    image: postgres:16-alpine
+    container_name: cerebro-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cerebro}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cerebro_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-cerebro}
+    volumes:
+      - cerebro_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cerebro} -d ${POSTGRES_DB:-cerebro}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cerebro-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - cerebro_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  cerebro_db:
+  cerebro_redis:
