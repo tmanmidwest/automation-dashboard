@@ -6,6 +6,11 @@ import {
   RebootInstancesCommand,
   TerminateInstancesCommand,
   DescribeRegionsCommand,
+  DescribeImagesCommand,
+  DescribeKeyPairsCommand,
+  DescribeSubnetsCommand,
+  DescribeSecurityGroupsCommand,
+  RunInstancesCommand,
   type Instance,
   type Tag,
 } from '@aws-sdk/client-ec2';
@@ -48,6 +53,51 @@ export interface AwsIdentity {
   account?: string;
   arn?: string;
   userId?: string;
+}
+
+export interface AwsImage {
+  imageId: string;
+  name?: string;
+  creationDate?: string;
+}
+
+export interface AwsImageInfo {
+  imageId: string;
+  rootDeviceName?: string;
+  /** Default size (GB) of the AMI's root EBS volume. */
+  rootDefaultSize?: number;
+  architecture?: string;
+}
+
+export interface AwsSubnet {
+  id: string;
+  cidr?: string;
+  az?: string;
+  vpcId?: string;
+  name?: string;
+}
+
+export interface AwsSecurityGroup {
+  id: string;
+  name?: string;
+  vpcId?: string;
+  description?: string;
+}
+
+/** Parameters for launching one or more EC2 instances. */
+export interface RunInstancesParams {
+  imageId: string;
+  instanceType: string;
+  minCount: number;
+  maxCount: number;
+  keyName?: string;
+  subnetId?: string;
+  securityGroupIds?: string[];
+  /** Already base64-encoded user data. */
+  userDataBase64?: string;
+  /** Applied as the Name tag on launched instances. */
+  nameTag?: string;
+  blockDeviceMappings?: { DeviceName?: string; Ebs?: { VolumeSize?: number; VolumeType?: string } }[];
 }
 
 export class AwsApiError extends Error {
@@ -234,6 +284,116 @@ export class AwsApi {
     try {
       const r = await this.ec2.send(new DescribeRegionsCommand({}));
       return (r.Regions ?? []).map((x) => x.RegionName ?? '').filter(Boolean).sort();
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Newest available x86_64 AMI from the given owners matching a name pattern. */
+  async latestImage(owners: string[], namePattern: string): Promise<AwsImage | undefined> {
+    try {
+      const r = await this.ec2.send(
+        new DescribeImagesCommand({
+          Owners: owners,
+          Filters: [
+            { Name: 'name', Values: [namePattern] },
+            { Name: 'state', Values: ['available'] },
+            { Name: 'architecture', Values: ['x86_64'] },
+            { Name: 'root-device-type', Values: ['ebs'] },
+          ],
+        }),
+      );
+      const images = (r.Images ?? [])
+        .slice()
+        .sort((a, b) => (b.CreationDate ?? '').localeCompare(a.CreationDate ?? ''));
+      const img = images[0];
+      if (!img?.ImageId) return undefined;
+      return { imageId: img.ImageId, name: img.Name, creationDate: img.CreationDate };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Root device name + default root volume size for a specific AMI (for disk resizing). */
+  async getImageInfo(imageId: string): Promise<AwsImageInfo | undefined> {
+    try {
+      const r = await this.ec2.send(new DescribeImagesCommand({ ImageIds: [imageId] }));
+      const img = r.Images?.[0];
+      if (!img?.ImageId) return undefined;
+      const rootBdm = (img.BlockDeviceMappings ?? []).find((b) => b.DeviceName === img.RootDeviceName);
+      return {
+        imageId: img.ImageId,
+        rootDeviceName: img.RootDeviceName,
+        rootDefaultSize: rootBdm?.Ebs?.VolumeSize,
+        architecture: img.Architecture,
+      };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async listKeyPairs(): Promise<{ name: string }[]> {
+    try {
+      const r = await this.ec2.send(new DescribeKeyPairsCommand({}));
+      return (r.KeyPairs ?? []).map((k) => ({ name: k.KeyName ?? '' })).filter((k) => k.name);
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async listSubnets(): Promise<AwsSubnet[]> {
+    try {
+      const r = await this.ec2.send(new DescribeSubnetsCommand({}));
+      return (r.Subnets ?? []).map((s) => ({
+        id: s.SubnetId ?? '',
+        cidr: s.CidrBlock,
+        az: s.AvailabilityZone,
+        vpcId: s.VpcId,
+        name: (s.Tags ?? []).find((t) => t.Key === 'Name')?.Value,
+      }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async listSecurityGroups(vpcId?: string): Promise<AwsSecurityGroup[]> {
+    try {
+      const r = await this.ec2.send(
+        new DescribeSecurityGroupsCommand({
+          Filters: vpcId ? [{ Name: 'vpc-id', Values: [vpcId] }] : undefined,
+        }),
+      );
+      return (r.SecurityGroups ?? []).map((g) => ({
+        id: g.GroupId ?? '',
+        name: g.GroupName,
+        vpcId: g.VpcId,
+        description: g.Description,
+      }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Launch instances; returns the new instance IDs. */
+  async runInstances(p: RunInstancesParams): Promise<string[]> {
+    try {
+      const r = await this.ec2.send(
+        new RunInstancesCommand({
+          ImageId: p.imageId,
+          InstanceType: p.instanceType as never,
+          MinCount: p.minCount,
+          MaxCount: p.maxCount,
+          KeyName: p.keyName,
+          SubnetId: p.subnetId,
+          SecurityGroupIds: p.securityGroupIds,
+          UserData: p.userDataBase64,
+          BlockDeviceMappings: p.blockDeviceMappings as never,
+          TagSpecifications: p.nameTag
+            ? [{ ResourceType: 'instance', Tags: [{ Key: 'Name', Value: p.nameTag }] }]
+            : undefined,
+        }),
+      );
+      return (r.Instances ?? []).map((i) => i.InstanceId ?? '').filter(Boolean);
     } catch (err) {
       throw friendly(err);
     }

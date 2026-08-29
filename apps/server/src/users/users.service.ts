@@ -37,10 +37,16 @@ export class UsersService {
     const role = await this.prisma.role.findUnique({ where: { slug: input.roleSlug } });
     if (!role) throw new BadRequestException('Unknown role.');
     const email = input.email.toLowerCase();
-    const existing = await this.prisma.user.findUnique({ where: { email } });
-    if (existing) throw new BadRequestException('A user with that email already exists.');
-
     const password = input.password?.trim();
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      throw new BadRequestException(
+        password
+          ? 'A user with that email already exists.'
+          : `${email} already has an account — it will be linked to SSO automatically the first time they sign in with that provider, so no invite is needed.`,
+      );
+    }
+
     if (password && password.length < 10) throw new BadRequestException('Password must be at least 10 characters.');
 
     const passwordHash = password ? await bcrypt.hash(password, 12) : null;

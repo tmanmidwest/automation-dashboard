@@ -96,7 +96,10 @@ export class SsoService {
     const claims = tokenSet.claims();
     const subject = claims.sub;
     const email = (claims.email as string | undefined)?.toLowerCase();
-    const emailVerified = claims.email_verified === true;
+    // Providers disagree on the type: Google sends a boolean, some send the string "true".
+    // Treat only an explicit true/"true" as verified — an absent or false claim is NOT.
+    const rawEmailVerified = claims.email_verified as unknown;
+    const emailVerified = rawEmailVerified === true || rawEmailVerified === 'true';
     const displayName =
       (claims.name as string | undefined) ||
       (claims.preferred_username as string | undefined) ||

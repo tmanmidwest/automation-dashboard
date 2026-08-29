@@ -5,7 +5,10 @@ import type {
   ConnectorResource,
   ConnectorResourceDetail,
   ConnectorDetailGroup,
+  ConnectorOption,
   ConnectorOverview,
+  OperationResult,
+  OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
 import { AwsApi, AwsAuth, AwsInstance } from './aws-api';
@@ -14,6 +17,24 @@ const EC2_KIND = 'ec2';
 
 /** EC2 states in which an instance can no longer be acted upon. */
 const DEAD_STATES = ['terminated', 'shutting-down'];
+
+/** Sentinel option value that reveals the free-text "Custom AMI ID" field. */
+const CUSTOM_AMI = '__custom__';
+
+/** Curated latest-official-image catalog, resolved to concrete AMI IDs at form-open time. */
+const AMI_CATALOG: { label: string; owners: string[]; name: string }[] = [
+  { label: 'Amazon Linux 2023 (x86_64)', owners: ['amazon'], name: 'al2023-ami-2023.*-x86_64' },
+  { label: 'Ubuntu 24.04 LTS (x86_64)', owners: ['099720109477'], name: 'ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-amd64-server-*' },
+  { label: 'Ubuntu 22.04 LTS (x86_64)', owners: ['099720109477'], name: 'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' },
+];
+
+/** Common x86_64 instance types offered in the launch form. */
+const INSTANCE_TYPES = [
+  't3.micro', 't3.small', 't3.medium', 't3.large', 't3.xlarge',
+  't3a.micro', 't3a.small', 't3a.medium', 't3a.large',
+  'm5.large', 'm5.xlarge', 'm6i.large', 'm6i.xlarge',
+  'c5.large', 'c6i.large', 'r5.large', 'r6i.large',
+];
 
 function timeAgo(d?: Date): string | undefined {
   if (!d) return undefined;
@@ -79,9 +100,33 @@ export class AwsConnector implements Connector {
         ],
       },
     ],
+    operations: [
+      {
+        id: 'launch-ec2',
+        label: 'Launch instance',
+        description: 'Launch a new EC2 instance from an official image or a custom AMI.',
+        scope: 'create',
+        kind: EC2_KIND,
+        icon: 'rocket',
+        submitLabel: 'Launch instance',
+        fields: [
+          { key: 'name', label: 'Name', type: 'text', required: true, placeholder: 'web-01', help: 'Applied as the instance\'s Name tag.' },
+          { key: 'imageId', label: 'AMI', type: 'select', optionsSource: 'amis', required: true, help: 'Latest official images, or pick "Custom AMI ID…" to enter your own.' },
+          { key: 'customImageId', label: 'Custom AMI ID', type: 'text', placeholder: 'ami-0abc123...', showWhen: { field: 'imageId', equals: CUSTOM_AMI } },
+          { key: 'instanceType', label: 'Instance type', type: 'select', required: true, default: 't3.micro', options: INSTANCE_TYPES.map((t) => ({ label: t, value: t })) },
+          { key: 'keyName', label: 'Key pair', type: 'select', optionsSource: 'keyPairs', help: 'SSH key pair for login. Blank = launch without a key.' },
+          { key: 'subnetId', label: 'Subnet', type: 'select', optionsSource: 'subnets', help: 'Blank = the account\'s default subnet for this region.' },
+          { key: 'securityGroupId', label: 'Security group', type: 'select', optionsSource: 'securityGroups', dependsOn: ['subnetId'], help: 'Filtered to the subnet\'s VPC. Blank = default security group.' },
+          { key: 'rootVolumeSize', label: 'Root volume size (GB)', type: 'number', help: 'Blank = the AMI default. Must be at least the AMI default.' },
+          { key: 'volumeType', label: 'Root volume type', type: 'select', default: 'gp3', options: [{ label: 'gp3', value: 'gp3' }, { label: 'gp2', value: 'gp2' }], help: 'Applied only when a root volume size is set.' },
+          { key: 'userData', label: 'User data (cloud-init)', type: 'textarea', placeholder: '#cloud-config\n...', help: 'Optional startup script run on first boot.' },
+          { key: 'count', label: 'How many', type: 'number', default: 1, help: 'Number of identical instances to launch (1–10).' },
+        ],
+      },
+    ],
     help: {
       overview:
-        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances and lets you start, stop, reboot, and terminate them.',
+        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances and lets you launch, start, stop, reboot, and terminate them.',
       setupSteps: [
         'In the AWS IAM console, create (or reuse) an IAM user for Cerebro.',
         'Attach a policy granting the EC2 describe/power permissions listed below (AmazonEC2ReadOnlyAccess covers listing; add the power actions to manage state).',
@@ -93,6 +138,8 @@ export class AwsConnector implements Connector {
         'ec2:DescribeInstances, ec2:DescribeRegions — required to list instances (AmazonEC2ReadOnlyAccess covers these).',
         'ec2:StartInstances, ec2:StopInstances, ec2:RebootInstances — required for power actions.',
         'ec2:TerminateInstances — required only if you want to terminate instances from Cerebro.',
+        'ec2:RunInstances (+ ec2:CreateTags) — required to launch new instances.',
+        'ec2:DescribeImages, ec2:DescribeKeyPairs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups — populate the Launch form (all in AmazonEC2ReadOnlyAccess).',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -292,5 +339,119 @@ export class AwsConnector implements Connector {
       .map((i) => ({ name: i.name || i.id, kind: EC2_KIND, status: i.state, node: i.az || region }));
 
     return { metrics, guests };
+  }
+
+  async resolveOptions(ctx: ConnectorContext, sourceId: string, values: Record<string, unknown>): Promise<ConnectorOption[]> {
+    const api = new AwsApi(this.authFrom(ctx));
+    switch (sourceId) {
+      case 'amis': {
+        // Resolve each catalog entry to its latest concrete AMI ID; skip any that don't resolve.
+        const settled = await Promise.allSettled(AMI_CATALOG.map((c) => api.latestImage(c.owners, c.name)));
+        const opts: ConnectorOption[] = [];
+        settled.forEach((r, i) => {
+          if (r.status === 'fulfilled' && r.value) {
+            opts.push({ label: AMI_CATALOG[i].label, value: r.value.imageId, description: r.value.imageId });
+          }
+        });
+        opts.push({ label: 'Custom AMI ID…', value: CUSTOM_AMI });
+        return opts;
+      }
+      case 'keyPairs': {
+        const kps = await api.listKeyPairs();
+        return kps.map((k) => ({ label: k.name, value: k.name }));
+      }
+      case 'subnets': {
+        const subs = await api.listSubnets();
+        return subs.map((s) => ({
+          label: `${s.name ? s.name + ' · ' : ''}${s.id} — ${s.cidr ?? '?'} (${s.az ?? '?'})`,
+          value: s.id,
+          description: s.vpcId ? `VPC ${s.vpcId}` : undefined,
+        }));
+      }
+      case 'securityGroups': {
+        // Scope to the chosen subnet's VPC when one is selected.
+        let vpcId: string | undefined;
+        if (values.subnetId) {
+          const sub = (await api.listSubnets()).find((s) => s.id === values.subnetId);
+          vpcId = sub?.vpcId;
+        }
+        const sgs = await api.listSecurityGroups(vpcId);
+        return sgs.map((g) => ({ label: `${g.name ?? g.id} (${g.id})`, value: g.id, description: g.description }));
+      }
+      default:
+        return [];
+    }
+  }
+
+  async runOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    _resourceId: string | undefined,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+  ): Promise<OperationResult> {
+    if (operationId !== 'launch-ec2') return { ok: false, message: `Unknown operation "${operationId}".` };
+    const api = new AwsApi(this.authFrom(ctx));
+    try {
+      const imageId = (values.imageId === CUSTOM_AMI ? String(values.customImageId ?? '') : String(values.imageId ?? '')).trim();
+      if (!imageId) return { ok: false, message: 'Choose an AMI or provide a custom AMI ID.' };
+      if (!/^ami-[0-9a-f]+$/i.test(imageId)) return { ok: false, message: `"${imageId}" is not a valid AMI ID.` };
+
+      const instanceType = String(values.instanceType || 't3.micro');
+      const name = String(values.name ?? '').trim();
+      const count = Math.max(1, Math.min(10, Math.floor(Number(values.count) || 1)));
+
+      onProgress(`Preparing to launch ${count} × ${instanceType} from ${imageId}…`);
+
+      let blockDeviceMappings: { DeviceName?: string; Ebs?: { VolumeSize?: number; VolumeType?: string } }[] | undefined;
+      const rootSizeRaw = values.rootVolumeSize;
+      if (rootSizeRaw != null && `${rootSizeRaw}` !== '') {
+        const rootSize = Number(rootSizeRaw);
+        if (!Number.isFinite(rootSize) || rootSize <= 0) return { ok: false, message: 'Root volume size must be a positive number of GB.' };
+        onProgress('Reading the image\'s root volume…');
+        const info = await api.getImageInfo(imageId);
+        if (!info) return { ok: false, message: `AMI ${imageId} not found in this region.` };
+        if (info.rootDefaultSize && rootSize < info.rootDefaultSize) {
+          return { ok: false, message: `Root volume must be at least the AMI default of ${info.rootDefaultSize} GB.` };
+        }
+        blockDeviceMappings = [
+          { DeviceName: info.rootDeviceName, Ebs: { VolumeSize: rootSize, VolumeType: String(values.volumeType || 'gp3') } },
+        ];
+      }
+
+      const keyName = values.keyName ? String(values.keyName) : undefined;
+      const subnetId = values.subnetId ? String(values.subnetId) : undefined;
+      const securityGroupId = values.securityGroupId ? String(values.securityGroupId) : undefined;
+      const userDataBase64 = values.userData && `${values.userData}` !== ''
+        ? Buffer.from(String(values.userData), 'utf8').toString('base64')
+        : undefined;
+
+      onProgress(`Launching ${count} instance${count > 1 ? 's' : ''}…`);
+      const ids = await api.runInstances({
+        imageId,
+        instanceType,
+        minCount: count,
+        maxCount: count,
+        keyName,
+        subnetId,
+        securityGroupIds: securityGroupId ? [securityGroupId] : undefined,
+        userDataBase64,
+        nameTag: name || undefined,
+        blockDeviceMappings,
+      });
+
+      if (!ids.length) return { ok: false, message: 'AWS accepted the request but returned no instance IDs.' };
+      ctx.log('info', `AWS launched ${ids.join(', ')} (${name || imageId}).`);
+      onProgress(`Launched ${ids.join(', ')}.`);
+      return {
+        ok: true,
+        message: `Launched ${ids.length} instance${ids.length > 1 ? 's' : ''}: ${ids.join(', ')}.`,
+        createdResourceId: ids[0],
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Launch failed.';
+      ctx.log('error', `AWS launch failed: ${message}`);
+      return { ok: false, message };
+    }
   }
 }
