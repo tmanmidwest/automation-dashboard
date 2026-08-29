@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Proxmox: migrate & backup (Phase D)
+- **Migrate** a VM or container to another node (live/online for running VMs, restart
+  migration for containers), with an option to move local disks.
+- **Backup** (vzdump) a guest to a backup storage, choosing mode (snapshot/suspend/stop)
+  and compression. Both run as tracked jobs.
+- Operation forms can now resolve dynamic options from injected context (the guest's node),
+  powering the migration-target and backup-storage dropdowns.
+
 ### Added — Form pre-fill
 - Operation forms can now pre-fill from live data: **Edit CPU / RAM** opens with the
   guest's current cores/memory, and **Deploy from template** fills CPU/RAM/disk size

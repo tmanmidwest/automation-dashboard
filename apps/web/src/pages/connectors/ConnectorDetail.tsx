@@ -517,7 +517,7 @@ export function ConnectorDetail() {
           instanceId={id!}
           operation={snapOp}
           resourceId={detailFor.id}
-          extraValues={{ kind }}
+          extraValues={{ kind, node: detailFor.details?.node as string | undefined }}
           open={!!snapOp}
           onClose={() => setSnapOp(null)}
           onDone={() => {
@@ -532,7 +532,7 @@ export function ConnectorDetail() {
           instanceId={id!}
           operation={resourceOp}
           resourceId={detailFor.id}
-          extraValues={{ kind }}
+          extraValues={{ kind, node: detailFor.details?.node as string | undefined }}
           open={!!resourceOp}
           onClose={() => setResourceOp(null)}
           onDone={() => {

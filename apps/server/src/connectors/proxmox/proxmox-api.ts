@@ -221,6 +221,16 @@ export class ProxmoxApi {
     return this.request('POST', `/nodes/${encodeURIComponent(node)}/qemu/${vmid}/template`);
   }
 
+  /** Migrate a guest to another node. Returns the task UPID. */
+  async migrate(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/migrate`, params);
+  }
+
+  /** Trigger a vzdump backup. Returns the task UPID. */
+  async vzdump(node: string, params: Record<string, unknown>): Promise<string> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/vzdump`, params);
+  }
+
   /** Update a guest's config (cloud-init fields, cores, memory, ...). */
   async updateConfig(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<unknown> {
     return this.request('PUT', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/config`, params);

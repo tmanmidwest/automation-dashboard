@@ -54,20 +54,22 @@ export function OperationDialog({
   }, [open, operation]);
 
   const optionFields = useMemo(() => operation.fields.filter((f) => f.optionsSource), [operation]);
-  const depsSignature = JSON.stringify(optionFields.map((f) => (f.dependsOn ?? []).map((d) => values[d])));
+  // Dependencies may come from form fields or from injected extraValues (e.g. the guest's node).
+  const depFor = (d: string) => values[d] ?? extraValues?.[d];
+  const depsSignature = JSON.stringify(optionFields.map((f) => (f.dependsOn ?? []).map((d) => depFor(d))));
 
   // Load dynamic dropdown options (and refresh when dependencies change).
   useEffect(() => {
     if (!open || phase !== 'form') return;
     optionFields.forEach(async (f) => {
       const deps = f.dependsOn ?? [];
-      if (deps.some((d) => !values[d])) {
+      if (deps.some((d) => !depFor(d))) {
         setOptionsMap((m) => ({ ...m, [f.key]: [] }));
         return;
       }
       try {
         const opts = await api.post<ConnectorOption[]>(`/api/connectors/instances/${instanceId}/options`, {
-          sourceId: f.optionsSource, values,
+          sourceId: f.optionsSource, values: { ...extraValues, ...values },
         });
         setOptionsMap((m) => ({ ...m, [f.key]: opts }));
         // Clear a now-invalid selection.

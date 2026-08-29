@@ -174,6 +174,40 @@ export class ProxmoxConnector implements Connector {
       { id: 'snapshot-rollback', label: 'Rollback snapshot', scope: 'resource', fields: [] },
       { id: 'snapshot-delete', label: 'Delete snapshot', scope: 'resource', fields: [] },
       {
+        id: 'migrate',
+        label: 'Migrate',
+        description: 'Move this guest to another node in the cluster.',
+        scope: 'resource',
+        icon: 'move',
+        submitLabel: 'Migrate',
+        fields: [
+          { key: 'targetNode', label: 'Target node', type: 'select', optionsSource: 'migrationTargets', dependsOn: ['node'], required: true },
+          { key: 'online', label: 'Live / online migrate if running', type: 'boolean', default: true, help: 'VMs live-migrate; containers use restart migration (brief downtime).' },
+          { key: 'withLocalDisks', label: 'Migrate local disks', type: 'boolean', default: true, help: 'Needed when the guest has disks on local (non-shared) storage.' },
+        ],
+      },
+      {
+        id: 'backup',
+        label: 'Backup',
+        description: 'Create a vzdump backup of this guest.',
+        scope: 'resource',
+        icon: 'archive',
+        submitLabel: 'Start backup',
+        fields: [
+          { key: 'storage', label: 'Backup storage', type: 'select', optionsSource: 'backupStorages', dependsOn: ['node'], required: true },
+          { key: 'mode', label: 'Mode', type: 'select', default: 'snapshot', options: [
+            { label: 'Snapshot (no downtime)', value: 'snapshot' },
+            { label: 'Suspend', value: 'suspend' },
+            { label: 'Stop', value: 'stop' },
+          ] },
+          { key: 'compress', label: 'Compression', type: 'select', default: 'zstd', options: [
+            { label: 'Zstd (fast, recommended)', value: 'zstd' },
+            { label: 'GZIP', value: 'gzip' },
+            { label: 'None', value: '0' },
+          ] },
+        ],
+      },
+      {
         id: 'edit-hardware',
         label: 'Edit CPU / RAM',
         description: 'Change the CPU cores and memory. For a running guest this may require a reboot to take effect.',
@@ -491,6 +525,18 @@ export class ProxmoxConnector implements Connector {
         const storages = await api.nodeStorages(node, 'rootdir');
         return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
       }
+      case 'migrationTargets': {
+        // Other nodes in the cluster (exclude the guest's current node, passed in values.node).
+        const current = String(values.node ?? '');
+        const nodes = await api.nodes();
+        return nodes.filter((n) => n.node !== current).map((n) => ({ label: n.node, value: n.node, description: n.status }));
+      }
+      case 'backupStorages': {
+        const node = String(values.node ?? '');
+        if (!node) return [];
+        const storages = await api.nodeStorages(node, 'backup');
+        return storages.map((s) => ({ label: s.storage, value: s.storage, description: s.type }));
+      }
       case 'isoStorages': {
         const node = String(values.node ?? '');
         if (!node) return [];
@@ -616,6 +662,8 @@ export class ProxmoxConnector implements Connector {
     if (operationId === 'create-lxc') return this.createLxc(api, values, onProgress);
     if (operationId === 'build-template') return this.buildTemplate(api, values, onProgress);
     if (operationId === 'edit-hardware') return this.editHardware(api, resourceId, values, onProgress);
+    if (operationId === 'migrate') return this.migrateGuest(api, resourceId, values, onProgress);
+    if (operationId === 'backup') return this.backupGuest(api, resourceId, values, onProgress);
     if (operationId !== 'deploy-template') {
       return { ok: false, message: `Unknown operation "${operationId}".` };
     }
@@ -927,6 +975,59 @@ export class ProxmoxConnector implements Connector {
       };
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : 'Update failed.' };
+    }
+  }
+
+  private async migrateGuest(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const type = this.typeForKind(String(values.kind ?? 'qemu'));
+    const vmid = parseInt(String(resourceId ?? ''), 10);
+    const target = String(values.targetNode ?? '');
+    if (!target) return { ok: false, message: 'Choose a target node.' };
+    const LONG = 60 * 60 * 1000; // migrations can be slow
+    try {
+      const res = await this.locate(api, type, vmid);
+      if (!res) return { ok: false, message: `${type} ${vmid} not found.` };
+      if (res.node === target) return { ok: false, message: `Already on ${target}.` };
+      const running = res.status === 'running';
+      const online = values.online === true || values.online === 'true';
+      const params: Record<string, unknown> = { target };
+      if (type === 'qemu') {
+        if (running && online) params.online = 1;
+        if (values.withLocalDisks !== false && values.withLocalDisks !== 'false') params['with-local-disks'] = 1;
+      } else if (running) {
+        // LXC has no live migration; running containers need restart migration.
+        params.restart = 1;
+      }
+      onProgress(`Migrating ${res.name || `${type} ${vmid}`} from ${res.node} → ${target}…`);
+      const upid = await api.migrate(res.node, type, vmid, params);
+      await api.waitForTask(res.node, upid, LONG);
+      return { ok: true, message: `Migrated ${res.name || `${type} ${vmid}`} to ${target}.` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Migration failed.' };
+    }
+  }
+
+  private async backupGuest(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const type = this.typeForKind(String(values.kind ?? 'qemu'));
+    const vmid = parseInt(String(resourceId ?? ''), 10);
+    const storage = String(values.storage ?? '');
+    if (!storage) return { ok: false, message: 'Choose a backup storage.' };
+    const LONG = 60 * 60 * 1000;
+    try {
+      const res = await this.locate(api, type, vmid);
+      if (!res) return { ok: false, message: `${type} ${vmid} not found.` };
+      const params: Record<string, unknown> = {
+        vmid,
+        storage,
+        mode: String(values.mode || 'snapshot'),
+        compress: String(values.compress || 'zstd'),
+      };
+      onProgress(`Backing up ${res.name || `${type} ${vmid}`} to ${storage}…`);
+      const upid = await api.vzdump(res.node, params);
+      await api.waitForTask(res.node, upid, LONG);
+      return { ok: true, message: `Backup of ${res.name || `${type} ${vmid}`} completed to ${storage}.` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Backup failed.' };
     }
   }
 
