@@ -6,6 +6,7 @@ import { JobService } from './job.service';
 import { ConsoleService } from './console.service';
 import { ConnectorsController } from './connectors.controller';
 import { ProxmoxConnector } from './proxmox/proxmox.connector';
+import { AwsConnector } from './aws/aws.connector';
 
 @Module({
   imports: [SettingsModule],
@@ -19,5 +20,6 @@ export class ConnectorsModule implements OnModuleInit {
   /** Register the built-in connectors with the extension host. */
   onModuleInit() {
     this.registry.register(new ProxmoxConnector());
+    this.registry.register(new AwsConnector());
   }
 }

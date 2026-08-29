@@ -73,10 +73,11 @@ export function SidebarNav({
 
       <div className="p-3 border-t border-border/60">
         {!collapsed && (
-          <div className="px-3 py-2 mb-1">
+          <NavLink to="/account" onClick={onNavigate}
+            className="block px-3 py-2 mb-1 rounded-md hover:bg-white/5 transition-colors">
             <p className="text-sm font-medium truncate">{user?.displayName}</p>
-            <p className="text-xs text-muted-foreground truncate">{user?.roleName}</p>
-          </div>
+            <p className="text-xs text-muted-foreground truncate">{user?.roleName} · account</p>
+          </NavLink>
         )}
         <Button
           variant="ghost"

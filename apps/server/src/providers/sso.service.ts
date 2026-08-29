@@ -141,7 +141,15 @@ export class SsoService {
       await this.prisma.userIdentity.create({
         data: { userId: existing.id, providerId: provider.id, subject, email },
       });
-      await this.prisma.user.update({ where: { id: existing.id }, data: { lastLoginAt: new Date() } });
+      // For an invited (SSO-only) user, fill in their real name from the provider on first login.
+      const placeholder = !existing.displayName || existing.displayName === email.split('@')[0] || existing.displayName === email;
+      await this.prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          lastLoginAt: new Date(),
+          ...(placeholder && displayName ? { displayName } : {}),
+        },
+      });
       await this.audit.record({
         actorId: existing.id,
         actorEmail: email,

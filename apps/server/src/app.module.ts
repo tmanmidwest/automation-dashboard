@@ -10,6 +10,7 @@ import { SettingsModule } from './settings/settings.module';
 import { AuthModule } from './auth/auth.module';
 import { ProvidersModule } from './providers/providers.module';
 import { UsersModule } from './users/users.module';
+import { AccountModule } from './account/account.module';
 import { MailModule } from './mail/mail.module';
 import { ConnectorsModule } from './connectors/connectors.module';
 import { VersionModule } from './version/version.module';
@@ -32,6 +33,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     AuthModule,
     ProvidersModule,
     UsersModule,
+    AccountModule,
     MailModule,
     ConnectorsModule,
     VersionModule,

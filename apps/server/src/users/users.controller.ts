@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
-import { IsBoolean, IsEmail, IsString, MinLength } from 'class-validator';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { IsBoolean, IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
 import { UsersService } from './users.service';
 import { AuditService } from '../logging/audit.service';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
@@ -7,8 +7,9 @@ import type { SessionUser } from '@cerebro/shared';
 
 class CreateUserDto {
   @IsEmail() email!: string;
-  @IsString() @MinLength(2) displayName!: string;
-  @IsString() @MinLength(10) password!: string;
+  @IsOptional() @IsString() @MinLength(2) displayName?: string;
+  // Omit for an SSO-only invite (no password, no local login); include for a local account.
+  @IsOptional() @IsString() @MinLength(10) password?: string;
   @IsString() roleSlug!: string;
 }
 class SetRoleDto {
@@ -40,13 +41,13 @@ export class UsersController {
   @Post('users')
   @RequirePermissions('users:write')
   async create(@Body() dto: CreateUserDto, @CurrentUser() actor: SessionUser) {
-    const res = await this.users.createLocal(dto);
+    const res = await this.users.create(dto);
     await this.audit.record({
       actorId: actor.id,
       actorEmail: actor.email,
-      action: 'users.created',
+      action: res.invited ? 'users.invited' : 'users.created',
       target: dto.email,
-      meta: { roleSlug: dto.roleSlug },
+      meta: { roleSlug: dto.roleSlug, invited: res.invited },
     });
     return res;
   }
@@ -62,6 +63,14 @@ export class UsersController {
       target: id,
       meta: { roleSlug: dto.roleSlug },
     });
+    return res;
+  }
+
+  @Delete('users/:id')
+  @RequirePermissions('users:write')
+  async remove(@Param('id') id: string, @CurrentUser() actor: SessionUser) {
+    const res = await this.users.remove(id, actor.id);
+    await this.audit.record({ actorId: actor.id, actorEmail: actor.email, action: 'users.deleted', target: id });
     return res;
   }
 

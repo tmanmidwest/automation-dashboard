@@ -6,6 +6,7 @@ import { Brand } from '@/components/Brand';
 import { Login } from '@/pages/Login';
 import { Setup } from '@/pages/Setup';
 import { Dashboard } from '@/pages/Dashboard';
+import { Account } from '@/pages/Account';
 import { OverviewResources } from '@/pages/OverviewResources';
 import { ConnectorsList } from '@/pages/connectors/ConnectorsList';
 import { ConnectorSetup } from '@/pages/connectors/ConnectorSetup';
@@ -68,6 +69,7 @@ function Router() {
       <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
       <Route path="/settings/authentication" element={<Protected><RequirePerm perm="settings:read"><Authentication /></RequirePerm></Protected>} />
       <Route path="/settings/email" element={<Protected><RequirePerm perm="settings:read"><Email /></RequirePerm></Protected>} />
+      <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
