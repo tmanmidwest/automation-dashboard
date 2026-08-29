@@ -181,6 +181,11 @@ export class ProxmoxApi {
     return this.request('GET', `/nodes/${encodeURIComponent(node)}/network`);
   }
 
+  /** Cluster-level storage definition (includes `path` for file-based storages). */
+  async storageConfig(storage: string): Promise<{ storage: string; type: string; path?: string; content?: string }> {
+    return this.request('GET', `/storage/${encodeURIComponent(storage)}`);
+  }
+
   // ── Provisioning ──
 
   /** Clone a VM/template. Returns the task UPID. */

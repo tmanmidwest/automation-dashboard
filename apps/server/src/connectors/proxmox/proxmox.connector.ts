@@ -663,22 +663,38 @@ export class ProxmoxConnector implements Connector {
       return { ok: false, message: 'Name, node, image URL, and both storages are required.' };
     }
     const LONG = 30 * 60 * 1000; // image downloads / imports can take a while
+    let newid: number | undefined;
+    let converted = false;
     try {
-      // 1) Download the cloud image onto an ISO-capable storage.
+      // 1) Download the cloud image onto an ISO-capable (file-based) storage.
       const urlName = imageUrl.split('/').pop() || `${name}.img`;
       const filename = urlName.match(/\.(img|qcow2|raw)$/i) ? urlName : `${name}.img`;
-      onProgress(`Downloading ${filename} to ${isoStorage}…`);
-      const dlParams: Record<string, unknown> = { content: 'iso', url: imageUrl, filename };
-      if (values.checksum) {
-        dlParams.checksum = String(values.checksum).trim();
-        dlParams['checksum-algorithm'] = 'sha256';
-      }
-      const dlUpid = await api.downloadUrl(node, isoStorage, dlParams);
-      await api.waitForTask(node, dlUpid, LONG);
       const imageVolid = `${isoStorage}:iso/${filename}`;
+      // Idempotent: skip the download if the image is already staged (e.g. a retry).
+      const existing = await api.storageContent(node, isoStorage, 'iso').catch(() => []);
+      if (existing.some((it) => it.volid === imageVolid)) {
+        onProgress(`${filename} already present in ${isoStorage}, skipping download.`);
+      } else {
+        onProgress(`Downloading ${filename} to ${isoStorage}…`);
+        const dlParams: Record<string, unknown> = { content: 'iso', url: imageUrl, filename };
+        if (values.checksum) {
+          dlParams.checksum = String(values.checksum).trim();
+          dlParams['checksum-algorithm'] = 'sha256';
+        }
+        const dlUpid = await api.downloadUrl(node, isoStorage, dlParams);
+        await api.waitForTask(node, dlUpid, LONG);
+      }
+
+      // Resolve the image's absolute path: `import-from` rejects an iso-type volid,
+      // but accepts a filesystem path. ISO content lives at <storage path>/template/iso/.
+      const storeCfg = await api.storageConfig(isoStorage);
+      if (!storeCfg.path) {
+        throw new Error(`Storage "${isoStorage}" has no filesystem path; pick a directory/NFS storage for the download.`);
+      }
+      const importFrom = `${storeCfg.path.replace(/\/$/, '')}/template/iso/${filename}`;
 
       // 2) Create the VM shell (serial console — cloud images expect it).
-      const newid = await api.nextId();
+      newid = await api.nextId();
       onProgress(`Creating VM ${newid} shell…`);
       const createUpid = await api.createVm(node, {
         vmid: newid,
@@ -695,10 +711,10 @@ export class ProxmoxConnector implements Connector {
       });
       await api.waitForTask(node, createUpid);
 
-      // 3) Import the downloaded image as scsi0 (PVE8 import-from).
+      // 3) Import the downloaded image as scsi0 (PVE8 import-from, by absolute path).
       onProgress('Importing the disk (this can take a while)…');
       const importRes = await api.updateConfig(node, 'qemu', newid, {
-        scsi0: `${diskStorage}:0,import-from=${imageVolid}`,
+        scsi0: `${diskStorage}:0,import-from=${importFrom}`,
       });
       if (typeof importRes === 'string' && importRes.startsWith('UPID')) {
         await api.waitForTask(node, importRes, LONG);
@@ -717,9 +733,15 @@ export class ProxmoxConnector implements Connector {
       if (typeof tplRes === 'string' && tplRes.startsWith('UPID')) {
         await api.waitForTask(node, tplRes);
       }
+      converted = true;
 
       return { ok: true, message: `Template "${name}" built (VMID ${newid}). It's now available under "Deploy from template".`, createdResourceId: String(newid) };
     } catch (err) {
+      // Best-effort cleanup: remove the half-built VM shell so no orphan is left behind.
+      if (newid !== undefined && !converted) {
+        onProgress('Cleaning up the incomplete VM…');
+        await api.destroy(node, 'qemu', newid).catch(() => undefined);
+      }
       return { ok: false, message: err instanceof Error ? err.message : 'Template build failed.' };
     }
   }
