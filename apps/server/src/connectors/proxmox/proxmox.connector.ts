@@ -208,6 +208,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'vlan', label: 'VLAN tag', type: 'number', help: 'Optional 802.1Q VLAN tag.' },
           { key: 'bios', label: 'BIOS', type: 'select', default: 'seabios', options: [
             { label: 'SeaBIOS (default)', value: 'seabios' }, { label: 'UEFI (OVMF)', value: 'ovmf' },
           ] },
@@ -234,6 +235,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'password', label: 'Root password', type: 'password', help: 'Set a root password and/or an SSH key below.' },
           { key: 'sshkeys', label: 'SSH public key(s)', type: 'textarea', placeholder: 'ssh-ed25519 AAAA... user@host' },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'vlan', label: 'VLAN tag', type: 'number', help: 'Optional 802.1Q VLAN tag.' },
           { key: 'ipmode', label: 'IP configuration', type: 'select', default: 'dhcp', options: [
             { label: 'DHCP', value: 'dhcp' }, { label: 'Static', value: 'static' },
           ] },
@@ -727,7 +729,7 @@ export class ProxmoxConnector implements Connector {
         scsihw: 'virtio-scsi-single',
         scsi0: `${storage}:${disksize}${ssdOpts}`,
         ide2: `${values.iso},media=cdrom`,
-        net0: `virtio,bridge=${values.bridge}`,
+        net0: `virtio,bridge=${values.bridge}${values.vlan ? `,tag=${values.vlan}` : ''}`,
         boot: 'order=scsi0;ide2',
         bios: String(values.bios || 'seabios'),
       };
@@ -770,7 +772,7 @@ export class ProxmoxConnector implements Connector {
         cores: Number(values.cores || 1),
         memory: Number(values.memory || 512),
         swap: Number(values.swap || 512),
-        net0: `name=eth0,bridge=${values.bridge},ip=${ip}`,
+        net0: `name=eth0,bridge=${values.bridge}${values.vlan ? `,tag=${values.vlan}` : ''},ip=${ip}`,
         unprivileged: values.unprivileged === false || values.unprivileged === 'false' ? 0 : 1,
         password: values.password || undefined,
         'ssh-public-keys': values.sshkeys ? String(values.sshkeys).trim() : undefined,

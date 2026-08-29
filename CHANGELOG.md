@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sortable columns** in the VM/container/template lists (Name, ID, Node, Status).
 - **Grouping** — group the list by Proxmox **tag**, **pool**, node, or status
   (e.g. tag VMs `prod` / `docker` in Proxmox and Cerebro groups them).
+- **VLAN tag** option added to Create VM and Create LXC (previously only on Deploy).
 
 ### Added / Changed — Proxmox refinements
 - **Templates** now have their own tab and are no longer listed as startable VMs.
