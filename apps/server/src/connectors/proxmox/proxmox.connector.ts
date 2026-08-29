@@ -145,6 +145,7 @@ export class ProxmoxConnector implements Connector {
         fields: [
           { key: 'templateId', label: 'Source template', type: 'select', optionsSource: 'templates', required: true, help: 'A cloud-init-ready VM template to clone.' },
           { key: 'name', label: 'New VM name', type: 'text', required: true, placeholder: 'web-01', help: 'Also used as the hostname.' },
+          { key: 'vmid', label: 'VM ID', type: 'number', help: 'Next free ID by default — override to use a specific one.' },
           { key: 'node', label: 'Target node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'storage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true, help: 'Where the new VM\'s disk lives (full clone).' },
           { key: 'disksize', label: 'Disk size (GB)', type: 'number', help: 'Grow the template disk to this size (blank = keep template default). Cloud-init expands the filesystem on boot.' },
@@ -231,8 +232,10 @@ export class ProxmoxConnector implements Connector {
         kind: 'qemu',
         icon: 'plus',
         submitLabel: 'Create VM',
+        prefill: true,
         fields: [
           { key: 'name', label: 'VM name', type: 'text', required: true, placeholder: 'debian-01' },
+          { key: 'vmid', label: 'VM ID', type: 'number', help: 'Next free ID by default — override to use a specific one.' },
           { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'ostype', label: 'OS type', type: 'select', default: 'l26', options: [
             { label: 'Linux (6.x/5.x)', value: 'l26' }, { label: 'Windows 11', value: 'win11' },
@@ -260,8 +263,10 @@ export class ProxmoxConnector implements Connector {
         kind: 'lxc',
         icon: 'plus',
         submitLabel: 'Create container',
+        prefill: true,
         fields: [
           { key: 'hostname', label: 'Hostname', type: 'text', required: true, placeholder: 'ct-01' },
+          { key: 'vmid', label: 'Container ID', type: 'number', help: 'Next free ID by default — override to use a specific one.' },
           { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'ostemplate', label: 'OS template', type: 'select', optionsSource: 'containerTemplates', dependsOn: ['node'], required: true, help: 'Download templates in Proxmox (CT Templates) first.' },
           { key: 'storage', label: 'Root FS storage', type: 'select', optionsSource: 'rootfsStorages', dependsOn: ['node'], required: true },
@@ -291,8 +296,10 @@ export class ProxmoxConnector implements Connector {
         kind: 'qemu',
         icon: 'package',
         submitLabel: 'Build template',
+        prefill: true,
         fields: [
           { key: 'name', label: 'Template name', type: 'text', required: true, placeholder: 'ubuntu-2404-cloudinit' },
+          { key: 'vmid', label: 'VM ID', type: 'number', help: 'Next free ID by default — override to use a specific one.' },
           { key: 'node', label: 'Node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'imageUrl', label: 'Cloud image URL', type: 'text', required: true, placeholder: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img', help: 'A .img/.qcow2 cloud image with cloud-init preinstalled.' },
           { key: 'isoStorage', label: 'Download to storage', type: 'select', optionsSource: 'isoStorages', dependsOn: ['node'], required: true, help: 'Where the image is staged. With a non-root token, enable the "Import" content type on this storage (Datacenter → Storage → Edit → Content).' },
@@ -385,6 +392,15 @@ export class ProxmoxConnector implements Connector {
   /** Maps a UI resource kind to the underlying Proxmox guest type (templates are qemu). */
   private typeForKind(kind: string): 'qemu' | 'lxc' {
     return kind === 'lxc' ? 'lxc' : 'qemu';
+  }
+
+  /** Uses the user-supplied VM ID when valid, otherwise the next free one. */
+  private async resolveVmid(api: ProxmoxApi, values: Record<string, unknown>): Promise<number> {
+    if (values.vmid !== undefined && values.vmid !== null && `${values.vmid}` !== '') {
+      const n = Number(values.vmid);
+      if (Number.isInteger(n) && n > 0) return n;
+    }
+    return api.nextId();
   }
 
   async performAction(
@@ -625,22 +641,27 @@ export class ProxmoxConnector implements Connector {
         const cfg = await api.config(res.node, type, vmid);
         return { cores: Number(cfg.cores ?? 1), memory: Number(cfg.memory ?? 512) };
       }
-      if (operationId === 'deploy-template') {
-        const [tplNode, tplVmidStr] = String(values.templateId ?? '').split(':');
-        const tplVmid = parseInt(tplVmidStr, 10);
-        if (!tplNode || !tplVmid) return {};
-        const cfg = await api.config(tplNode, 'qemu', tplVmid);
-        const out: Record<string, unknown> = {
-          cores: Number(cfg.cores ?? 1),
-          memory: Number(cfg.memory ?? 512),
-        };
-        // Prefill disk size from the template's primary disk.
-        const diskKey = Object.keys(cfg).find(
-          (k) => /^(scsi|virtio|sata)\d+$/.test(k) && !`${cfg[k]}`.includes('media=cdrom') && !`${cfg[k]}`.includes('cloudinit'),
-        );
-        if (diskKey) {
-          const m = String(cfg[diskKey]).match(/size=([0-9.]+)([KMGT])/i);
-          if (m) out.disksize = sizeToGb(parseFloat(m[1]), m[2].toUpperCase());
+      // Ops that create a guest: prefill the next free VM ID (only when the user hasn't set one).
+      if (['create-vm', 'create-lxc', 'build-template', 'deploy-template'].includes(operationId)) {
+        const out: Record<string, unknown> = {};
+        if (!values.vmid) {
+          try { out.vmid = await api.nextId(); } catch { /* leave blank */ }
+        }
+        if (operationId === 'deploy-template') {
+          const [tplNode, tplVmidStr] = String(values.templateId ?? '').split(':');
+          const tplVmid = parseInt(tplVmidStr, 10);
+          if (tplNode && tplVmid) {
+            const cfg = await api.config(tplNode, 'qemu', tplVmid);
+            out.cores = Number(cfg.cores ?? 1);
+            out.memory = Number(cfg.memory ?? 512);
+            const diskKey = Object.keys(cfg).find(
+              (k) => /^(scsi|virtio|sata)\d+$/.test(k) && !`${cfg[k]}`.includes('media=cdrom') && !`${cfg[k]}`.includes('cloudinit'),
+            );
+            if (diskKey) {
+              const m = String(cfg[diskKey]).match(/size=([0-9.]+)([KMGT])/i);
+              if (m) out.disksize = sizeToGb(parseFloat(m[1]), m[2].toUpperCase());
+            }
+          }
         }
         return out;
       }
@@ -717,7 +738,7 @@ export class ProxmoxConnector implements Connector {
     if (!name) return { ok: false, message: 'A VM name is required.' };
 
     onProgress('Allocating a new VM ID…');
-    const newid = await api.nextId();
+    const newid = await this.resolveVmid(api, values);
 
     onProgress(`Cloning template ${tplVmid} → VM ${newid} (${name})…`);
     const cloneParams: Record<string, unknown> = {
@@ -803,7 +824,7 @@ export class ProxmoxConnector implements Connector {
     if (!node) return { ok: false, message: 'Choose a node.' };
     if (!name) return { ok: false, message: 'A VM name is required.' };
     try {
-      const newid = await api.nextId();
+      const newid = await this.resolveVmid(api, values);
       const storage = String(values.storage);
       const disksize = Number(values.disksize || 32);
       const ssdOpts = values.ssd === false || values.ssd === 'false' ? '' : ',discard=on,ssd=1';
@@ -844,7 +865,7 @@ export class ProxmoxConnector implements Connector {
       return { ok: false, message: 'Set a root password or an SSH key.' };
     }
     try {
-      const newid = await api.nextId();
+      const newid = await this.resolveVmid(api, values);
       const storage = String(values.storage);
       const disksize = Number(values.disksize || 8);
       const ip =
@@ -944,7 +965,7 @@ export class ProxmoxConnector implements Connector {
       }
 
       // 2) Create the VM shell (serial console — cloud images expect it).
-      newid = await api.nextId();
+      newid = await this.resolveVmid(api, values);
       onProgress(`Creating VM ${newid} shell…`);
       const createUpid = await api.createVm(node, {
         vmid: newid,

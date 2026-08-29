@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operation forms can now resolve dynamic options from injected context (the guest's node),
   powering the migration-target and backup-storage dropdowns.
 
+### Added — Editable VM ID
+- Create VM, Create LXC, Deploy from template, and Build template now show a **VM ID**
+  field, pre-filled with the next free ID from the cluster and overridable to any value.
+
 ### Added — Form pre-fill
 - Operation forms can now pre-fill from live data: **Edit CPU / RAM** opens with the
   guest's current cores/memory, and **Deploy from template** fills CPU/RAM/disk size
