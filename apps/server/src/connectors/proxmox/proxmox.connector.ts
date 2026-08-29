@@ -157,6 +157,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'ciuser', label: 'Cloud-init user', type: 'text', placeholder: 'ubuntu', help: 'Default login user created on first boot.' },
           { key: 'cipassword', label: 'Cloud-init password', type: 'password', help: 'Optional if you provide an SSH key.' },
           { key: 'sshkeys', label: 'SSH public key(s)', type: 'textarea', placeholder: 'ssh-ed25519 AAAA... user@host', help: 'One key per line.' },
+          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'text', placeholder: 'local:snippets/cerebro-guest.yaml', help: 'Optional cloud-init snippet volume (e.g. install qemu-guest-agent). Blank inherits the template\'s.' },
           { key: 'ipmode', label: 'IP configuration', type: 'select', default: 'dhcp', options: [{ label: 'DHCP', value: 'dhcp' }, { label: 'Static', value: 'static' }] },
           { key: 'ipaddress', label: 'IP address (CIDR)', type: 'text', placeholder: '192.168.1.50/24', showWhen: { field: 'ipmode', equals: 'static' } },
           { key: 'gateway', label: 'Gateway', type: 'text', placeholder: '192.168.1.1', showWhen: { field: 'ipmode', equals: 'static' } },
@@ -308,6 +309,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
+          { key: 'snippet', label: 'Guest-agent + console snippet (cicustom)', type: 'text', placeholder: 'local:snippets/cerebro-guest.yaml', help: 'Optional cloud-init snippet volume. Installs qemu-guest-agent and raises the console resolution on first boot. Create it once on a snippets-enabled storage (see the setup reference).' },
           { key: 'checksum', label: 'SHA-256 checksum', type: 'text', placeholder: 'optional', help: 'Optional — verifies the downloaded image.' },
         ],
       },
@@ -333,6 +335,7 @@ export class ProxmoxConnector implements Connector {
         { label: 'Proxmox VE API tokens', url: 'https://pve.proxmox.com/wiki/User_Management#pveum_tokens' },
         { label: 'Roles & privileges reference', url: 'https://pve.proxmox.com/wiki/User_Management#pveum_permission_management' },
         { label: 'Proxmox VE API viewer', url: 'https://pve.proxmox.com/pve-docs/api-viewer/' },
+        { label: 'Cloud-init snippets (cicustom)', url: 'https://pve.proxmox.com/wiki/Cloud-Init_Support#_custom_cloud_init_configuration' },
       ],
       notes:
         'Use a dedicated token, not your root password. Grant PVEAuditor for a view-only connection; add VM.PowerMgmt only if you want Cerebro to control power state.',
@@ -813,6 +816,8 @@ export class ProxmoxConnector implements Connector {
     } else {
       ci.ipconfig0 = 'ip=dhcp';
     }
+    // vendor= runs alongside the user-data above (ciuser/sshkeys stay intact).
+    if (values.snippet) ci.cicustom = `vendor=${String(values.snippet).trim()}`;
     if (Object.keys(ci).length > 0) {
       onProgress('Applying cloud-init settings (user, SSH key, network)…');
       await api.updateConfig(targetNode, 'qemu', newid, ci);
@@ -1004,12 +1009,15 @@ export class ProxmoxConnector implements Connector {
         await api.waitForTask(node, importRes, LONG);
       }
 
-      // 4) Cloud-init drive + boot order.
+      // 4) Cloud-init drive + boot order (+ optional vendor snippet for guest agent / console res).
       onProgress('Adding cloud-init drive and boot settings…');
-      await api.updateConfig(node, 'qemu', newid, {
+      const ciConfig: Record<string, unknown> = {
         ide2: `${diskStorage}:cloudinit`,
         boot: 'order=scsi0',
-      });
+      };
+      // vendor= runs alongside Proxmox's user-data, so the SSH key/user set at deploy still apply.
+      if (values.snippet) ciConfig.cicustom = `vendor=${String(values.snippet).trim()}`;
+      await api.updateConfig(node, 'qemu', newid, ciConfig);
 
       // 5) Convert to template.
       onProgress('Converting to a template…');
