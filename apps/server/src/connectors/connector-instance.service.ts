@@ -4,7 +4,10 @@ import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorRegistry } from './connector-registry.service';
 import { JobService } from './job.service';
-import type { ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget } from '@cerebro/shared';
+import type {
+  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget,
+  DashboardOverview, OverviewMetric, OverviewGuest,
+} from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
 
 @Injectable()
@@ -236,6 +239,50 @@ export class ConnectorInstanceService {
 
   getJob(jobId: string) {
     return this.jobs.get(jobId);
+  }
+
+  private overviewCache?: { at: number; data: DashboardOverview };
+
+  /** Aggregated telemetry across all enabled connectors (short-cached to survive polling). */
+  async dashboardOverview(): Promise<DashboardOverview> {
+    if (this.overviewCache && Date.now() - this.overviewCache.at < 3000) return this.overviewCache.data;
+
+    const instances = (await this.list()).filter((i) => i.enabled);
+    const metricMap = new Map<string, { label: string; unit?: string; values: number[] }>();
+    const guests: OverviewGuest[] = [];
+    let ok = 0;
+
+    await Promise.all(
+      instances.map(async (inst) => {
+        const connector = this.registry.get(inst.connectorId);
+        if (!connector?.overview) return;
+        try {
+          const ctx = await this.buildContext(inst);
+          const ov = await connector.overview(ctx);
+          ok++;
+          for (const m of ov.metrics) {
+            const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [] };
+            e.values.push(m.value);
+            metricMap.set(m.key, e);
+          }
+          for (const g of ov.guests) guests.push({ ...g, connector: inst.name });
+        } catch {
+          // Skip connectors that fail (unreachable, etc.).
+        }
+      }),
+    );
+
+    // Percentages average across connectors; everything else sums.
+    const metrics: OverviewMetric[] = [...metricMap.entries()].map(([key, e]) => {
+      const value = e.unit === '%'
+        ? Math.round(e.values.reduce((s, v) => s + v, 0) / e.values.length)
+        : e.values.reduce((s, v) => s + v, 0);
+      return { key, label: e.label, value, unit: e.unit };
+    });
+
+    const data: DashboardOverview = { connectors: { total: instances.length, ok }, metrics, guests: guests.slice(0, 60) };
+    this.overviewCache = { at: Date.now(), data };
+    return data;
   }
 
   async openConsole(id: string, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {

@@ -89,6 +89,14 @@ export class ConnectorsController {
     return connector.manifest;
   }
 
+  // ── Aggregate dashboard telemetry ──
+
+  @Get('overview')
+  @RequirePermissions('connectors:read')
+  async overview() {
+    return this.instances.dashboardOverview();
+  }
+
   // ── Installed instances ──
 
   @Get('instances')

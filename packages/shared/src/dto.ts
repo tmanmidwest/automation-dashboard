@@ -1,6 +1,7 @@
 /** Shared DTOs used across the API boundary. */
 
 import type { Permission } from './rbac';
+import type { OverviewMetric } from './connector';
 
 export interface SessionUser {
   id: string;
@@ -81,6 +82,21 @@ export interface ConnectorJobStatus {
   steps: string[];
   message?: string;
   createdResourceId?: string;
+}
+
+export interface OverviewGuest {
+  name: string;
+  kind: string;
+  status: string;
+  node: string;
+  connector: string;
+}
+
+/** Aggregated dashboard telemetry across all connectors. */
+export interface DashboardOverview {
+  connectors: { total: number; ok: number };
+  metrics: OverviewMetric[];
+  guests: OverviewGuest[];
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';

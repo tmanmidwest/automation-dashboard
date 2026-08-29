@@ -239,6 +239,21 @@ export interface OperationResult {
 /** Callback a connector uses to report progress lines during a long operation. */
 export type OperationProgress = (step: string) => void;
 
+/** A single aggregate metric a connector reports for the dashboard. */
+export interface OverviewMetric {
+  key: string;
+  label: string;
+  value: number;
+  unit?: string;
+}
+
+/** A connector's at-a-glance summary for the dashboard. */
+export interface ConnectorOverview {
+  metrics: OverviewMetric[];
+  /** A sample of managed resources (for the radar / live list). */
+  guests: { name: string; kind: string; status: string; node: string }[];
+}
+
 /** The runtime interface every connector module must implement. */
 export interface Connector {
   manifest: ConnectorManifest;
@@ -269,6 +284,8 @@ export interface Connector {
     kind: string,
     resourceId: string,
   ): Promise<{ ok: boolean; message: string }>;
+  /** Optional: an at-a-glance summary for the dashboard (counts, usage, resource sample). */
+  overview?(ctx: ConnectorContext): Promise<ConnectorOverview>;
   /** Optional: open an interactive console; returns where the core should relay to. */
   openConsole?(
     ctx: ConnectorContext,

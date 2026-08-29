@@ -163,7 +163,7 @@ export class ProxmoxApi {
 
   // ── Inventory (for wizard dropdowns) ──
 
-  async nodes(): Promise<Array<{ node: string; status: string }>> {
+  async nodes(): Promise<Array<{ node: string; status: string; cpu?: number; maxcpu?: number; mem?: number; maxmem?: number }>> {
     return this.request('GET', '/nodes');
   }
 

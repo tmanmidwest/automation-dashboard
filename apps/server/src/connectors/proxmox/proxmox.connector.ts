@@ -8,6 +8,7 @@ import type {
   ConnectorDetailItem,
   ConnectorOption,
   ConnectorConsoleTarget,
+  ConnectorOverview,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
@@ -516,6 +517,39 @@ export class ProxmoxConnector implements Connector {
       ctx.log('error', `Proxmox delete ${type} ${vmid} failed: ${message}`);
       return { ok: false, message };
     }
+  }
+
+  async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    const [resources, nodes] = await Promise.all([api.clusterResources(), api.nodes()]);
+    const guestsRaw = resources.filter((r) => (r.type === 'qemu' || r.type === 'lxc') && r.template !== 1);
+    const vms = guestsRaw.filter((r) => r.type === 'qemu');
+    const cts = guestsRaw.filter((r) => r.type === 'lxc');
+    const running = (arr: typeof guestsRaw) => arr.filter((r) => r.status === 'running').length;
+
+    const online = nodes.filter((n) => n.status === 'online');
+    const cpuPct = online.length ? Math.round((online.reduce((s, n) => s + (n.cpu ?? 0), 0) / online.length) * 100) : 0;
+    const memUsed = online.reduce((s, n) => s + (n.mem ?? 0), 0);
+    const memMax = online.reduce((s, n) => s + (n.maxmem ?? 0), 0);
+    const memPct = memMax ? Math.round((memUsed / memMax) * 100) : 0;
+
+    const metrics = [
+      { key: 'vmsRunning', label: 'VMs running', value: running(vms) },
+      { key: 'vmsTotal', label: 'VMs total', value: vms.length },
+      { key: 'ctsRunning', label: 'Containers running', value: running(cts) },
+      { key: 'ctsTotal', label: 'Containers total', value: cts.length },
+      { key: 'nodes', label: 'Nodes online', value: online.length },
+      { key: 'cpuPct', label: 'Cluster CPU', value: cpuPct, unit: '%' },
+      { key: 'memPct', label: 'Cluster memory', value: memPct, unit: '%' },
+    ];
+
+    const guests = guestsRaw
+      .slice()
+      .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) || a.vmid - b.vmid)
+      .slice(0, 40)
+      .map((r) => ({ name: r.name || `${r.type}-${r.vmid}`, kind: r.type, status: r.status ?? 'unknown', node: r.node }));
+
+    return { metrics, guests };
   }
 
   async openConsole(ctx: ConnectorContext, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {
