@@ -24,6 +24,7 @@ export function Console() {
   const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<string | null>(null);
+  const [displayMode, setDisplayMode] = useState<'resize' | 'fit' | 'actual'>('resize');
 
   useEffect(() => {
     let disposed = false;
@@ -40,7 +41,7 @@ export function Console() {
           startTerminal(url, screenRef.current, cleanups, setStatus, setError);
         } else {
           const rfb = new RFB(screenRef.current, url, { credentials: { password: res.password } });
-          rfb.scaleViewport = true;
+          applyDisplayMode(rfb, displayMode);
           rfb.addEventListener('connect', () => setStatus('connected'));
           rfb.addEventListener('disconnect', (e) => {
             setStatus('disconnected');
@@ -64,7 +65,12 @@ export function Console() {
       disposed = true;
       cleanups.forEach((c) => c());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, kind, resourceId, mode]);
+
+  useEffect(() => {
+    if (rfbRef.current) applyDisplayMode(rfbRef.current, displayMode);
+  }, [displayMode]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -81,10 +87,22 @@ export function Console() {
             {status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
           </span>
           {mode === 'vnc' && (
-            <Button variant="outline" size="sm" disabled={status !== 'connected'}
-              onClick={() => rfbRef.current?.sendCtrlAltDel()}>
-              <Keyboard className="h-4 w-4" /> Ctrl+Alt+Del
-            </Button>
+            <>
+              <select
+                value={displayMode}
+                onChange={(e) => setDisplayMode(e.target.value as 'resize' | 'fit' | 'actual')}
+                className="h-8 rounded-md border border-input bg-background/60 px-2 text-xs text-muted-foreground"
+                title="Display scaling"
+              >
+                <option value="resize">Auto-resize</option>
+                <option value="fit">Scale to fit</option>
+                <option value="actual">Actual size</option>
+              </select>
+              <Button variant="outline" size="sm" disabled={status !== 'connected'}
+                onClick={() => rfbRef.current?.sendCtrlAltDel()}>
+                <Keyboard className="h-4 w-4" /> Ctrl+Alt+Del
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -95,7 +113,7 @@ export function Console() {
         </div>
       )}
 
-      <div className="flex-1 relative grid place-items-center">
+      <div className="flex-1 relative grid place-items-center overflow-auto">
         {status === 'connecting' && !error && (
           <div className="absolute inset-0 grid place-items-center text-muted-foreground pointer-events-none">
             <Loader2 className="h-6 w-6 animate-spin" />
@@ -105,6 +123,12 @@ export function Console() {
       </div>
     </div>
   );
+}
+
+/** resize = ask the VM to match the window (higher res, smaller text); fit = scale up to fill; actual = 1:1. */
+function applyDisplayMode(rfb: RFB, m: 'resize' | 'fit' | 'actual') {
+  rfb.resizeSession = m === 'resize';
+  rfb.scaleViewport = m === 'fit';
 }
 
 /** Serial console over Proxmox's termproxy protocol (xterm.js). */
