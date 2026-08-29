@@ -680,8 +680,7 @@ export class ProxmoxConnector implements Connector {
       //  - Storage with the 'import' content type → download there, import by volid (works for non-root tokens).
       //  - Else a root@pam token → download as ISO, import by absolute file path.
       //  - Else → Proxmox forbids non-root path imports; explain the fix.
-      const urlName = imageUrl.split('/').pop() || `${name}.img`;
-      const filename = urlName.match(/\.(img|qcow2|raw)$/i) ? urlName : `${name}.img`;
+      const urlName = (imageUrl.split('/').pop() || `${name}.img`).split('?')[0];
       const storages = await api.nodeStorages(node);
       const store = storages.find((s) => s.storage === isoStorage);
       const supportsImport = (store?.content || '').split(',').includes('import');
@@ -695,6 +694,11 @@ export class ProxmoxConnector implements Connector {
           `Proxmox only lets the root user import a disk from a file path. To build templates with this token, enable the "Import" content type on the "${isoStorage}" storage (Datacenter → Storage → ${isoStorage} → Edit → Content → add "Import"), then retry — or use a root@pam API token for this connector.`,
         );
       }
+
+      // The 'import' content type only accepts disk-image extensions (.qcow2/.raw/.vmdk/.ova),
+      // not .img. Ubuntu cloud images are QCOW2 despite the .img name, so stage them as .qcow2.
+      let filename = urlName.match(/\.(img|qcow2|raw|vmdk|ova)$/i) ? urlName : `${name}.qcow2`;
+      if (content === 'import') filename = filename.replace(/\.img$/i, '.qcow2');
 
       const imageVolid = `${isoStorage}:${content}/${filename}`;
       // Idempotent: skip the download if the image is already staged (e.g. a retry).
