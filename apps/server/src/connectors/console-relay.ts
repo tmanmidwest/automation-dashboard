@@ -46,6 +46,8 @@ export function attachConsoleRelay(server: Server, consoleService: ConsoleServic
 
       upstream.on('open', () => {
         upstreamOpen = true;
+        // e.g. the terminal auth line — sent before any client traffic, kept server-side.
+        if (target.initMessage) upstream.send(target.initMessage);
         for (const m of pending) upstream.send(m.data, { binary: m.binary });
         pending.length = 0;
       });

@@ -238,14 +238,14 @@ export class ConnectorInstanceService {
     return this.jobs.get(jobId);
   }
 
-  async openConsole(id: string, kind: string, resourceId: string): Promise<ConnectorConsoleTarget> {
+  async openConsole(id: string, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {
     const instance = await this.get(id);
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
     const connector = this.connectorFor(instance);
     if (!connector.openConsole) throw new BadRequestException('This connector does not support a console.');
     const ctx = await this.buildContext(instance);
     try {
-      return await connector.openConsole(ctx, kind, resourceId);
+      return await connector.openConsole(ctx, kind, resourceId, mode);
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to open the console.');
     }

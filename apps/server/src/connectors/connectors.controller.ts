@@ -48,6 +48,7 @@ class RunOperationDto {
 class ConsoleDto {
   @IsString() kind!: string;
   @IsString() resourceId!: string;
+  @IsOptional() @IsString() mode?: 'vnc' | 'serial';
 }
 
 @Controller('api/connectors')
@@ -247,13 +248,15 @@ export class ConnectorsController {
   @Post('instances/:id/console')
   @RequirePermissions('connectors:action')
   async openConsole(@Param('id') id: string, @Body() dto: ConsoleDto, @CurrentUser() user: SessionUser) {
-    const target = await this.instances.openConsole(id, dto.kind, dto.resourceId);
+    const mode = dto.mode === 'serial' ? 'serial' : 'vnc';
+    const target = await this.instances.openConsole(id, dto.kind, dto.resourceId, mode);
     const token = this.consoles.issue(target);
     await this.audit.record({
       actorId: user.id, actorEmail: user.email,
       action: 'connectors.console_opened', target: `${id}/${dto.kind}/${dto.resourceId}`,
+      meta: { mode },
     });
-    // Never return the upstream url/headers — only what the browser client needs.
+    // Never return the upstream url/headers/initMessage — only what the browser client needs.
     return { token, type: target.type, password: target.password, wsPath: '/api/console/ws' };
   }
 

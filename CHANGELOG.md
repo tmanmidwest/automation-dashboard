@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added — Interactive console (Phase D)
-- **noVNC console** for running VMs and containers: open a full-screen browser console
-  from a guest's detail drawer (with a Ctrl+Alt+Del button).
+- **noVNC (graphical) console** and **serial console** (xterm.js) for running VMs and
+  containers — pick either from the guest's detail drawer. The serial console is handy
+  for cloud images. Graphical console has a Ctrl+Alt+Del button.
 - The backend relays a WebSocket to Proxmox's VNC endpoint — attaching the API-token
   auth and honoring the connector's TLS setting — so the browser never talks to Proxmox
   directly. Access is gated by `connectors:action`, brokered with one-time tokens, and

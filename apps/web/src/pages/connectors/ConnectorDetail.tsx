@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation,
@@ -422,10 +422,16 @@ export function ConnectorDetail() {
         {canAct && (resourceOps.length > 0 || (activeKind?.console && detailFor)) && (
           <div className="flex flex-wrap gap-2 mb-5">
             {activeKind?.console && detailFor?.status === 'running' && (
-              <Button size="sm" variant="outline"
-                onClick={() => navigate(`/connectors/${id}/console/${kind}/${encodeURIComponent(detailFor.id)}`)}>
-                <MonitorPlay className="h-4 w-4" /> Console
-              </Button>
+              <>
+                <Button size="sm" variant="outline"
+                  onClick={() => navigate(`/connectors/${id}/console/${kind}/${encodeURIComponent(detailFor.id)}`)}>
+                  <MonitorPlay className="h-4 w-4" /> Console
+                </Button>
+                <Button size="sm" variant="outline"
+                  onClick={() => navigate(`/connectors/${id}/console/${kind}/${encodeURIComponent(detailFor.id)}?mode=serial`)}>
+                  <TerminalSquare className="h-4 w-4" /> Serial
+                </Button>
+              </>
             )}
             {resourceOps.map((op) => (
               <Button key={op.id} size="sm" variant="outline" onClick={() => setResourceOp(op)}>

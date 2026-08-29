@@ -94,9 +94,11 @@ export interface ConnectorConsoleTarget {
   /** Verify the upstream TLS certificate. */
   rejectUnauthorized?: boolean;
   /** Console protocol for the browser client. */
-  type: 'vnc';
-  /** One-time password handed to the browser client (e.g. VNC/RFB password). */
+  type: 'vnc' | 'terminal';
+  /** One-time password handed to the browser client (VNC/RFB auth). */
   password?: string;
+  /** Message the relay sends upstream immediately on connect (e.g. terminal auth line). Kept server-side. */
+  initMessage?: string;
 }
 
 /** A collection nested under a resource (e.g. a VM's snapshots). */
@@ -272,6 +274,7 @@ export interface Connector {
     ctx: ConnectorContext,
     kind: string,
     resourceId: string,
+    mode: 'vnc' | 'serial',
   ): Promise<ConnectorConsoleTarget>;
   /** Optional: resolve dynamic dropdown options for an operation form field. */
   resolveOptions?(

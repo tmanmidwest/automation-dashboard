@@ -499,7 +499,7 @@ export class ProxmoxConnector implements Connector {
     }
   }
 
-  async openConsole(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorConsoleTarget> {
+  async openConsole(ctx: ConnectorContext, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {
     const type = this.typeForKind(kind);
     const api = new ProxmoxApi(this.authFrom(ctx));
     const vmid = parseInt(resourceId, 10);
@@ -507,16 +507,30 @@ export class ProxmoxConnector implements Connector {
     if (!res) throw new Error(`${type} ${vmid} not found.`);
     if (res.status !== 'running') throw new Error('Start the guest to open its console.');
 
-    const { ticket, port } = await api.vncproxy(res.node, type, vmid);
     const conn = api.connection;
     const u = new URL(conn.baseUrl);
     const wsProto = u.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url =
+    const headers = { Authorization: `PVEAPIToken=${conn.tokenId}=${conn.tokenSecret}` };
+    const wsUrl = (ticket: string, port: string | number) =>
       `${wsProto}//${u.host}/api2/json/nodes/${encodeURIComponent(res.node)}/${type}/${vmid}` +
       `/vncwebsocket?port=${encodeURIComponent(String(port))}&vncticket=${encodeURIComponent(ticket)}`;
+
+    if (mode === 'serial') {
+      const { ticket, port, user } = await api.termproxy(res.node, type, vmid);
+      return {
+        url: wsUrl(ticket, port),
+        headers,
+        rejectUnauthorized: conn.verifyTls,
+        type: 'terminal',
+        // The termproxy protocol wants an auth line first; the relay sends it (kept server-side).
+        initMessage: `${user}:${ticket}\n`,
+      };
+    }
+
+    const { ticket, port } = await api.vncproxy(res.node, type, vmid);
     return {
-      url,
-      headers: { Authorization: `PVEAPIToken=${conn.tokenId}=${conn.tokenSecret}` },
+      url: wsUrl(ticket, port),
+      headers,
       rejectUnauthorized: conn.verifyTls,
       type: 'vnc',
       password: ticket,

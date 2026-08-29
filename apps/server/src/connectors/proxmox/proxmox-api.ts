@@ -236,6 +236,11 @@ export class ProxmoxApi {
     return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/vncproxy`, { websocket: 1 });
   }
 
+  /** Request a serial terminal proxy session (xterm.js). Returns a one-time ticket + port + user. */
+  async termproxy(node: string, type: 'qemu' | 'lxc', vmid: number): Promise<{ ticket: string; port: string | number; user: string }> {
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/termproxy`, {});
+  }
+
   /** The configured base URL and auth, for building relay targets (e.g. the VNC websocket). */
   get connection() {
     return { baseUrl: this.auth.baseUrl, tokenId: this.auth.tokenId, tokenSecret: this.auth.tokenSecret, verifyTls: this.auth.verifyTls };
