@@ -941,8 +941,10 @@ export class ProxmoxConnector implements Connector {
         ostype: 'l26',
         scsihw: 'virtio-scsi-single',
         net0: `virtio,bridge=${values.bridge}`,
+        // Keep a serial device (cloud images log to it) but use a real VGA display
+        // so the graphical/noVNC console works — vga=serial0 leaves no framebuffer.
         serial0: 'socket',
-        vga: 'serial0',
+        vga: 'std',
         agent: 1,
       });
       await api.waitForTask(node, createUpid);
