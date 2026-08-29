@@ -19,7 +19,6 @@ CREATE TABLE "User" (
     "displayName" TEXT NOT NULL,
     "passwordHash" TEXT,
     "authProvider" TEXT NOT NULL DEFAULT 'local',
-    "oidcSubject" TEXT,
     "disabled" BOOLEAN NOT NULL DEFAULT false,
     "roleId" TEXT NOT NULL,
     "lastLoginAt" TIMESTAMP(3),
@@ -27,6 +26,40 @@ CREATE TABLE "User" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "IdentityProvider" (
+    "id" TEXT NOT NULL,
+    "slug" TEXT NOT NULL,
+    "label" TEXT NOT NULL,
+    "type" TEXT NOT NULL DEFAULT 'oidc',
+    "issuer" TEXT NOT NULL,
+    "clientId" TEXT NOT NULL,
+    "buttonLabel" TEXT NOT NULL DEFAULT 'Sign in with SSO',
+    "icon" TEXT NOT NULL DEFAULT 'generic',
+    "scopes" TEXT NOT NULL DEFAULT 'openid email profile',
+    "enabled" BOOLEAN NOT NULL DEFAULT false,
+    "autoCreateUsers" BOOLEAN NOT NULL DEFAULT false,
+    "defaultRoleSlug" TEXT NOT NULL DEFAULT 'viewer',
+    "allowedDomains" TEXT[],
+    "sortOrder" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "IdentityProvider_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "UserIdentity" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL,
+    "subject" TEXT NOT NULL,
+    "email" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "UserIdentity_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -92,10 +125,16 @@ CREATE UNIQUE INDEX "Role_slug_key" ON "Role"("slug");
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "User_oidcSubject_key" ON "User"("oidcSubject");
+CREATE INDEX "User_roleId_idx" ON "User"("roleId");
 
 -- CreateIndex
-CREATE INDEX "User_roleId_idx" ON "User"("roleId");
+CREATE UNIQUE INDEX "IdentityProvider_slug_key" ON "IdentityProvider"("slug");
+
+-- CreateIndex
+CREATE INDEX "UserIdentity_userId_idx" ON "UserIdentity"("userId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "UserIdentity_providerId_subject_key" ON "UserIdentity"("providerId", "subject");
 
 -- CreateIndex
 CREATE INDEX "ConnectorInstance_connectorId_idx" ON "ConnectorInstance"("connectorId");
@@ -114,4 +153,10 @@ CREATE INDEX "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
 
 -- AddForeignKey
 ALTER TABLE "User" ADD CONSTRAINT "User_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "Role"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "UserIdentity" ADD CONSTRAINT "UserIdentity_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "UserIdentity" ADD CONSTRAINT "UserIdentity_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "IdentityProvider"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

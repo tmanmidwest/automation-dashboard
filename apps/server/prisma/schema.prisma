@@ -30,20 +30,62 @@ model User {
   id           String    @id @default(cuid())
   email        String    @unique
   displayName  String
-  /// Null for users that only authenticate via OIDC.
+  /// Null for users that only authenticate via an external provider.
   passwordHash String?
-  /// 'local' or 'oidc'
+  /// How the account was created: 'local' or 'oidc' (informational).
   authProvider String    @default("local")
-  /// Subject claim from the OIDC provider, when applicable.
-  oidcSubject  String?   @unique
   disabled     Boolean   @default(false)
   role         Role      @relation(fields: [roleId], references: [id])
   roleId       String
+  /// Linked external identities (Google, Entra, Authentik, ...). A user may have several.
+  identities   UserIdentity[]
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@index([roleId])
+}
+
+/// A configured single-sign-on provider. Multiple can exist, each independently
+/// labeled and enabled. Client secrets live in the encrypted vault (key idp:<id>:clientSecret).
+model IdentityProvider {
+  id              String   @id @default(cuid())
+  /// Stable short id used in callback URLs (/api/auth/sso/<slug>/callback).
+  slug            String   @unique
+  label           String
+  /// Protocol. Only 'oidc' for now (discovery-based).
+  type            String   @default("oidc")
+  issuer          String
+  clientId        String
+  buttonLabel     String   @default("Sign in with SSO")
+  /// UI icon key: google | microsoft | authentik | generic.
+  icon            String   @default("generic")
+  scopes          String   @default("openid email profile")
+  enabled         Boolean  @default(false)
+  /// Provisioning policy (per-provider, per the design decision).
+  autoCreateUsers Boolean  @default(false)
+  defaultRoleSlug String   @default("viewer")
+  /// If non-empty, only emails in these domains may sign in / be provisioned.
+  allowedDomains  String[]
+  sortOrder       Int      @default(0)
+  identities      UserIdentity[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+/// Links a Cerebro user to a subject at a specific provider. Unique per (provider, subject).
+model UserIdentity {
+  id         String           @id @default(cuid())
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  provider   IdentityProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String
+  subject    String
+  email      String?
+  createdAt  DateTime         @default(now())
+
+  @@unique([providerId, subject])
+  @@index([userId])
 }
 
 /// Non-secret application settings (SMTP host/port, OIDC issuer, feature flags...).

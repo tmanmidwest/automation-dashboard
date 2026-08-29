@@ -8,6 +8,7 @@ import { CommonModule } from './common/common.module';
 import { LoggingModule } from './logging/logging.module';
 import { SettingsModule } from './settings/settings.module';
 import { AuthModule } from './auth/auth.module';
+import { ProvidersModule } from './providers/providers.module';
 import { UsersModule } from './users/users.module';
 import { MailModule } from './mail/mail.module';
 import { ConnectorsModule } from './connectors/connectors.module';
@@ -29,6 +30,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     LoggingModule,
     SettingsModule,
     AuthModule,
+    ProvidersModule,
     UsersModule,
     MailModule,
     ConnectorsModule,

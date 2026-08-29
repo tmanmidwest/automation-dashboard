@@ -4,8 +4,8 @@ import type { SessionUser } from '@cerebro/shared';
 declare module 'express-session' {
   interface SessionData {
     userId?: string;
-    /** Transient state for the OIDC auth code flow. */
-    oidc?: { state: string; nonce: string; codeVerifier: string };
+    /** Transient state for an in-flight SSO auth-code flow. */
+    sso?: { providerId: string; state: string; nonce: string; codeVerifier: string };
   }
 }
 

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import type { PublicIdentityProvider } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Brand } from '@/components/Brand';
+import { ProviderIcon } from '@/components/ProviderIcon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,13 +18,10 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(params.get('error'));
   const [busy, setBusy] = useState(false);
-  const [oidc, setOidc] = useState<{ enabled: boolean; buttonLabel: string }>({
-    enabled: false,
-    buttonLabel: 'Sign in with SSO',
-  });
+  const [providers, setProviders] = useState<PublicIdentityProvider[]>([]);
 
   useEffect(() => {
-    api.get<{ enabled: boolean; buttonLabel: string }>('/api/auth/oidc/status').then(setOidc).catch(() => {});
+    api.get<PublicIdentityProvider[]>('/api/auth/providers').then(setProviders).catch(() => {});
   }, []);
 
   async function submit(e: React.FormEvent) {
@@ -73,15 +72,20 @@ export function Login() {
               </Button>
             </form>
 
-            {oidc.enabled && (
+            {providers.length > 0 && (
               <>
                 <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
                   <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
                 </div>
-                <Button variant="outline" className="w-full"
-                  onClick={() => (window.location.href = '/api/auth/oidc/login')}>
-                  {oidc.buttonLabel}
-                </Button>
+                <div className="space-y-2">
+                  {providers.map((p) => (
+                    <Button key={p.slug} variant="outline" className="w-full"
+                      onClick={() => (window.location.href = `/api/auth/sso/${p.slug}/login`)}>
+                      <ProviderIcon icon={p.icon} />
+                      {p.buttonLabel}
+                    </Button>
+                  ))}
+                </div>
               </>
             )}
           </CardContent>
