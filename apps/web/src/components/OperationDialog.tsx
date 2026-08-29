@@ -79,6 +79,27 @@ export function OperationDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depsSignature, open, phase]);
 
+  // Prefill field values from the connector (current CPU/RAM, the chosen template's specs, ...).
+  const prefillDeps = operation.prefillDependsOn ?? [];
+  const prefillSig = JSON.stringify(prefillDeps.map((k) => values[k]));
+  useEffect(() => {
+    if (!open || phase !== 'form' || !operation.prefill) return;
+    let cancelled = false;
+    api
+      .post<Record<string, unknown>>(`/api/connectors/instances/${instanceId}/operations/${operation.id}/defaults`, {
+        resourceId,
+        values: { ...values, ...extraValues },
+      })
+      .then((d) => {
+        if (!cancelled && d && Object.keys(d).length) setValues((v) => ({ ...v, ...d }));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, phase, prefillSig]);
+
   const pollJob = useCallback(async (jid: string) => {
     try {
       const j = await api.get<ConnectorJobStatus>(`/api/connectors/instances/${instanceId}/jobs/${jid}`);

@@ -202,6 +202,18 @@ export class ConnectorInstanceService {
     }
   }
 
+  async operationDefaults(id: string, operationId: string, resourceId: string | undefined, values: Record<string, unknown>) {
+    const instance = await this.get(id);
+    const connector = this.connectorFor(instance);
+    if (!connector.operationDefaults) return {};
+    const ctx = await this.buildContext(instance);
+    try {
+      return await connector.operationDefaults(ctx, operationId, resourceId, values);
+    } catch {
+      return {};
+    }
+  }
+
   /** Kicks off a background job running the operation; returns the job id. */
   async startOperation(
     id: string,

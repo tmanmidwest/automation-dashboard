@@ -24,6 +24,9 @@ export interface ProxmoxResource {
   maxcpu?: number;
   cpu?: number;
   uptime?: number;
+  template?: number; // 1 for templates
+  tags?: string; // e.g. "prod;docker"
+  pool?: string;
 }
 
 export class ProxmoxApiError extends Error {
@@ -221,6 +224,11 @@ export class ProxmoxApi {
   /** Update a guest's config (cloud-init fields, cores, memory, ...). */
   async updateConfig(node: string, type: 'qemu' | 'lxc', vmid: number, params: Record<string, unknown>): Promise<unknown> {
     return this.request('PUT', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/config`, params);
+  }
+
+  /** Grow a disk. size is like "32G" (absolute, grow-only) or "+8G". */
+  async resizeDisk(node: string, type: 'qemu' | 'lxc', vmid: number, disk: string, size: string): Promise<unknown> {
+    return this.request('PUT', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/resize`, { disk, size });
   }
 
   // ── Snapshots ──

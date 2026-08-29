@@ -41,6 +41,11 @@ function bytes(n?: number): string | undefined {
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
+function sizeToGb(value: number, unit: string): number {
+  const factor: Record<string, number> = { K: 1 / 1024 / 1024, M: 1 / 1024, G: 1, T: 1024 };
+  return Math.max(1, Math.ceil(value * (factor[unit] ?? 1)));
+}
+
 function uptime(seconds?: number): string | undefined {
   if (!seconds) return undefined;
   const d = Math.floor(seconds / 86400);
@@ -115,6 +120,12 @@ export class ProxmoxConnector implements Connector {
         ],
         subResources: [SNAPSHOTS_SUBRESOURCE],
       },
+      {
+        id: 'template',
+        label: 'Templates',
+        // Templates aren't power-managed; they're cloned via "Deploy from template" and can be deleted.
+        actions: [],
+      },
     ],
     operations: [
       {
@@ -126,11 +137,19 @@ export class ProxmoxConnector implements Connector {
         kind: 'qemu',
         icon: 'rocket',
         submitLabel: 'Deploy VM',
+        prefill: true,
+        prefillDependsOn: ['templateId'],
         fields: [
           { key: 'templateId', label: 'Source template', type: 'select', optionsSource: 'templates', required: true, help: 'A cloud-init-ready VM template to clone.' },
           { key: 'name', label: 'New VM name', type: 'text', required: true, placeholder: 'web-01', help: 'Also used as the hostname.' },
           { key: 'node', label: 'Target node', type: 'select', optionsSource: 'nodes', required: true },
           { key: 'storage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true, help: 'Where the new VM\'s disk lives (full clone).' },
+          { key: 'disksize', label: 'Disk size (GB)', type: 'number', help: 'Grow the template disk to this size (blank = keep template default). Cloud-init expands the filesystem on boot.' },
+          { key: 'ssd', label: 'SSD emulation + discard (TRIM)', type: 'boolean', default: true, help: 'Recommended on SSD-backed storage.' },
+          { key: 'cores', label: 'CPU cores', type: 'number', help: 'Blank = keep template default.' },
+          { key: 'memory', label: 'Memory (MB)', type: 'number', help: 'Blank = keep template default.' },
+          { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], help: 'Blank = keep the template\'s bridge.' },
+          { key: 'vlan', label: 'VLAN tag', type: 'number', help: 'Optional 802.1Q VLAN tag for the network.' },
           { key: 'ciuser', label: 'Cloud-init user', type: 'text', placeholder: 'ubuntu', help: 'Default login user created on first boot.' },
           { key: 'cipassword', label: 'Cloud-init password', type: 'password', help: 'Optional if you provide an SSH key.' },
           { key: 'sshkeys', label: 'SSH public key(s)', type: 'textarea', placeholder: 'ssh-ed25519 AAAA... user@host', help: 'One key per line.' },
@@ -155,6 +174,19 @@ export class ProxmoxConnector implements Connector {
       { id: 'snapshot-rollback', label: 'Rollback snapshot', scope: 'resource', fields: [] },
       { id: 'snapshot-delete', label: 'Delete snapshot', scope: 'resource', fields: [] },
       {
+        id: 'edit-hardware',
+        label: 'Edit CPU / RAM',
+        description: 'Change the CPU cores and memory. For a running guest this may require a reboot to take effect.',
+        scope: 'resource',
+        icon: 'cpu',
+        submitLabel: 'Apply changes',
+        prefill: true,
+        fields: [
+          { key: 'cores', label: 'CPU cores', type: 'number' },
+          { key: 'memory', label: 'Memory (MB)', type: 'number' },
+        ],
+      },
+      {
         id: 'create-vm',
         label: 'Create VM',
         description: 'Create a new virtual machine and boot it from an installation ISO.',
@@ -172,6 +204,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'iso', label: 'Installation ISO', type: 'select', optionsSource: 'isos', dependsOn: ['node'], required: true, help: 'Upload ISOs to a storage in Proxmox first.' },
           { key: 'storage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true },
           { key: 'disksize', label: 'Disk size (GB)', type: 'number', default: 32 },
+          { key: 'ssd', label: 'SSD emulation + discard (TRIM)', type: 'boolean', default: true, help: 'Recommended on SSD-backed storage.' },
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
@@ -225,6 +258,7 @@ export class ProxmoxConnector implements Connector {
           { key: 'imageUrl', label: 'Cloud image URL', type: 'text', required: true, placeholder: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img', help: 'A .img/.qcow2 cloud image with cloud-init preinstalled.' },
           { key: 'isoStorage', label: 'Download to storage', type: 'select', optionsSource: 'isoStorages', dependsOn: ['node'], required: true, help: 'Where the image is staged. With a non-root token, enable the "Import" content type on this storage (Datacenter → Storage → Edit → Content).' },
           { key: 'diskStorage', label: 'Disk storage', type: 'select', optionsSource: 'diskStorages', dependsOn: ['node'], required: true, help: 'Where the imported template disk will live.' },
+          { key: 'ssd', label: 'SSD emulation + discard (TRIM)', type: 'boolean', default: true, help: 'Recommended on SSD-backed storage; deployed VMs inherit it.' },
           { key: 'cores', label: 'CPU cores', type: 'number', default: 2 },
           { key: 'memory', label: 'Memory (MB)', type: 'number', default: 2048 },
           { key: 'bridge', label: 'Network bridge', type: 'select', optionsSource: 'bridges', dependsOn: ['node'], required: true },
@@ -283,26 +317,35 @@ export class ProxmoxConnector implements Connector {
   }
 
   async listResources(ctx: ConnectorContext, kind: string): Promise<ConnectorResource[]> {
-    const type = KIND_TO_TYPE[kind];
-    if (!type) return [];
     const api = new ProxmoxApi(this.authFrom(ctx));
     const all = await api.clusterResources();
+    const isTemplateKind = kind === 'template';
+    const type = this.typeForKind(kind);
     return all
       .filter((r) => r.type === type)
+      // The Templates tab shows only templates; the qemu/lxc tabs exclude them.
+      .filter((r) => (isTemplateKind ? r.template === 1 : r.template !== 1))
       .sort((a, b) => a.vmid - b.vmid)
       .map((r) => ({
         id: String(r.vmid),
         kind,
         name: r.name || `${type}-${r.vmid}`,
-        status: r.status,
+        status: isTemplateKind ? 'template' : r.status,
         details: {
           vmid: r.vmid,
           node: r.node,
           cpu: r.maxcpu != null ? `${r.maxcpu} vCPU` : null,
           memory: bytes(r.maxmem) ?? null,
           uptime: r.status === 'running' ? uptime(r.uptime) ?? null : null,
+          tags: r.tags?.trim() || null,
+          pool: r.pool || null,
         },
       }));
+  }
+
+  /** Maps a UI resource kind to the underlying Proxmox guest type (templates are qemu). */
+  private typeForKind(kind: string): 'qemu' | 'lxc' {
+    return kind === 'lxc' ? 'lxc' : 'qemu';
   }
 
   async performAction(
@@ -339,7 +382,7 @@ export class ProxmoxConnector implements Connector {
   }
 
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
-    const type = KIND_TO_TYPE[kind];
+    const type = this.typeForKind(kind);
     const api = new ProxmoxApi(this.authFrom(ctx));
     const vmid = parseInt(resourceId, 10);
     const res = await this.locate(api, type, vmid);
@@ -398,7 +441,7 @@ export class ProxmoxConnector implements Connector {
   }
 
   async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
-    const type = KIND_TO_TYPE[kind];
+    const type = this.typeForKind(kind);
     const api = new ProxmoxApi(this.authFrom(ctx));
     const vmid = parseInt(resourceId, 10);
     try {
@@ -477,6 +520,47 @@ export class ProxmoxConnector implements Connector {
     }
   }
 
+  async operationDefaults(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const api = new ProxmoxApi(this.authFrom(ctx));
+    try {
+      if (operationId === 'edit-hardware') {
+        const type = this.typeForKind(String(values.kind ?? 'qemu'));
+        const vmid = parseInt(String(resourceId ?? ''), 10);
+        const res = await this.locate(api, type, vmid);
+        if (!res) return {};
+        const cfg = await api.config(res.node, type, vmid);
+        return { cores: Number(cfg.cores ?? 1), memory: Number(cfg.memory ?? 512) };
+      }
+      if (operationId === 'deploy-template') {
+        const [tplNode, tplVmidStr] = String(values.templateId ?? '').split(':');
+        const tplVmid = parseInt(tplVmidStr, 10);
+        if (!tplNode || !tplVmid) return {};
+        const cfg = await api.config(tplNode, 'qemu', tplVmid);
+        const out: Record<string, unknown> = {
+          cores: Number(cfg.cores ?? 1),
+          memory: Number(cfg.memory ?? 512),
+        };
+        // Prefill disk size from the template's primary disk.
+        const diskKey = Object.keys(cfg).find(
+          (k) => /^(scsi|virtio|sata)\d+$/.test(k) && !`${cfg[k]}`.includes('media=cdrom') && !`${cfg[k]}`.includes('cloudinit'),
+        );
+        if (diskKey) {
+          const m = String(cfg[diskKey]).match(/size=([0-9.]+)([KMGT])/i);
+          if (m) out.disksize = sizeToGb(parseFloat(m[1]), m[2].toUpperCase());
+        }
+        return out;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
   /** Aggregates content volids of a given type across all storages on a node. */
   private async storageVolids(api: ProxmoxApi, node: string, content: string): Promise<ConnectorOption[]> {
     if (!node) return [];
@@ -492,7 +576,7 @@ export class ProxmoxConnector implements Connector {
 
   async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
     if (subKind !== 'snapshot') return [];
-    const type = KIND_TO_TYPE[kind];
+    const type = this.typeForKind(kind);
     const api = new ProxmoxApi(this.authFrom(ctx));
     const vmid = parseInt(resourceId, 10);
     const res = await this.locate(api, type, vmid);
@@ -529,6 +613,7 @@ export class ProxmoxConnector implements Connector {
     if (operationId === 'create-vm') return this.createVm(api, values, onProgress);
     if (operationId === 'create-lxc') return this.createLxc(api, values, onProgress);
     if (operationId === 'build-template') return this.buildTemplate(api, values, onProgress);
+    if (operationId === 'edit-hardware') return this.editHardware(api, resourceId, values, onProgress);
     if (operationId !== 'deploy-template') {
       return { ok: false, message: `Unknown operation "${operationId}".` };
     }
@@ -554,6 +639,46 @@ export class ProxmoxConnector implements Connector {
     const upid = await api.cloneVm(tplNode, tplVmid, cloneParams);
     onProgress('Waiting for the clone to finish…');
     await api.waitForTask(tplNode, upid);
+
+    // Read the clone's config once for network/disk tweaks.
+    const cfg = await api.config(targetNode, 'qemu', newid);
+    const diskKey = Object.keys(cfg).find(
+      (k) => /^(scsi|virtio|sata)\d+$/.test(k) && !`${cfg[k]}`.includes('media=cdrom') && !`${cfg[k]}`.includes('cloudinit'),
+    );
+
+    // Apply hardware overrides (CPU/RAM), network (bridge/VLAN), and SSD flags on the clone.
+    const hw: Record<string, unknown> = {};
+    if (values.cores) hw.cores = Number(values.cores);
+    if (values.memory) hw.memory = Number(values.memory);
+    if (values.bridge || values.vlan) {
+      let bridge = values.bridge ? String(values.bridge) : '';
+      let model = 'virtio';
+      const net0 = String(cfg.net0 ?? '');
+      const mMatch = net0.match(/^([a-z0-9]+)[,=]/i);
+      if (mMatch) model = mMatch[1];
+      if (!bridge) {
+        const bMatch = net0.match(/bridge=([^,]+)/);
+        if (bMatch) bridge = bMatch[1];
+      }
+      if (bridge) hw.net0 = `${model},bridge=${bridge}${values.vlan ? `,tag=${values.vlan}` : ''}`;
+    }
+    if (diskKey && !(values.ssd === false || values.ssd === 'false')) {
+      const volid = String(cfg[diskKey]).split(',')[0];
+      const ssd = diskKey.startsWith('virtio') ? ',discard=on' : ',discard=on,ssd=1';
+      hw[diskKey] = `${volid}${ssd}`;
+    }
+    if (Object.keys(hw).length > 0) {
+      onProgress('Applying CPU / RAM / network / SSD settings…');
+      await api.updateConfig(targetNode, 'qemu', newid, hw);
+    }
+
+    // Grow the OS disk if a larger size was requested.
+    if (values.disksize && diskKey) {
+      onProgress(`Resizing disk to ${values.disksize} GB…`);
+      await api.resizeDisk(targetNode, 'qemu', newid, diskKey, `${Number(values.disksize)}G`).catch((e) => {
+        onProgress(`Disk resize skipped: ${e instanceof Error ? e.message : 'failed'} (target must be larger than the template disk).`);
+      });
+    }
 
     // Apply cloud-init settings on the new VM.
     const ci: Record<string, unknown> = {};
@@ -590,6 +715,7 @@ export class ProxmoxConnector implements Connector {
       const newid = await api.nextId();
       const storage = String(values.storage);
       const disksize = Number(values.disksize || 32);
+      const ssdOpts = values.ssd === false || values.ssd === 'false' ? '' : ',discard=on,ssd=1';
       onProgress(`Creating VM ${newid} (${name})…`);
       const params: Record<string, unknown> = {
         vmid: newid,
@@ -599,7 +725,7 @@ export class ProxmoxConnector implements Connector {
         memory: Number(values.memory || 2048),
         ostype: String(values.ostype || 'l26'),
         scsihw: 'virtio-scsi-single',
-        scsi0: `${storage}:${disksize}`,
+        scsi0: `${storage}:${disksize}${ssdOpts}`,
         ide2: `${values.iso},media=cdrom`,
         net0: `virtio,bridge=${values.bridge}`,
         boot: 'order=scsi0;ide2',
@@ -746,8 +872,9 @@ export class ProxmoxConnector implements Connector {
 
       // 3) Import the downloaded image as scsi0 (PVE8 import-from, by absolute path).
       onProgress('Importing the disk (this can take a while)…');
+      const ssdOpts = values.ssd === false || values.ssd === 'false' ? '' : ',discard=on,ssd=1';
       const importRes = await api.updateConfig(node, 'qemu', newid, {
-        scsi0: `${diskStorage}:0,import-from=${importFrom}`,
+        scsi0: `${diskStorage}:0,import-from=${importFrom}${ssdOpts}`,
       });
       if (typeof importRes === 'string' && importRes.startsWith('UPID')) {
         await api.waitForTask(node, importRes, LONG);
@@ -776,6 +903,28 @@ export class ProxmoxConnector implements Connector {
         await api.destroy(node, 'qemu', newid).catch(() => undefined);
       }
       return { ok: false, message: err instanceof Error ? err.message : 'Template build failed.' };
+    }
+  }
+
+  private async editHardware(api: ProxmoxApi, resourceId: string | undefined, values: Record<string, unknown>, onProgress: OperationProgress): Promise<OperationResult> {
+    const type = this.typeForKind(String(values.kind ?? 'qemu'));
+    const vmid = parseInt(String(resourceId ?? ''), 10);
+    const cfg: Record<string, unknown> = {};
+    if (values.cores) cfg.cores = Number(values.cores);
+    if (values.memory) cfg.memory = Number(values.memory);
+    if (Object.keys(cfg).length === 0) return { ok: false, message: 'Enter a new CPU or memory value.' };
+    try {
+      const res = await this.locate(api, type, vmid);
+      if (!res) return { ok: false, message: `${type} ${vmid} not found.` };
+      onProgress('Updating CPU / memory…');
+      await api.updateConfig(res.node, type, vmid, cfg);
+      const running = res.status === 'running';
+      return {
+        ok: true,
+        message: `Updated ${res.name || `${type} ${vmid}`}.${running ? ' Reboot the guest for the change to take effect.' : ''}`,
+      };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Update failed.' };
     }
   }
 

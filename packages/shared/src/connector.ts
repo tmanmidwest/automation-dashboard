@@ -194,6 +194,10 @@ export interface ConnectorOperation {
   submitLabel?: string;
   intent?: 'default' | 'destructive';
   fields: ConnectorFormField[];
+  /** If true, the UI fetches initial field values from the connector when the form opens. */
+  prefill?: boolean;
+  /** Re-fetch prefill values when any of these fields change (e.g. deploy re-reads the chosen template). */
+  prefillDependsOn?: string[];
 }
 
 export interface ConnectorOption {
@@ -248,6 +252,13 @@ export interface Connector {
     sourceId: string,
     values: Record<string, unknown>,
   ): Promise<ConnectorOption[]>;
+  /** Optional: initial field values for an operation form (prefill). */
+  operationDefaults?(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   /** Optional: run a parameterized operation. Long-running work reports via onProgress. */
   runOperation?(
     ctx: ConnectorContext,

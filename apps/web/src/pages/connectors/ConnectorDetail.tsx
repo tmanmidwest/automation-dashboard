@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation,
@@ -50,8 +50,18 @@ export function ConnectorDetail() {
   const [snapLoading, setSnapLoading] = useState(false);
   const [snapOp, setSnapOp] = useState<ConnectorOperation | null>(null);
   const [subBusy, setSubBusy] = useState<string | null>(null);
+  const [resourceOp, setResourceOp] = useState<ConnectorOperation | null>(null);
+
+  // Sorting & grouping
+  const [sortCol, setSortCol] = useState<'name' | 'vmid' | 'node' | 'status'>('vmid');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [groupBy, setGroupBy] = useState<'none' | 'node' | 'status' | 'tag' | 'pool'>('none');
 
   const snapSub = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources?.find((s) => s.id === 'snapshot');
+  // Resource-scoped operations shown in the detail drawer (e.g. Edit CPU/RAM) — snapshot ops are handled separately.
+  const resourceOps = (manifest?.operations ?? []).filter(
+    (o) => o.scope === 'resource' && !o.id.startsWith('snapshot') && (!o.kind || o.kind === kind),
+  );
 
   useEffect(() => {
     async function load() {
@@ -200,6 +210,50 @@ export function ConnectorDetail() {
   const actionsFor = (status?: string) =>
     (activeKind?.actions ?? []).filter((a) => !a.showWhenStatus || (status && a.showWhenStatus.includes(status)));
 
+  const colSpan = canAct ? 6 : 5;
+  function toggleSort(col: typeof sortCol) {
+    if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortCol(col); setSortDir('asc'); }
+  }
+  const sortVal = (r: ConnectorResource): string | number =>
+    sortCol === 'vmid' ? Number(r.details?.vmid ?? r.id)
+    : sortCol === 'node' ? String(r.details?.node ?? '')
+    : sortCol === 'status' ? String(r.status ?? '')
+    : String(r.name ?? '');
+  const sorted = [...resources].sort((a, b) => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const av = sortVal(a), bv = sortVal(b);
+    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+    return String(av).localeCompare(String(bv)) * dir;
+  });
+  const groups: { key: string | null; items: ConnectorResource[] }[] = (() => {
+    if (groupBy === 'none') return [{ key: null, items: sorted }];
+    const map = new Map<string, ConnectorResource[]>();
+    for (const r of sorted) {
+      let keys: string[];
+      if (groupBy === 'node') keys = [String(r.details?.node ?? '—')];
+      else if (groupBy === 'status') keys = [String(r.status ?? 'unknown')];
+      else if (groupBy === 'pool') keys = [r.details?.pool ? String(r.details.pool) : 'No pool'];
+      else {
+        const t = r.details?.tags ? String(r.details.tags).split(/[;, ]+/).filter(Boolean) : [];
+        keys = t.length ? t : ['Untagged'];
+      }
+      for (const k of keys) { if (!map.has(k)) map.set(k, []); map.get(k)!.push(r); }
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, items]) => ({ key, items }));
+  })();
+
+  const SortHead = ({ col, label, className }: { col: typeof sortCol; label: string; className?: string }) => (
+    <th className={cn('px-4 py-3 font-medium', className)}>
+      <button className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort(col)}>
+        {label}
+        {sortCol === col
+          ? (sortDir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />)
+          : <ChevronsUpDown className="h-3.5 w-3.5 opacity-40" />}
+      </button>
+    </th>
+  );
+
   return (
     <>
       <Link to="/connectors" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-3">
@@ -243,6 +297,18 @@ export function ConnectorDetail() {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              <select
+                className="h-9 rounded-md border border-input bg-background/60 px-2 text-sm text-muted-foreground"
+                value={groupBy}
+                onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+                title="Group by"
+              >
+                <option value="none">No grouping</option>
+                <option value="tag">Group by tag</option>
+                <option value="pool">Group by pool</option>
+                <option value="node">Group by node</option>
+                <option value="status">Group by status</option>
+              </select>
               {operations.filter((o) => o.kind === kind).map((op) => (
                 <Button key={op.id} size="sm" onClick={() => setActiveOp(op)}>
                   <Rocket className="h-4 w-4" /> {op.label}
@@ -259,57 +325,68 @@ export function ConnectorDetail() {
               <table className="w-full text-sm">
                 <thead className="text-left text-muted-foreground border-b border-border">
                   <tr>
-                    <th className="px-4 py-3 font-medium">Name</th>
-                    <th className="px-4 py-3 font-medium">ID</th>
-                    <th className="px-4 py-3 font-medium">Node</th>
+                    <SortHead col="name" label="Name" />
+                    <SortHead col="vmid" label="ID" />
+                    <SortHead col="node" label="Node" />
                     <th className="px-4 py-3 font-medium">Resources</th>
-                    <th className="px-4 py-3 font-medium">Status</th>
+                    <SortHead col="status" label="Status" />
                     {canAct && <th className="px-4 py-3 font-medium text-right">Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {resources.map((r) => (
-                    <tr key={r.id} className="border-b border-border/50 last:border-0 hover:bg-muted/30">
-                      <td className="px-4 py-3">
-                        <button className="font-medium hover:text-primary transition-colors" onClick={() => openDetail(r)}>
-                          {r.name}
-                        </button>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">{String(r.details?.vmid ?? r.id)}</td>
-                      <td className="px-4 py-3 text-muted-foreground">{String(r.details?.node ?? '—')}</td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {[r.details?.cpu, r.details?.memory].filter(Boolean).join(' · ') || '—'}
-                        {r.details?.uptime ? ` · up ${r.details.uptime}` : ''}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={cn('text-xs rounded-full px-2 py-0.5 capitalize', statusColor(r.status))}>
-                          {r.status ?? 'unknown'}
-                        </span>
-                      </td>
-                      {canAct && (
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 justify-end">
-                            {actionsFor(r.status).map((a) => (
-                              <Button key={a.id} variant="outline" size="sm"
-                                className={cn(a.intent === 'destructive' && 'text-destructive border-destructive/40 hover:bg-destructive/10')}
-                                disabled={busyAction === `${r.id}:${a.id}`}
-                                onClick={() => runAction(r, a)}>
-                                {busyAction === `${r.id}:${a.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                                {a.label}
-                              </Button>
-                            ))}
-                          </div>
-                        </td>
+                  {groups.map((g) => (
+                    <Fragment key={g.key ?? '__all'}>
+                      {g.key !== null && (
+                        <tr className="bg-muted/40">
+                          <td colSpan={colSpan} className="px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                            {g.key} <span className="text-muted-foreground/60">({g.items.length})</span>
+                          </td>
+                        </tr>
                       )}
-                    </tr>
+                      {g.items.map((r) => (
+                        <tr key={(g.key ?? '') + r.id} className="border-b border-border/50 last:border-0 hover:bg-muted/30">
+                          <td className="px-4 py-3">
+                            <button className="font-medium hover:text-primary transition-colors" onClick={() => openDetail(r)}>
+                              {r.name}
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground">{String(r.details?.vmid ?? r.id)}</td>
+                          <td className="px-4 py-3 text-muted-foreground">{String(r.details?.node ?? '—')}</td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {[r.details?.cpu, r.details?.memory].filter(Boolean).join(' · ') || '—'}
+                            {r.details?.uptime ? ` · up ${r.details.uptime}` : ''}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={cn('text-xs rounded-full px-2 py-0.5 capitalize', statusColor(r.status))}>
+                              {r.status ?? 'unknown'}
+                            </span>
+                          </td>
+                          {canAct && (
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1 justify-end">
+                                {actionsFor(r.status).map((a) => (
+                                  <Button key={a.id} variant="outline" size="sm"
+                                    className={cn(a.intent === 'destructive' && 'text-destructive border-destructive/40 hover:bg-destructive/10')}
+                                    disabled={busyAction === `${r.id}:${a.id}`}
+                                    onClick={() => runAction(r, a)}>
+                                    {busyAction === `${r.id}:${a.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                    {a.label}
+                                  </Button>
+                                ))}
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </Fragment>
                   ))}
                   {resources.length === 0 && !loadingRes && (
-                    <tr><td colSpan={canAct ? 6 : 5} className="px-4 py-8 text-center text-muted-foreground">
+                    <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-muted-foreground">
                       No {activeKind?.label.toLowerCase()} found.
                     </td></tr>
                   )}
                   {loadingRes && resources.length === 0 && (
-                    <tr><td colSpan={canAct ? 6 : 5} className="px-4 py-8 text-center text-muted-foreground">
+                    <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-muted-foreground">
                       <Loader2 className="h-5 w-5 animate-spin inline" />
                     </td></tr>
                   )}
@@ -342,6 +419,15 @@ export function ConnectorDetail() {
         )}
       >
         {detailLoading && <div className="text-center text-muted-foreground py-8"><Loader2 className="h-5 w-5 animate-spin inline" /></div>}
+        {canAct && resourceOps.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-5">
+            {resourceOps.map((op) => (
+              <Button key={op.id} size="sm" variant="outline" onClick={() => setResourceOp(op)}>
+                <Cpu className="h-4 w-4" /> {op.label}
+              </Button>
+            ))}
+          </div>
+        )}
         {detail && (
           <div className="space-y-5">
             {detail.groups.map((g) => (
@@ -437,6 +523,23 @@ export function ConnectorDetail() {
           onDone={() => {
             setSnapOp(null);
             if (detailFor) loadSnapshots(detailFor.id);
+          }}
+        />
+      )}
+
+      {resourceOp && detailFor && (
+        <OperationDialog
+          instanceId={id!}
+          operation={resourceOp}
+          resourceId={detailFor.id}
+          extraValues={{ kind }}
+          open={!!resourceOp}
+          onClose={() => setResourceOp(null)}
+          onDone={() => {
+            const target = detailFor;
+            setResourceOp(null);
+            if (target) openDetail(target); // refresh the detail to show new CPU/RAM
+            loadResources();
           }}
         />
       )}

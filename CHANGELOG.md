@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Form pre-fill
+- Operation forms can now pre-fill from live data: **Edit CPU / RAM** opens with the
+  guest's current cores/memory, and **Deploy from template** fills CPU/RAM/disk size
+  from the selected template (updating when you change the template).
+
+### Added / Changed — Proxmox: SSD flags, sorting, grouping
+- **SSD emulation + discard/TRIM** option (default on) when creating VMs, building
+  templates, and deploying from a template — sets `discard=on,ssd=1` on the disk.
+- **Sortable columns** in the VM/container/template lists (Name, ID, Node, Status).
+- **Grouping** — group the list by Proxmox **tag**, **pool**, node, or status
+  (e.g. tag VMs `prod` / `docker` in Proxmox and Cerebro groups them).
+
+### Added / Changed — Proxmox refinements
+- **Templates** now have their own tab and are no longer listed as startable VMs.
+- **Deploy from template** gained options: grow the disk (GB), override CPU cores and
+  memory, choose the network bridge, and set a VLAN tag.
+- **Edit CPU / RAM** — change an existing VM or container's cores and memory from its
+  detail drawer (a reboot may be needed for a running guest).
+
 ### Added — Proxmox: build template from cloud image (Phase C2)
 - **Build template from image** — give a cloud image URL (e.g. an Ubuntu cloud image) and
   Cerebro downloads it, imports it as a disk, adds a cloud-init drive, and converts it to a

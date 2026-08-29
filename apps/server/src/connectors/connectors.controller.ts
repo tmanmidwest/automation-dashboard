@@ -211,6 +211,16 @@ export class ConnectorsController {
     return this.instances.resolveOptions(id, dto.sourceId, dto.values);
   }
 
+  @Post('instances/:id/operations/:operationId/defaults')
+  @RequirePermissions('connectors:read')
+  async operationDefaults(
+    @Param('id') id: string,
+    @Param('operationId') operationId: string,
+    @Body() dto: RunOperationDto,
+  ) {
+    return this.instances.operationDefaults(id, operationId, dto.resourceId, dto.values);
+  }
+
   @Post('instances/:id/operations/:operationId')
   @RequirePermissions('connectors:action')
   async runOperation(
