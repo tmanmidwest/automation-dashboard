@@ -543,6 +543,17 @@ export class ProxmoxConnector implements Connector {
       };
     }
 
+    // A serial-only display has no VNC framebuffer — vncproxy would fail with a
+    // cryptic "set_password / qmp socket timeout". Guide the user to the serial console.
+    if (type === 'qemu') {
+      const cfg = await api.config(res.node, 'qemu', vmid);
+      if (String(cfg.vga ?? '').startsWith('serial')) {
+        throw new Error(
+          "This VM's display is set to Serial, so the graphical console isn't available. Use the Serial console instead, or change Display to Default in Proxmox (Hardware → Display).",
+        );
+      }
+    }
+
     const { ticket, port } = await api.vncproxy(res.node, type, vmid);
     return {
       url: wsUrl(ticket, port),
@@ -976,10 +987,9 @@ export class ProxmoxConnector implements Connector {
         ostype: 'l26',
         scsihw: 'virtio-scsi-single',
         net0: `virtio,bridge=${values.bridge}`,
-        // Keep a serial device (cloud images log to it) but use a real VGA display
-        // so the graphical/noVNC console works — vga=serial0 leaves no framebuffer.
+        // Keep a serial device (cloud images log to it), but leave Display as Default
+        // (no explicit vga) so it matches typical Proxmox VMs and the console still works.
         serial0: 'socket',
-        vga: 'std',
         agent: 1,
       });
       await api.waitForTask(node, createUpid);
