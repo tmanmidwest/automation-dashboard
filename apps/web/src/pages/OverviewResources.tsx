@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Loader2, Server, Boxes, Network, ChevronRight } from 'lucide-react';
-import type { ConnectorInstanceSummary, ConnectorResource, ConnectorNode } from '@cerebro/shared';
+import type { ConnectorInstanceSummary, ConnectorResource, ConnectorNode, ConnectorManifest } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
@@ -33,9 +33,9 @@ export function OverviewResources() {
   const [filter, setFilter] = useState('all');
 
   const isNodes = kind === 'nodes';
-  const isLxc = kind === 'lxc';
-  const label = isNodes ? 'Nodes' : isLxc ? 'Containers' : 'Virtual machines';
-  const Icon = isNodes ? Network : isLxc ? Boxes : Server;
+  const isContainer = kind === 'container';
+  const label = isNodes ? 'Nodes' : isContainer ? 'Containers' : 'Virtual machines';
+  const Icon = isNodes ? Network : isContainer ? Boxes : Server;
   const filters = isNodes ? ['all', 'online', 'offline'] : ['all', 'running', 'stopped'];
 
   useEffect(() => {
@@ -43,14 +43,29 @@ export function OverviewResources() {
     async function load() {
       setLoading(true);
       try {
-        const instances = await api.get<ConnectorInstanceSummary[]>('/api/connectors/instances');
+        const [instances, manifests] = await Promise.all([
+          api.get<ConnectorInstanceSummary[]>('/api/connectors/instances'),
+          isNodes
+            ? Promise.resolve([] as ConnectorManifest[])
+            : api.get<ConnectorManifest[]>('/api/connectors/available').catch(() => [] as ConnectorManifest[]),
+        ]);
         const enabled = instances.filter((i) => i.enabled);
+        // Map each connector's resource kinds that belong to the requested
+        // category (e.g. "vm" → Proxmox "qemu" + AWS "ec2").
+        const kindsByConnector = new Map<string, string[]>(
+          manifests.map((m) => [m.id, m.resourceKinds.filter((k) => k.category === kind).map((k) => k.id)]),
+        );
         const results = await Promise.all(
-          enabled.map(async (inst) => ({
-            connector: inst,
-            resources: isNodes ? [] : await api.get<ConnectorResource[]>(`/api/connectors/instances/${inst.id}/resources?kind=${kind}`).catch(() => []),
-            nodes: isNodes ? await api.get<ConnectorNode[]>(`/api/connectors/instances/${inst.id}/nodes`).catch(() => []) : [],
-          })),
+          enabled.map(async (inst) => {
+            if (isNodes) {
+              return { connector: inst, resources: [] as ConnectorResource[], nodes: await api.get<ConnectorNode[]>(`/api/connectors/instances/${inst.id}/nodes`).catch(() => []) };
+            }
+            const kinds = kindsByConnector.get(inst.connectorId) ?? [];
+            const perKind = await Promise.all(
+              kinds.map((k) => api.get<ConnectorResource[]>(`/api/connectors/instances/${inst.id}/resources?kind=${k}`).catch(() => [])),
+            );
+            return { connector: inst, resources: perKind.flat(), nodes: [] as ConnectorNode[] };
+          }),
         );
         setGroups(results.filter((g) => (isNodes ? g.nodes.length : g.resources.length) > 0));
       } finally {

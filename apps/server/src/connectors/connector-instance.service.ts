@@ -255,11 +255,20 @@ export class ConnectorInstanceService {
   }
 
   private overviewCache?: { at: number; data: DashboardOverview };
-  private lastGoodOverview?: { at: number; data: DashboardOverview };
+  /**
+   * Per-connector last-good telemetry. When one connector has a transient
+   * failure (a slow/timed-out AWS call, say) while others succeed, we keep
+   * folding its last-good numbers into the aggregate for a short window — so
+   * the dashboard totals stay steady instead of flickering down and back up.
+   * Source health (`sources`/`ok`) still reflects the real, current failure.
+   */
+  private connectorTelemetry = new Map<string, { at: number; metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] }>();
+  private static readonly TELEMETRY_STALE_MS = 60000;
 
   /** Aggregated telemetry across all enabled connectors (short-cached to survive polling). */
   async dashboardOverview(): Promise<DashboardOverview> {
-    if (this.overviewCache && Date.now() - this.overviewCache.at < 3000) return this.overviewCache.data;
+    const now = Date.now();
+    if (this.overviewCache && now - this.overviewCache.at < 3000) return this.overviewCache.data;
 
     const instances = (await this.list()).filter((i) => i.enabled);
     const metricMap = new Map<string, { label: string; unit?: string; values: number[] }>();
@@ -271,19 +280,29 @@ export class ConnectorInstanceService {
       instances.map(async (inst) => {
         const connector = this.registry.get(inst.connectorId);
         if (!connector?.overview) return;
+        let contribution: { metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] } | undefined;
         try {
           const ctx = await this.buildContext(inst);
           const ov = await connector.overview(ctx);
           ok++;
           sources.push({ name: inst.name, ok: true });
-          for (const m of ov.metrics) {
+          contribution = { metrics: ov.metrics, guests: ov.guests };
+          this.connectorTelemetry.set(inst.id, { at: now, ...contribution });
+        } catch (err) {
+          sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
+          // Substitute this connector's last-good numbers so a blip doesn't drop it from the totals.
+          const cached = this.connectorTelemetry.get(inst.id);
+          if (cached && now - cached.at < ConnectorInstanceService.TELEMETRY_STALE_MS) {
+            contribution = { metrics: cached.metrics, guests: cached.guests };
+          }
+        }
+        if (contribution) {
+          for (const m of contribution.metrics) {
             const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [] };
             e.values.push(m.value);
             metricMap.set(m.key, e);
           }
-          for (const g of ov.guests) guests.push({ ...g, connector: inst.name });
-        } catch (err) {
-          sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
+          for (const g of contribution.guests) guests.push({ ...g, connector: inst.name });
         }
       }),
     );
@@ -297,18 +316,12 @@ export class ConnectorInstanceService {
       return { key, label: e.label, value, unit: e.unit };
     });
 
-    let data: DashboardOverview = { connectors: { total: instances.length, ok }, sources, metrics, guests: guests.slice(0, 60) };
+    // Forget telemetry for connectors that no longer exist.
+    const liveIds = new Set(instances.map((i) => i.id));
+    for (const id of this.connectorTelemetry.keys()) if (!liveIds.has(id)) this.connectorTelemetry.delete(id);
 
-    // Smooth transient failures: if this poll reached no connectors but some are
-    // configured, keep serving the last good telemetry (up to 20s) — but with the
-    // CURRENT source health, so the alert surfaces immediately.
-    if (ok === 0 && instances.length > 0 && this.lastGoodOverview && Date.now() - this.lastGoodOverview.at < 20000) {
-      data = { ...this.lastGoodOverview.data, connectors: data.connectors, sources };
-    } else if (ok > 0) {
-      this.lastGoodOverview = { at: Date.now(), data };
-    }
-
-    this.overviewCache = { at: Date.now(), data };
+    const data: DashboardOverview = { connectors: { total: instances.length, ok }, sources, metrics, guests: guests.slice(0, 60) };
+    this.overviewCache = { at: now, data };
     return data;
   }
 

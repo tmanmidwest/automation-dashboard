@@ -41,7 +41,18 @@ function timeAgo(d?: Date): string | undefined {
   return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
 }
 
+/** How long a connector instance's dashboard overview is reused before it re-queries EC2. */
+const OVERVIEW_TTL_MS = 30_000;
+
 export class AwsConnector implements Connector {
+  /**
+   * Caches each instance's dashboard overview (keyed by access key + region).
+   * The dashboard polls frequently; EC2 DescribeInstances is unbilled but
+   * rate-limited, so we only actually call AWS every OVERVIEW_TTL_MS. The
+   * connector detail page uses listResources (uncached) so it stays live.
+   */
+  private overviewCache = new Map<string, { at: number; data: ConnectorOverview }>();
+
   manifest: ConnectorManifest = {
     id: 'aws',
     name: 'Amazon Web Services',
@@ -85,6 +96,7 @@ export class AwsConnector implements Connector {
       {
         id: EC2_KIND,
         label: 'EC2 Instances',
+        category: 'vm',
         actions: [
           { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped'] },
           { id: 'stop', label: 'Stop', mutating: true, confirm: 'Stop this instance?', showWhenStatus: ['running'] },
@@ -199,6 +211,10 @@ export class AwsConnector implements Connector {
       status: i.state,
       details: {
         instanceId: i.id,
+        // Generic keys the shared list/drill-down tables read: `node` (location)
+        // and `cpu` (resource summary). EC2 has no node, so surface the AZ/type.
+        node: i.az ?? null,
+        cpu: i.type ?? null,
         type: i.type ?? null,
         az: i.az ?? null,
         privateIp: i.privateIp ?? null,
@@ -320,16 +336,21 @@ export class AwsConnector implements Connector {
   }
 
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
-    const api = new AwsApi(this.authFrom(ctx));
-    const region = this.authFrom(ctx).region;
+    const auth = this.authFrom(ctx);
+    const cacheKey = `${auth.accessKeyId}:${auth.region}`;
+    const cached = this.overviewCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < OVERVIEW_TTL_MS) return cached.data;
+
+    const api = new AwsApi(auth);
+    const region = auth.region;
     const instances = (await api.describeInstances()).filter((i) => i.state !== 'terminated');
     const running = instances.filter((i) => i.state === 'running').length;
-    const stopped = instances.filter((i) => i.state === 'stopped').length;
 
+    // Report against the canonical 'vms*' keys so EC2 rolls up into the
+    // dashboard's cross-connector "VMs" tile alongside Proxmox VMs.
     const metrics = [
-      { key: 'ec2Running', label: 'EC2 running', value: running },
-      { key: 'ec2Stopped', label: 'EC2 stopped', value: stopped },
-      { key: 'ec2Total', label: 'EC2 total', value: instances.length },
+      { key: 'vmsRunning', label: 'VMs running', value: running },
+      { key: 'vmsTotal', label: 'VMs total', value: instances.length },
     ];
 
     const guests = instances
@@ -338,7 +359,9 @@ export class AwsConnector implements Connector {
       .slice(0, 40)
       .map((i) => ({ name: i.name || i.id, kind: EC2_KIND, status: i.state, node: i.az || region }));
 
-    return { metrics, guests };
+    const data: ConnectorOverview = { metrics, guests };
+    this.overviewCache.set(cacheKey, { at: Date.now(), data });
+    return data;
   }
 
   async resolveOptions(ctx: ConnectorContext, sourceId: string, values: Record<string, unknown>): Promise<ConnectorOption[]> {

@@ -72,6 +72,14 @@ export interface ConnectorResourceKind {
   id: string;
   /** e.g. "Virtual Machines" */
   label: string;
+  /**
+   * Canonical bucket this kind rolls up into on the cross-connector dashboard
+   * (e.g. a Proxmox "qemu" and an AWS "ec2" both belong to "vm"). Lets the
+   * dashboard aggregate and drill down across connectors that name their kinds
+   * differently. Omit for kinds that shouldn't appear in a dashboard bucket
+   * (e.g. templates). Canonical values: 'vm' | 'container'.
+   */
+  category?: 'vm' | 'container';
   /** Actions this kind supports, e.g. ["start", "stop", "restart"]. */
   actions: ConnectorAction[];
   /** Nested collections a resource of this kind contains (e.g. snapshots). */

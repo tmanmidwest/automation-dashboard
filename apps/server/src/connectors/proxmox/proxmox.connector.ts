@@ -101,6 +101,7 @@ export class ProxmoxConnector implements Connector {
       {
         id: 'qemu',
         label: 'Virtual Machines',
+        category: 'vm',
         actions: [
           { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped'] },
           { id: 'shutdown', label: 'Shutdown', mutating: true, confirm: 'Gracefully shut down this VM?', showWhenStatus: ['running'] },
@@ -116,6 +117,7 @@ export class ProxmoxConnector implements Connector {
       {
         id: 'lxc',
         label: 'LXC Containers',
+        category: 'container',
         actions: [
           { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped'] },
           { id: 'shutdown', label: 'Shutdown', mutating: true, confirm: 'Gracefully shut down this container?', showWhenStatus: ['running'] },
