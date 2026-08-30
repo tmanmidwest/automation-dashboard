@@ -13,7 +13,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet } from '@/components/ui/sheet';
-import { cn, timeAgo, formatMoney } from '@/lib/utils';
+import { cn, timeAgo, formatMoney, shortDateTime } from '@/lib/utils';
 
 /** Preset background refresh intervals offered per connector. */
 const REFRESH_PRESETS: { label: string; value: number }[] = [
@@ -366,6 +366,7 @@ export function ConnectorDetail() {
                 <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
                   <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
                   <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
+                  {m.asOf && <p className="text-[10px] text-muted-foreground/60">as of {shortDateTime(m.asOf)}</p>}
                 </div>
               ))}
             </div>

@@ -315,7 +315,7 @@ export class ConnectorInstanceService {
     if (this.overviewCache && now - this.overviewCache.at < 3000) return this.overviewCache.data;
 
     const instances = (await this.list()).filter((i) => i.enabled);
-    const metricMap = new Map<string, { label: string; unit?: string; values: number[] }>();
+    const metricMap = new Map<string, { label: string; unit?: string; values: number[]; asOf?: string }>();
     const guests: OverviewGuest[] = [];
     const sources: OverviewSource[] = [];
     let ok = 0;
@@ -327,12 +327,12 @@ export class ConnectorInstanceService {
         let contribution: { metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] } | undefined;
 
         // Background-sync throttle: only re-query this connector's external system
-        // once per its refreshIntervalSec. Between, serve its cached telemetry so the
-        // dashboard stays live without extra API calls.
+        // once per its refreshIntervalSec. Between, serve the cached telemetry so the
+        // dashboard stays live without extra API calls. Keyed on when the telemetry
+        // was last actually fetched (not any read), so it refreshes on schedule.
         const intervalMs = ((inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30) * 1000;
-        const lastAt = this.lastSync.get(inst.id);
         const cachedTel = this.connectorTelemetry.get(inst.id);
-        if (cachedTel && lastAt && now - lastAt < intervalMs) {
+        if (cachedTel && now - cachedTel.at < intervalMs) {
           ok++;
           sources.push({ name: inst.name, ok: true });
           contribution = { metrics: cachedTel.metrics, guests: cachedTel.guests };
@@ -356,8 +356,10 @@ export class ConnectorInstanceService {
         }
         if (contribution) {
           for (const m of contribution.metrics) {
-            const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [] };
+            const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [], asOf: m.asOf };
             e.values.push(m.value);
+            // Keep the oldest "as of" across connectors so the tile reflects the stalest figure.
+            if (m.asOf && (!e.asOf || m.asOf < e.asOf)) e.asOf = m.asOf;
             metricMap.set(m.key, e);
           }
           for (const g of contribution.guests) guests.push({ ...g, connector: inst.name });
@@ -371,7 +373,7 @@ export class ConnectorInstanceService {
       const value = e.unit === '%'
         ? Math.round(e.values.reduce((s, v) => s + v, 0) / e.values.length)
         : e.values.reduce((s, v) => s + v, 0);
-      return { key, label: e.label, value, unit: e.unit };
+      return { key, label: e.label, value, unit: e.unit, asOf: e.asOf };
     });
 
     // Forget telemetry for connectors that no longer exist.

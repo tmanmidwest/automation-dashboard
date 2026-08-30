@@ -14,6 +14,14 @@ export function formatMoney(value: number, currency = 'USD'): string {
   }
 }
 
+/** Compact date + time, e.g. "Aug 30, 10:14". Empty string for null/invalid. */
+export function shortDateTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 /** Compact relative time, e.g. "just now", "5m ago", "3h ago", "2d ago". */
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return 'never';

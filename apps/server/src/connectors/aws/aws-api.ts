@@ -89,6 +89,8 @@ export interface AwsCostSummary {
   /** Estimated full-month spend (mtd + forecast). */
   estimated: number;
   currency: string;
+  /** ISO timestamp this figure was fetched from Cost Explorer. */
+  asOf: string;
 }
 
 export interface AwsImage {
@@ -337,7 +339,7 @@ export class AwsApi {
         forecast = 0;
       }
 
-      return { mtd, forecast, estimated: mtd + forecast, currency };
+      return { mtd, forecast, estimated: mtd + forecast, currency, asOf: new Date().toISOString() };
     } catch (err) {
       throw friendly(err);
     }

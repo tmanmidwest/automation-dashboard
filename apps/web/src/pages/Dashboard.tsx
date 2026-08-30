@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
-import { cn, formatMoney } from '@/lib/utils';
+import { cn, formatMoney, shortDateTime } from '@/lib/utils';
 import { Brand } from '@/components/Brand';
 
 function useCountUp(target: number, ms = 700) {
@@ -335,20 +335,17 @@ export function Dashboard() {
       </div>
 
       {/* Telemetry tiles */}
-      <div className={cn('grid gap-3 grid-cols-2 lg:grid-cols-3', costMtd ? 'xl:grid-cols-7' : 'xl:grid-cols-6')}>
+      <div className={cn('grid gap-3 grid-cols-2 lg:grid-cols-4', costMtd ? 'xl:grid-cols-8' : 'xl:grid-cols-6')}>
         <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/vm" />
         <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} to="/overview/container" />
         <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" to="/overview/nodes" />
         <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} to="/overview/nodes" />
         <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
         {costMtd && (
-          <StatTile
-            icon={DollarSign}
-            label="Cloud spend"
-            value={formatMoney(costMtd.value, costMtd.unit)}
-            sub={costEst ? `est ${formatMoney(costEst.value, costEst.unit)} this month` : 'month to date'}
-            to="/connectors"
-          />
+          <StatTile icon={DollarSign} label="Spend so far" value={formatMoney(costMtd.value, costMtd.unit)} sub={costMtd.asOf ? `as of ${shortDateTime(costMtd.asOf)}` : 'month to date'} to="/connectors" />
+        )}
+        {costEst && (
+          <StatTile icon={TrendingUp} label="Est. this month" value={formatMoney(costEst.value, costEst.unit)} sub={costEst.asOf ? `as of ${shortDateTime(costEst.asOf)}` : 'forecast'} to="/connectors" />
         )}
         <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
       </div>

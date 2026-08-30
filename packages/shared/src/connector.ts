@@ -259,6 +259,8 @@ export interface OverviewMetric {
   label: string;
   value: number;
   unit?: string;
+  /** Optional ISO timestamp the value is current as of (e.g. billing data that lags/updates slowly). */
+  asOf?: string;
 }
 
 /** A connector's at-a-glance summary for the dashboard. */
