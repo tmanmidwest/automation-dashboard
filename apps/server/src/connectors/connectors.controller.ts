@@ -174,6 +174,12 @@ export class ConnectorsController {
     return this.instances.connectorOverview(id);
   }
 
+  @Post('instances/:id/overview/refresh')
+  @RequirePermissions('connectors:write')
+  async refreshInstanceOverview(@Param('id') id: string) {
+    return this.instances.refreshOverview(id);
+  }
+
   @Get('instances/:id/resources')
   @RequirePermissions('connectors:read')
   async resources(@Param('id') id: string, @Query('kind') kind: string) {

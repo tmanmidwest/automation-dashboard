@@ -56,6 +56,7 @@ export function ConnectorDetail() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
   const [connMetrics, setConnMetrics] = useState<OverviewMetric[]>([]);
+  const [billingRefreshing, setBillingRefreshing] = useState(false);
 
   // Detail drawer
   const [detailFor, setDetailFor] = useState<ConnectorResource | null>(null);
@@ -140,6 +141,21 @@ export function ConnectorDetail() {
     if (!inst) return;
     const updated = await api.patch<ConnectorInstanceConfig>(`/api/connectors/instances/${id}/enabled`, { enabled: !inst.enabled });
     setInst({ ...inst, enabled: updated.enabled });
+  }
+
+  async function refreshBilling() {
+    setBillingRefreshing(true);
+    setMsg(null);
+    try {
+      const o = await api.post<{ metrics: OverviewMetric[] }>(`/api/connectors/instances/${id}/overview/refresh`);
+      setConnMetrics(o.metrics);
+      setSyncedAt(new Date().toISOString());
+      setMsg({ ok: true, text: 'Billing data refreshed from AWS Cost Explorer.' });
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Failed to refresh billing' });
+    } finally {
+      setBillingRefreshing(false);
+    }
   }
 
   async function setRefreshInterval(sec: number) {
@@ -361,14 +377,24 @@ export function ConnectorDetail() {
       ) : (
         <>
           {connMetrics.length > 0 && (
-            <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 mb-4">
-              {connMetrics.map((m) => (
-                <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
-                  <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
-                  {m.asOf && <p className="text-[10px] text-muted-foreground/60">as of {shortDateTime(m.asOf)}</p>}
+            <div className="mb-4">
+              {connMetrics.some((m) => m.key.startsWith('cost')) && canWrite && (
+                <div className="flex items-center justify-end mb-2">
+                  <Button variant="ghost" size="sm" onClick={refreshBilling} disabled={billingRefreshing}
+                    title="Force a fresh pull from AWS Cost Explorer (one billable ~$0.01 call), bypassing the daily cache">
+                    <RefreshCw className={cn('h-4 w-4', billingRefreshing && 'animate-spin')} /> Refresh billing
+                  </Button>
                 </div>
-              ))}
+              )}
+              <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+                {connMetrics.map((m) => (
+                  <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
+                    <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
+                    {m.asOf && <p className="text-[10px] text-muted-foreground/60">as of {shortDateTime(m.asOf)}</p>}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <div className="flex items-center justify-between mb-4">

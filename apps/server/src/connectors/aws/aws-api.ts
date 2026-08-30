@@ -86,9 +86,9 @@ export interface AwsCostSummary {
   lastMonth: number;
   /** Month-to-date actual spend. */
   mtd: number;
-  /** Forecast spend for the remainder of the month. */
+  /** Raw Cost Explorer forecast (with MONTHLY granularity this is the projected full-month total). */
   forecast: number;
-  /** Estimated full-month spend (mtd + forecast). */
+  /** Estimated full-month spend (the month-end forecast, or MTD if no forecast is available). */
   estimated: number;
   currency: string;
   /** ISO timestamp this figure was fetched from Cost Explorer. */
@@ -331,6 +331,9 @@ export class AwsApi {
       }
 
       // Forecast needs historical data; if unavailable it throws — treat as 0.
+      // With MONTHLY granularity, GetCostForecast returns the projected FULL-MONTH
+      // total (it already accounts for spend so far), so this IS the month-end
+      // estimate — do NOT add MTD on top or it double-counts.
       let forecast = 0;
       try {
         const fc = await this.ce.send(
@@ -345,7 +348,9 @@ export class AwsApi {
         forecast = 0;
       }
 
-      return { lastMonth, mtd, forecast, estimated: mtd + forecast, currency, asOf: new Date().toISOString() };
+      // The forecast is the month-end total; fall back to MTD if unavailable.
+      const estimated = forecast > 0 ? Math.max(mtd, forecast) : mtd;
+      return { lastMonth, mtd, forecast, estimated, currency, asOf: new Date().toISOString() };
     } catch (err) {
       throw friendly(err);
     }

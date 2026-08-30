@@ -402,6 +402,11 @@ export class AwsConnector implements Connector {
     }
   }
 
+  /** Drop the cached cost summary so the next overview re-queries Cost Explorer (used by "Refresh billing"). */
+  invalidateCache(ctx: ConnectorContext): void {
+    this.costCache.delete(this.authFrom(ctx).accessKeyId);
+  }
+
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const auth = this.authFrom(ctx);
     const api = new AwsApi(auth);

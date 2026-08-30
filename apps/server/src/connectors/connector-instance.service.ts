@@ -293,6 +293,20 @@ export class ConnectorInstanceService {
   private connectorTelemetry = new Map<string, { at: number; metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] }>();
   private static readonly TELEMETRY_STALE_MS = 60000;
 
+  /** Force a fresh overview: drop the connector's internal caches (e.g. billing) and re-fetch. */
+  async refreshOverview(id: string): Promise<{ metrics: OverviewMetric[]; guests: OverviewGuest[] }> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (connector.invalidateCache) {
+      const ctx = await this.buildContext(instance);
+      await connector.invalidateCache(ctx);
+    }
+    // Bust the dashboard's cached telemetry too, so it reflects the refresh on the next poll.
+    this.connectorTelemetry.delete(id);
+    return this.connectorOverview(id);
+  }
+
   /** One connector's own overview (metrics + guests) for its detail page. */
   async connectorOverview(id: string): Promise<{ metrics: OverviewMetric[]; guests: OverviewGuest[] }> {
     const instance = await this.get(id);

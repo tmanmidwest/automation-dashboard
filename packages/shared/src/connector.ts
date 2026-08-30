@@ -313,6 +313,8 @@ export interface Connector {
   ): Promise<{ ok: boolean; message: string }>;
   /** Optional: an at-a-glance summary for the dashboard (counts, usage, resource sample). */
   overview?(ctx: ConnectorContext): Promise<ConnectorOverview>;
+  /** Optional: drop any internal caches (e.g. long-cached billing data) so the next fetch is fresh. */
+  invalidateCache?(ctx: ConnectorContext): void | Promise<void>;
   /** Optional: list the infrastructure nodes/hosts this connector manages. */
   listNodes?(ctx: ConnectorContext): Promise<ConnectorNode[]>;
   /** Optional: open an interactive console; returns where the core should relay to. */
