@@ -180,16 +180,32 @@ export class AwsConnector implements Connector {
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
-    const api = new AwsApi(this.authFrom(ctx));
+    const auth = this.authFrom(ctx);
+    const api = new AwsApi(auth);
     try {
       const id = await api.getCallerIdentity();
       // Confirm EC2 access too, so the test reflects the permissions the connector actually uses.
       await api.describeInstances();
-      ctx.log('info', `Connected to AWS account ${id.account ?? '?'} as ${id.arn ?? '?'}`);
+
+      // Probe Cost Explorer so the user knows whether the spend tile will work. This is
+      // one billable (~$0.01) call, made only on an explicit Test. On success it primes
+      // the cost cache so the spend tile appears immediately.
+      let costStatus: string;
+      try {
+        const summary = await api.getCostSummary();
+        this.costCache.set(auth.accessKeyId, { at: Date.now(), data: summary });
+        costStatus = `available — ${summary.currency} ${summary.mtd.toFixed(2)} MTD`;
+      } catch (err) {
+        const m = err instanceof Error ? err.message : 'error';
+        costStatus = `unavailable — enable Cost Explorer + grant ce:GetCostAndUsage/ce:GetCostForecast (${m})`;
+        ctx.log('warn', `AWS Cost Explorer probe failed: ${m}`);
+      }
+
+      ctx.log('info', `Connected to AWS account ${id.account ?? '?'} as ${id.arn ?? '?'}. Cost Explorer ${costStatus}.`);
       return {
         ok: true,
-        message: `Connected to AWS account ${id.account ?? '?'} (${this.authFrom(ctx).region}).`,
-        details: { account: id.account ?? '', arn: id.arn ?? '' },
+        message: `Connected to AWS account ${id.account ?? '?'} (${auth.region}). Spend tile: ${costStatus}.`,
+        details: { account: id.account ?? '', arn: id.arn ?? '', costExplorer: costStatus },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Connection failed.';
@@ -370,15 +386,17 @@ export class AwsConnector implements Connector {
   }
 
   /** Cached (24h) month-to-date + forecast spend; null when Cost Explorer isn't available. */
-  private async cachedCost(api: AwsApi, accountKey: string): Promise<AwsCostSummary | null> {
+  private async cachedCost(ctx: ConnectorContext, api: AwsApi, accountKey: string): Promise<AwsCostSummary | null> {
     const c = this.costCache.get(accountKey);
     if (c && Date.now() - c.at < (c.data ? COST_TTL_MS : COST_RETRY_MS)) return c.data;
     try {
       const data = await api.getCostSummary();
       this.costCache.set(accountKey, { at: Date.now(), data });
       return data;
-    } catch {
+    } catch (err) {
       // Cost Explorer not enabled / missing ce:* permissions / transient — omit spend, retry later.
+      const m = err instanceof Error ? err.message : 'error';
+      ctx.log('warn', `AWS spend hidden — Cost Explorer unavailable: ${m}. Enable Cost Explorer in Billing and grant ce:GetCostAndUsage/ce:GetCostForecast.`);
       this.costCache.set(accountKey, { at: Date.now(), data: null });
       return null;
     }
@@ -400,7 +418,7 @@ export class AwsConnector implements Connector {
 
     // Best-effort spend (billable → cached a day). Unit is the currency code so the
     // UI renders it as money, and the dashboard sums it across AWS accounts.
-    const cost = await this.cachedCost(api, auth.accessKeyId);
+    const cost = await this.cachedCost(ctx, api, auth.accessKeyId);
     if (cost) {
       metrics.push({ key: 'costMtd', label: 'Spend (MTD)', value: round2(cost.mtd), unit: cost.currency });
       metrics.push({ key: 'costForecast', label: 'Est. this month', value: round2(cost.estimated), unit: cost.currency });
