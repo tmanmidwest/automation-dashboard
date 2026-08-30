@@ -10,7 +10,7 @@ import {
   Put,
   Query,
 } from '@nestjs/common';
-import { IsBoolean, IsObject, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 import type { ConnectorJobStatus } from '@cerebro/shared';
 import type {
   ConnectorInstanceConfig,
@@ -33,6 +33,7 @@ class CreateInstanceDto {
 class UpdateInstanceDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsObject() values?: Record<string, unknown>;
+  @IsOptional() @IsInt() @Min(5) @Max(86400) refreshIntervalSec?: number;
 }
 class EnabledDto {
   @IsBoolean() enabled!: boolean;
@@ -71,6 +72,7 @@ export class ConnectorsController {
       enabled: inst.enabled,
       createdAt: inst.createdAt.toISOString(),
       lastSyncedAt: this.instances.lastSyncedAt(inst.id),
+      refreshIntervalSec: (inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30,
     };
   }
 
@@ -133,7 +135,7 @@ export class ConnectorsController {
   @Put('instances/:id')
   @RequirePermissions('connectors:write')
   async update(@Param('id') id: string, @Body() dto: UpdateInstanceDto, @CurrentUser() user: SessionUser) {
-    const inst = await this.instances.update(id, { name: dto.name, values: dto.values });
+    const inst = await this.instances.update(id, { name: dto.name, values: dto.values, refreshIntervalSec: dto.refreshIntervalSec });
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'connectors.instance_updated', target: inst.name });
     return this.summary(inst);
   }
@@ -165,6 +167,12 @@ export class ConnectorsController {
   }
 
   // ── Resources & actions ──
+
+  @Get('instances/:id/overview')
+  @RequirePermissions('connectors:read')
+  async instanceOverview(@Param('id') id: string) {
+    return this.instances.connectorOverview(id);
+  }
 
   @Get('instances/:id/resources')
   @RequirePermissions('connectors:read')

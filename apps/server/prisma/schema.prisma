@@ -114,6 +114,8 @@ model ConnectorInstance {
   enabled      Boolean  @default(true)
   /// Non-secret config values as JSON. Secret fields are stored in Secret as `connector:<id>:<field>`.
   config       Json     @default("{}")
+  /// How often (seconds) background telemetry re-queries this connector's external system.
+  refreshIntervalSec Int  @default(30)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

@@ -5,6 +5,15 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Format an amount as currency, e.g. formatMoney(1234.5, "USD") → "$1,234.50". Falls back gracefully for odd codes. */
+export function formatMoney(value: number, currency = 'USD'): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(2)}`;
+  }
+}
+
 /** Compact relative time, e.g. "just now", "5m ago", "3h ago", "2d ago". */
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return 'never';

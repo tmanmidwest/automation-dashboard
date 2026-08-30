@@ -15,6 +15,7 @@ import {
   type Tag,
 } from '@aws-sdk/client-ec2';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand } from '@aws-sdk/client-cost-explorer';
 
 export interface AwsAuth {
   accessKeyId: string;
@@ -78,6 +79,16 @@ export interface AwsIdentity {
   account?: string;
   arn?: string;
   userId?: string;
+}
+
+export interface AwsCostSummary {
+  /** Month-to-date actual spend. */
+  mtd: number;
+  /** Forecast spend for the remainder of the month. */
+  forecast: number;
+  /** Estimated full-month spend (mtd + forecast). */
+  estimated: number;
+  currency: string;
 }
 
 export interface AwsImage {
@@ -234,6 +245,7 @@ function normalize(i: Instance): AwsInstance {
 export class AwsApi {
   private _ec2?: EC2Client;
   private _sts?: STSClient;
+  private _ce?: CostExplorerClient;
 
   constructor(private readonly auth: AwsAuth) {}
 
@@ -265,6 +277,70 @@ export class AwsApi {
       });
     }
     return this._sts;
+  }
+
+  /** Cost Explorer only has a global endpoint in us-east-1, regardless of the connector's region. */
+  private get ce(): CostExplorerClient {
+    if (!this._ce) {
+      this._ce = new CostExplorerClient({ region: 'us-east-1', credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._ce;
+  }
+
+  /**
+   * Month-to-date spend plus a forecast for the rest of the month. Requires Cost
+   * Explorer to be enabled on the account and ce:GetCostAndUsage / ce:GetCostForecast.
+   * NOTE: each call is billed ~$0.01 by AWS — callers should cache aggressively.
+   */
+  async getCostSummary(): Promise<AwsCostSummary> {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    const monthStart = `${y}-${pad(m + 1)}-01`;
+    const today = `${y}-${pad(m + 1)}-${pad(now.getUTCDate())}`;
+    const next = new Date(Date.UTC(y, m + 1, 1));
+    const monthEnd = `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-01`;
+
+    try {
+      let mtd = 0;
+      let currency = 'USD';
+      if (today !== monthStart) {
+        const cu = await this.ce.send(
+          new GetCostAndUsageCommand({
+            TimePeriod: { Start: monthStart, End: today },
+            Granularity: 'MONTHLY',
+            Metrics: ['UnblendedCost'],
+          }),
+        );
+        for (const r of cu.ResultsByTime ?? []) {
+          const amt = r.Total?.UnblendedCost;
+          if (amt) {
+            mtd += parseFloat(amt.Amount || '0');
+            if (amt.Unit) currency = amt.Unit;
+          }
+        }
+      }
+
+      // Forecast needs historical data; if unavailable it throws — treat as 0.
+      let forecast = 0;
+      try {
+        const fc = await this.ce.send(
+          new GetCostForecastCommand({
+            TimePeriod: { Start: today, End: monthEnd },
+            Metric: 'UNBLENDED_COST',
+            Granularity: 'MONTHLY',
+          }),
+        );
+        forecast = parseFloat(fc.Total?.Amount || '0');
+      } catch {
+        forecast = 0;
+      }
+
+      return { mtd, forecast, estimated: mtd + forecast, currency };
+    } catch (err) {
+      throw friendly(err);
+    }
   }
 
   async getCallerIdentity(): Promise<AwsIdentity> {

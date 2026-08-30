@@ -7,11 +7,12 @@ import type {
   ConnectorDetailGroup,
   ConnectorOption,
   ConnectorOverview,
+  OverviewMetric,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { AwsApi, AwsAuth, AwsInstance } from './aws-api';
+import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary } from './aws-api';
 
 const EC2_KIND = 'ec2';
 
@@ -41,17 +42,20 @@ function timeAgo(d?: Date): string | undefined {
   return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
 }
 
-/** How long a connector instance's dashboard overview is reused before it re-queries EC2. */
-const OVERVIEW_TTL_MS = 30_000;
+/** Cost Explorer is billed per call, and spend moves ~daily — cache it for a day. */
+const COST_TTL_MS = 24 * 60 * 60 * 1000;
+/** If a cost fetch fails (CE not enabled / no perms), retry sooner than a full day. */
+const COST_RETRY_MS = 60 * 60 * 1000;
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export class AwsConnector implements Connector {
   /**
-   * Caches each instance's dashboard overview (keyed by access key + region).
-   * The dashboard polls frequently; EC2 DescribeInstances is unbilled but
-   * rate-limited, so we only actually call AWS every OVERVIEW_TTL_MS. The
-   * connector detail page uses listResources (uncached) so it stays live.
+   * Caches month-to-date + forecast spend per account (access key). AWS bills
+   * ~$0.01 per Cost Explorer call, so this is only refreshed once a day even
+   * though overview() runs far more often. Failures cache briefly then retry.
    */
-  private overviewCache = new Map<string, { at: number; data: ConnectorOverview }>();
+  private costCache = new Map<string, { at: number; data: AwsCostSummary | null }>();
 
   manifest: ConnectorManifest = {
     id: 'aws',
@@ -152,6 +156,7 @@ export class AwsConnector implements Connector {
         'ec2:TerminateInstances — required only if you want to terminate instances from Cerebro.',
         'ec2:RunInstances (+ ec2:CreateTags) — required to launch new instances.',
         'ec2:DescribeImages, ec2:DescribeKeyPairs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups — populate the Launch form (all in AmazonEC2ReadOnlyAccess).',
+        'ce:GetCostAndUsage, ce:GetCostForecast — OPTIONAL, for the spend tile. Requires Cost Explorer to be enabled in Billing first; each call is billed ~$0.01 by AWS (Cerebro fetches once a day).',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -364,12 +369,23 @@ export class AwsConnector implements Connector {
     }
   }
 
+  /** Cached (24h) month-to-date + forecast spend; null when Cost Explorer isn't available. */
+  private async cachedCost(api: AwsApi, accountKey: string): Promise<AwsCostSummary | null> {
+    const c = this.costCache.get(accountKey);
+    if (c && Date.now() - c.at < (c.data ? COST_TTL_MS : COST_RETRY_MS)) return c.data;
+    try {
+      const data = await api.getCostSummary();
+      this.costCache.set(accountKey, { at: Date.now(), data });
+      return data;
+    } catch {
+      // Cost Explorer not enabled / missing ce:* permissions / transient — omit spend, retry later.
+      this.costCache.set(accountKey, { at: Date.now(), data: null });
+      return null;
+    }
+  }
+
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const auth = this.authFrom(ctx);
-    const cacheKey = `${auth.accessKeyId}:${auth.region}`;
-    const cached = this.overviewCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < OVERVIEW_TTL_MS) return cached.data;
-
     const api = new AwsApi(auth);
     const region = auth.region;
     const instances = (await api.describeInstances()).filter((i) => i.state !== 'terminated');
@@ -377,10 +393,18 @@ export class AwsConnector implements Connector {
 
     // Report against the canonical 'vms*' keys so EC2 rolls up into the
     // dashboard's cross-connector "VMs" tile alongside Proxmox VMs.
-    const metrics = [
+    const metrics: OverviewMetric[] = [
       { key: 'vmsRunning', label: 'VMs running', value: running },
       { key: 'vmsTotal', label: 'VMs total', value: instances.length },
     ];
+
+    // Best-effort spend (billable → cached a day). Unit is the currency code so the
+    // UI renders it as money, and the dashboard sums it across AWS accounts.
+    const cost = await this.cachedCost(api, auth.accessKeyId);
+    if (cost) {
+      metrics.push({ key: 'costMtd', label: 'Spend (MTD)', value: round2(cost.mtd), unit: cost.currency });
+      metrics.push({ key: 'costForecast', label: 'Est. this month', value: round2(cost.estimated), unit: cost.currency });
+    }
 
     const guests = instances
       .slice()
@@ -388,9 +412,7 @@ export class AwsConnector implements Connector {
       .slice(0, 40)
       .map((i) => ({ name: i.name || i.id, kind: EC2_KIND, status: i.state, node: i.az || region }));
 
-    const data: ConnectorOverview = { metrics, guests };
-    this.overviewCache.set(cacheKey, { at: Date.now(), data });
-    return data;
+    return { metrics, guests };
   }
 
   async resolveOptions(ctx: ConnectorContext, sourceId: string, values: Record<string, unknown>): Promise<ConnectorOption[]> {

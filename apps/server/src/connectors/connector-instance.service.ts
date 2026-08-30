@@ -72,13 +72,17 @@ export class ConnectorInstanceService {
 
   async update(
     id: string,
-    updates: { name?: string; enabled?: boolean; values?: Record<string, unknown> },
+    updates: { name?: string; enabled?: boolean; values?: Record<string, unknown>; refreshIntervalSec?: number },
   ): Promise<ConnectorInstance> {
     const instance = await this.get(id);
     const secretKeys = this.secretFields(instance.connectorId);
     const data: Record<string, unknown> = {};
     if (updates.name !== undefined) data.name = updates.name.trim();
     if (updates.enabled !== undefined) data.enabled = updates.enabled;
+    if (updates.refreshIntervalSec !== undefined) {
+      // Clamp to a sane range: 5s floor, 24h ceiling.
+      data.refreshIntervalSec = Math.max(5, Math.min(86400, Math.floor(updates.refreshIntervalSec)));
+    }
 
     if (updates.values) {
       const config: Record<string, unknown> = { ...(instance.config as object) };
@@ -289,6 +293,22 @@ export class ConnectorInstanceService {
   private connectorTelemetry = new Map<string, { at: number; metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] }>();
   private static readonly TELEMETRY_STALE_MS = 60000;
 
+  /** One connector's own overview (metrics + guests) for its detail page. */
+  async connectorOverview(id: string): Promise<{ metrics: OverviewMetric[]; guests: OverviewGuest[] }> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.overview) return { metrics: [], guests: [] };
+    const ctx = await this.buildContext(instance);
+    try {
+      const ov = await connector.overview(ctx);
+      this.markSynced(id);
+      return { metrics: ov.metrics, guests: ov.guests.map((g) => ({ ...g, connector: instance.name })) };
+    } catch (err) {
+      throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
+    }
+  }
+
   /** Aggregated telemetry across all enabled connectors (short-cached to survive polling). */
   async dashboardOverview(): Promise<DashboardOverview> {
     const now = Date.now();
@@ -305,20 +325,33 @@ export class ConnectorInstanceService {
         const connector = this.registry.get(inst.connectorId);
         if (!connector?.overview) return;
         let contribution: { metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] } | undefined;
-        try {
-          const ctx = await this.buildContext(inst);
-          const ov = await connector.overview(ctx);
+
+        // Background-sync throttle: only re-query this connector's external system
+        // once per its refreshIntervalSec. Between, serve its cached telemetry so the
+        // dashboard stays live without extra API calls.
+        const intervalMs = ((inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30) * 1000;
+        const lastAt = this.lastSync.get(inst.id);
+        const cachedTel = this.connectorTelemetry.get(inst.id);
+        if (cachedTel && lastAt && now - lastAt < intervalMs) {
           ok++;
-          this.markSynced(inst.id);
           sources.push({ name: inst.name, ok: true });
-          contribution = { metrics: ov.metrics, guests: ov.guests };
-          this.connectorTelemetry.set(inst.id, { at: now, ...contribution });
-        } catch (err) {
-          sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
-          // Substitute this connector's last-good numbers so a blip doesn't drop it from the totals.
-          const cached = this.connectorTelemetry.get(inst.id);
-          if (cached && now - cached.at < ConnectorInstanceService.TELEMETRY_STALE_MS) {
-            contribution = { metrics: cached.metrics, guests: cached.guests };
+          contribution = { metrics: cachedTel.metrics, guests: cachedTel.guests };
+        } else {
+          try {
+            const ctx = await this.buildContext(inst);
+            const ov = await connector.overview(ctx);
+            ok++;
+            this.markSynced(inst.id);
+            sources.push({ name: inst.name, ok: true });
+            contribution = { metrics: ov.metrics, guests: ov.guests };
+            this.connectorTelemetry.set(inst.id, { at: now, ...contribution });
+          } catch (err) {
+            sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
+            // Substitute this connector's last-good numbers so a blip doesn't drop it from the totals.
+            const cached = this.connectorTelemetry.get(inst.id);
+            if (cached && now - cached.at < ConnectorInstanceService.TELEMETRY_STALE_MS) {
+              contribution = { metrics: cached.metrics, guests: cached.guests };
+            }
           }
         }
         if (contribution) {

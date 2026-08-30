@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
-  ConnectorResourceDetail, ConnectorOperation,
+  ConnectorResourceDetail, ConnectorOperation, OverviewMetric,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -13,7 +13,24 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet } from '@/components/ui/sheet';
-import { cn, timeAgo } from '@/lib/utils';
+import { cn, timeAgo, formatMoney } from '@/lib/utils';
+
+/** Preset background refresh intervals offered per connector. */
+const REFRESH_PRESETS: { label: string; value: number }[] = [
+  { label: '10s', value: 10 },
+  { label: '30s', value: 30 },
+  { label: '1m', value: 60 },
+  { label: '5m', value: 300 },
+  { label: '15m', value: 900 },
+  { label: '1h', value: 3600 },
+];
+
+/** Render a connector overview metric: currency codes as money, "%" inline, else value + unit. */
+function fmtMetric(m: OverviewMetric): string {
+  if (m.unit && /^[A-Z]{3}$/.test(m.unit)) return formatMoney(m.value, m.unit);
+  if (m.unit === '%') return `${m.value}%`;
+  return m.unit ? `${m.value} ${m.unit}` : String(m.value);
+}
 
 function statusColor(status?: string) {
   if (status === 'running') return 'text-emerald-400 bg-emerald-500/15';
@@ -38,6 +55,7 @@ export function ConnectorDetail() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
+  const [connMetrics, setConnMetrics] = useState<OverviewMetric[]>([]);
 
   // Detail drawer
   const [detailFor, setDetailFor] = useState<ConnectorResource | null>(null);
@@ -80,6 +98,11 @@ export function ConnectorDetail() {
       if (canAct) {
         setOperations(await api.get<ConnectorOperation[]>(`/api/connectors/instances/${id}/operations?scope=create`).catch(() => []));
       }
+      if (i.enabled) {
+        api.get<{ metrics: OverviewMetric[] }>(`/api/connectors/instances/${id}/overview`)
+          .then((o) => setConnMetrics(o.metrics))
+          .catch(() => setConnMetrics([]));
+      }
     }
     load().catch((e) => setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Failed to load' }));
   }, [id]);
@@ -117,6 +140,16 @@ export function ConnectorDetail() {
     if (!inst) return;
     const updated = await api.patch<ConnectorInstanceConfig>(`/api/connectors/instances/${id}/enabled`, { enabled: !inst.enabled });
     setInst({ ...inst, enabled: updated.enabled });
+  }
+
+  async function setRefreshInterval(sec: number) {
+    if (!inst) return;
+    setInst({ ...inst, refreshIntervalSec: sec }); // optimistic
+    try {
+      await api.put<ConnectorInstanceConfig>(`/api/connectors/instances/${id}`, { refreshIntervalSec: sec });
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Failed to update refresh interval' });
+    }
   }
 
   async function removeConnector() {
@@ -327,6 +360,16 @@ export function ConnectorDetail() {
         </CardContent></Card>
       ) : (
         <>
+          {connMetrics.length > 0 && (
+            <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 mb-4">
+              {connMetrics.map((m) => (
+                <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
+                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
+                  <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-between mb-4">
             <div className="inline-flex rounded-lg border border-border p-1 bg-card">
               {manifest.resourceKinds.map((k) => (
@@ -385,6 +428,19 @@ export function ConnectorDetail() {
                   <Rocket className="h-4 w-4" /> {op.label}
                 </Button>
               ))}
+              {canWrite && (
+                <select
+                  className="h-9 rounded-md border border-input bg-background/60 px-2 text-sm text-muted-foreground"
+                  value={inst.refreshIntervalSec}
+                  onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                  title="How often background telemetry re-syncs this connector"
+                >
+                  {REFRESH_PRESETS.map((p) => <option key={p.value} value={p.value}>Sync every {p.label}</option>)}
+                  {!REFRESH_PRESETS.some((p) => p.value === inst.refreshIntervalSec) && (
+                    <option value={inst.refreshIntervalSec}>Sync every {inst.refreshIntervalSec}s</option>
+                  )}
+                </select>
+              )}
               <Button variant="ghost" size="sm" onClick={loadResources} disabled={loadingRes}>
                 <RefreshCw className={cn('h-4 w-4', loadingRes && 'animate-spin')} /> Refresh
               </Button>
