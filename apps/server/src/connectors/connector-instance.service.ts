@@ -126,7 +126,9 @@ export class ConnectorInstanceService {
   async test(id: string) {
     const instance = await this.get(id);
     const ctx = await this.buildContext(instance);
-    return this.connectorFor(instance).testConnection(ctx);
+    const result = await this.connectorFor(instance).testConnection(ctx);
+    if (result.ok) this.markSynced(id);
+    return result;
   }
 
   async listResources(id: string, kind: string): Promise<ConnectorResource[]> {
@@ -134,7 +136,9 @@ export class ConnectorInstanceService {
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
     const ctx = await this.buildContext(instance);
     try {
-      return await this.connectorFor(instance).listResources(ctx, kind);
+      const res = await this.connectorFor(instance).listResources(ctx, kind);
+      this.markSynced(id);
+      return res;
     } catch (err) {
       // Surface the connector's own error message to the UI instead of a bare 500.
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
@@ -157,7 +161,9 @@ export class ConnectorInstanceService {
     }
     const ctx = await this.buildContext(instance);
     try {
-      return await connector.describeResource(ctx, kind, resourceId);
+      const detail = await connector.describeResource(ctx, kind, resourceId);
+      this.markSynced(id);
+      return detail;
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
     }
@@ -181,7 +187,9 @@ export class ConnectorInstanceService {
     if (!connector.listSubResources) return [];
     const ctx = await this.buildContext(instance);
     try {
-      return await connector.listSubResources(ctx, kind, resourceId, subKind);
+      const subs = await connector.listSubResources(ctx, kind, resourceId, subKind);
+      this.markSynced(id);
+      return subs;
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
     }
@@ -248,10 +256,26 @@ export class ConnectorInstanceService {
     if (!connector.listNodes) return [];
     const ctx = await this.buildContext(instance);
     try {
-      return await connector.listNodes(ctx);
+      const nodes = await connector.listNodes(ctx);
+      this.markSynced(id);
+      return nodes;
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
     }
+  }
+
+  /** Last successful data-fetch time per instance id (epoch ms). In-memory; populated as connectors are polled/opened. */
+  private lastSync = new Map<string, number>();
+
+  /** Record that this instance successfully returned data now. */
+  private markSynced(id: string) {
+    this.lastSync.set(id, Date.now());
+  }
+
+  /** ISO timestamp of the last successful data fetch for an instance, or null. */
+  lastSyncedAt(id: string): string | null {
+    const t = this.lastSync.get(id);
+    return t ? new Date(t).toISOString() : null;
   }
 
   private overviewCache?: { at: number; data: DashboardOverview };
@@ -285,6 +309,7 @@ export class ConnectorInstanceService {
           const ctx = await this.buildContext(inst);
           const ov = await connector.overview(ctx);
           ok++;
+          this.markSynced(inst.id);
           sources.push({ name: inst.name, ok: true });
           contribution = { metrics: ov.metrics, guests: ov.guests };
           this.connectorTelemetry.set(inst.id, { at: now, ...contribution });

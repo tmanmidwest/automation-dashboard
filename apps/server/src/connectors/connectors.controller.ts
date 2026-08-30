@@ -70,6 +70,7 @@ export class ConnectorsController {
       name: inst.name,
       enabled: inst.enabled,
       createdAt: inst.createdAt.toISOString(),
+      lastSyncedAt: this.instances.lastSyncedAt(inst.id),
     };
   }
 

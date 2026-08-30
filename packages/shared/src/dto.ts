@@ -64,6 +64,8 @@ export interface ConnectorInstanceSummary {
   name: string;
   enabled: boolean;
   createdAt: string;
+  /** ISO timestamp of the last successful data fetch from this connector, or null if it hasn't synced yet. */
+  lastSyncedAt: string | null;
 }
 
 /** Full instance config for the edit screen — non-secret values plus which secrets are set. */

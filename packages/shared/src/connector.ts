@@ -154,6 +154,12 @@ export interface ConnectorResource {
   status?: string;
   /** Free-form key/value details shown in the resource drawer. */
   details?: Record<string, string | number | boolean | null>;
+  /**
+   * Structured key/value labels (e.g. AWS resource tags) the UI can render as
+   * chips and use to filter / group the list. Distinct from `details`, which is
+   * free-form display data. Omit or leave empty when the resource has none.
+   */
+  tags?: Record<string, string>;
 }
 
 /** A labelled value in a resource's detail view. */

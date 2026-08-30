@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation,
@@ -13,7 +13,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet } from '@/components/ui/sheet';
-import { cn } from '@/lib/utils';
+import { cn, timeAgo } from '@/lib/utils';
 
 function statusColor(status?: string) {
   if (status === 'running') return 'text-emerald-400 bg-emerald-500/15';
@@ -37,6 +37,7 @@ export function ConnectorDetail() {
   const [loadingRes, setLoadingRes] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [syncedAt, setSyncedAt] = useState<string | null>(null);
 
   // Detail drawer
   const [detailFor, setDetailFor] = useState<ConnectorResource | null>(null);
@@ -55,7 +56,12 @@ export function ConnectorDetail() {
   // Sorting & grouping
   const [sortCol, setSortCol] = useState<'name' | 'vmid' | 'node' | 'status'>('vmid');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
-  const [groupBy, setGroupBy] = useState<'none' | 'node' | 'status' | 'tag' | 'pool'>('none');
+  // 'none' | 'node' | 'status' | 'tag' | 'pool' | a dynamic 'tagk:<key>' for structured tags.
+  const [groupBy, setGroupBy] = useState<string>('none');
+
+  // Tag filters (structured key/value tags, e.g. AWS) — multiple, AND-combined.
+  const [tagFilters, setTagFilters] = useState<{ key: string; value: string }[]>([]);
+  const [addKey, setAddKey] = useState<string>(''); // key currently being added via the builder
 
   const snapSub = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources?.find((s) => s.id === 'snapshot');
   // Resource-scoped operations shown in the detail drawer (e.g. Edit CPU/RAM) — snapshot ops are handled separately.
@@ -67,6 +73,7 @@ export function ConnectorDetail() {
     async function load() {
       const i = await api.get<ConnectorInstanceConfig>(`/api/connectors/instances/${id}`);
       setInst(i);
+      setSyncedAt(i.lastSyncedAt);
       const m = await api.get<ConnectorManifest>(`/api/connectors/available/${i.connectorId}`);
       setManifest(m);
       setKind(m.resourceKinds[0]?.id ?? '');
@@ -82,6 +89,7 @@ export function ConnectorDetail() {
     setLoadingRes(true);
     try {
       setResources(await api.get<ConnectorResource[]>(`/api/connectors/instances/${id}/resources?kind=${kind}`));
+      setSyncedAt(new Date().toISOString());
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to load resources' });
       setResources([]);
@@ -91,6 +99,9 @@ export function ConnectorDetail() {
   }, [id, kind, inst?.enabled]);
 
   useEffect(() => { void loadResources(); }, [loadResources]);
+
+  // Clear the tag filters when switching resource kinds (tag facets differ per kind).
+  useEffect(() => { setTagFilters([]); setAddKey(''); }, [kind]);
 
   async function test() {
     setMsg(null);
@@ -210,7 +221,34 @@ export function ConnectorDetail() {
   const actionsFor = (status?: string) =>
     (activeKind?.actions ?? []).filter((a) => !a.showWhenStatus || (status && a.showWhenStatus.includes(status)));
 
-  const colSpan = canAct ? 6 : 5;
+  // Structured tag facets present across the current resources (drives the tag
+  // filter, the group-by-tag options, and the Tags column).
+  const tagKeys = (() => {
+    const s = new Set<string>();
+    for (const r of resources) for (const k of Object.keys(r.tags ?? {})) s.add(k);
+    return [...s].sort((a, b) => a.localeCompare(b));
+  })();
+  const hasTags = tagKeys.length > 0;
+  const valuesForKey = (key: string) =>
+    [...new Set(resources.map((r) => r.tags?.[key]).filter((v): v is string => v != null && v !== ''))].sort((a, b) => a.localeCompare(b));
+
+  const filterActive = (key: string, value: string) => tagFilters.some((f) => f.key === key && f.value === value);
+  const addFilter = (key: string, value: string) =>
+    setTagFilters((prev) => (prev.some((f) => f.key === key && f.value === value) ? prev : [...prev, { key, value }]));
+  const removeFilter = (key: string, value: string) =>
+    setTagFilters((prev) => prev.filter((f) => !(f.key === key && f.value === value)));
+  const toggleFilter = (key: string, value: string) =>
+    (filterActive(key, value) ? removeFilter(key, value) : addFilter(key, value));
+
+  // A resource must satisfy EVERY active tag filter (AND). An empty value means "has this tag".
+  const filtered = resources.filter((r) =>
+    tagFilters.every((f) => {
+      const v = r.tags?.[f.key];
+      return f.value ? v === f.value : v != null && v !== '';
+    }),
+  );
+
+  const colSpan = (canAct ? 6 : 5) + (hasTags ? 1 : 0);
   function toggleSort(col: typeof sortCol) {
     if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortCol(col); setSortDir('asc'); }
@@ -220,7 +258,7 @@ export function ConnectorDetail() {
     : sortCol === 'node' ? String(r.details?.node ?? '')
     : sortCol === 'status' ? String(r.status ?? '')
     : String(r.name ?? '');
-  const sorted = [...resources].sort((a, b) => {
+  const sorted = [...filtered].sort((a, b) => {
     const dir = sortDir === 'asc' ? 1 : -1;
     const av = sortVal(a), bv = sortVal(b);
     if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
@@ -234,7 +272,10 @@ export function ConnectorDetail() {
       if (groupBy === 'node') keys = [String(r.details?.node ?? '—')];
       else if (groupBy === 'status') keys = [String(r.status ?? 'unknown')];
       else if (groupBy === 'pool') keys = [r.details?.pool ? String(r.details.pool) : 'No pool'];
-      else {
+      else if (groupBy.startsWith('tagk:')) {
+        const k = groupBy.slice(5);
+        keys = [r.tags?.[k] ? String(r.tags[k]) : `No ${k}`];
+      } else {
         const t = r.details?.tags ? String(r.details.tags).split(/[;, ]+/).filter(Boolean) : [];
         keys = t.length ? t : ['Untagged'];
       }
@@ -261,7 +302,7 @@ export function ConnectorDetail() {
       </Link>
       <PageHeader
         title={inst.name}
-        description={inst.connectorName}
+        description={`${inst.connectorName} · Last sync ${timeAgo(syncedAt)}`}
         actions={
           <div className="flex items-center gap-2">
             {canWrite && <Button variant="ghost" size="sm" onClick={test}><PlugZap className="h-4 w-4" /> Test</Button>}
@@ -297,17 +338,47 @@ export function ConnectorDetail() {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              {hasTags && (
+                <div className="inline-flex items-center gap-1">
+                  <select
+                    className="h-9 rounded-md border border-input bg-background/60 px-2 text-sm text-muted-foreground"
+                    value={addKey}
+                    onChange={(e) => setAddKey(e.target.value)}
+                    title="Filter by tag"
+                  >
+                    <option value="">+ Tag filter</option>
+                    {tagKeys.map((k) => <option key={k} value={k}>Tag: {k}</option>)}
+                  </select>
+                  {addKey && (
+                    <select
+                      className="h-9 rounded-md border border-input bg-background/60 px-2 text-sm text-muted-foreground"
+                      value=""
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        addFilter(addKey, e.target.value === '__any__' ? '' : e.target.value);
+                        setAddKey('');
+                      }}
+                      title="Tag value"
+                    >
+                      <option value="">value…</option>
+                      <option value="__any__">Any value</option>
+                      {valuesForKey(addKey).map((v) => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  )}
+                </div>
+              )}
               <select
                 className="h-9 rounded-md border border-input bg-background/60 px-2 text-sm text-muted-foreground"
                 value={groupBy}
-                onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+                onChange={(e) => setGroupBy(e.target.value)}
                 title="Group by"
               >
                 <option value="none">No grouping</option>
-                <option value="tag">Group by tag</option>
-                <option value="pool">Group by pool</option>
+                {!hasTags && <option value="tag">Group by tag</option>}
+                {!hasTags && <option value="pool">Group by pool</option>}
                 <option value="node">Group by node</option>
                 <option value="status">Group by status</option>
+                {tagKeys.map((k) => <option key={`g-${k}`} value={`tagk:${k}`}>Group by tag: {k}</option>)}
               </select>
               {operations.filter((o) => o.kind === kind).map((op) => (
                 <Button key={op.id} size="sm" onClick={() => setActiveOp(op)}>
@@ -320,6 +391,26 @@ export function ConnectorDetail() {
             </div>
           </div>
 
+          {tagFilters.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              <span className="text-xs text-muted-foreground mr-0.5">Filtering by</span>
+              {tagFilters.map((f) => (
+                <button
+                  key={`${f.key}=${f.value}`}
+                  onClick={() => removeFilter(f.key, f.value)}
+                  title="Remove filter"
+                  className="inline-flex items-center gap-1 text-[11px] rounded-md border border-primary/60 bg-primary/15 px-1.5 py-0.5 font-mono text-foreground hover:bg-primary/25"
+                >
+                  {f.key}<span className="opacity-50">=</span>{f.value || 'any'}
+                  <X className="h-3 w-3 opacity-70" />
+                </button>
+              ))}
+              <button onClick={() => setTagFilters([])} className="text-[11px] text-muted-foreground hover:text-foreground underline ml-1">
+                Clear all
+              </button>
+            </div>
+          )}
+
           <Card>
             <CardContent className="p-0">
               <table className="w-full text-sm">
@@ -330,6 +421,7 @@ export function ConnectorDetail() {
                     <SortHead col="node" label="Node" />
                     <th className="px-4 py-3 font-medium">Resources</th>
                     <SortHead col="status" label="Status" />
+                    {hasTags && <th className="px-4 py-3 font-medium">Tags</th>}
                     {canAct && <th className="px-4 py-3 font-medium text-right">Actions</th>}
                   </tr>
                 </thead>
@@ -361,6 +453,31 @@ export function ConnectorDetail() {
                               {r.status ?? 'unknown'}
                             </span>
                           </td>
+                          {hasTags && (
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-1 max-w-[260px]">
+                                {Object.entries(r.tags ?? {}).slice(0, 4).map(([k, v]) => (
+                                  <button
+                                    key={k}
+                                    title={filterActive(k, v) ? `Remove filter ${k}=${v}` : `Filter by ${k}=${v}`}
+                                    onClick={() => toggleFilter(k, v)}
+                                    className={cn(
+                                      'text-[11px] rounded-md border px-1.5 py-0.5 font-mono transition-colors',
+                                      filterActive(k, v)
+                                        ? 'border-primary/60 bg-primary/15 text-foreground'
+                                        : 'border-border bg-muted/40 text-muted-foreground hover:border-primary/40 hover:text-foreground',
+                                    )}
+                                  >
+                                    {k}<span className="opacity-50">=</span>{v || '—'}
+                                  </button>
+                                ))}
+                                {Object.keys(r.tags ?? {}).length > 4 && (
+                                  <span className="text-[11px] text-muted-foreground/70 px-1 py-0.5">+{Object.keys(r.tags ?? {}).length - 4}</span>
+                                )}
+                                {Object.keys(r.tags ?? {}).length === 0 && <span className="text-xs text-muted-foreground/50">—</span>}
+                              </div>
+                            </td>
+                          )}
                           {canAct && (
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-1 justify-end">
@@ -383,6 +500,12 @@ export function ConnectorDetail() {
                   {resources.length === 0 && !loadingRes && (
                     <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-muted-foreground">
                       No {activeKind?.label.toLowerCase()} found.
+                    </td></tr>
+                  )}
+                  {resources.length > 0 && filtered.length === 0 && !loadingRes && (
+                    <tr><td colSpan={colSpan} className="px-4 py-8 text-center text-muted-foreground">
+                      No {activeKind?.label.toLowerCase()} match {tagFilters.length > 1 ? 'these tag filters' : 'this tag filter'}.{' '}
+                      <button className="text-primary hover:underline" onClick={() => setTagFilters([])}>Clear {tagFilters.length > 1 ? 'filters' : 'filter'}</button>
                     </td></tr>
                   )}
                   {loadingRes && resources.length === 0 && (

@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { ConnectorIcon } from '@/components/ConnectorIcon';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { timeAgo } from '@/lib/utils';
 
 export function ConnectorsList() {
   const { can } = useAuth();
@@ -85,6 +86,12 @@ export function ConnectorsList() {
                         : <span className="text-xs rounded-full bg-muted text-muted-foreground px-2 py-0.5">Disabled</span>}
                     </div>
                     <p className="text-xs text-muted-foreground">{inst.connectorName}</p>
+                  </div>
+                  <div className="text-right shrink-0 hidden sm:block">
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70">Last sync</p>
+                    <p className="text-xs text-muted-foreground" title={inst.lastSyncedAt ?? 'Never synced'}>
+                      {timeAgo(inst.lastSyncedAt)}
+                    </p>
                   </div>
                   <ChevronRight className="h-5 w-5 text-muted-foreground shrink-0" />
                 </CardContent>

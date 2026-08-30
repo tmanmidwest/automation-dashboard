@@ -220,6 +220,9 @@ export class AwsConnector implements Connector {
         privateIp: i.privateIp ?? null,
         publicIp: i.publicIp ?? null,
       },
+      // Structured tags for the list's chips / tag filter (Name is already the
+      // display name, so it's omitted here to keep the tag facets meaningful).
+      tags: Object.fromEntries(Object.entries(i.tags).filter(([k]) => k !== 'Name')),
     };
   }
 
@@ -262,6 +265,10 @@ export class AwsConnector implements Connector {
     const [inst] = await api.describeInstances([resourceId]);
     if (!inst) throw new Error(`Instance ${resourceId} not found in this region.`);
 
+    const yn = (b?: boolean) => (b === undefined ? '—' : b ? 'Yes' : 'No');
+    const vcpus = inst.cpuCores != null ? inst.cpuCores * (inst.cpuThreadsPerCore ?? 1) : undefined;
+    const iamProfile = inst.iamProfileArn ? inst.iamProfileArn.split('/').pop() || inst.iamProfileArn : '—';
+
     const groups: ConnectorDetailGroup[] = [
       {
         title: 'General',
@@ -269,12 +276,20 @@ export class AwsConnector implements Connector {
           { label: 'Instance ID', value: inst.id, variant: 'mono' },
           { label: 'Name', value: inst.name || '—' },
           { label: 'State', value: inst.state, variant: 'status' },
+          ...(inst.stateReason ? [{ label: 'State reason', value: inst.stateReason }] : []),
           { label: 'Type', value: inst.type || '—' },
+          { label: 'vCPUs', value: vcpus != null ? String(vcpus) : '—' },
+          { label: 'Lifecycle', value: inst.lifecycle ? inst.lifecycle : 'on-demand' },
           { label: 'AMI', value: inst.imageId || '—', variant: 'mono' },
           { label: 'Architecture', value: inst.arch || '—' },
           { label: 'Platform', value: inst.platform || '—' },
+          { label: 'Virtualization', value: inst.virtualizationType || '—' },
           { label: 'Key pair', value: inst.keyName || '—' },
+          { label: 'IAM role', value: iamProfile, variant: 'mono' },
+          { label: 'Tenancy', value: inst.tenancy || '—' },
           { label: 'Monitoring', value: inst.monitoring || '—' },
+          { label: 'EBS optimized', value: yn(inst.ebsOptimized) },
+          { label: 'ENA', value: yn(inst.enaSupport) },
           { label: 'Launched', value: timeAgo(inst.launchTime) || '—' },
         ],
       },
@@ -284,6 +299,8 @@ export class AwsConnector implements Connector {
           { label: 'Availability zone', value: inst.az || '—' },
           { label: 'Private IP', value: inst.privateIp || '—', variant: 'mono' },
           { label: 'Public IP', value: inst.publicIp || '—', variant: 'mono' },
+          { label: 'Private DNS', value: inst.privateDns || '—', variant: 'mono' },
+          { label: 'Public DNS', value: inst.publicDns || '—', variant: 'mono' },
           { label: 'VPC', value: inst.vpcId || '—', variant: 'mono' },
           { label: 'Subnet', value: inst.subnetId || '—', variant: 'mono' },
           {
@@ -292,6 +309,12 @@ export class AwsConnector implements Connector {
               ? inst.securityGroups.map((g) => `${g.name} (${g.id})`).join(', ')
               : '—',
           },
+          ...inst.networkInterfaces.map((n) => ({
+            label: `NIC ${n.id ?? ''}`.trim(),
+            value: [n.privateIp, n.publicIp ? `→ ${n.publicIp}` : '', n.macAddress ? `· ${n.macAddress}` : '', n.description ? `· ${n.description}` : '']
+              .filter(Boolean).join(' ') || '—',
+            variant: 'mono' as const,
+          })),
         ],
       },
       {
@@ -300,19 +323,25 @@ export class AwsConnector implements Connector {
           { label: 'Root device', value: inst.rootDeviceName || '—', variant: 'mono' },
           { label: 'Root device type', value: inst.rootDeviceType || '—' },
           ...(inst.volumes.length
-            ? inst.volumes.map((v) => ({ label: v.device || 'volume', value: v.volumeId || '—', variant: 'mono' as const }))
+            ? inst.volumes.map((v) => ({
+                label: v.device || 'volume',
+                value: [v.volumeId ?? '—', v.status ? `(${v.status})` : '', v.deleteOnTermination ? '· delete on termination' : '']
+                  .filter(Boolean).join(' '),
+                variant: 'mono' as const,
+              }))
             : [{ label: 'Volumes', value: '—' }]),
         ],
       },
     ];
 
-    const tagKeys = Object.keys(inst.tags).filter((k) => k !== 'Name').sort();
-    if (tagKeys.length) {
-      groups.push({
-        title: 'Tags',
-        items: tagKeys.map((k) => ({ label: k, value: inst.tags[k] || '—' })),
-      });
-    }
+    // Every tag on the instance, Name first, then alphabetical.
+    const tagKeys = Object.keys(inst.tags).sort((a, b) => (a === 'Name' ? -1 : b === 'Name' ? 1 : a.localeCompare(b)));
+    groups.push({
+      title: tagKeys.length ? `Tags (${tagKeys.length})` : 'Tags',
+      items: tagKeys.length
+        ? tagKeys.map((k) => ({ label: k, value: inst.tags[k] || '—' }))
+        : [{ label: '—', value: 'No tags assigned' }],
+    });
 
     return { id: inst.id, kind: EC2_KIND, name: inst.name || inst.id, status: inst.state, groups };
   }

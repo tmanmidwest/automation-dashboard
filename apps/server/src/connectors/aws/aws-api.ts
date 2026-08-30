@@ -30,10 +30,14 @@ export interface AwsInstance {
   name?: string;
   /** running | stopped | pending | stopping | shutting-down | terminated | ... */
   state: string;
+  /** Why the instance is in its current state, e.g. "User initiated shutdown". */
+  stateReason?: string;
   type?: string;
   az?: string;
   privateIp?: string;
   publicIp?: string;
+  privateDns?: string;
+  publicDns?: string;
   vpcId?: string;
   subnetId?: string;
   imageId?: string;
@@ -44,9 +48,30 @@ export interface AwsInstance {
   monitoring?: string;
   rootDeviceName?: string;
   rootDeviceType?: string;
+  /** IAM instance profile ARN attached to the instance, if any. */
+  iamProfileArn?: string;
+  tenancy?: string;
+  /** 'spot' | 'scheduled' when applicable; undefined for normal on-demand. */
+  lifecycle?: string;
+  ebsOptimized?: boolean;
+  enaSupport?: boolean;
+  hypervisor?: string;
+  virtualizationType?: string;
+  cpuCores?: number;
+  cpuThreadsPerCore?: number;
   tags: Record<string, string>;
   securityGroups: { id: string; name: string }[];
-  volumes: { device: string; volumeId?: string }[];
+  volumes: { device: string; volumeId?: string; deleteOnTermination?: boolean; status?: string }[];
+  networkInterfaces: {
+    id?: string;
+    privateIp?: string;
+    privateDns?: string;
+    publicIp?: string;
+    macAddress?: string;
+    subnetId?: string;
+    description?: string;
+    status?: string;
+  }[];
 }
 
 export interface AwsIdentity {
@@ -154,10 +179,13 @@ function normalize(i: Instance): AwsInstance {
     id: i.InstanceId ?? '',
     name: tags['Name'] || undefined,
     state: i.State?.Name ?? 'unknown',
+    stateReason: i.StateReason?.Message || i.StateTransitionReason || undefined,
     type: i.InstanceType,
     az: i.Placement?.AvailabilityZone,
     privateIp: i.PrivateIpAddress,
     publicIp: i.PublicIpAddress,
+    privateDns: i.PrivateDnsName || undefined,
+    publicDns: i.PublicDnsName || undefined,
     vpcId: i.VpcId,
     subnetId: i.SubnetId,
     imageId: i.ImageId,
@@ -168,9 +196,33 @@ function normalize(i: Instance): AwsInstance {
     monitoring: i.Monitoring?.State,
     rootDeviceName: i.RootDeviceName,
     rootDeviceType: i.RootDeviceType,
+    iamProfileArn: i.IamInstanceProfile?.Arn || undefined,
+    tenancy: i.Placement?.Tenancy,
+    lifecycle: i.InstanceLifecycle || undefined,
+    ebsOptimized: i.EbsOptimized,
+    enaSupport: i.EnaSupport,
+    hypervisor: i.Hypervisor,
+    virtualizationType: i.VirtualizationType,
+    cpuCores: i.CpuOptions?.CoreCount,
+    cpuThreadsPerCore: i.CpuOptions?.ThreadsPerCore,
     tags,
     securityGroups: (i.SecurityGroups ?? []).map((g) => ({ id: g.GroupId ?? '', name: g.GroupName ?? '' })),
-    volumes: (i.BlockDeviceMappings ?? []).map((b) => ({ device: b.DeviceName ?? '', volumeId: b.Ebs?.VolumeId })),
+    volumes: (i.BlockDeviceMappings ?? []).map((b) => ({
+      device: b.DeviceName ?? '',
+      volumeId: b.Ebs?.VolumeId,
+      deleteOnTermination: b.Ebs?.DeleteOnTermination,
+      status: b.Ebs?.Status,
+    })),
+    networkInterfaces: (i.NetworkInterfaces ?? []).map((n) => ({
+      id: n.NetworkInterfaceId,
+      privateIp: n.PrivateIpAddress,
+      privateDns: n.PrivateDnsName,
+      publicIp: n.Association?.PublicIp,
+      macAddress: n.MacAddress,
+      subnetId: n.SubnetId,
+      description: n.Description || undefined,
+      status: n.Status,
+    })),
   };
 }
 
