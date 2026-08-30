@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────
 
 # 1) Install all workspace deps once (cached)
-FROM node:20-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY packages/shared/package.json ./packages/shared/
@@ -14,7 +14,7 @@ COPY apps/web/package.json ./apps/web/
 RUN npm install
 
 # 2) Build shared, web, and server
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 ARG GIT_SHA=dev
 ENV VITE_GIT_SHA=$GIT_SHA
@@ -29,7 +29,7 @@ RUN npm run build --workspace @cerebro/shared \
 RUN mkdir -p apps/server/public && cp -r apps/web/dist/* apps/server/public/
 
 # 3) Runtime — only production deps + built output
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ARG GIT_SHA=dev
