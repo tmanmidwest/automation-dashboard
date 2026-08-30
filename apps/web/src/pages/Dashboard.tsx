@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -229,6 +229,7 @@ export function Dashboard() {
   }, []);
 
   const metric = (k: string) => overview?.metrics.find((m) => m.key === k)?.value ?? 0;
+  const costLast = overview?.metrics.find((m) => m.key === 'costLastMonth');
   const costMtd = overview?.metrics.find((m) => m.key === 'costMtd');
   const costEst = overview?.metrics.find((m) => m.key === 'costForecast');
   const guests = overview?.guests ?? [];
@@ -335,20 +336,33 @@ export function Dashboard() {
       </div>
 
       {/* Telemetry tiles */}
-      <div className={cn('grid gap-3 grid-cols-2 lg:grid-cols-4', costMtd ? 'xl:grid-cols-8' : 'xl:grid-cols-6')}>
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/vm" />
         <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} to="/overview/container" />
         <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" to="/overview/nodes" />
         <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} to="/overview/nodes" />
         <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
-        {costMtd && (
-          <StatTile icon={DollarSign} label="Spend so far" value={formatMoney(costMtd.value, costMtd.unit)} sub={costMtd.asOf ? `as of ${shortDateTime(costMtd.asOf)}` : 'month to date'} to="/connectors" />
-        )}
-        {costEst && (
-          <StatTile icon={TrendingUp} label="Est. this month" value={formatMoney(costEst.value, costEst.unit)} sub={costEst.asOf ? `as of ${shortDateTime(costEst.asOf)}` : 'forecast'} to="/connectors" />
-        )}
         <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
       </div>
+
+      {/* Cloud spend — its own row so it doesn't crowd the telemetry tiles */}
+      {costMtd && (
+        <div>
+          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+            <DollarSign className="h-3.5 w-3.5 text-accent" /> Cloud spend
+            {costMtd.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60">as of {shortDateTime(costMtd.asOf)}</span>}
+          </div>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+            {costLast && (
+              <StatTile icon={CalendarDays} label="Last month" value={formatMoney(costLast.value, costLast.unit)} sub="previous month total" to="/connectors" />
+            )}
+            <StatTile icon={DollarSign} label="Spend so far" value={formatMoney(costMtd.value, costMtd.unit)} sub="month to date" to="/connectors" />
+            {costEst && (
+              <StatTile icon={TrendingUp} label="Est. this month" value={formatMoney(costEst.value, costEst.unit)} sub="forecast" to="/connectors" />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Activity feed */}
       <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur">

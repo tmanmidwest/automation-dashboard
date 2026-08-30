@@ -82,6 +82,8 @@ export interface AwsIdentity {
 }
 
 export interface AwsCostSummary {
+  /** Previous calendar month's total spend. */
+  lastMonth: number;
   /** Month-to-date actual spend. */
   mtd: number;
   /** Forecast spend for the remainder of the month. */
@@ -290,38 +292,42 @@ export class AwsApi {
   }
 
   /**
-   * Month-to-date spend plus a forecast for the rest of the month. Requires Cost
-   * Explorer to be enabled on the account and ce:GetCostAndUsage / ce:GetCostForecast.
+   * Last month's total, month-to-date spend, and a forecast for the rest of the
+   * month. Last month + MTD come from a single GetCostAndUsage (two monthly
+   * buckets), so this is still just two Cost Explorer calls. Requires Cost
+   * Explorer enabled + ce:GetCostAndUsage / ce:GetCostForecast.
    * NOTE: each call is billed ~$0.01 by AWS — callers should cache aggressively.
    */
   async getCostSummary(): Promise<AwsCostSummary> {
     const pad = (n: number) => String(n).padStart(2, '0');
+    const iso = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
     const now = new Date();
     const y = now.getUTCFullYear();
     const m = now.getUTCMonth();
-    const monthStart = `${y}-${pad(m + 1)}-01`;
-    const today = `${y}-${pad(m + 1)}-${pad(now.getUTCDate())}`;
-    const next = new Date(Date.UTC(y, m + 1, 1));
-    const monthEnd = `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-01`;
+    const lastMonthStart = iso(new Date(Date.UTC(y, m - 1, 1)));
+    const monthStart = iso(new Date(Date.UTC(y, m, 1)));
+    const today = iso(now);
+    const monthEnd = iso(new Date(Date.UTC(y, m + 1, 1)));
 
     try {
       let mtd = 0;
+      let lastMonth = 0;
       let currency = 'USD';
-      if (today !== monthStart) {
-        const cu = await this.ce.send(
-          new GetCostAndUsageCommand({
-            TimePeriod: { Start: monthStart, End: today },
-            Granularity: 'MONTHLY',
-            Metrics: ['UnblendedCost'],
-          }),
-        );
-        for (const r of cu.ResultsByTime ?? []) {
-          const amt = r.Total?.UnblendedCost;
-          if (amt) {
-            mtd += parseFloat(amt.Amount || '0');
-            if (amt.Unit) currency = amt.Unit;
-          }
-        }
+      // One call spanning last month through today → a bucket per month.
+      const cu = await this.ce.send(
+        new GetCostAndUsageCommand({
+          TimePeriod: { Start: lastMonthStart, End: today === monthStart ? monthStart : today },
+          Granularity: 'MONTHLY',
+          Metrics: ['UnblendedCost'],
+        }),
+      );
+      for (const r of cu.ResultsByTime ?? []) {
+        const amt = r.Total?.UnblendedCost;
+        if (!amt) continue;
+        const val = parseFloat(amt.Amount || '0');
+        if (amt.Unit) currency = amt.Unit;
+        if (r.TimePeriod?.Start === monthStart) mtd = val;
+        else if (r.TimePeriod?.Start === lastMonthStart) lastMonth = val;
       }
 
       // Forecast needs historical data; if unavailable it throws — treat as 0.
@@ -339,7 +345,7 @@ export class AwsApi {
         forecast = 0;
       }
 
-      return { mtd, forecast, estimated: mtd + forecast, currency, asOf: new Date().toISOString() };
+      return { lastMonth, mtd, forecast, estimated: mtd + forecast, currency, asOf: new Date().toISOString() };
     } catch (err) {
       throw friendly(err);
     }

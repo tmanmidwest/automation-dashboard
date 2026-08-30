@@ -420,6 +420,7 @@ export class AwsConnector implements Connector {
     // UI renders it as money, and the dashboard sums it across AWS accounts.
     const cost = await this.cachedCost(ctx, api, auth.accessKeyId);
     if (cost) {
+      metrics.push({ key: 'costLastMonth', label: 'Last month', value: round2(cost.lastMonth), unit: cost.currency, asOf: cost.asOf });
       metrics.push({ key: 'costMtd', label: 'Spend (MTD)', value: round2(cost.mtd), unit: cost.currency, asOf: cost.asOf });
       metrics.push({ key: 'costForecast', label: 'Est. this month', value: round2(cost.estimated), unit: cost.currency, asOf: cost.asOf });
     }
