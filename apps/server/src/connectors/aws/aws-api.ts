@@ -23,6 +23,14 @@ import {
   ListNodegroupsCommand,
   DescribeNodegroupCommand,
 } from '@aws-sdk/client-eks';
+import {
+  ECSClient,
+  ListClustersCommand as EcsListClustersCommand,
+  DescribeClustersCommand as EcsDescribeClustersCommand,
+  ListServicesCommand as EcsListServicesCommand,
+  DescribeServicesCommand as EcsDescribeServicesCommand,
+  type Cluster as EcsClusterRaw,
+} from '@aws-sdk/client-ecs';
 
 export interface AwsAuth {
   accessKeyId: string;
@@ -117,6 +125,29 @@ export interface AwsEksCluster {
   endpointPrivateAccess?: boolean;
   tags: Record<string, string>;
   nodegroups: AwsEksNodegroup[];
+}
+
+export interface AwsEcsService {
+  name: string;
+  status?: string;
+  launchType?: string;
+  desired?: number;
+  running?: number;
+  pending?: number;
+}
+
+/** A normalized ECS cluster. */
+export interface AwsEcsCluster {
+  name: string;
+  arn?: string;
+  status: string; // ACTIVE | PROVISIONING | DEPROVISIONING | FAILED | INACTIVE
+  runningTasks?: number;
+  pendingTasks?: number;
+  activeServices?: number;
+  containerInstances?: number;
+  capacityProviders?: string[];
+  tags: Record<string, string>;
+  services: AwsEcsService[];
 }
 
 export interface AwsCostSummary {
@@ -577,6 +608,110 @@ export class AwsApi {
         };
       }),
     );
+  }
+
+  private _ecs?: ECSClient;
+  private get ecs(): ECSClient {
+    if (!this._ecs) {
+      this._ecs = new ECSClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._ecs;
+  }
+
+  private mapEcsCluster(c: EcsClusterRaw): AwsEcsCluster {
+    const tags: Record<string, string> = {};
+    for (const t of c.tags ?? []) if (t.key) tags[t.key] = t.value ?? '';
+    return {
+      name: c.clusterName ?? c.clusterArn ?? 'cluster',
+      arn: c.clusterArn,
+      status: c.status ?? 'UNKNOWN',
+      runningTasks: c.runningTasksCount,
+      pendingTasks: c.pendingTasksCount,
+      activeServices: c.activeServicesCount,
+      containerInstances: c.registeredContainerInstancesCount,
+      capacityProviders: c.capacityProviders,
+      tags,
+      services: [],
+    };
+  }
+
+  /** ECS cluster ARNs (paginated). */
+  async listEcsClusterArns(): Promise<string[]> {
+    try {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ecs.send(new EcsListClustersCommand({ nextToken: token }));
+        out.push(...(r.clusterArns ?? []));
+        token = r.nextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** ECS clusters with stats + tags (batched DescribeClusters, ≤100 per call). */
+  async listEcsClusters(): Promise<AwsEcsCluster[]> {
+    try {
+      const arns = await this.listEcsClusterArns();
+      const out: AwsEcsCluster[] = [];
+      for (let i = 0; i < arns.length; i += 100) {
+        const chunk = arns.slice(i, i + 100);
+        const r = await this.ecs.send(new EcsDescribeClustersCommand({ clusters: chunk, include: ['STATISTICS', 'TAGS'] }));
+        for (const c of r.clusters ?? []) out.push(this.mapEcsCluster(c));
+      }
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** One ECS cluster's details; optionally with its services. */
+  async describeEcsCluster(nameOrArn: string, withServices = true): Promise<AwsEcsCluster> {
+    try {
+      const r = await this.ecs.send(new EcsDescribeClustersCommand({ clusters: [nameOrArn], include: ['STATISTICS', 'TAGS'] }));
+      const c = r.clusters?.[0];
+      if (!c) throw new Error(`ECS cluster ${nameOrArn} not found in this region.`);
+      const cluster = this.mapEcsCluster(c);
+      if (withServices) {
+        try {
+          cluster.services = await this.listEcsServices(cluster.arn ?? nameOrArn);
+        } catch {
+          cluster.services = [];
+        }
+      }
+      return cluster;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Services in an ECS cluster (ListServices → DescribeServices in chunks of 10). */
+  async listEcsServices(cluster: string): Promise<AwsEcsService[]> {
+    const arns: string[] = [];
+    let token: string | undefined;
+    do {
+      const r = await this.ecs.send(new EcsListServicesCommand({ cluster, nextToken: token }));
+      arns.push(...(r.serviceArns ?? []));
+      token = r.nextToken;
+    } while (token);
+    const out: AwsEcsService[] = [];
+    for (let i = 0; i < arns.length; i += 10) {
+      const chunk = arns.slice(i, i + 10);
+      const r = await this.ecs.send(new EcsDescribeServicesCommand({ cluster, services: chunk }));
+      for (const s of r.services ?? []) {
+        out.push({
+          name: s.serviceName ?? '',
+          status: s.status,
+          launchType: s.launchType,
+          desired: s.desiredCount,
+          running: s.runningCount,
+          pending: s.pendingCount,
+        });
+      }
+    }
+    return out;
   }
 
   /** Region names enabled/available for this account (for a region dropdown). */

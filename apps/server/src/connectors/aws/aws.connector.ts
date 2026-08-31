@@ -12,10 +12,11 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster } from './aws-api';
+import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster } from './aws-api';
 
 const EC2_KIND = 'ec2';
 const EKS_KIND = 'eks';
+const ECS_KIND = 'ecs';
 
 /** EC2 states in which an instance can no longer be acted upon. */
 const DEAD_STATES = ['terminated', 'shutting-down'];
@@ -61,7 +62,7 @@ export class AwsConnector implements Connector {
   manifest: ConnectorManifest = {
     id: 'aws',
     name: 'Amazon Web Services',
-    description: 'View and manage Amazon EC2 instances and view EKS clusters in an AWS account and region.',
+    description: 'View and manage Amazon EC2 instances and view EKS and ECS clusters in an AWS account and region.',
     version: '1.0.0',
     icon: 'aws',
     configFields: [
@@ -123,6 +124,13 @@ export class AwsConnector implements Connector {
         actions: [],
         deletable: false,
       },
+      {
+        id: ECS_KIND,
+        label: 'ECS Clusters',
+        // Read-only: view clusters + services/task counts.
+        actions: [],
+        deletable: false,
+      },
     ],
     operations: [
       {
@@ -150,7 +158,7 @@ export class AwsConnector implements Connector {
     ],
     help: {
       overview:
-        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate) and EKS clusters with their node groups (read-only).',
+        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate), EKS clusters with node groups, and ECS clusters with their services (clusters read-only).',
       setupSteps: [
         'In the AWS IAM console, create (or reuse) an IAM user for Cerebro.',
         'Attach a policy granting the EC2 describe/power permissions listed below (AmazonEC2ReadOnlyAccess covers listing; add the power actions to manage state).',
@@ -166,6 +174,7 @@ export class AwsConnector implements Connector {
         'ec2:DescribeImages, ec2:DescribeKeyPairs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups — populate the Launch form (all in AmazonEC2ReadOnlyAccess).',
         'ce:GetCostAndUsage, ce:GetCostForecast — OPTIONAL, for the spend tile. Requires Cost Explorer to be enabled in Billing first; each call is billed ~$0.01 by AWS (Cerebro fetches once a day).',
         'eks:ListClusters, eks:DescribeCluster, eks:ListNodegroups, eks:DescribeNodegroup — OPTIONAL, to list EKS clusters and node groups. No AWS-managed read policy covers these for a user; attach a small custom policy with these four actions (Resource "*").',
+        'ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices — OPTIONAL, to list ECS clusters and their services (AmazonECS_FullAccess / ECS read policies cover these).',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -232,12 +241,35 @@ export class AwsConnector implements Connector {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((c) => this.toEksResource(c));
     }
+    if (kind === ECS_KIND) {
+      const clusters = await api.listEcsClusters();
+      return clusters
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((c) => this.toEcsResource(c));
+    }
     if (kind !== EC2_KIND) return [];
     const instances = await api.describeInstances();
     return instances
       .filter((i) => i.state !== 'terminated')
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
       .map((i) => this.toResource(i));
+  }
+
+  private toEcsResource(c: AwsEcsCluster): ConnectorResource {
+    return {
+      id: c.name,
+      kind: ECS_KIND,
+      name: c.name,
+      status: c.status.toLowerCase(), // ACTIVE → active
+      details: {
+        // Generic table columns: node (tasks) / cpu (services).
+        node: `${c.runningTasks ?? 0} running${c.pendingTasks ? ` / ${c.pendingTasks} pending` : ''} task${(c.runningTasks ?? 0) === 1 ? '' : 's'}`,
+        cpu: `${c.activeServices ?? 0} service${(c.activeServices ?? 0) === 1 ? '' : 's'}`,
+        launchType: c.capacityProviders?.length ? c.capacityProviders.join(', ') : null,
+      },
+      tags: c.tags,
+    };
   }
 
   private toEksResource(c: AwsEksCluster): ConnectorResource {
@@ -367,9 +399,52 @@ export class AwsConnector implements Connector {
     return { id: c.name, kind: EKS_KIND, name: c.name, status: c.status.toLowerCase(), groups };
   }
 
+  private async describeEcs(api: AwsApi, nameOrArn: string): Promise<ConnectorResourceDetail> {
+    const c = await api.describeEcsCluster(nameOrArn, true);
+    const groups: ConnectorDetailGroup[] = [
+      {
+        title: 'General',
+        items: [
+          { label: 'Cluster', value: c.name, variant: 'mono' },
+          { label: 'Status', value: c.status.toLowerCase(), variant: 'status' },
+          { label: 'Running tasks', value: String(c.runningTasks ?? 0) },
+          { label: 'Pending tasks', value: String(c.pendingTasks ?? 0) },
+          { label: 'Active services', value: String(c.activeServices ?? 0) },
+          { label: 'Container instances', value: String(c.containerInstances ?? 0) },
+          { label: 'Capacity providers', value: c.capacityProviders?.length ? c.capacityProviders.join(', ') : '—' },
+          { label: 'ARN', value: c.arn || '—', variant: 'mono' },
+        ],
+      },
+      {
+        title: c.services.length ? `Services (${c.services.length})` : 'Services',
+        items: c.services.length
+          ? c.services.map((s) => ({
+              label: s.name,
+              value: [
+                s.status?.toLowerCase(),
+                `${s.running ?? 0}/${s.desired ?? 0} running${s.pending ? ` (${s.pending} pending)` : ''}`,
+                s.launchType,
+              ].filter(Boolean).join(' · ') || '—',
+            }))
+          : [{ label: '—', value: 'No services' }],
+      },
+    ];
+
+    const tagKeys = Object.keys(c.tags).sort((a, b) => a.localeCompare(b));
+    groups.push({
+      title: tagKeys.length ? `Tags (${tagKeys.length})` : 'Tags',
+      items: tagKeys.length
+        ? tagKeys.map((k) => ({ label: k, value: c.tags[k] || '—' }))
+        : [{ label: '—', value: 'No tags assigned' }],
+    });
+
+    return { id: c.name, kind: ECS_KIND, name: c.name, status: c.status.toLowerCase(), groups };
+  }
+
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
     const api = new AwsApi(this.authFrom(ctx));
     if (kind === EKS_KIND) return this.describeEks(api, resourceId);
+    if (kind === ECS_KIND) return this.describeEcs(api, resourceId);
     const [inst] = await api.describeInstances([resourceId]);
     if (!inst) throw new Error(`Instance ${resourceId} not found in this region.`);
 
@@ -517,6 +592,14 @@ export class AwsConnector implements Connector {
       if (clusters.length) metrics.push({ key: 'eksClusters', label: 'EKS clusters', value: clusters.length });
     } catch {
       /* eks not permitted / unavailable — omit */
+    }
+
+    // Best-effort ECS cluster count (omit if no ecs:* permissions).
+    try {
+      const arns = await api.listEcsClusterArns();
+      if (arns.length) metrics.push({ key: 'ecsClusters', label: 'ECS clusters', value: arns.length });
+    } catch {
+      /* ecs not permitted / unavailable — omit */
     }
 
     // Best-effort spend (billable → cached a day). Unit is the currency code so the
