@@ -32,6 +32,14 @@ const SNAPSHOTS_SUBRESOURCE: ConnectorSubResourceKind = {
 
 const KIND_TO_TYPE: Record<string, 'qemu' | 'lxc'> = { qemu: 'qemu', lxc: 'lxc' };
 
+/** Reject a promise if it doesn't settle within `ms` (bounds slow guest-agent calls). */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
 function bytes(n?: number): string | undefined {
   if (n == null) return undefined;
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -374,26 +382,47 @@ export class ProxmoxConnector implements Connector {
     const all = await api.clusterResources();
     const isTemplateKind = kind === 'template';
     const type = this.typeForKind(kind);
-    return all
+    const rows = all
       .filter((r) => r.type === type)
       // The Templates tab shows only templates; the qemu/lxc tabs exclude them.
       .filter((r) => (isTemplateKind ? r.template === 1 : r.template !== 1))
-      .sort((a, b) => a.vmid - b.vmid)
-      .map((r) => ({
-        id: String(r.vmid),
-        kind,
-        name: r.name || `${type}-${r.vmid}`,
-        status: isTemplateKind ? 'template' : r.status,
-        details: {
-          vmid: r.vmid,
-          node: r.node,
-          cpu: r.maxcpu != null ? `${r.maxcpu} vCPU` : null,
-          memory: bytes(r.maxmem) ?? null,
-          uptime: r.status === 'running' ? uptime(r.uptime) ?? null : null,
-          tags: r.tags?.trim() || null,
-          pool: r.pool || null,
-        },
-      }));
+      .sort((a, b) => a.vmid - b.vmid);
+
+    // Best-effort live IPs for running guests (qemu = guest agent, lxc = interfaces),
+    // fetched in parallel with a short per-guest timeout so one slow/absent agent
+    // can't stall the whole list. Missing IPs simply don't show.
+    const ipByVmid = new Map<number, string>();
+    if (!isTemplateKind) {
+      await Promise.all(
+        rows
+          .filter((r) => r.status === 'running')
+          .map(async (r) => {
+            try {
+              const ips = await withTimeout(this.guestIps(api, r.node, type, r.vmid), 3000);
+              if (ips.length) ipByVmid.set(r.vmid, ips.join(', '));
+            } catch {
+              /* no agent / timeout / unsupported — leave IP blank */
+            }
+          }),
+      );
+    }
+
+    return rows.map((r) => ({
+      id: String(r.vmid),
+      kind,
+      name: r.name || `${type}-${r.vmid}`,
+      status: isTemplateKind ? 'template' : r.status,
+      details: {
+        vmid: r.vmid,
+        node: r.node,
+        cpu: r.maxcpu != null ? `${r.maxcpu} vCPU` : null,
+        memory: bytes(r.maxmem) ?? null,
+        ip: ipByVmid.get(r.vmid) ?? null,
+        uptime: r.status === 'running' ? uptime(r.uptime) ?? null : null,
+        tags: r.tags?.trim() || null,
+        pool: r.pool || null,
+      },
+    }));
   }
 
   /** Maps a UI resource kind to the underlying Proxmox guest type (templates are qemu). */

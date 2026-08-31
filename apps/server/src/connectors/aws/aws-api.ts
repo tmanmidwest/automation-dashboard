@@ -29,6 +29,10 @@ import {
   DescribeClustersCommand as EcsDescribeClustersCommand,
   ListServicesCommand as EcsListServicesCommand,
   DescribeServicesCommand as EcsDescribeServicesCommand,
+  ListTasksCommand as EcsListTasksCommand,
+  DescribeTasksCommand as EcsDescribeTasksCommand,
+  UpdateServiceCommand as EcsUpdateServiceCommand,
+  StopTaskCommand as EcsStopTaskCommand,
   type Cluster as EcsClusterRaw,
 } from '@aws-sdk/client-ecs';
 
@@ -134,6 +138,18 @@ export interface AwsEcsService {
   desired?: number;
   running?: number;
   pending?: number;
+}
+
+export interface AwsEcsTask {
+  id: string;
+  arn: string;
+  lastStatus?: string;
+  desiredStatus?: string;
+  taskDefinition?: string;
+  group?: string;
+  cpu?: string;
+  memory?: string;
+  startedAt?: Date;
 }
 
 /** A normalized ECS cluster. */
@@ -712,6 +728,65 @@ export class AwsApi {
       }
     }
     return out;
+  }
+
+  /** Running tasks in an ECS cluster (ListTasks → DescribeTasks in chunks of 100). */
+  async listEcsTasks(cluster: string): Promise<AwsEcsTask[]> {
+    try {
+      const arns: string[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ecs.send(new EcsListTasksCommand({ cluster, nextToken: token }));
+        arns.push(...(r.taskArns ?? []));
+        token = r.nextToken;
+      } while (token);
+      const out: AwsEcsTask[] = [];
+      for (let i = 0; i < arns.length; i += 100) {
+        const chunk = arns.slice(i, i + 100);
+        const r = await this.ecs.send(new EcsDescribeTasksCommand({ cluster, tasks: chunk }));
+        for (const t of r.tasks ?? []) {
+          const arn = t.taskArn ?? '';
+          out.push({
+            id: arn.split('/').pop() || arn,
+            arn,
+            lastStatus: t.lastStatus,
+            desiredStatus: t.desiredStatus,
+            taskDefinition: (t.taskDefinitionArn ?? '').split('/').pop(),
+            group: t.group,
+            cpu: t.cpu,
+            memory: t.memory,
+            startedAt: t.startedAt,
+          });
+        }
+      }
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Scale a service (desiredCount) and/or force a new deployment. */
+  async updateEcsService(cluster: string, service: string, opts: { desiredCount?: number; forceNewDeployment?: boolean }): Promise<void> {
+    try {
+      await this.ecs.send(
+        new EcsUpdateServiceCommand({
+          cluster,
+          service,
+          ...(opts.desiredCount !== undefined ? { desiredCount: opts.desiredCount } : {}),
+          ...(opts.forceNewDeployment ? { forceNewDeployment: true } : {}),
+        }),
+      );
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async stopEcsTask(cluster: string, task: string, reason = 'Stopped from Cerebro'): Promise<void> {
+    try {
+      await this.ecs.send(new EcsStopTaskCommand({ cluster, task, reason }));
+    } catch (err) {
+      throw friendly(err);
+    }
   }
 
   /** Region names enabled/available for this account (for a region dropdown). */

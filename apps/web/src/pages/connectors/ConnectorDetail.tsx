@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Camera, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Plus, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation, OverviewMetric,
@@ -65,10 +65,10 @@ export function ConnectorDetail() {
   const [confirmName, setConfirmName] = useState('');
   const [deleting, setDeleting] = useState(false);
 
-  // Snapshots (sub-resources) within the drawer
-  const [snapshots, setSnapshots] = useState<ConnectorResource[]>([]);
-  const [snapLoading, setSnapLoading] = useState(false);
-  const [snapOp, setSnapOp] = useState<ConnectorOperation | null>(null);
+  // Sub-resources (e.g. snapshots, ECS services/tasks) within the drawer — keyed by subKind id.
+  const [subItems, setSubItems] = useState<Record<string, ConnectorResource[]>>({});
+  const [subLoadingMap, setSubLoadingMap] = useState<Record<string, boolean>>({});
+  const [subDialog, setSubDialog] = useState<{ operation: ConnectorOperation; extraValues: Record<string, unknown>; reloadSub?: string } | null>(null);
   const [subBusy, setSubBusy] = useState<string | null>(null);
   const [resourceOp, setResourceOp] = useState<ConnectorOperation | null>(null);
 
@@ -82,11 +82,18 @@ export function ConnectorDetail() {
   const [tagFilters, setTagFilters] = useState<{ key: string; value: string }[]>([]);
   const [addKey, setAddKey] = useState<string>(''); // key currently being added via the builder
 
-  const snapSub = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources?.find((s) => s.id === 'snapshot');
-  // Resource-scoped operations shown in the detail drawer (e.g. Edit CPU/RAM) — snapshot ops are handled separately.
+  const subKinds = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources ?? [];
+  // Operation ids that back sub-resources (create + item actions) — handled within their sub-resource section, not as cluster-level buttons.
+  const subOpIds = new Set<string>();
+  for (const sk of subKinds) {
+    if (sk.createOperationId) subOpIds.add(sk.createOperationId);
+    for (const a of sk.itemActions ?? []) subOpIds.add(a.operationId);
+  }
+  // Resource-scoped operations shown in the detail drawer (e.g. Edit CPU/RAM).
   const resourceOps = (manifest?.operations ?? []).filter(
-    (o) => o.scope === 'resource' && !o.id.startsWith('snapshot') && (!o.kind || o.kind === kind),
+    (o) => o.scope === 'resource' && !subOpIds.has(o.id) && (!o.kind || o.kind === kind),
   );
+  const opById = (opId?: string) => (opId ? manifest?.operations?.find((o) => o.id === opId) ?? null : null);
 
   useEffect(() => {
     async function load() {
@@ -195,7 +202,7 @@ export function ConnectorDetail() {
   async function openDetail(res: ConnectorResource) {
     setDetailFor(res);
     setDetail(null);
-    setSnapshots([]);
+    setSubItems({});
     setConfirmName('');
     setDetailLoading(true);
     try {
@@ -206,17 +213,24 @@ export function ConnectorDetail() {
     } finally {
       setDetailLoading(false);
     }
-    if (snapSub) void loadSnapshots(res.id);
+    setSubItems({});
+    if (subKinds.length) void loadSubResources(res.id);
   }
 
-  async function loadSnapshots(resourceId: string) {
-    setSnapLoading(true);
-    try {
-      setSnapshots(await api.get<ConnectorResource[]>(`/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(resourceId)}/subresources/snapshot`));
-    } catch {
-      setSnapshots([]);
-    } finally {
-      setSnapLoading(false);
+  async function loadSubResources(resourceId: string) {
+    const kinds = manifest?.resourceKinds.find((k) => k.id === kind)?.subResources ?? [];
+    for (const sk of kinds) {
+      setSubLoadingMap((m) => ({ ...m, [sk.id]: true }));
+      try {
+        const items = await api.get<ConnectorResource[]>(
+          `/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(resourceId)}/subresources/${sk.id}`,
+        );
+        setSubItems((m) => ({ ...m, [sk.id]: items }));
+      } catch {
+        setSubItems((m) => ({ ...m, [sk.id]: [] }));
+      } finally {
+        setSubLoadingMap((m) => ({ ...m, [sk.id]: false }));
+      }
     }
   }
 
@@ -239,7 +253,7 @@ export function ConnectorDetail() {
         message = job.message ?? '';
       }
       setMsg({ ok: status === 'success', text: message || (status === 'success' ? 'Done.' : 'Operation failed.') });
-      await loadSnapshots(detailFor.id);
+      await loadSubResources(detailFor.id);
       loadResources();
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Operation failed' });
@@ -278,6 +292,7 @@ export function ConnectorDetail() {
     return [...s].sort((a, b) => a.localeCompare(b));
   })();
   const hasTags = tagKeys.length > 0;
+  const hasIp = resources.some((r) => r.details?.ip != null && r.details.ip !== '');
   const valuesForKey = (key: string) =>
     [...new Set(resources.map((r) => r.tags?.[key]).filter((v): v is string => v != null && v !== ''))].sort((a, b) => a.localeCompare(b));
 
@@ -297,7 +312,7 @@ export function ConnectorDetail() {
     }),
   );
 
-  const colSpan = (canAct ? 6 : 5) + (hasTags ? 1 : 0);
+  const colSpan = (canAct ? 6 : 5) + (hasTags ? 1 : 0) + (hasIp ? 1 : 0);
   function toggleSort(col: typeof sortCol) {
     if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortCol(col); setSortDir('asc'); }
@@ -503,6 +518,7 @@ export function ConnectorDetail() {
                     <SortHead col="vmid" label="ID" />
                     <SortHead col="node" label="Node" />
                     <th className="px-4 py-3 font-medium">Resources</th>
+                    {hasIp && <th className="px-4 py-3 font-medium">IP</th>}
                     <SortHead col="status" label="Status" />
                     {hasTags && <th className="px-4 py-3 font-medium">Tags</th>}
                     {canAct && <th className="px-4 py-3 font-medium text-right">Actions</th>}
@@ -531,6 +547,9 @@ export function ConnectorDetail() {
                             {[r.details?.cpu, r.details?.memory].filter(Boolean).join(' · ') || '—'}
                             {r.details?.uptime ? ` · up ${r.details.uptime}` : ''}
                           </td>
+                          {hasIp && (
+                            <td className="px-4 py-3 text-muted-foreground font-mono text-xs">{r.details?.ip ? String(r.details.ip) : '—'}</td>
+                          )}
                           <td className="px-4 py-3">
                             <span className={cn('text-xs rounded-full px-2 py-0.5 capitalize', statusColor(r.status))}>
                               {r.status ?? 'unknown'}
@@ -665,55 +684,68 @@ export function ConnectorDetail() {
           </div>
         )}
 
-        {snapSub && detailFor && (
-          <div className="mt-6 pt-5 border-t border-border">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs uppercase tracking-wider text-muted-foreground">{snapSub.label}</p>
-              {canAct && snapSub.createOperationId && (
-                <Button size="sm" variant="outline"
-                  onClick={() => setSnapOp(manifest.operations?.find((o) => o.id === snapSub.createOperationId) ?? null)}>
-                  <Camera className="h-4 w-4" /> Take snapshot
-                </Button>
+        {detailFor && subKinds.map((sk) => {
+          const items = subItems[sk.id] ?? [];
+          const createOp = opById(sk.createOperationId);
+          return (
+            <div key={sk.id} className="mt-6 pt-5 border-t border-border">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs uppercase tracking-wider text-muted-foreground">{sk.label}</p>
+                {canAct && createOp && (
+                  <Button size="sm" variant="outline"
+                    onClick={() => setSubDialog({ operation: createOp, extraValues: { kind, node: detailFor.details?.node as string | undefined }, reloadSub: sk.id })}>
+                    <Plus className="h-4 w-4" /> {createOp.label}
+                  </Button>
+                )}
+              </div>
+              {subLoadingMap[sk.id] ? (
+                <div className="text-center text-muted-foreground py-3"><Loader2 className="h-4 w-4 animate-spin inline" /></div>
+              ) : items.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No {sk.label.toLowerCase()}.</p>
+              ) : (
+                <div className="space-y-2">
+                  {items.map((s) => (
+                    <div key={s.id} className="rounded-md border border-border p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{s.name}
+                            {s.status && <span className="ml-2 text-xs text-muted-foreground">({s.status})</span>}</p>
+                          {s.details?.summary && <p className="text-xs text-muted-foreground truncate">{String(s.details.summary)}</p>}
+                          {s.details?.created && <p className="text-xs text-muted-foreground">{String(s.details.created)}</p>}
+                          {s.details?.description && <p className="text-xs text-muted-foreground italic">{String(s.details.description)}</p>}
+                        </div>
+                        {canAct && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            {sk.itemActions?.map((a) => {
+                              const op = opById(a.operationId);
+                              const hasForm = !!op?.fields?.length;
+                              return (
+                                <Button key={a.id} size="sm" variant="outline"
+                                  className={cn(a.intent === 'destructive' && 'text-destructive border-destructive/40 hover:bg-destructive/10')}
+                                  disabled={subBusy === `${s.id}:${a.id}`}
+                                  onClick={() => {
+                                    if (hasForm && op) {
+                                      setSubDialog({ operation: op, extraValues: { kind, [a.paramKey]: s.id }, reloadSub: sk.id });
+                                      return;
+                                    }
+                                    if (a.confirm && !confirm(`${a.confirm}\n\n${sk.labelSingular ?? 'Item'}: ${s.name}`)) return;
+                                    runSub(a.operationId, { [a.paramKey]: s.id }, `${s.id}:${a.id}`);
+                                  }}>
+                                  {subBusy === `${s.id}:${a.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                  {a.label}
+                                </Button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-            {snapLoading ? (
-              <div className="text-center text-muted-foreground py-3"><Loader2 className="h-4 w-4 animate-spin inline" /></div>
-            ) : snapshots.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No snapshots.</p>
-            ) : (
-              <div className="space-y-2">
-                {snapshots.map((s) => (
-                  <div key={s.id} className="rounded-md border border-border p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{s.name}
-                          {s.status && <span className="ml-2 text-xs text-muted-foreground">({s.status})</span>}</p>
-                        {s.details?.created && <p className="text-xs text-muted-foreground">{String(s.details.created)}</p>}
-                        {s.details?.description && <p className="text-xs text-muted-foreground italic">{String(s.details.description)}</p>}
-                      </div>
-                      {canAct && (
-                        <div className="flex items-center gap-1 shrink-0">
-                          {snapSub.itemActions?.map((a) => (
-                            <Button key={a.id} size="sm" variant="outline"
-                              className={cn(a.intent === 'destructive' && 'text-destructive border-destructive/40 hover:bg-destructive/10')}
-                              disabled={subBusy === `${s.id}:${a.id}`}
-                              onClick={() => {
-                                if (a.confirm && !confirm(`${a.confirm}\n\nSnapshot: ${s.name}`)) return;
-                                runSub(a.operationId, { [a.paramKey]: s.id }, `${s.id}:${a.id}`);
-                              }}>
-                              {subBusy === `${s.id}:${a.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                              {a.label}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+          );
+        })}
       </Sheet>
 
       {activeOp && (
@@ -730,17 +762,21 @@ export function ConnectorDetail() {
         />
       )}
 
-      {snapOp && detailFor && (
+      {subDialog && detailFor && (
         <OperationDialog
           instanceId={id!}
-          operation={snapOp}
+          operation={subDialog.operation}
           resourceId={detailFor.id}
-          extraValues={{ kind, node: detailFor.details?.node as string | undefined }}
-          open={!!snapOp}
-          onClose={() => setSnapOp(null)}
+          extraValues={subDialog.extraValues}
+          open={!!subDialog}
+          onClose={() => setSubDialog(null)}
           onDone={() => {
-            setSnapOp(null);
-            if (detailFor) loadSnapshots(detailFor.id);
+            const reload = subDialog.reloadSub;
+            setSubDialog(null);
+            if (detailFor) {
+              if (reload) void loadSubResources(detailFor.id);
+              loadResources();
+            }
           }}
         />
       )}

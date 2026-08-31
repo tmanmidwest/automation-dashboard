@@ -12,7 +12,7 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster } from './aws-api';
+import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask } from './aws-api';
 
 const EC2_KIND = 'ec2';
 const EKS_KIND = 'eks';
@@ -127,9 +127,27 @@ export class AwsConnector implements Connector {
       {
         id: ECS_KIND,
         label: 'ECS Clusters',
-        // Read-only: view clusters + services/task counts.
         actions: [],
         deletable: false,
+        subResources: [
+          {
+            id: 'service',
+            label: 'Services',
+            labelSingular: 'service',
+            itemActions: [
+              { id: 'scale', label: 'Scale', operationId: 'ecs-scale-service', paramKey: 'service' },
+              { id: 'redeploy', label: 'Redeploy', operationId: 'ecs-redeploy-service', paramKey: 'service', confirm: 'Force a new deployment of this service (rolling restart)?' },
+            ],
+          },
+          {
+            id: 'task',
+            label: 'Tasks',
+            labelSingular: 'task',
+            itemActions: [
+              { id: 'stop', label: 'Stop', operationId: 'ecs-stop-task', paramKey: 'task', confirm: 'Stop this task? ECS will start a replacement if a service manages it.', intent: 'destructive' },
+            ],
+          },
+        ],
       },
     ],
     operations: [
@@ -155,10 +173,37 @@ export class AwsConnector implements Connector {
           { key: 'count', label: 'How many', type: 'number', default: 1, help: 'Number of identical instances to launch (1–10).' },
         ],
       },
+      {
+        id: 'ecs-scale-service',
+        label: 'Scale service',
+        description: 'Set how many tasks an ECS service runs (0 to stop it).',
+        scope: 'resource',
+        kind: ECS_KIND,
+        submitLabel: 'Scale',
+        prefill: true,
+        fields: [
+          { key: 'desiredCount', label: 'Desired task count', type: 'number', required: true, help: 'Number of tasks the service should run (0 stops it).' },
+        ],
+      },
+      {
+        id: 'ecs-redeploy-service',
+        label: 'Redeploy service',
+        scope: 'resource',
+        kind: ECS_KIND,
+        fields: [],
+      },
+      {
+        id: 'ecs-stop-task',
+        label: 'Stop task',
+        scope: 'resource',
+        kind: ECS_KIND,
+        intent: 'destructive',
+        fields: [],
+      },
     ],
     help: {
       overview:
-        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate), EKS clusters with node groups, and ECS clusters with their services (clusters read-only).',
+        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate), EKS clusters with node groups (read-only), and ECS clusters — drill into a cluster to scale/redeploy its services and stop tasks.',
       setupSteps: [
         'In the AWS IAM console, create (or reuse) an IAM user for Cerebro.',
         'Attach a policy granting the EC2 describe/power permissions listed below (AmazonEC2ReadOnlyAccess covers listing; add the power actions to manage state).',
@@ -174,7 +219,8 @@ export class AwsConnector implements Connector {
         'ec2:DescribeImages, ec2:DescribeKeyPairs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups — populate the Launch form (all in AmazonEC2ReadOnlyAccess).',
         'ce:GetCostAndUsage, ce:GetCostForecast — OPTIONAL, for the spend tile. Requires Cost Explorer to be enabled in Billing first; each call is billed ~$0.01 by AWS (Cerebro fetches once a day).',
         'eks:ListClusters, eks:DescribeCluster, eks:ListNodegroups, eks:DescribeNodegroup — OPTIONAL, to list EKS clusters and node groups. No AWS-managed read policy covers these for a user; attach a small custom policy with these four actions (Resource "*").',
-        'ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices — OPTIONAL, to list ECS clusters and their services (AmazonECS_FullAccess / ECS read policies cover these).',
+        'ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices, ecs:ListTasks, ecs:DescribeTasks — OPTIONAL, to list ECS clusters, services, and tasks.',
+        'ecs:UpdateService, ecs:StopTask — OPTIONAL, to scale/redeploy services and stop tasks from Cerebro.',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -301,6 +347,7 @@ export class AwsConnector implements Connector {
         // and `cpu` (resource summary). EC2 has no node, so surface the AZ/type.
         node: i.az ?? null,
         cpu: i.type ?? null,
+        ip: i.publicIp || i.privateIp || null,
         type: i.type ?? null,
         az: i.az ?? null,
         privateIp: i.privateIp ?? null,
@@ -662,13 +709,109 @@ export class AwsConnector implements Connector {
     }
   }
 
-  async runOperation(
+  async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
+    if (kind !== ECS_KIND) return [];
+    const api = new AwsApi(this.authFrom(ctx));
+    if (subKind === 'service') {
+      const services = await api.listEcsServices(resourceId);
+      return services.map((s: AwsEcsService) => ({
+        id: s.name,
+        kind: 'service',
+        name: s.name,
+        status: (s.status || '').toLowerCase(),
+        details: {
+          summary: `${s.running ?? 0}/${s.desired ?? 0} running${s.pending ? ` · ${s.pending} pending` : ''}${s.launchType ? ` · ${s.launchType}` : ''}`,
+          desired: s.desired ?? 0,
+          running: s.running ?? 0,
+        },
+      }));
+    }
+    if (subKind === 'task') {
+      const tasks = await api.listEcsTasks(resourceId);
+      return tasks.map((t: AwsEcsTask) => ({
+        id: t.arn,
+        kind: 'task',
+        name: t.id,
+        status: (t.lastStatus || '').toLowerCase(),
+        details: {
+          summary: [t.taskDefinition, t.group].filter(Boolean).join(' · ') || '—',
+        },
+      }));
+    }
+    return [];
+  }
+
+  async operationDefaults(
     ctx: ConnectorContext,
     operationId: string,
-    _resourceId: string | undefined,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (operationId === 'ecs-scale-service' && resourceId && values.service) {
+      try {
+        const api = new AwsApi(this.authFrom(ctx));
+        const svc = (await api.listEcsServices(resourceId)).find((s) => s.name === String(values.service));
+        if (svc?.desired != null) return { desiredCount: svc.desired };
+      } catch {
+        /* best-effort prefill */
+      }
+    }
+    return {};
+  }
+
+  private async runEcsOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
+    const api = new AwsApi(this.authFrom(ctx));
+    const cluster = resourceId;
+    if (!cluster) return { ok: false, message: 'Missing ECS cluster.' };
+    try {
+      if (operationId === 'ecs-scale-service') {
+        const service = String(values.service ?? '');
+        if (!service) return { ok: false, message: 'Missing service.' };
+        const desired = Number(values.desiredCount);
+        if (!Number.isInteger(desired) || desired < 0) return { ok: false, message: 'Desired task count must be 0 or more.' };
+        onProgress(`Scaling ${service} to ${desired} task${desired === 1 ? '' : 's'}…`);
+        await api.updateEcsService(cluster, service, { desiredCount: desired });
+        ctx.log('info', `AWS ECS scaled ${service} to ${desired} in ${cluster}.`);
+        return { ok: true, message: `Scaled ${service} to ${desired} task${desired === 1 ? '' : 's'}.` };
+      }
+      if (operationId === 'ecs-redeploy-service') {
+        const service = String(values.service ?? '');
+        if (!service) return { ok: false, message: 'Missing service.' };
+        onProgress(`Redeploying ${service}…`);
+        await api.updateEcsService(cluster, service, { forceNewDeployment: true });
+        ctx.log('info', `AWS ECS redeployed ${service} in ${cluster}.`);
+        return { ok: true, message: `New deployment started for ${service}.` };
+      }
+      if (operationId === 'ecs-stop-task') {
+        const task = String(values.task ?? '');
+        if (!task) return { ok: false, message: 'Missing task.' };
+        onProgress(`Stopping task ${task.split('/').pop()}…`);
+        await api.stopEcsTask(cluster, task);
+        ctx.log('warn', `AWS ECS stopped task ${task} in ${cluster}.`);
+        return { ok: true, message: `Stop requested for task ${task.split('/').pop()}.` };
+      }
+      return { ok: false, message: `Unknown operation "${operationId}".` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Operation failed.';
+      ctx.log('error', `AWS ECS ${operationId} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  async runOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+  ): Promise<OperationResult> {
+    if (operationId.startsWith('ecs-')) return this.runEcsOperation(ctx, operationId, resourceId, values, onProgress);
     if (operationId !== 'launch-ec2') return { ok: false, message: `Unknown operation "${operationId}".` };
     const api = new AwsApi(this.authFrom(ctx));
     try {
