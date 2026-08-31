@@ -121,9 +121,9 @@ export function OverviewResources() {
                   <ChevronRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                 </Link>
                 <Card>
-                  <CardContent className="p-0">
+                  <CardContent className="p-0 overflow-x-auto">
                     {isNodes ? (
-                      <table className="w-full text-sm">
+                      <table className="w-full min-w-[560px] text-sm">
                         <thead className="text-left text-muted-foreground border-b border-border">
                           <tr>
                             <th className="px-4 py-3 font-medium">Node</th>
@@ -151,7 +151,7 @@ export function OverviewResources() {
                         </tbody>
                       </table>
                     ) : (
-                      <table className="w-full text-sm">
+                      <table className="w-full min-w-[560px] text-sm">
                         <thead className="text-left text-muted-foreground border-b border-border">
                           <tr>
                             <th className="px-4 py-3 font-medium">Name</th>
