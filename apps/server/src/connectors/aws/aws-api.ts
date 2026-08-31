@@ -56,6 +56,8 @@ export interface AwsInstance {
   az?: string;
   privateIp?: string;
   publicIp?: string;
+  /** True when the instance's public IP is an Elastic IP (not an auto-assigned one). */
+  publicIpElastic?: boolean;
   privateDns?: string;
   publicDns?: string;
   vpcId?: string;
@@ -275,6 +277,15 @@ function tagsToMap(tags?: Tag[]): Record<string, string> {
 
 function normalize(i: Instance): AwsInstance {
   const tags = tagsToMap(i.Tags);
+  // An Elastic IP shows up on the network interface's association with an
+  // IpOwnerId that's the account (not "amazon", which marks an auto-assigned IP).
+  let publicIpElastic = false;
+  for (const ni of i.NetworkInterfaces ?? []) {
+    const assoc = ni.Association;
+    if (assoc?.PublicIp && assoc.PublicIp === i.PublicIpAddress) {
+      publicIpElastic = !!assoc.IpOwnerId && assoc.IpOwnerId !== 'amazon';
+    }
+  }
   return {
     id: i.InstanceId ?? '',
     name: tags['Name'] || undefined,
@@ -284,6 +295,7 @@ function normalize(i: Instance): AwsInstance {
     az: i.Placement?.AvailabilityZone,
     privateIp: i.PrivateIpAddress,
     publicIp: i.PublicIpAddress,
+    publicIpElastic,
     privateDns: i.PrivateDnsName || undefined,
     publicDns: i.PublicDnsName || undefined,
     vpcId: i.VpcId,

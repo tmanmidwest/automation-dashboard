@@ -347,7 +347,8 @@ export class AwsConnector implements Connector {
         // and `cpu` (resource summary). EC2 has no node, so surface the AZ/type.
         node: i.az ?? null,
         cpu: i.type ?? null,
-        ip: i.publicIp || i.privateIp || null,
+        // Show private + public together; tag the public one when it's an Elastic IP.
+        ip: [i.privateIp, i.publicIp ? `${i.publicIp}${i.publicIpElastic ? ' (EIP)' : ''}` : null].filter(Boolean).join(' · ') || null,
         type: i.type ?? null,
         az: i.az ?? null,
         privateIp: i.privateIp ?? null,
@@ -528,7 +529,7 @@ export class AwsConnector implements Connector {
         items: [
           { label: 'Availability zone', value: inst.az || '—' },
           { label: 'Private IP', value: inst.privateIp || '—', variant: 'mono' },
-          { label: 'Public IP', value: inst.publicIp || '—', variant: 'mono' },
+          { label: inst.publicIpElastic ? 'Public IP (Elastic)' : 'Public IP', value: inst.publicIp || '—', variant: 'mono' },
           { label: 'Private DNS', value: inst.privateDns || '—', variant: 'mono' },
           { label: 'Public DNS', value: inst.publicDns || '—', variant: 'mono' },
           { label: 'VPC', value: inst.vpcId || '—', variant: 'mono' },
