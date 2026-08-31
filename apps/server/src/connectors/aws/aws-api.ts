@@ -472,7 +472,8 @@ export class AwsApi {
       const out: string[] = [];
       let token: string | undefined;
       do {
-        const r = await this.eks.send(new ListClustersCommand({ nextToken: token }));
+        // include 'all' so connected/registered clusters are returned too, not just native EKS.
+        const r = await this.eks.send(new ListClustersCommand({ nextToken: token, include: ['all'] }));
         out.push(...(r.clusters ?? []));
         token = r.nextToken;
       } while (token);
@@ -487,20 +488,31 @@ export class AwsApi {
    * ListNodegroups (names only) so we can show a node-group count without a
    * DescribeNodegroup per group. Full node-group specs are fetched on demand in
    * describeEksCluster (the detail drawer).
+   *
+   * Each cluster is fetched INDEPENDENTLY: a cluster that's mid-lifecycle
+   * (creating/deleting/failed) can make DescribeCluster or ListNodegroups throw,
+   * and we must never let that hide the other clusters — a failed lookup still
+   * surfaces the cluster (by name), and node-group counts degrade to 0.
    */
   async listEksClusters(): Promise<AwsEksCluster[]> {
-    try {
-      const names = await this.listEksClusterNames();
-      return await Promise.all(
-        names.map(async (n) => {
-          const cluster = await this.describeEksCluster(n, false);
+    const names = await this.listEksClusterNames();
+    return await Promise.all(
+      names.map(async (n) => {
+        let cluster: AwsEksCluster;
+        try {
+          cluster = await this.describeEksCluster(n, false);
+        } catch {
+          // Describe failed (transitional/denied) — still show the cluster.
+          cluster = { name: n, status: 'UNKNOWN', tags: {}, nodegroups: [] };
+        }
+        try {
           cluster.nodegroups = (await this.listEksNodegroupNames(n)).map((name) => ({ name }));
-          return cluster;
-        }),
-      );
-    } catch (err) {
-      throw friendly(err);
-    }
+        } catch {
+          cluster.nodegroups = [];
+        }
+        return cluster;
+      }),
+    );
   }
 
   /** One cluster's details; set withNodegroups to also fetch full node group specs. */
