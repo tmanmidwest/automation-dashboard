@@ -391,27 +391,44 @@ export function ConnectorDetail() {
         </CardContent></Card>
       ) : (
         <>
-          {connMetrics.length > 0 && (
-            <div className="mb-4">
-              {connMetrics.some((m) => m.key.startsWith('cost')) && canWrite && (
-                <div className="flex items-center justify-end mb-2">
-                  <Button variant="ghost" size="sm" onClick={refreshBilling} disabled={billingRefreshing}
-                    title="Force a fresh pull from AWS Cost Explorer (one billable ~$0.01 call), bypassing the daily cache">
-                    <RefreshCw className={cn('h-4 w-4', billingRefreshing && 'animate-spin')} /> Refresh billing
-                  </Button>
-                </div>
-              )}
-              <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-                {connMetrics.map((m) => (
-                  <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
-                    <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
-                    <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
-                    {m.asOf && <p className="text-[10px] text-muted-foreground/60">as of {shortDateTime(m.asOf)}</p>}
+          {connMetrics.length > 0 && (() => {
+            const svcMetrics = connMetrics.filter((m) => m.key.startsWith('costSvc:'));
+            const mainMetrics = connMetrics.filter((m) => !m.key.startsWith('costSvc:'));
+            return (
+              <div className="mb-4">
+                {connMetrics.some((m) => m.key.startsWith('cost')) && canWrite && (
+                  <div className="flex items-center justify-end mb-2">
+                    <Button variant="ghost" size="sm" onClick={refreshBilling} disabled={billingRefreshing}
+                      title="Force a fresh pull from AWS Cost Explorer (one billable ~$0.01 call), bypassing the daily cache">
+                      <RefreshCw className={cn('h-4 w-4', billingRefreshing && 'animate-spin')} /> Refresh billing
+                    </Button>
                   </div>
-                ))}
+                )}
+                <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+                  {mainMetrics.map((m) => (
+                    <div key={m.key} className="rounded-xl border border-border/60 bg-card/70 px-3 py-2.5">
+                      <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 truncate">{m.label}</p>
+                      <p className="text-lg font-semibold tracking-tight">{fmtMetric(m)}</p>
+                      {m.asOf && <p className="text-[10px] text-muted-foreground/60">as of {shortDateTime(m.asOf)}</p>}
+                    </div>
+                  ))}
+                </div>
+                {svcMetrics.length > 0 && (
+                  <div className="mt-3 rounded-xl border border-border/60 bg-card/70 p-3">
+                    <p className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground mb-2">Spend by service (MTD)</p>
+                    <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
+                      {svcMetrics.map((m) => (
+                        <div key={m.key} className="flex items-center justify-between gap-3 text-sm border-b border-border/40 py-1 last:border-0">
+                          <span className="text-muted-foreground truncate">{m.label}</span>
+                          <span className="font-medium tabular-nums shrink-0">{fmtMetric(m)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
           <div className="flex items-center justify-between mb-4">
             <div className="inline-flex rounded-lg border border-border p-1 bg-card">
               {manifest.resourceKinds.map((k) => (

@@ -12,11 +12,19 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask } from './aws-api';
+import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask, AwsElasticIp, AwsVolume, AwsRdsInstance, AwsS3Bucket } from './aws-api';
 
 const EC2_KIND = 'ec2';
 const EKS_KIND = 'eks';
 const ECS_KIND = 'ecs';
+const EIP_KIND = 'eip';
+const EBS_KIND = 'ebs';
+const RDS_KIND = 'rds';
+const S3_KIND = 's3';
+
+function bytesGb(gb?: number): string {
+  return gb != null ? `${gb} GB` : '—';
+}
 
 /** EC2 states in which an instance can no longer be acted upon. */
 const DEAD_STATES = ['terminated', 'shutting-down'];
@@ -62,7 +70,7 @@ export class AwsConnector implements Connector {
   manifest: ConnectorManifest = {
     id: 'aws',
     name: 'Amazon Web Services',
-    description: 'View and manage Amazon EC2 instances and view EKS and ECS clusters in an AWS account and region.',
+    description: 'Manage EC2 instances and view/manage EKS, ECS, RDS, EBS, Elastic IPs, and S3 across an AWS account, plus spend by service.',
     version: '1.0.0',
     icon: 'aws',
     configFields: [
@@ -149,6 +157,37 @@ export class AwsConnector implements Connector {
           },
         ],
       },
+      {
+        id: RDS_KIND,
+        label: 'RDS Databases',
+        actions: [
+          { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped'] },
+          { id: 'stop', label: 'Stop', mutating: true, confirm: 'Stop this database? RDS auto-starts it again after 7 days.', showWhenStatus: ['available'] },
+          { id: 'reboot', label: 'Reboot', mutating: true, confirm: 'Reboot this database?', showWhenStatus: ['available'] },
+        ],
+        deletable: false,
+      },
+      {
+        id: EBS_KIND,
+        label: 'EBS Volumes',
+        actions: [],
+        // Deletable via the drawer, but only when the volume is unattached (guarded server-side).
+        deletable: true,
+      },
+      {
+        id: EIP_KIND,
+        label: 'Elastic IPs',
+        actions: [
+          { id: 'release', label: 'Release', mutating: true, confirm: 'Release this Elastic IP back to AWS? This frees it (and its charge) but the address is lost.', showWhenStatus: ['unassociated'], intent: 'destructive' },
+        ],
+        deletable: false,
+      },
+      {
+        id: S3_KIND,
+        label: 'S3 Buckets',
+        actions: [],
+        deletable: false,
+      },
     ],
     operations: [
       {
@@ -221,6 +260,9 @@ export class AwsConnector implements Connector {
         'eks:ListClusters, eks:DescribeCluster, eks:ListNodegroups, eks:DescribeNodegroup — OPTIONAL, to list EKS clusters and node groups. No AWS-managed read policy covers these for a user; attach a small custom policy with these four actions (Resource "*").',
         'ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices, ecs:ListTasks, ecs:DescribeTasks — OPTIONAL, to list ECS clusters, services, and tasks.',
         'ecs:UpdateService, ecs:StopTask — OPTIONAL, to scale/redeploy services and stop tasks from Cerebro.',
+        'rds:DescribeDBInstances (+ ListTagsForResource), rds:StartDBInstance/StopDBInstance/RebootDBInstance — OPTIONAL, to view and start/stop/reboot RDS databases.',
+        'ec2:DescribeVolumes, ec2:DescribeAddresses — OPTIONAL, for the EBS Volumes and Elastic IPs tabs (in AmazonEC2ReadOnlyAccess). ec2:DeleteVolume, ec2:ReleaseAddress — to delete unattached volumes / release idle Elastic IPs.',
+        's3:ListAllMyBuckets, s3:GetBucketLocation — OPTIONAL, for the S3 Buckets tab (buckets are global — shows all buckets in the account).',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -294,12 +336,93 @@ export class AwsConnector implements Connector {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((c) => this.toEcsResource(c));
     }
+    if (kind === RDS_KIND) {
+      const dbs = await api.listRdsInstances();
+      return dbs.slice().sort((a, b) => a.id.localeCompare(b.id)).map((d) => this.toRdsResource(d));
+    }
+    if (kind === EBS_KIND) {
+      const vols = await api.listVolumes();
+      return vols.slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id)).map((v) => this.toEbsResource(v));
+    }
+    if (kind === EIP_KIND) {
+      const eips = await api.listElasticIps();
+      return eips.slice().sort((a, b) => (a.publicIp || '').localeCompare(b.publicIp || '')).map((e) => this.toEipResource(e));
+    }
+    if (kind === S3_KIND) {
+      const buckets = await api.listS3Buckets();
+      return buckets.slice().sort((a, b) => a.name.localeCompare(b.name)).map((b) => this.toS3Resource(b));
+    }
     if (kind !== EC2_KIND) return [];
     const instances = await api.describeInstances();
     return instances
       .filter((i) => i.state !== 'terminated')
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
       .map((i) => this.toResource(i));
+  }
+
+  private toRdsResource(d: AwsRdsInstance): ConnectorResource {
+    return {
+      id: d.id,
+      kind: RDS_KIND,
+      name: d.id,
+      status: d.status.toLowerCase(),
+      details: {
+        node: d.az ?? null,
+        cpu: [d.engine, d.instanceClass].filter(Boolean).join(' · ') || null,
+        ip: d.endpoint ?? null,
+        engine: d.engineVersion ? `${d.engine ?? ''} ${d.engineVersion}` : d.engine ?? null,
+        storage: d.allocatedStorageGb != null ? `${d.allocatedStorageGb} GB ${d.storageType ?? ''}`.trim() : null,
+        multiAZ: d.multiAZ ? 'yes' : 'no',
+      },
+      tags: d.tags,
+    };
+  }
+
+  private toEbsResource(v: AwsVolume): ConnectorResource {
+    return {
+      id: v.id,
+      kind: EBS_KIND,
+      name: v.name || v.id,
+      status: v.state.toLowerCase(), // available (unattached) | in-use | ...
+      details: {
+        node: v.az ?? null,
+        cpu: [bytesGb(v.sizeGb), v.volumeType].filter((x) => x && x !== '—').join(' · ') || null,
+        attachedTo: v.attachedInstanceId ?? null,
+        iops: v.iops != null ? String(v.iops) : null,
+        encrypted: v.encrypted ? 'yes' : 'no',
+      },
+      tags: v.tags,
+    };
+  }
+
+  private toEipResource(e: AwsElasticIp): ConnectorResource {
+    return {
+      id: e.allocationId,
+      kind: EIP_KIND,
+      name: e.name || e.publicIp || e.allocationId,
+      status: e.associated ? 'associated' : 'unassociated',
+      details: {
+        ip: e.publicIp ?? null,
+        allocationId: e.allocationId,
+        attachedTo: e.instanceId ?? e.networkInterfaceId ?? null,
+        privateIp: e.privateIp ?? null,
+      },
+      tags: e.tags,
+    };
+  }
+
+  private toS3Resource(b: AwsS3Bucket): ConnectorResource {
+    return {
+      id: b.name,
+      kind: S3_KIND,
+      name: b.name,
+      // Buckets have no lifecycle status; surface the region here so the pill isn't empty.
+      status: b.region || 'bucket',
+      details: {
+        node: b.region ?? null,
+        created: b.createdAt ? b.createdAt.toISOString().slice(0, 10) : null,
+      },
+    };
   }
 
   private toEcsResource(c: AwsEcsCluster): ConnectorResource {
@@ -366,9 +489,25 @@ export class AwsConnector implements Connector {
     resourceId: string,
     actionId: string,
   ): Promise<{ ok: boolean; message: string }> {
-    if (kind !== EC2_KIND) return { ok: false, message: `Unknown resource kind "${kind}".` };
     const api = new AwsApi(this.authFrom(ctx));
     try {
+      if (kind === RDS_KIND) {
+        switch (actionId) {
+          case 'start': await api.startRds(resourceId); break;
+          case 'stop': await api.stopRds(resourceId); break;
+          case 'reboot': await api.rebootRds(resourceId); break;
+          default: return { ok: false, message: `Unsupported action "${actionId}".` };
+        }
+        ctx.log('info', `AWS RDS ${actionId} on ${resourceId} requested.`);
+        return { ok: true, message: `${actionId} requested for ${resourceId}.` };
+      }
+      if (kind === EIP_KIND) {
+        if (actionId !== 'release') return { ok: false, message: `Unsupported action "${actionId}".` };
+        await api.releaseElasticIp(resourceId);
+        ctx.log('warn', `AWS released Elastic IP ${resourceId}.`);
+        return { ok: true, message: `Released Elastic IP ${resourceId}.` };
+      }
+      if (kind !== EC2_KIND) return { ok: false, message: `Unknown resource kind "${kind}".` };
       switch (actionId) {
         case 'start':
           await api.startInstances([resourceId]);
@@ -489,10 +628,118 @@ export class AwsConnector implements Connector {
     return { id: c.name, kind: ECS_KIND, name: c.name, status: c.status.toLowerCase(), groups };
   }
 
+  private tagsGroup(tags: Record<string, string>): ConnectorDetailGroup {
+    const keys = Object.keys(tags).filter((k) => k !== 'Name').sort((a, b) => a.localeCompare(b));
+    return {
+      title: keys.length ? `Tags (${keys.length})` : 'Tags',
+      items: keys.length ? keys.map((k) => ({ label: k, value: tags[k] || '—' })) : [{ label: '—', value: 'No tags assigned' }],
+    };
+  }
+
+  private async describeRds(api: AwsApi, id: string): Promise<ConnectorResourceDetail> {
+    const [d] = await api.listRdsInstances([id]);
+    if (!d) throw new Error(`RDS instance ${id} not found in this region.`);
+    const groups: ConnectorDetailGroup[] = [
+      {
+        title: 'General',
+        items: [
+          { label: 'Identifier', value: d.id, variant: 'mono' },
+          { label: 'Status', value: d.status.toLowerCase(), variant: 'status' },
+          { label: 'Engine', value: [d.engine, d.engineVersion].filter(Boolean).join(' ') || '—' },
+          { label: 'Instance class', value: d.instanceClass || '—' },
+          { label: 'Storage', value: d.allocatedStorageGb != null ? `${d.allocatedStorageGb} GB ${d.storageType ?? ''}`.trim() : '—' },
+          { label: 'Multi-AZ', value: d.multiAZ ? 'Yes' : 'No' },
+          { label: 'Availability zone', value: d.az || '—' },
+          { label: 'Publicly accessible', value: d.publiclyAccessible ? 'Yes' : 'No' },
+          { label: 'ARN', value: d.arn || '—', variant: 'mono' },
+        ],
+      },
+      {
+        title: 'Connection',
+        items: [
+          { label: 'Endpoint', value: d.endpoint || '—', variant: 'mono' },
+          { label: 'Port', value: d.port != null ? String(d.port) : '—' },
+        ],
+      },
+      this.tagsGroup(d.tags),
+    ];
+    return { id: d.id, kind: RDS_KIND, name: d.id, status: d.status.toLowerCase(), groups };
+  }
+
+  private async describeEbs(api: AwsApi, id: string): Promise<ConnectorResourceDetail> {
+    const v = (await api.listVolumes()).find((x) => x.id === id);
+    if (!v) throw new Error(`Volume ${id} not found in this region.`);
+    const groups: ConnectorDetailGroup[] = [
+      {
+        title: 'General',
+        items: [
+          { label: 'Volume ID', value: v.id, variant: 'mono' },
+          { label: 'Name', value: v.name || '—' },
+          { label: 'State', value: v.state.toLowerCase(), variant: 'status' },
+          { label: 'Size', value: bytesGb(v.sizeGb) },
+          { label: 'Type', value: v.volumeType || '—' },
+          { label: 'IOPS', value: v.iops != null ? String(v.iops) : '—' },
+          { label: 'Throughput', value: v.throughput != null ? `${v.throughput} MB/s` : '—' },
+          { label: 'Encrypted', value: v.encrypted ? 'Yes' : 'No' },
+          { label: 'Availability zone', value: v.az || '—' },
+          { label: 'Attached to', value: v.attachedInstanceId ? `${v.attachedInstanceId}${v.attachedDevice ? ` (${v.attachedDevice})` : ''}` : '— (unattached)' },
+        ],
+      },
+      this.tagsGroup(v.tags),
+    ];
+    return { id: v.id, kind: EBS_KIND, name: v.name || v.id, status: v.state.toLowerCase(), groups };
+  }
+
+  private async describeEip(api: AwsApi, allocationId: string): Promise<ConnectorResourceDetail> {
+    const e = (await api.listElasticIps()).find((x) => x.allocationId === allocationId);
+    if (!e) throw new Error(`Elastic IP ${allocationId} not found in this region.`);
+    const groups: ConnectorDetailGroup[] = [
+      {
+        title: 'General',
+        items: [
+          { label: 'Public IP', value: e.publicIp || '—', variant: 'mono' },
+          { label: 'Allocation ID', value: e.allocationId, variant: 'mono' },
+          { label: 'Status', value: e.associated ? 'associated' : 'unassociated', variant: 'status' },
+          { label: 'Associated instance', value: e.instanceId || '—', variant: 'mono' },
+          { label: 'Network interface', value: e.networkInterfaceId || '—', variant: 'mono' },
+          { label: 'Private IP', value: e.privateIp || '—', variant: 'mono' },
+          { label: 'Domain', value: e.domain || '—' },
+        ],
+      },
+      this.tagsGroup(e.tags),
+    ];
+    return { id: e.allocationId, kind: EIP_KIND, name: e.name || e.publicIp || e.allocationId, status: e.associated ? 'associated' : 'unassociated', groups };
+  }
+
+  private async describeS3(api: AwsApi, name: string): Promise<ConnectorResourceDetail> {
+    const b = (await api.listS3Buckets()).find((x) => x.name === name);
+    if (!b) throw new Error(`Bucket ${name} not found.`);
+    return {
+      id: b.name,
+      kind: S3_KIND,
+      name: b.name,
+      status: b.region || 'bucket',
+      groups: [
+        {
+          title: 'General',
+          items: [
+            { label: 'Bucket', value: b.name, variant: 'mono' },
+            { label: 'Region', value: b.region || '—' },
+            { label: 'Created', value: b.createdAt ? b.createdAt.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC') : '—' },
+          ],
+        },
+      ],
+    };
+  }
+
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
     const api = new AwsApi(this.authFrom(ctx));
     if (kind === EKS_KIND) return this.describeEks(api, resourceId);
     if (kind === ECS_KIND) return this.describeEcs(api, resourceId);
+    if (kind === RDS_KIND) return this.describeRds(api, resourceId);
+    if (kind === EBS_KIND) return this.describeEbs(api, resourceId);
+    if (kind === EIP_KIND) return this.describeEip(api, resourceId);
+    if (kind === S3_KIND) return this.describeS3(api, resourceId);
     const [inst] = await api.describeInstances([resourceId]);
     if (!inst) throw new Error(`Instance ${resourceId} not found in this region.`);
 
@@ -578,10 +825,26 @@ export class AwsConnector implements Connector {
   }
 
   async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
+    const api = new AwsApi(this.authFrom(ctx));
+    if (kind === EBS_KIND) {
+      try {
+        const v = (await api.listVolumes()).find((x) => x.id === resourceId);
+        if (!v) return { ok: false, message: `Volume ${resourceId} not found in this region.` };
+        if (v.state !== 'available') {
+          return { ok: false, message: `Volume ${resourceId} is ${v.state} — detach it before deleting.` };
+        }
+        await api.deleteVolume(resourceId);
+        ctx.log('warn', `AWS deleted EBS volume ${resourceId} (${v.name ?? ''}).`);
+        return { ok: true, message: `Deleted volume ${v.name || resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete volume ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
     if (kind !== EC2_KIND) {
       return { ok: false, message: `Deleting ${kind} resources isn't supported from Cerebro yet.` };
     }
-    const api = new AwsApi(this.authFrom(ctx));
     try {
       const [inst] = await api.describeInstances([resourceId]);
       if (!inst) return { ok: false, message: `Instance ${resourceId} not found in this region.` };
@@ -642,13 +905,25 @@ export class AwsConnector implements Connector {
       /* eks not permitted / unavailable — omit */
     }
 
-    // Best-effort ECS cluster count (omit if no ecs:* permissions).
-    try {
-      const arns = await api.listEcsClusterArns();
-      if (arns.length) metrics.push({ key: 'ecsClusters', label: 'ECS clusters', value: arns.length });
-    } catch {
-      /* ecs not permitted / unavailable — omit */
-    }
+    // Best-effort resource counts across services (each omitted if not permitted).
+    // Run in parallel so the overview stays fast. Waste signals (unassociated EIP,
+    // unattached EBS) only surface when > 0.
+    const [eks, ecs, eips, vols, rds, s3] = await Promise.all([
+      api.listEksClusterNames().catch(() => null),
+      api.listEcsClusterArns().catch(() => null),
+      api.listElasticIps().catch(() => null),
+      api.listVolumes().catch(() => null),
+      api.listRdsInstances().catch(() => null),
+      api.listS3Buckets().catch(() => null),
+    ]);
+    if (eks?.length) metrics.push({ key: 'eksClusters', label: 'EKS clusters', value: eks.length });
+    if (ecs?.length) metrics.push({ key: 'ecsClusters', label: 'ECS clusters', value: ecs.length });
+    if (rds?.length) metrics.push({ key: 'rdsInstances', label: 'RDS databases', value: rds.length });
+    if (s3?.length) metrics.push({ key: 's3Buckets', label: 'S3 buckets', value: s3.length });
+    const eipIdle = eips?.filter((e) => !e.associated).length ?? 0;
+    if (eipIdle > 0) metrics.push({ key: 'eipUnassociated', label: 'Idle Elastic IPs', value: eipIdle });
+    const ebsIdle = vols?.filter((v) => v.state === 'available').length ?? 0;
+    if (ebsIdle > 0) metrics.push({ key: 'ebsUnattached', label: 'Unattached volumes', value: ebsIdle });
 
     // Best-effort spend (billable → cached a day). Unit is the currency code so the
     // UI renders it as money, and the dashboard sums it across AWS accounts.
@@ -657,6 +932,10 @@ export class AwsConnector implements Connector {
       metrics.push({ key: 'costLastMonth', label: 'Last month', value: round2(cost.lastMonth), unit: cost.currency, asOf: cost.asOf });
       metrics.push({ key: 'costMtd', label: 'Spend (MTD)', value: round2(cost.mtd), unit: cost.currency, asOf: cost.asOf });
       metrics.push({ key: 'costForecast', label: 'Est. this month', value: round2(cost.estimated), unit: cost.currency, asOf: cost.asOf });
+      // Spend broken down by service (keyed 'costSvc:<service>' so the UI can group them).
+      for (const s of cost.byService) {
+        metrics.push({ key: `costSvc:${s.service}`, label: s.service, value: round2(s.amount), unit: cost.currency, asOf: cost.asOf });
+      }
     }
 
     const guests = instances

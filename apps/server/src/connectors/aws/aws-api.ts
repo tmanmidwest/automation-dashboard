@@ -11,9 +11,21 @@ import {
   DescribeSubnetsCommand,
   DescribeSecurityGroupsCommand,
   RunInstancesCommand,
+  DescribeAddressesCommand,
+  ReleaseAddressCommand,
+  DescribeVolumesCommand,
+  DeleteVolumeCommand,
   type Instance,
   type Tag,
 } from '@aws-sdk/client-ec2';
+import {
+  RDSClient,
+  DescribeDBInstancesCommand,
+  StartDBInstanceCommand,
+  StopDBInstanceCommand,
+  RebootDBInstanceCommand,
+} from '@aws-sdk/client-rds';
+import { S3Client, ListBucketsCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand } from '@aws-sdk/client-cost-explorer';
 import {
@@ -168,6 +180,62 @@ export interface AwsEcsCluster {
   services: AwsEcsService[];
 }
 
+export interface AwsElasticIp {
+  allocationId: string;
+  publicIp?: string;
+  associated: boolean;
+  instanceId?: string;
+  privateIp?: string;
+  networkInterfaceId?: string;
+  domain?: string;
+  name?: string;
+  tags: Record<string, string>;
+}
+
+export interface AwsVolume {
+  id: string;
+  name?: string;
+  state: string; // available | in-use | creating | deleting | ...
+  sizeGb?: number;
+  volumeType?: string;
+  iops?: number;
+  throughput?: number;
+  az?: string;
+  encrypted?: boolean;
+  attachedInstanceId?: string;
+  attachedDevice?: string;
+  createTime?: Date;
+  tags: Record<string, string>;
+}
+
+export interface AwsRdsInstance {
+  id: string;
+  status: string;
+  engine?: string;
+  engineVersion?: string;
+  instanceClass?: string;
+  allocatedStorageGb?: number;
+  storageType?: string;
+  multiAZ?: boolean;
+  endpoint?: string;
+  port?: number;
+  az?: string;
+  publiclyAccessible?: boolean;
+  arn?: string;
+  tags: Record<string, string>;
+}
+
+export interface AwsS3Bucket {
+  name: string;
+  createdAt?: Date;
+  region?: string;
+}
+
+export interface AwsCostServiceSlice {
+  service: string;
+  amount: number;
+}
+
 export interface AwsCostSummary {
   /** Previous calendar month's total spend. */
   lastMonth: number;
@@ -178,6 +246,8 @@ export interface AwsCostSummary {
   /** Estimated full-month spend (the month-end forecast, or MTD if no forecast is available). */
   estimated: number;
   currency: string;
+  /** Month-to-date spend broken down by AWS service, highest first. */
+  byService: AwsCostServiceSlice[];
   /** ISO timestamp this figure was fetched from Cost Explorer. */
   asOf: string;
 }
@@ -267,6 +337,30 @@ function friendly(err: unknown): AwsApiError {
     return new AwsApiError(msg, code);
   }
   return new AwsApiError(msg || 'AWS request failed.', code);
+}
+
+/** Shorten AWS's verbose Cost Explorer service names for compact display. */
+function shortAwsService(name: string): string {
+  const map: Record<string, string> = {
+    'Amazon Elastic Compute Cloud - Compute': 'EC2',
+    'EC2 - Other': 'EC2 - Other',
+    'Amazon Simple Storage Service': 'S3',
+    'Amazon Relational Database Service': 'RDS',
+    'Amazon Elastic Container Service': 'ECS',
+    'Amazon Elastic Container Service for Kubernetes': 'EKS',
+    'Amazon Elastic Kubernetes Service': 'EKS',
+    'Amazon Elastic Load Balancing': 'ELB',
+    'Amazon Elastic Block Store': 'EBS',
+    'Amazon Virtual Private Cloud': 'VPC',
+    'AWS Lambda': 'Lambda',
+    'Amazon CloudFront': 'CloudFront',
+    'Amazon Route 53': 'Route 53',
+    'AWS Key Management Service': 'KMS',
+    'AmazonCloudWatch': 'CloudWatch',
+    'AWS Data Transfer': 'Data Transfer',
+    'Tax': 'Tax',
+  };
+  return map[name] ?? name.replace(/^Amazon |^AWS /, '');
 }
 
 function tagsToMap(tags?: Tag[]): Record<string, string> {
@@ -447,7 +541,33 @@ export class AwsApi {
 
       // The forecast is the month-end total; fall back to MTD if unavailable.
       const estimated = forecast > 0 ? Math.max(mtd, forecast) : mtd;
-      return { lastMonth, mtd, forecast, estimated, currency, asOf: new Date().toISOString() };
+
+      // Month-to-date spend grouped by service (best-effort — one more CE call).
+      let byService: AwsCostServiceSlice[] = [];
+      try {
+        if (today !== monthStart) {
+          const grp = await this.ce.send(
+            new GetCostAndUsageCommand({
+              TimePeriod: { Start: monthStart, End: today },
+              Granularity: 'MONTHLY',
+              Metrics: ['UnblendedCost'],
+              GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }],
+            }),
+          );
+          const slices: AwsCostServiceSlice[] = [];
+          for (const r of grp.ResultsByTime ?? []) {
+            for (const g of r.Groups ?? []) {
+              const amount = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
+              if (amount > 0) slices.push({ service: shortAwsService(g.Keys?.[0] || 'Other'), amount });
+            }
+          }
+          byService = slices.sort((a, b) => b.amount - a.amount).slice(0, 8);
+        }
+      } catch {
+        byService = [];
+      }
+
+      return { lastMonth, mtd, forecast, estimated, currency, byService, asOf: new Date().toISOString() };
     } catch (err) {
       throw friendly(err);
     }
@@ -796,6 +916,176 @@ export class AwsApi {
   async stopEcsTask(cluster: string, task: string, reason = 'Stopped from Cerebro'): Promise<void> {
     try {
       await this.ecs.send(new EcsStopTaskCommand({ cluster, task, reason }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── Elastic IPs (EC2 API) ──
+  async listElasticIps(): Promise<AwsElasticIp[]> {
+    try {
+      const r = await this.ec2.send(new DescribeAddressesCommand({}));
+      return (r.Addresses ?? []).map((a) => {
+        const tags = tagsToMap(a.Tags);
+        return {
+          allocationId: a.AllocationId ?? a.PublicIp ?? '',
+          publicIp: a.PublicIp,
+          associated: !!(a.AssociationId || a.InstanceId || a.NetworkInterfaceId),
+          instanceId: a.InstanceId || undefined,
+          privateIp: a.PrivateIpAddress || undefined,
+          networkInterfaceId: a.NetworkInterfaceId || undefined,
+          domain: a.Domain,
+          name: tags['Name'] || undefined,
+          tags,
+        };
+      });
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async releaseElasticIp(allocationId: string): Promise<void> {
+    try {
+      await this.ec2.send(new ReleaseAddressCommand({ AllocationId: allocationId }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── EBS volumes (EC2 API) ──
+  async listVolumes(): Promise<AwsVolume[]> {
+    try {
+      const out: AwsVolume[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ec2.send(new DescribeVolumesCommand({ NextToken: token, MaxResults: 500 }));
+        for (const v of r.Volumes ?? []) {
+          const tags = tagsToMap(v.Tags);
+          const att = (v.Attachments ?? [])[0];
+          out.push({
+            id: v.VolumeId ?? '',
+            name: tags['Name'] || undefined,
+            state: v.State ?? 'unknown',
+            sizeGb: v.Size,
+            volumeType: v.VolumeType,
+            iops: v.Iops,
+            throughput: v.Throughput,
+            az: v.AvailabilityZone,
+            encrypted: v.Encrypted,
+            attachedInstanceId: att?.InstanceId,
+            attachedDevice: att?.Device,
+            createTime: v.CreateTime,
+            tags,
+          });
+        }
+        token = r.NextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async deleteVolume(volumeId: string): Promise<void> {
+    try {
+      await this.ec2.send(new DeleteVolumeCommand({ VolumeId: volumeId }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── RDS ──
+  private _rds?: RDSClient;
+  private get rds(): RDSClient {
+    if (!this._rds) this._rds = new RDSClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    return this._rds;
+  }
+
+  async listRdsInstances(ids?: string[]): Promise<AwsRdsInstance[]> {
+    try {
+      const out: AwsRdsInstance[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.rds.send(
+          new DescribeDBInstancesCommand({
+            Marker: marker,
+            ...(ids?.length ? { DBInstanceIdentifier: ids[0] } : {}),
+          }),
+        );
+        for (const d of r.DBInstances ?? []) {
+          const tags: Record<string, string> = {};
+          for (const t of d.TagList ?? []) if (t.Key) tags[t.Key] = t.Value ?? '';
+          out.push({
+            id: d.DBInstanceIdentifier ?? '',
+            status: d.DBInstanceStatus ?? 'unknown',
+            engine: d.Engine,
+            engineVersion: d.EngineVersion,
+            instanceClass: d.DBInstanceClass,
+            allocatedStorageGb: d.AllocatedStorage,
+            storageType: d.StorageType,
+            multiAZ: d.MultiAZ,
+            endpoint: d.Endpoint?.Address,
+            port: d.Endpoint?.Port,
+            az: d.AvailabilityZone,
+            publiclyAccessible: d.PubliclyAccessible,
+            arn: d.DBInstanceArn,
+            tags,
+          });
+        }
+        marker = r.Marker;
+      } while (marker && !ids?.length);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async startRds(id: string): Promise<void> {
+    try {
+      await this.rds.send(new StartDBInstanceCommand({ DBInstanceIdentifier: id }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+  async stopRds(id: string): Promise<void> {
+    try {
+      await this.rds.send(new StopDBInstanceCommand({ DBInstanceIdentifier: id }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+  async rebootRds(id: string): Promise<void> {
+    try {
+      await this.rds.send(new RebootDBInstanceCommand({ DBInstanceIdentifier: id }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── S3 (global service) ──
+  private _s3?: S3Client;
+  private get s3(): S3Client {
+    if (!this._s3) this._s3 = new S3Client({ region: this.auth.region || 'us-east-1', credentials: this.credentials, maxAttempts: 3 });
+    return this._s3;
+  }
+
+  /** All buckets in the account (S3 is global). Region is fetched per-bucket, best-effort. */
+  async listS3Buckets(): Promise<AwsS3Bucket[]> {
+    try {
+      const r = await this.s3.send(new ListBucketsCommand({}));
+      const buckets = (r.Buckets ?? []).map((b) => ({ name: b.Name ?? '', createdAt: b.CreationDate }));
+      // Best-effort region per bucket (GetBucketLocation is one cheap call each).
+      await Promise.all(
+        buckets.map(async (b) => {
+          try {
+            const loc = await this.s3.send(new GetBucketLocationCommand({ Bucket: b.name }));
+            (b as AwsS3Bucket).region = loc.LocationConstraint || 'us-east-1'; // null/empty = us-east-1
+          } catch {
+            /* no perms / access point — leave region blank */
+          }
+        }),
+      );
+      return buckets;
     } catch (err) {
       throw friendly(err);
     }
