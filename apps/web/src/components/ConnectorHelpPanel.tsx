@@ -1,6 +1,35 @@
-import { ExternalLink, KeyRound, ListChecks, Info, AlertTriangle } from 'lucide-react';
-import type { ConnectorHelp } from '@cerebro/shared';
+import { useState } from 'react';
+import { ExternalLink, KeyRound, ListChecks, Info, AlertTriangle, Copy, Check, FileCode2 } from 'lucide-react';
+import type { ConnectorHelp, ConnectorCodeSample } from '@cerebro/shared';
 import { Card, CardContent } from './ui/card';
+import { cn } from '@/lib/utils';
+
+function CodeSample({ sample }: { sample: ConnectorCodeSample }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(sample.code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked — user can select manually */ }
+  };
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <FileCode2 className="h-4 w-4 text-primary" />
+        <p className="font-medium">{sample.title}</p>
+        {sample.language && <span className="text-[10px] font-mono uppercase tracking-wider rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{sample.language}</span>}
+        <button onClick={copy} className={cn('ml-auto inline-flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors', copied ? 'text-emerald-400 border-emerald-500/40' : 'text-muted-foreground hover:text-foreground hover:border-primary/40')}>
+          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {sample.description && <p className="text-xs text-muted-foreground mb-2">{sample.description}</p>}
+      <pre className="max-h-80 overflow-auto rounded-md border border-border bg-background/70 p-3 text-xs leading-relaxed">
+        <code className="font-mono text-muted-foreground">{sample.code}</code>
+      </pre>
+    </div>
+  );
+}
 
 /** Renders a connector's setup reference: overview, steps, required permissions, links, notes. */
 export function ConnectorHelpPanel({ help }: { help?: ConnectorHelp }) {
@@ -35,6 +64,12 @@ export function ConnectorHelpPanel({ help }: { help?: ConnectorHelp }) {
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {help.codeSamples && help.codeSamples.length > 0 && (
+          <div className="space-y-4">
+            {help.codeSamples.map((s, i) => <CodeSample key={i} sample={s} />)}
           </div>
         )}
 

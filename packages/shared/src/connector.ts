@@ -45,6 +45,17 @@ export interface ConnectorHelp {
   referenceLinks?: ConnectorReferenceLink[];
   /** Freeform caution / notes shown as a callout. */
   notes?: string;
+  /** Copyable code samples shown on the setup screen (e.g. a full IAM policy JSON). */
+  codeSamples?: ConnectorCodeSample[];
+}
+
+export interface ConnectorCodeSample {
+  title: string;
+  /** Optional short description shown above the code block. */
+  description?: string;
+  /** Language hint (e.g. "json") — used for the label only. */
+  language?: string;
+  code: string;
 }
 
 /** Declarative description of a connector. The core reads this; it never imports connector code to render config. */

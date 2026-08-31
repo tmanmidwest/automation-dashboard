@@ -429,17 +429,17 @@ export function ConnectorDetail() {
               </div>
             );
           })()}
-          <div className="flex items-center justify-between mb-4">
-            <div className="inline-flex rounded-lg border border-border p-1 bg-card">
+          <div className="flex flex-wrap items-center justify-between gap-y-2 mb-4">
+            <div className="flex flex-wrap gap-1 rounded-lg border border-border p-1 bg-card">
               {manifest.resourceKinds.map((k) => (
                 <button key={k.id} onClick={() => setKind(k.id)}
-                  className={cn('px-4 py-1.5 text-sm rounded-md transition-colors',
+                  className={cn('px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap',
                     kind === k.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}>
                   {k.label}
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {hasTags && (
                 <div className="inline-flex items-center gap-1">
                   <select

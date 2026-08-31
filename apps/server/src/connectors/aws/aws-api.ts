@@ -15,6 +15,8 @@ import {
   ReleaseAddressCommand,
   DescribeVolumesCommand,
   DeleteVolumeCommand,
+  DescribeNatGatewaysCommand,
+  DescribeSnapshotsCommand,
   type Instance,
   type Tag,
 } from '@aws-sdk/client-ec2';
@@ -24,8 +26,14 @@ import {
   StartDBInstanceCommand,
   StopDBInstanceCommand,
   RebootDBInstanceCommand,
+  DescribeDBSnapshotsCommand,
 } from '@aws-sdk/client-rds';
 import { S3Client, ListBucketsCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3';
+import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
+import { CloudFrontClient, ListDistributionsCommand } from '@aws-sdk/client-cloudfront';
+import { DynamoDBClient, ListTablesCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
+import { ElastiCacheClient, DescribeCacheClustersCommand } from '@aws-sdk/client-elasticache';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand } from '@aws-sdk/client-cost-explorer';
 import {
@@ -234,6 +242,90 @@ export interface AwsS3Bucket {
 export interface AwsCostServiceSlice {
   service: string;
   amount: number;
+}
+
+export interface AwsNatGateway {
+  id: string;
+  state: string;
+  publicIp?: string;
+  privateIp?: string;
+  subnetId?: string;
+  vpcId?: string;
+  connectivityType?: string;
+  createTime?: Date;
+  name?: string;
+  tags: Record<string, string>;
+}
+
+export interface AwsLoadBalancer {
+  name: string;
+  arn?: string;
+  dnsName?: string;
+  type?: string; // application | network | gateway
+  scheme?: string;
+  state?: string;
+  vpcId?: string;
+  azCount?: number;
+  createdAt?: Date;
+}
+
+export interface AwsEbsSnapshot {
+  id: string;
+  volumeId?: string;
+  sizeGb?: number;
+  state?: string;
+  startTime?: Date;
+  description?: string;
+  encrypted?: boolean;
+  name?: string;
+  tags: Record<string, string>;
+}
+
+export interface AwsRdsSnapshot {
+  id: string;
+  dbInstanceId?: string;
+  type?: string;
+  status?: string;
+  sizeGb?: number;
+  engine?: string;
+  createdAt?: Date;
+}
+
+export interface AwsLambdaFunction {
+  name: string;
+  runtime?: string;
+  memoryMb?: number;
+  codeSizeBytes?: number;
+  timeoutSec?: number;
+  handler?: string;
+  lastModified?: string;
+  arch?: string;
+}
+
+export interface AwsCloudFrontDistribution {
+  id: string;
+  domainName?: string;
+  status?: string;
+  enabled?: boolean;
+  aliases: string[];
+  comment?: string;
+}
+
+export interface AwsDynamoTable {
+  name: string;
+  status?: string;
+  billingMode?: string;
+  itemCount?: number;
+  sizeBytes?: number;
+}
+
+export interface AwsElastiCacheCluster {
+  id: string;
+  engine?: string;
+  engineVersion?: string;
+  nodeType?: string;
+  nodes?: number;
+  status?: string;
 }
 
 export interface AwsCostSummary {
@@ -561,7 +653,7 @@ export class AwsApi {
               if (amount > 0) slices.push({ service: shortAwsService(g.Keys?.[0] || 'Other'), amount });
             }
           }
-          byService = slices.sort((a, b) => b.amount - a.amount).slice(0, 8);
+          byService = slices.sort((a, b) => b.amount - a.amount).slice(0, 12);
         }
       } catch {
         byService = [];
@@ -1086,6 +1178,254 @@ export class AwsApi {
         }),
       );
       return buckets;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── NAT Gateways (EC2 API) ──
+  async listNatGateways(): Promise<AwsNatGateway[]> {
+    try {
+      const out: AwsNatGateway[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ec2.send(new DescribeNatGatewaysCommand({ NextToken: token }));
+        for (const n of r.NatGateways ?? []) {
+          const tags = tagsToMap(n.Tags);
+          const addr = (n.NatGatewayAddresses ?? [])[0];
+          out.push({
+            id: n.NatGatewayId ?? '',
+            state: n.State ?? 'unknown',
+            publicIp: addr?.PublicIp,
+            privateIp: addr?.PrivateIp,
+            subnetId: n.SubnetId,
+            vpcId: n.VpcId,
+            connectivityType: n.ConnectivityType,
+            createTime: n.CreateTime,
+            name: tags['Name'] || undefined,
+            tags,
+          });
+        }
+        token = r.NextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── EBS Snapshots (EC2 API, owned by this account) ──
+  async listEbsSnapshots(): Promise<AwsEbsSnapshot[]> {
+    try {
+      const out: AwsEbsSnapshot[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ec2.send(new DescribeSnapshotsCommand({ OwnerIds: ['self'], NextToken: token, MaxResults: 1000 }));
+        for (const s of r.Snapshots ?? []) {
+          const tags = tagsToMap(s.Tags);
+          out.push({
+            id: s.SnapshotId ?? '',
+            volumeId: s.VolumeId,
+            sizeGb: s.VolumeSize,
+            state: s.State,
+            startTime: s.StartTime,
+            description: s.Description || undefined,
+            encrypted: s.Encrypted,
+            name: tags['Name'] || undefined,
+            tags,
+          });
+        }
+        token = r.NextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── Load Balancers (ELBv2) ──
+  private _elb?: ElasticLoadBalancingV2Client;
+  private get elb(): ElasticLoadBalancingV2Client {
+    if (!this._elb) this._elb = new ElasticLoadBalancingV2Client({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    return this._elb;
+  }
+  async listLoadBalancers(): Promise<AwsLoadBalancer[]> {
+    try {
+      const out: AwsLoadBalancer[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.elb.send(new DescribeLoadBalancersCommand({ Marker: marker }));
+        for (const lb of r.LoadBalancers ?? []) {
+          out.push({
+            name: lb.LoadBalancerName ?? '',
+            arn: lb.LoadBalancerArn,
+            dnsName: lb.DNSName,
+            type: lb.Type,
+            scheme: lb.Scheme,
+            state: lb.State?.Code,
+            vpcId: lb.VpcId,
+            azCount: lb.AvailabilityZones?.length,
+            createdAt: lb.CreatedTime,
+          });
+        }
+        marker = r.NextMarker;
+      } while (marker);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── RDS Snapshots ──
+  async listRdsSnapshots(): Promise<AwsRdsSnapshot[]> {
+    try {
+      const out: AwsRdsSnapshot[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.rds.send(new DescribeDBSnapshotsCommand({ Marker: marker }));
+        for (const s of r.DBSnapshots ?? []) {
+          out.push({
+            id: s.DBSnapshotIdentifier ?? '',
+            dbInstanceId: s.DBInstanceIdentifier,
+            type: s.SnapshotType,
+            status: s.Status,
+            sizeGb: s.AllocatedStorage,
+            engine: s.Engine,
+            createdAt: s.SnapshotCreateTime,
+          });
+        }
+        marker = r.Marker;
+      } while (marker);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── Lambda ──
+  private _lambda?: LambdaClient;
+  private get lambda(): LambdaClient {
+    if (!this._lambda) this._lambda = new LambdaClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    return this._lambda;
+  }
+  async listLambdaFunctions(): Promise<AwsLambdaFunction[]> {
+    try {
+      const out: AwsLambdaFunction[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.lambda.send(new ListFunctionsCommand({ Marker: marker }));
+        for (const f of r.Functions ?? []) {
+          out.push({
+            name: f.FunctionName ?? '',
+            runtime: f.Runtime,
+            memoryMb: f.MemorySize,
+            codeSizeBytes: f.CodeSize,
+            timeoutSec: f.Timeout,
+            handler: f.Handler,
+            lastModified: f.LastModified,
+            arch: (f.Architectures ?? [])[0],
+          });
+        }
+        marker = r.NextMarker;
+      } while (marker);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── CloudFront (global) ──
+  private _cf?: CloudFrontClient;
+  private get cf(): CloudFrontClient {
+    if (!this._cf) this._cf = new CloudFrontClient({ region: 'us-east-1', credentials: this.credentials, maxAttempts: 3 });
+    return this._cf;
+  }
+  async listCloudFrontDistributions(): Promise<AwsCloudFrontDistribution[]> {
+    try {
+      const out: AwsCloudFrontDistribution[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.cf.send(new ListDistributionsCommand({ Marker: marker }));
+        for (const d of r.DistributionList?.Items ?? []) {
+          out.push({
+            id: d.Id ?? '',
+            domainName: d.DomainName,
+            status: d.Status,
+            enabled: d.Enabled,
+            aliases: d.Aliases?.Items ?? [],
+            comment: d.Comment || undefined,
+          });
+        }
+        marker = r.DistributionList?.IsTruncated ? r.DistributionList?.NextMarker : undefined;
+      } while (marker);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── DynamoDB ──
+  private _ddb?: DynamoDBClient;
+  private get ddb(): DynamoDBClient {
+    if (!this._ddb) this._ddb = new DynamoDBClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    return this._ddb;
+  }
+  async listDynamoTables(): Promise<AwsDynamoTable[]> {
+    try {
+      const names: string[] = [];
+      let start: string | undefined;
+      do {
+        const r = await this.ddb.send(new ListTablesCommand({ ExclusiveStartTableName: start }));
+        names.push(...(r.TableNames ?? []));
+        start = r.LastEvaluatedTableName;
+      } while (start);
+      return await Promise.all(
+        names.map(async (name) => {
+          try {
+            const d = await this.ddb.send(new DescribeTableCommand({ TableName: name }));
+            const t = d.Table;
+            return {
+              name,
+              status: t?.TableStatus,
+              billingMode: t?.BillingModeSummary?.BillingMode || 'PROVISIONED',
+              itemCount: t?.ItemCount,
+              sizeBytes: t?.TableSizeBytes,
+            };
+          } catch {
+            return { name };
+          }
+        }),
+      );
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── ElastiCache ──
+  private _ec?: ElastiCacheClient;
+  private get elasticache(): ElastiCacheClient {
+    if (!this._ec) this._ec = new ElastiCacheClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    return this._ec;
+  }
+  async listElastiCacheClusters(): Promise<AwsElastiCacheCluster[]> {
+    try {
+      const out: AwsElastiCacheCluster[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await this.elasticache.send(new DescribeCacheClustersCommand({ Marker: marker }));
+        for (const c of r.CacheClusters ?? []) {
+          out.push({
+            id: c.CacheClusterId ?? '',
+            engine: c.Engine,
+            engineVersion: c.EngineVersion,
+            nodeType: c.CacheNodeType,
+            nodes: c.NumCacheNodes,
+            status: c.CacheClusterStatus,
+          });
+        }
+        marker = r.Marker;
+      } while (marker);
+      return out;
     } catch (err) {
       throw friendly(err);
     }

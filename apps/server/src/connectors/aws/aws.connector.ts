@@ -12,7 +12,11 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask, AwsElasticIp, AwsVolume, AwsRdsInstance, AwsS3Bucket } from './aws-api';
+import {
+  AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask,
+  AwsElasticIp, AwsVolume, AwsRdsInstance, AwsS3Bucket,
+  AwsNatGateway, AwsLoadBalancer, AwsEbsSnapshot, AwsRdsSnapshot, AwsLambdaFunction, AwsCloudFrontDistribution, AwsDynamoTable, AwsElastiCacheCluster,
+} from './aws-api';
 
 const EC2_KIND = 'ec2';
 const EKS_KIND = 'eks';
@@ -21,6 +25,96 @@ const EIP_KIND = 'eip';
 const EBS_KIND = 'ebs';
 const RDS_KIND = 'rds';
 const S3_KIND = 's3';
+const NAT_KIND = 'natgw';
+const ELB_KIND = 'elb';
+const EBSSNAP_KIND = 'ebssnap';
+const RDSSNAP_KIND = 'rdssnap';
+const LAMBDA_KIND = 'lambda';
+const CF_KIND = 'cloudfront';
+const DDB_KIND = 'dynamodb';
+const CACHE_KIND = 'elasticache';
+
+function fmtBytes(n?: number): string {
+  if (n == null) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+
+/** A complete IAM policy enabling every AWS-connector feature (view + manage). Shown on the setup screen. */
+const AWS_FULL_POLICY = JSON.stringify(
+  {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Sid: 'CerebroIdentityAndCost',
+        Effect: 'Allow',
+        Action: ['sts:GetCallerIdentity', 'ce:GetCostAndUsage', 'ce:GetCostForecast'],
+        Resource: '*',
+      },
+      {
+        Sid: 'CerebroEc2',
+        Effect: 'Allow',
+        Action: [
+          'ec2:DescribeInstances', 'ec2:DescribeRegions', 'ec2:DescribeImages',
+          'ec2:DescribeKeyPairs', 'ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups',
+          'ec2:DescribeVolumes', 'ec2:DescribeAddresses', 'ec2:DescribeNatGateways', 'ec2:DescribeSnapshots',
+          'ec2:StartInstances', 'ec2:StopInstances', 'ec2:RebootInstances',
+          'ec2:TerminateInstances', 'ec2:RunInstances', 'ec2:CreateTags',
+          'ec2:DeleteVolume', 'ec2:ReleaseAddress',
+        ],
+        Resource: '*',
+      },
+      {
+        Sid: 'CerebroContainers',
+        Effect: 'Allow',
+        Action: [
+          'eks:ListClusters', 'eks:DescribeCluster', 'eks:ListNodegroups', 'eks:DescribeNodegroup',
+          'ecs:ListClusters', 'ecs:DescribeClusters', 'ecs:ListServices', 'ecs:DescribeServices',
+          'ecs:ListTasks', 'ecs:DescribeTasks', 'ecs:UpdateService', 'ecs:StopTask',
+        ],
+        Resource: '*',
+      },
+      {
+        Sid: 'CerebroDataAndDiscovery',
+        Effect: 'Allow',
+        Action: [
+          'rds:DescribeDBInstances', 'rds:ListTagsForResource', 'rds:DescribeDBSnapshots',
+          'rds:StartDBInstance', 'rds:StopDBInstance', 'rds:RebootDBInstance',
+          's3:ListAllMyBuckets', 's3:GetBucketLocation',
+          'elasticloadbalancing:DescribeLoadBalancers',
+          'lambda:ListFunctions',
+          'cloudfront:ListDistributions',
+          'dynamodb:ListTables', 'dynamodb:DescribeTable',
+          'elasticache:DescribeCacheClusters',
+        ],
+        Resource: '*',
+      },
+    ],
+  },
+  null,
+  2,
+);
+function ymd(d?: Date): string | null {
+  return d ? d.toISOString().slice(0, 10) : null;
+}
+function humanize(key: string): string {
+  const s = key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Per-kind label overrides for the generic discovery detail (details keys → human labels). */
+const DISCOVERY_LABELS: Record<string, Record<string, string>> = {
+  natgw: { node: 'Subnet', ip: 'Public IP', connectivity: 'Connectivity', vpc: 'VPC' },
+  elb: { node: 'Scheme', cpu: 'Type', ip: 'DNS name', azs: 'Availability zones', vpc: 'VPC' },
+  ebssnap: { node: 'Source volume', cpu: 'Size', created: 'Created', description: 'Description', encrypted: 'Encrypted' },
+  rdssnap: { node: 'Source database', cpu: 'Engine / size', type: 'Type', created: 'Created' },
+  lambda: { node: 'Architecture', cpu: 'Runtime / memory', code: 'Code size', modified: 'Last modified' },
+  cloudfront: { node: 'State', ip: 'Domain name', aliases: 'Aliases', comment: 'Comment' },
+  dynamodb: { node: 'Billing mode', cpu: 'Items', size: 'Size' },
+  elasticache: { node: 'Node type', cpu: 'Engine', nodes: 'Nodes' },
+};
 
 function bytesGb(gb?: number): string {
   return gb != null ? `${gb} GB` : '—';
@@ -188,6 +282,14 @@ export class AwsConnector implements Connector {
         actions: [],
         deletable: false,
       },
+      { id: NAT_KIND, label: 'NAT Gateways', actions: [], deletable: false },
+      { id: ELB_KIND, label: 'Load Balancers', actions: [], deletable: false },
+      { id: EBSSNAP_KIND, label: 'EBS Snapshots', actions: [], deletable: false },
+      { id: RDSSNAP_KIND, label: 'RDS Snapshots', actions: [], deletable: false },
+      { id: LAMBDA_KIND, label: 'Lambda', actions: [], deletable: false },
+      { id: CF_KIND, label: 'CloudFront', actions: [], deletable: false },
+      { id: DDB_KIND, label: 'DynamoDB', actions: [], deletable: false },
+      { id: CACHE_KIND, label: 'ElastiCache', actions: [], deletable: false },
     ],
     operations: [
       {
@@ -263,6 +365,7 @@ export class AwsConnector implements Connector {
         'rds:DescribeDBInstances (+ ListTagsForResource), rds:StartDBInstance/StopDBInstance/RebootDBInstance — OPTIONAL, to view and start/stop/reboot RDS databases.',
         'ec2:DescribeVolumes, ec2:DescribeAddresses — OPTIONAL, for the EBS Volumes and Elastic IPs tabs (in AmazonEC2ReadOnlyAccess). ec2:DeleteVolume, ec2:ReleaseAddress — to delete unattached volumes / release idle Elastic IPs.',
         's3:ListAllMyBuckets, s3:GetBucketLocation — OPTIONAL, for the S3 Buckets tab (buckets are global — shows all buckets in the account).',
+        'Discovery tabs (all read-only): ec2:DescribeNatGateways, ec2:DescribeSnapshots, elasticloadbalancing:DescribeLoadBalancers, rds:DescribeDBSnapshots, lambda:ListFunctions, cloudfront:ListDistributions, dynamodb:ListTables + dynamodb:DescribeTable, elasticache:DescribeCacheClusters.',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -271,6 +374,15 @@ export class AwsConnector implements Connector {
       ],
       notes:
         'Use a dedicated IAM user with least privilege — grant AmazonEC2ReadOnlyAccess for a view-only connection and add only the power actions you want Cerebro to perform. Prefer scoping the policy to the specific region and tags where possible.',
+      codeSamples: [
+        {
+          title: 'Full IAM policy (all connector features)',
+          description:
+            'Attach this to the Cerebro IAM user (or a group) to enable every tab and action. It includes management (EC2/RDS start-stop, ECS scale, delete unattached volumes, release Elastic IPs) — remove the write actions you don\'t want. Cost Explorer must also be enabled in the Billing console. Resource is "*" because most describe/list actions don\'t support resource scoping.',
+          language: 'json',
+          code: AWS_FULL_POLICY,
+        },
+      ],
     },
   };
 
@@ -351,6 +463,56 @@ export class AwsConnector implements Connector {
     if (kind === S3_KIND) {
       const buckets = await api.listS3Buckets();
       return buckets.slice().sort((a, b) => a.name.localeCompare(b.name)).map((b) => this.toS3Resource(b));
+    }
+    if (kind === NAT_KIND) {
+      return (await api.listNatGateways()).map((n) => ({
+        id: n.id, kind, name: n.name || n.id, status: n.state.toLowerCase(),
+        details: { node: n.subnetId ?? null, ip: n.publicIp ?? null, connectivity: n.connectivityType ?? null, vpc: n.vpcId ?? null },
+        tags: n.tags,
+      }));
+    }
+    if (kind === ELB_KIND) {
+      return (await api.listLoadBalancers()).sort((a, b) => a.name.localeCompare(b.name)).map((lb) => ({
+        id: lb.name, kind, name: lb.name, status: (lb.state || '').toLowerCase() || 'active',
+        details: { node: lb.scheme ?? null, cpu: lb.type ?? null, ip: lb.dnsName ?? null, azs: lb.azCount != null ? `${lb.azCount} AZs` : null, vpc: lb.vpcId ?? null },
+      }));
+    }
+    if (kind === EBSSNAP_KIND) {
+      return (await api.listEbsSnapshots()).sort((a, b) => (b.startTime?.getTime() ?? 0) - (a.startTime?.getTime() ?? 0)).map((s) => ({
+        id: s.id, kind, name: s.name || s.id, status: (s.state || '').toLowerCase(),
+        details: { node: s.volumeId ?? null, cpu: s.sizeGb != null ? `${s.sizeGb} GB` : null, created: ymd(s.startTime), description: s.description ?? null, encrypted: s.encrypted ? 'yes' : 'no' },
+        tags: s.tags,
+      }));
+    }
+    if (kind === RDSSNAP_KIND) {
+      return (await api.listRdsSnapshots()).sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)).map((s) => ({
+        id: s.id, kind, name: s.id, status: (s.status || '').toLowerCase(),
+        details: { node: s.dbInstanceId ?? null, cpu: [s.engine, s.sizeGb != null ? `${s.sizeGb} GB` : null].filter(Boolean).join(' · ') || null, type: s.type ?? null, created: ymd(s.createdAt) },
+      }));
+    }
+    if (kind === LAMBDA_KIND) {
+      return (await api.listLambdaFunctions()).sort((a, b) => a.name.localeCompare(b.name)).map((f) => ({
+        id: f.name, kind, name: f.name, status: f.runtime || 'fn',
+        details: { node: f.arch ?? null, cpu: [f.runtime, f.memoryMb != null ? `${f.memoryMb} MB` : null].filter(Boolean).join(' · ') || null, code: fmtBytes(f.codeSizeBytes), modified: f.lastModified ? f.lastModified.slice(0, 10) : null },
+      }));
+    }
+    if (kind === CF_KIND) {
+      return (await api.listCloudFrontDistributions()).map((d) => ({
+        id: d.id, kind, name: d.aliases[0] || d.domainName || d.id, status: (d.status || '').toLowerCase() || (d.enabled ? 'enabled' : 'disabled'),
+        details: { node: d.enabled ? 'enabled' : 'disabled', ip: d.domainName ?? null, aliases: d.aliases.join(', ') || null, comment: d.comment ?? null },
+      }));
+    }
+    if (kind === DDB_KIND) {
+      return (await api.listDynamoTables()).sort((a, b) => a.name.localeCompare(b.name)).map((t) => ({
+        id: t.name, kind, name: t.name, status: (t.status || '').toLowerCase() || 'active',
+        details: { node: t.billingMode ?? null, cpu: t.itemCount != null ? `${t.itemCount.toLocaleString()} items` : null, size: fmtBytes(t.sizeBytes) },
+      }));
+    }
+    if (kind === CACHE_KIND) {
+      return (await api.listElastiCacheClusters()).sort((a, b) => a.id.localeCompare(b.id)).map((c) => ({
+        id: c.id, kind, name: c.id, status: (c.status || '').toLowerCase(),
+        details: { node: c.nodeType ?? null, cpu: [c.engine, c.engineVersion].filter(Boolean).join(' ') || null, nodes: c.nodes != null ? `${c.nodes} node${c.nodes === 1 ? '' : 's'}` : null },
+      }));
     }
     if (kind !== EC2_KIND) return [];
     const instances = await api.describeInstances();
@@ -732,6 +894,20 @@ export class AwsConnector implements Connector {
     };
   }
 
+  /** Detail for the read-only discovery kinds: re-list, find the row, render its details + tags. */
+  private async genericDetail(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
+    const r = (await this.listResources(ctx, kind)).find((x) => x.id === resourceId);
+    if (!r) throw new Error(`${kind} ${resourceId} not found in this region.`);
+    const labels = DISCOVERY_LABELS[kind] ?? {};
+    const items = Object.entries(r.details ?? {})
+      .filter(([, v]) => v != null && v !== '')
+      .map(([k, v]) => ({ label: labels[k] ?? humanize(k), value: String(v), variant: (k === 'ip' || k === 'node') ? ('mono' as const) : undefined }));
+    items.unshift({ label: 'ID', value: r.id, variant: 'mono' as const });
+    const groups: ConnectorDetailGroup[] = [{ title: 'General', items }];
+    if (r.tags && Object.keys(r.tags).length) groups.push(this.tagsGroup(r.tags));
+    return { id: r.id, kind, name: r.name, status: r.status, groups };
+  }
+
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
     const api = new AwsApi(this.authFrom(ctx));
     if (kind === EKS_KIND) return this.describeEks(api, resourceId);
@@ -740,6 +916,9 @@ export class AwsConnector implements Connector {
     if (kind === EBS_KIND) return this.describeEbs(api, resourceId);
     if (kind === EIP_KIND) return this.describeEip(api, resourceId);
     if (kind === S3_KIND) return this.describeS3(api, resourceId);
+    if ([NAT_KIND, ELB_KIND, EBSSNAP_KIND, RDSSNAP_KIND, LAMBDA_KIND, CF_KIND, DDB_KIND, CACHE_KIND].includes(kind)) {
+      return this.genericDetail(ctx, kind, resourceId);
+    }
     const [inst] = await api.describeInstances([resourceId]);
     if (!inst) throw new Error(`Instance ${resourceId} not found in this region.`);
 
