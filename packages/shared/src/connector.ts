@@ -86,6 +86,8 @@ export interface ConnectorResourceKind {
   subResources?: ConnectorSubResourceKind[];
   /** Whether resources of this kind offer an interactive console. */
   console?: boolean;
+  /** Set false for read-only kinds so the UI hides the delete control (default: deletable). */
+  deletable?: boolean;
 }
 
 /**

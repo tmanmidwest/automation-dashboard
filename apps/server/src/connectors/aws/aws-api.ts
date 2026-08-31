@@ -16,6 +16,13 @@ import {
 } from '@aws-sdk/client-ec2';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand } from '@aws-sdk/client-cost-explorer';
+import {
+  EKSClient,
+  ListClustersCommand,
+  DescribeClusterCommand,
+  ListNodegroupsCommand,
+  DescribeNodegroupCommand,
+} from '@aws-sdk/client-eks';
 
 export interface AwsAuth {
   accessKeyId: string;
@@ -79,6 +86,37 @@ export interface AwsIdentity {
   account?: string;
   arn?: string;
   userId?: string;
+}
+
+export interface AwsEksNodegroup {
+  name: string;
+  status?: string;
+  instanceTypes?: string[];
+  amiType?: string;
+  capacityType?: string;
+  desiredSize?: number;
+  minSize?: number;
+  maxSize?: number;
+  diskSize?: number;
+}
+
+/** A normalized EKS cluster. */
+export interface AwsEksCluster {
+  name: string;
+  status: string; // ACTIVE | CREATING | DELETING | FAILED | UPDATING | ...
+  version?: string;
+  platformVersion?: string;
+  arn?: string;
+  endpoint?: string;
+  roleArn?: string;
+  createdAt?: Date;
+  vpcId?: string;
+  subnetIds?: string[];
+  securityGroupIds?: string[];
+  endpointPublicAccess?: boolean;
+  endpointPrivateAccess?: boolean;
+  tags: Record<string, string>;
+  nodegroups: AwsEksNodegroup[];
 }
 
 export interface AwsCostSummary {
@@ -418,6 +456,115 @@ export class AwsApi {
     } catch (err) {
       throw friendly(err);
     }
+  }
+
+  private _eks?: EKSClient;
+  private get eks(): EKSClient {
+    if (!this._eks) {
+      this._eks = new EKSClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._eks;
+  }
+
+  /** Cluster names only (paginated) — cheap, for counts. */
+  async listEksClusterNames(): Promise<string[]> {
+    try {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.eks.send(new ListClustersCommand({ nextToken: token }));
+        out.push(...(r.clusters ?? []));
+        token = r.nextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /**
+   * Cluster list for the table. Each cluster is a DescribeCluster plus a cheap
+   * ListNodegroups (names only) so we can show a node-group count without a
+   * DescribeNodegroup per group. Full node-group specs are fetched on demand in
+   * describeEksCluster (the detail drawer).
+   */
+  async listEksClusters(): Promise<AwsEksCluster[]> {
+    try {
+      const names = await this.listEksClusterNames();
+      return await Promise.all(
+        names.map(async (n) => {
+          const cluster = await this.describeEksCluster(n, false);
+          cluster.nodegroups = (await this.listEksNodegroupNames(n)).map((name) => ({ name }));
+          return cluster;
+        }),
+      );
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** One cluster's details; set withNodegroups to also fetch full node group specs. */
+  async describeEksCluster(name: string, withNodegroups = true): Promise<AwsEksCluster> {
+    try {
+      const r = await this.eks.send(new DescribeClusterCommand({ name }));
+      const c = r.cluster;
+      const vpc = c?.resourcesVpcConfig;
+      const cluster: AwsEksCluster = {
+        name: c?.name ?? name,
+        status: c?.status ?? 'UNKNOWN',
+        version: c?.version,
+        platformVersion: c?.platformVersion,
+        arn: c?.arn,
+        endpoint: c?.endpoint,
+        roleArn: c?.roleArn,
+        createdAt: c?.createdAt,
+        vpcId: vpc?.vpcId,
+        subnetIds: vpc?.subnetIds,
+        securityGroupIds: vpc?.securityGroupIds,
+        endpointPublicAccess: vpc?.endpointPublicAccess,
+        endpointPrivateAccess: vpc?.endpointPrivateAccess,
+        tags: c?.tags ?? {},
+        nodegroups: [],
+      };
+      if (withNodegroups) cluster.nodegroups = await this.describeEksNodegroups(name);
+      return cluster;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Node group names for a cluster (cheap — no DescribeNodegroup). */
+  async listEksNodegroupNames(clusterName: string): Promise<string[]> {
+    const names: string[] = [];
+    let token: string | undefined;
+    do {
+      const r = await this.eks.send(new ListNodegroupsCommand({ clusterName, nextToken: token }));
+      names.push(...(r.nodegroups ?? []));
+      token = r.nextToken;
+    } while (token);
+    return names;
+  }
+
+  /** Full node group specs for a cluster (DescribeNodegroup per group). */
+  async describeEksNodegroups(clusterName: string): Promise<AwsEksNodegroup[]> {
+    const names = await this.listEksNodegroupNames(clusterName);
+    return await Promise.all(
+      names.map(async (nodegroupName) => {
+        const d = await this.eks.send(new DescribeNodegroupCommand({ clusterName, nodegroupName }));
+        const ng = d.nodegroup;
+        return {
+          name: ng?.nodegroupName ?? nodegroupName,
+          status: ng?.status,
+          instanceTypes: ng?.instanceTypes,
+          amiType: ng?.amiType,
+          capacityType: ng?.capacityType,
+          desiredSize: ng?.scalingConfig?.desiredSize,
+          minSize: ng?.scalingConfig?.minSize,
+          maxSize: ng?.scalingConfig?.maxSize,
+          diskSize: ng?.diskSize,
+        };
+      }),
+    );
   }
 
   /** Region names enabled/available for this account (for a region dropdown). */
