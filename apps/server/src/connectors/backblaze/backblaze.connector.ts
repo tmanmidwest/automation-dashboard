@@ -1,7 +1,5 @@
-import { promises as fs, createReadStream, createWriteStream } from 'node:fs';
+import { promises as fs, createWriteStream } from 'node:fs';
 import * as path from 'node:path';
-import { Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import type {
   Connector,
   ConnectorContext,
@@ -9,56 +7,18 @@ import type {
   ConnectorResource,
   ConnectorResourceDetail,
   ConnectorDetailGroup,
-  ConnectorOption,
   ConnectorOverview,
   OverviewMetric,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import parser from 'cron-parser';
-import { B2Api, B2Auth, regionFromEndpoint, type B2Object } from './backblaze-api';
+import { Restic, ResticAuth, type ResticSnapshot, type ResticFile, type ResticRepoStats } from './restic';
 import type { BackupRunService, BackupRunView } from './backup-run.service';
 
-const BUCKET_KIND = 'bucket';
-const REMOTE_KIND = 'remote-backup';
-const LOCAL_KIND = 'local-backup';
-const OBJECT_KIND = 'object';
+const SNAPSHOT_KIND = 'snapshot';
+const FILE_SUBKIND = 'file';
 const RUN_KIND = 'run';
-
-/** Human-readable elapsed time between two instants. */
-function durationStr(start: Date, end: Date | null): string {
-  if (!end) return 'running…';
-  const ms = end.getTime() - start.getTime();
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
-  if (m < 60) return `${m}m ${rem}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
-/**
- * B2 object keys can contain "/", but resource ids travel in single-segment URL
- * path params (…/resources/:kind/:resourceId). Encode keys as URL-safe base64url
- * so ids never contain a slash; decode them back in describe/delete.
- */
-function encodeKey(key: string): string {
-  return Buffer.from(key, 'utf8').toString('base64url');
-}
-function decodeKey(id: string): string {
-  return Buffer.from(id, 'base64url').toString('utf8');
-}
-
-/** Classify a bucket object for the raw browser view. */
-function objectType(name: string): string {
-  if (parseBackup(name).isArchive) return 'backup';
-  if (name.endsWith('.log')) return 'log';
-  if (name.endsWith('.notes')) return 'notes';
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(dot + 1).toLowerCase() : 'file';
-}
 
 /** vzdump archive filenames, e.g. vzdump-qemu-100-2026_08_31-03_00_00.vma.zst */
 const ARCHIVE_RE =
@@ -69,24 +29,18 @@ interface ParsedBackup {
   vmid?: string;
   guestType?: 'VM' | 'CT';
   timestamp?: Date;
-  format?: string;
-  compression?: string;
 }
 
-/** Parse a vzdump archive filename into VM-friendly fields. Non-archives (.log/.notes/etc.) return isArchive:false. */
 function parseBackup(name: string): ParsedBackup {
   const base = name.slice(name.lastIndexOf('/') + 1);
   const m = ARCHIVE_RE.exec(base);
   if (!m) return { isArchive: false };
-  const [, guest, vmid, y, mo, d, hh, mm, ss, format, comp] = m;
+  const [, guest, vmid, y, mo, d, hh, mm, ss] = m;
   return {
     isArchive: true,
     vmid,
     guestType: guest.toLowerCase() === 'qemu' ? 'VM' : 'CT',
-    // vzdump stamps node-local time; a local Date is fine for display/sorting.
     timestamp: new Date(Number(y), Number(mo) - 1, Number(d), Number(hh), Number(mm), Number(ss)),
-    format,
-    compression: comp ? comp.toLowerCase() : 'none',
   };
 }
 
@@ -102,62 +56,83 @@ function fmtDate(d?: Date): string {
   return d ? d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '') : '—';
 }
 
-interface LocalFile {
-  name: string;
-  sizeBytes: number;
-  mtime?: Date;
+function ageStr(d?: Date): string {
+  if (!d) return '—';
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
 }
 
+function durationStr(start: Date, end: Date | null): string {
+  if (!end) return 'running…';
+  const s = Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** restic stats scan the whole index, so cache the repo size briefly (overview polls often). */
+const STATS_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Backblaze B2 backup connector — a restic front-end.
+ *
+ * The Proxmox host backs up to B2 with restic, so the bucket is an encrypted,
+ * deduplicated restic repository, not browsable files. This connector reads that
+ * repo through the restic CLI (read-only B2 key + repo password) to list
+ * snapshots and their VM backups, and to RESTORE a chosen backup into the NAS
+ * "dump" folder — from which Proxmox restores it natively through its own UI.
+ *
+ * It deliberately does NOT back up, schedule, prune, or delete — the Proxmox
+ * systemd + restic pipeline stays the single owner of writes.
+ */
 export class BackblazeConnector implements Connector {
-  /** Durable scheduled-sync history store, injected at registration. */
+  /** Durable restore-history store, injected at registration. */
   constructor(private readonly runs?: BackupRunService) {}
+
+  /** Cached repo stats per repository string (raw-data scan is expensive). */
+  private statsCache = new Map<string, { at: number; data: ResticRepoStats | null }>();
 
   manifest: ConnectorManifest = {
     id: 'backblaze',
     name: 'Backblaze B2 Backups',
     description:
-      'Sync Proxmox vzdump backups between a NAS dump folder and a Backblaze B2 bucket, and pull them back for disaster recovery. Talks only to B2 and a local (mounted) path — never to Proxmox.',
-    version: '0.1.0',
+      'Browse and restore Proxmox vzdump backups stored in a Backblaze B2 restic repository. Lists snapshots and their VM backups, and restores a chosen backup into the NAS dump folder for a native Proxmox restore. Read-only — it never backs up, prunes, or deletes.',
+    version: '0.2.0',
     icon: 'backblaze',
     configFields: [
       {
-        key: 'keyId',
-        label: 'Application Key ID',
+        key: 'b2KeyId',
+        label: 'B2 Application Key ID',
         type: 'text',
         required: true,
-        placeholder: '0057...',
-        help: 'The keyID of a B2 application key scoped to your backup bucket.',
+        placeholder: '0057…',
+        help: 'The keyID of a READ-ONLY B2 application key (listFiles + readFiles) scoped to the backup bucket.',
       },
       {
-        key: 'applicationKey',
-        label: 'Application Key',
+        key: 'b2AppKey',
+        label: 'B2 Application Key',
         type: 'password',
         secret: true,
         required: true,
-        help: 'The applicationKey shown once when the key was created.',
+        help: 'The applicationKey shown once when the key was created. Stored encrypted; never shown again.',
       },
       {
-        key: 'endpoint',
-        label: 'S3 Endpoint',
-        type: 'url',
-        required: true,
-        placeholder: 'https://s3.us-west-004.backblazeb2.com',
-        help: 'The S3-compatible endpoint from your B2 bucket page (the region is read from this).',
-      },
-      {
-        key: 'bucket',
-        label: 'Bucket',
+        key: 'repository',
+        label: 'Restic repository',
         type: 'text',
         required: true,
-        placeholder: 'proxmox-backups',
-        help: 'The B2 bucket that holds your Proxmox backups.',
+        placeholder: 'b2:trevor-homelab-offsite:/',
+        help: 'The restic repository string, exactly as in your Proxmox b2-credentials (RESTIC_REPOSITORY).',
       },
       {
-        key: 'prefix',
-        label: 'Key prefix',
-        type: 'text',
-        placeholder: 'dump/',
-        help: 'Optional folder within the bucket to scope to, e.g. "dump/". Leave blank for the whole bucket.',
+        key: 'resticPassword',
+        label: 'Restic repository password',
+        type: 'password',
+        secret: true,
+        required: true,
+        help: 'The repository password (ideally a dedicated key added for Cerebro via "restic key add"). Stored encrypted; decrypts read access only.',
       },
       {
         key: 'dumpPath',
@@ -165,63 +140,43 @@ export class BackblazeConnector implements Connector {
         type: 'text',
         required: true,
         placeholder: '/mnt/dump',
-        help: 'The Proxmox "dump" folder as seen inside the Cerebro container — i.e. where the NAS share is mounted. See the setup guide.',
-      },
-      {
-        key: 'schedule',
-        label: 'Sync schedule (cron)',
-        type: 'text',
-        placeholder: '0 4 * * 0',
-        help: 'Optional. When set, Cerebro will run the NAS→B2 sync on this cron (used by the automatic scheduler). Leave blank for manual-only.',
+        help: 'The Proxmox "dump" folder as seen inside the Cerebro container — where restored backups are written. See the setup guide for mounting the NAS share.',
       },
     ],
     resourceKinds: [
-      // Backups can be deleted individually (the archive only) — confirmed in the UI.
-      { id: REMOTE_KIND, label: 'Backups in B2', actions: [], deletable: true },
-      { id: LOCAL_KIND, label: 'Local dump (NAS)', actions: [], deletable: false },
-      // Raw browser over every object in the bucket (archives + .log/.notes/anything), with manual delete.
-      { id: OBJECT_KIND, label: 'Bucket browser', actions: [], deletable: true },
-      { id: RUN_KIND, label: 'Sync history', actions: [], deletable: false },
-      { id: BUCKET_KIND, label: 'Buckets', actions: [], deletable: false },
-    ],
-    operations: [
       {
-        id: 'push-to-b2',
-        label: 'Upload pending to B2',
-        description:
-          'Upload every local backup that is not yet in B2. Additive only — it never deletes or overwrites anything already in the bucket.',
-        scope: 'create',
-        kind: LOCAL_KIND,
-        icon: 'upload',
-        submitLabel: 'Upload',
-        fields: [
+        id: SNAPSHOT_KIND,
+        label: 'Snapshots',
+        actions: [],
+        deletable: false,
+        subResources: [
           {
-            key: 'dryRun',
-            label: 'Preview only (don\'t upload)',
-            type: 'boolean',
-            default: false,
-            help: 'List what would be uploaded without transferring anything.',
+            id: FILE_SUBKIND,
+            label: 'Backups',
+            labelSingular: 'backup',
+            itemActions: [
+              {
+                id: 'restore',
+                label: 'Restore to NAS',
+                operationId: 'restore-file',
+                paramKey: 'file',
+              },
+            ],
           },
         ],
       },
+      { id: RUN_KIND, label: 'Restore history', actions: [], deletable: false },
+    ],
+    operations: [
       {
-        id: 'restore-from-b2',
+        id: 'restore-file',
         label: 'Restore to NAS',
         description:
-          'Download a backup from B2 into the dump folder so Proxmox can restore it from its own UI. Verified by size; won\'t overwrite a local file unless you allow it.',
-        scope: 'create',
-        kind: REMOTE_KIND,
-        icon: 'download',
+          'Download this backup from B2 (via restic) into the NAS dump folder. Once it lands, restore it from the Proxmox UI. Won\'t overwrite an existing local file unless you allow it.',
+        scope: 'resource',
+        kind: SNAPSHOT_KIND,
         submitLabel: 'Restore',
         fields: [
-          {
-            key: 'backup',
-            label: 'Backup',
-            type: 'select',
-            optionsSource: 'remoteBackups',
-            required: true,
-            help: 'Which backup to pull from B2 into the dump folder.',
-          },
           {
             key: 'overwrite',
             label: 'Overwrite if it already exists locally',
@@ -233,99 +188,63 @@ export class BackblazeConnector implements Connector {
     ],
     help: {
       overview:
-        'Connects a Backblaze B2 bucket to the Proxmox "dump" folder that your NAS exposes (mounted into the Cerebro container). It lists what backups exist in B2, what is staged locally, and which local backups have not been uploaded yet. Use "Upload pending to B2" (on the Local dump tab) to push new backups off-site, and "Restore to NAS" (on the Backups in B2 tab) to pull one back into the dump folder for a native Proxmox restore. Set a Sync schedule (cron) to push automatically; runs are logged under Sync history. The Bucket browser lists every object with a manual delete.',
+        'Your Proxmox host backs up to B2 with restic, so the bucket holds an encrypted, deduplicated restic repository. This connector reads it through restic: browse Snapshots and the VM backups inside each, then "Restore to NAS" pulls one into the mounted dump folder for a native Proxmox restore. It never backs up, prunes, or deletes — your systemd + restic job stays in charge of that.',
       setupSteps: [
-        'In Backblaze, create (or reuse) a private B2 bucket for your Proxmox backups.',
-        'Create an application key scoped to that bucket with read + write capabilities; copy the keyID and applicationKey.',
-        'From the bucket page, copy the S3-compatible endpoint (e.g. https://s3.us-west-004.backblazeb2.com).',
-        'Mount your UNAS Pro backup share into the Cerebro container (see the setup guide) and enter that mount path as the Local dump path.',
-        'Paste the keyID, applicationKey, endpoint, and bucket here, then run Test to verify both B2 and the mount.',
+        'Create a READ-ONLY B2 application key (listFiles + readFiles) scoped to your backup bucket; copy the keyID and applicationKey.',
+        'Optionally add a dedicated restic key for Cerebro on the Proxmox host: `restic key add` (so it is independently revocable).',
+        'Mount your NAS backup share into the Cerebro container (see the setup guide) and note the mount path.',
+        'Enter the B2 key, the restic repository string (RESTIC_REPOSITORY), the restic password, and the local dump path, then run Test.',
       ],
       requiredPermissions: [
-        'B2 application key with listBuckets/listFiles/readFiles on the bucket — for viewing and restore (pull).',
-        'writeFiles on the bucket — for the upload (push) action and scheduled sync.',
-        'deleteFiles on the bucket — only if you want to delete objects from the Bucket browser.',
-        'The Cerebro container must have the NAS backup share mounted read/write at the configured dump path.',
+        'A READ-ONLY B2 application key (listFiles + readFiles) on the bucket — Cerebro cannot write, prune, or delete.',
+        'The restic repository password (a dedicated key is recommended so it can be revoked without touching Proxmox).',
+        'The NAS backup share mounted read/write at the dump path (restores are written there).',
+        'The server image must include the restic binary (bundled in the Cerebro Docker image).',
       ],
       referenceLinks: [
-        { label: 'B2 S3-compatible API', url: 'https://www.backblaze.com/docs/cloud-storage-s3-compatible-api' },
-        { label: 'Create a B2 application key', url: 'https://www.backblaze.com/docs/cloud-storage-application-keys' },
+        { label: 'Restic documentation', url: 'https://restic.readthedocs.io/' },
+        { label: 'Restic B2 backend', url: 'https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html#backblaze-b2' },
         { label: 'Proxmox backup & restore', url: 'https://pve.proxmox.com/wiki/Backup_and_Restore' },
       ],
       notes:
-        'This connector never contacts Proxmox. Backups are moved between B2 and a mounted filesystem path; Proxmox picks up restored files from that same dump folder and restores them through its own UI.',
+        'This connector never contacts Proxmox and never modifies the repository. It reads snapshots and restores files to a mounted dump folder; Proxmox restores them from there through its own UI.',
     },
   };
 
-  private authFrom(ctx: ConnectorContext): B2Auth {
+  private authFrom(ctx: ConnectorContext): ResticAuth {
     const c = ctx.config;
-    const endpoint = String(c.endpoint ?? '').trim();
     return {
-      keyId: String(c.keyId ?? '').trim(),
-      applicationKey: String(c.applicationKey ?? ''),
-      endpoint,
-      region: regionFromEndpoint(endpoint),
+      b2KeyId: String(c.b2KeyId ?? '').trim(),
+      b2AppKey: String(c.b2AppKey ?? ''),
+      repository: String(c.repository ?? '').trim(),
+      password: String(c.resticPassword ?? ''),
     };
-  }
-
-  private bucketOf(ctx: ConnectorContext): string {
-    return String(ctx.config.bucket ?? '').trim();
-  }
-
-  private prefixOf(ctx: ConnectorContext): string {
-    return String(ctx.config.prefix ?? '').trim();
   }
 
   private dumpPathOf(ctx: ConnectorContext): string {
     return String(ctx.config.dumpPath ?? '').trim();
   }
 
-  /** Read the local (mounted) dump folder. Throws a friendly error if it isn't reachable. */
-  private async readLocalDump(dumpPath: string): Promise<LocalFile[]> {
-    let entries: string[];
-    try {
-      entries = await fs.readdir(dumpPath);
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code === 'ENOENT') throw new Error(`Dump path "${dumpPath}" does not exist inside the container — check the mount.`);
-      if (code === 'EACCES') throw new Error(`No permission to read "${dumpPath}" — check the mount's uid/gid and permissions.`);
-      throw new Error(`Could not read "${dumpPath}": ${(err as Error).message}`);
-    }
-    const out: LocalFile[] = [];
-    for (const name of entries) {
-      try {
-        const st = await fs.stat(path.join(dumpPath, name));
-        if (st.isFile()) out.push({ name, sizeBytes: st.size, mtime: st.mtime });
-      } catch {
-        /* skip unreadable entries */
-      }
-    }
-    return out;
-  }
-
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
     const auth = this.authFrom(ctx);
-    const bucket = this.bucketOf(ctx);
     const dumpPath = this.dumpPathOf(ctx);
     const details: Record<string, string> = {};
 
-    // ── B2 side ──
-    let b2Ok = false;
-    let b2Msg: string;
+    // ── Restic / B2 side ──
+    let repoOk = false;
+    let repoMsg: string;
     try {
-      const api = new B2Api(auth);
-      await api.headBucket(bucket);
-      const objects = await api.listObjects(bucket, this.prefixOf(ctx));
-      const archives = objects.filter((o) => parseBackup(o.key).isArchive);
-      const totalBytes = objects.reduce((s, o) => s + o.sizeBytes, 0);
-      b2Ok = true;
-      b2Msg = `${archives.length} backup${archives.length === 1 ? '' : 's'} (${fmtBytes(totalBytes)}) in "${bucket}"`;
-      details.bucket = bucket;
-      details.b2 = b2Msg;
+      const restic = new Restic(auth);
+      const snaps = await restic.snapshots();
+      const latest = snaps[0];
+      repoOk = true;
+      repoMsg = `${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}${latest?.time ? `, latest ${ageStr(latest.time)}` : ''}`;
+      details.repository = auth.repository;
+      details.repo = repoMsg;
     } catch (err) {
-      b2Msg = err instanceof Error ? err.message : 'B2 connection failed.';
-      details.b2 = `error — ${b2Msg}`;
-      ctx.log('warn', `B2 test failed: ${b2Msg}`);
+      repoMsg = err instanceof Error ? err.message : 'Restic repository check failed.';
+      details.repo = `error — ${repoMsg}`;
+      ctx.log('warn', `Restic repo test failed: ${repoMsg}`);
     }
 
     // ── Mount side ──
@@ -334,7 +253,6 @@ export class BackblazeConnector implements Connector {
     try {
       const st = await fs.stat(dumpPath);
       if (!st.isDirectory()) throw new Error(`"${dumpPath}" is not a directory.`);
-      // Write-probe so we know the share is mounted read/write, not just readable.
       const probe = path.join(dumpPath, `.cerebro-write-test-${process.pid}`);
       let writable = false;
       try {
@@ -344,10 +262,8 @@ export class BackblazeConnector implements Connector {
       } catch {
         writable = false;
       }
-      const files = await this.readLocalDump(dumpPath);
-      const archives = files.filter((f) => parseBackup(f.name).isArchive);
       mountOk = writable;
-      mountMsg = `${archives.length} backup${archives.length === 1 ? '' : 's'} staged, ${writable ? 'read/write' : 'READ-ONLY — uploads/restores will fail'}`;
+      mountMsg = writable ? 'read/write' : 'READ-ONLY — restores will fail';
       details.dumpPath = dumpPath;
       details.mount = mountMsg;
     } catch (err) {
@@ -356,106 +272,45 @@ export class BackblazeConnector implements Connector {
       ctx.log('warn', `Dump-path check failed: ${mountMsg}`);
     }
 
-    // ── Schedule (informational — never fails the test) ──
-    const schedule = String(ctx.config.schedule ?? '').trim();
-    if (schedule) {
-      try {
-        const next = parser.parseExpression(schedule).next().toDate();
-        details.schedule = `valid — next automatic sync ${fmtDate(next)}`;
-      } catch (err) {
-        details.schedule = `INVALID cron "${schedule}" — automatic sync disabled (${err instanceof Error ? err.message : 'parse error'})`;
-        ctx.log('warn', `Backblaze invalid schedule "${schedule}".`);
-      }
-    } else {
-      details.schedule = 'manual only (no schedule set)';
-    }
-
-    const ok = b2Ok && mountOk;
-    if (ok) ctx.log('info', `Backblaze connector OK — B2: ${b2Msg}; mount: ${mountMsg}; schedule: ${details.schedule}.`);
+    const ok = repoOk && mountOk;
+    if (ok) ctx.log('info', `Backblaze connector OK — repo: ${repoMsg}; mount: ${mountMsg}.`);
     return {
       ok,
-      message: `B2: ${b2Ok ? 'OK — ' + b2Msg : 'FAILED — ' + b2Msg}. Mount: ${mountOk ? 'OK — ' + mountMsg : 'FAILED — ' + mountMsg}.`,
+      message: `Repo: ${repoOk ? 'OK — ' + repoMsg : 'FAILED — ' + repoMsg}. Mount: ${mountOk ? 'OK — ' + mountMsg : 'FAILED — ' + mountMsg}.`,
       details,
     };
   }
 
-  // No mutating actions yet — push (upload) and restore (pull) arrive as operations in Phase 2.
   async performAction(): Promise<{ ok: boolean; message: string }> {
-    return { ok: false, message: 'This connector has no actions yet — upload and restore arrive in a later phase.' };
+    return { ok: false, message: 'This connector has no direct actions — restore a backup from a snapshot instead.' };
   }
 
   async listResources(ctx: ConnectorContext, kind: string): Promise<ConnectorResource[]> {
-    if (kind === BUCKET_KIND) {
-      const buckets = await new B2Api(this.authFrom(ctx)).listBuckets();
-      return buckets
-        .slice()
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((b) => ({
-          id: b.name,
-          kind: BUCKET_KIND,
-          name: b.name,
-          status: b.name === this.bucketOf(ctx) ? 'active' : 'bucket',
-          details: { created: b.createdAt ? fmtDate(b.createdAt) : null },
-        }));
+    if (kind === SNAPSHOT_KIND) {
+      const snaps = await new Restic(this.authFrom(ctx)).snapshots();
+      return snaps.map((s) => this.toSnapshotResource(s));
     }
-
-    if (kind === REMOTE_KIND) {
-      const objects = await new B2Api(this.authFrom(ctx)).listObjects(this.bucketOf(ctx), this.prefixOf(ctx));
-      return objects
-        .filter((o) => parseBackup(o.key).isArchive)
-        .map((o) => this.toRemoteResource(o))
-        .sort((a, b) => String(b.details?.sortKey).localeCompare(String(a.details?.sortKey)));
-    }
-
-    if (kind === OBJECT_KIND) {
-      // Raw browser: every object under the prefix, archives and sidecars alike.
-      const objects = await new B2Api(this.authFrom(ctx)).listObjects(this.bucketOf(ctx), this.prefixOf(ctx));
-      return objects
-        .slice()
-        .sort((a, b) => a.key.localeCompare(b.key)) // group related files (archive + its .log/.notes)
-        .map((o) => this.toObjectResource(o));
-    }
-
     if (kind === RUN_KIND) {
       if (!this.runs || !ctx.instanceId) return [];
       const rows = await this.runs.list(ctx.instanceId, 50);
       return rows.map((r) => this.toRunResource(r));
     }
-
-    if (kind === LOCAL_KIND) {
-      const dumpPath = this.dumpPathOf(ctx);
-      const [files, remote] = await Promise.all([
-        this.readLocalDump(dumpPath),
-        // Best-effort: know which local files already exist in B2 (compared by basename).
-        new B2Api(this.authFrom(ctx))
-          .listObjects(this.bucketOf(ctx), this.prefixOf(ctx))
-          .catch(() => [] as B2Object[]),
-      ]);
-      const remoteNames = new Set(remote.map((o) => o.key.slice(o.key.lastIndexOf('/') + 1)));
-      return files
-        .filter((f) => parseBackup(f.name).isArchive)
-        .map((f) => this.toLocalResource(f, remoteNames.has(f.name)))
-        .sort((a, b) => String(b.details?.sortKey).localeCompare(String(a.details?.sortKey)));
-    }
-
     return [];
   }
 
-  private toRemoteResource(o: B2Object): ConnectorResource {
-    const p = parseBackup(o.key);
-    const name = o.key.slice(o.key.lastIndexOf('/') + 1);
+  private toSnapshotResource(s: ResticSnapshot): ConnectorResource {
     return {
-      id: encodeKey(o.key),
-      kind: REMOTE_KIND,
-      name,
-      status: p.guestType ? p.guestType.toLowerCase() : 'file',
+      id: s.id,
+      kind: SNAPSHOT_KIND,
+      name: fmtDate(s.time),
+      status: s.tags[0] || 'snapshot',
       details: {
-        // Generic table columns: node (guest) / cpu (size).
-        node: p.vmid ? `${p.guestType} ${p.vmid}` : null,
-        cpu: fmtBytes(o.sizeBytes),
-        taken: p.timestamp ? fmtDate(p.timestamp) : fmtDate(o.lastModified),
-        compression: p.compression ?? null,
-        sortKey: (p.timestamp ?? o.lastModified ?? new Date(0)).toISOString(),
+        // Generic table columns: node (host) / cpu (age).
+        node: s.hostname ?? null,
+        cpu: ageStr(s.time),
+        shortId: s.shortId,
+        paths: s.paths.join(', ') || null,
+        tags: s.tags.join(', ') || null,
       },
     };
   }
@@ -467,7 +322,6 @@ export class BackblazeConnector implements Connector {
       name: fmtDate(r.startedAt),
       status: r.status, // running | success | error
       details: {
-        // Generic table columns: node (trigger) / cpu (duration).
         node: r.trigger,
         cpu: durationStr(r.startedAt, r.finishedAt),
         result: r.message ?? null,
@@ -475,147 +329,55 @@ export class BackblazeConnector implements Connector {
     };
   }
 
-  private toObjectResource(o: B2Object): ConnectorResource {
-    const name = o.key.slice(o.key.lastIndexOf('/') + 1);
-    const dir = o.key.includes('/') ? o.key.slice(0, o.key.lastIndexOf('/')) : '';
-    return {
-      id: encodeKey(o.key),
-      kind: OBJECT_KIND,
-      name,
-      status: objectType(name),
-      details: {
-        // Generic table columns: node (folder) / cpu (size).
-        node: dir || '(root)',
-        cpu: fmtBytes(o.sizeBytes),
-        modified: fmtDate(o.lastModified),
-        key: o.key,
-      },
-    };
+  async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
+    if (kind !== SNAPSHOT_KIND || subKind !== FILE_SUBKIND) return [];
+    const files = await new Restic(this.authFrom(ctx)).listFiles(resourceId);
+    return files
+      .filter((f) => parseBackup(f.name).isArchive)
+      .sort((a, b) => b.name.localeCompare(a.name))
+      .map((f) => this.toFileResource(f));
   }
 
-  private toLocalResource(f: LocalFile, inB2: boolean): ConnectorResource {
+  private toFileResource(f: ResticFile): ConnectorResource {
     const p = parseBackup(f.name);
     return {
-      id: f.name,
-      kind: LOCAL_KIND,
+      id: f.path, // full restic path — travels in the POST body, so a "/" is fine
+      kind: FILE_SUBKIND,
       name: f.name,
-      status: inB2 ? 'synced' : 'pending',
+      status: p.guestType ? p.guestType.toLowerCase() : 'file',
       details: {
-        node: p.vmid ? `${p.guestType} ${p.vmid}` : null,
-        cpu: fmtBytes(f.sizeBytes),
-        taken: p.timestamp ? fmtDate(p.timestamp) : fmtDate(f.mtime),
-        inB2: inB2 ? 'yes' : 'no',
-        sortKey: (p.timestamp ?? f.mtime ?? new Date(0)).toISOString(),
+        summary: `${p.vmid ? `${p.guestType} ${p.vmid} · ` : ''}${fmtBytes(f.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''}`,
       },
     };
   }
 
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
-    if (kind === REMOTE_KIND) {
-      const key = decodeKey(resourceId);
-      const objects = await new B2Api(this.authFrom(ctx)).listObjects(this.bucketOf(ctx), this.prefixOf(ctx));
-      const o = objects.find((x) => x.key === key);
-      if (!o) throw new Error(`Backup "${key}" not found in the bucket.`);
-      const p = parseBackup(o.key);
-      const name = o.key.slice(o.key.lastIndexOf('/') + 1);
+    if (kind === SNAPSHOT_KIND) {
+      const snaps = await new Restic(this.authFrom(ctx)).snapshots();
+      const s = snaps.find((x) => x.id === resourceId);
+      if (!s) throw new Error(`Snapshot "${resourceId}" not found.`);
       const groups: ConnectorDetailGroup[] = [
         {
-          title: 'Backup',
+          title: 'Snapshot',
           items: [
-            { label: 'File', value: name, variant: 'mono' },
-            { label: 'Guest', value: p.vmid ? `${p.guestType} ${p.vmid}` : '—' },
-            { label: 'Taken', value: p.timestamp ? fmtDate(p.timestamp) : '—' },
-            { label: 'Size', value: fmtBytes(o.sizeBytes) },
-            { label: 'Format', value: [p.format, p.compression].filter((x) => x && x !== 'none').join(' · ') || '—' },
-            { label: 'Compression', value: p.compression ?? '—' },
-          ],
-        },
-        {
-          title: 'B2 object',
-          items: [
-            { label: 'Key', value: o.key, variant: 'mono' },
-            { label: 'Bucket', value: this.bucketOf(ctx), variant: 'mono' },
-            { label: 'Last modified', value: fmtDate(o.lastModified) },
-            { label: 'ETag', value: o.etag || '—', variant: 'mono' },
+            { label: 'ID', value: s.shortId, variant: 'mono' },
+            { label: 'Taken', value: fmtDate(s.time) },
+            { label: 'Age', value: ageStr(s.time) },
+            { label: 'Host', value: s.hostname || '—' },
+            { label: 'Paths', value: s.paths.join(', ') || '—', variant: 'mono' },
+            { label: 'Tags', value: s.tags.join(', ') || '—' },
           ],
         },
       ];
-      return { id: resourceId, kind, name, status: p.guestType ? p.guestType.toLowerCase() : 'file', groups };
-    }
-
-    if (kind === OBJECT_KIND) {
-      const key = decodeKey(resourceId);
-      const objects = await new B2Api(this.authFrom(ctx)).listObjects(this.bucketOf(ctx), this.prefixOf(ctx));
-      const o = objects.find((x) => x.key === key);
-      if (!o) throw new Error(`Object "${key}" not found in the bucket.`);
-      const name = o.key.slice(o.key.lastIndexOf('/') + 1);
-      const p = parseBackup(name);
-      const groups: ConnectorDetailGroup[] = [
-        {
-          title: 'Object',
-          items: [
-            { label: 'Name', value: name, variant: 'mono' },
-            { label: 'Type', value: objectType(name) },
-            { label: 'Size', value: fmtBytes(o.sizeBytes) },
-            { label: 'Last modified', value: fmtDate(o.lastModified) },
-            ...(p.isArchive
-              ? [
-                  { label: 'Guest', value: p.vmid ? `${p.guestType} ${p.vmid}` : '—' },
-                  { label: 'Taken', value: p.timestamp ? fmtDate(p.timestamp) : '—' },
-                ]
-              : []),
-          ],
-        },
-        {
-          title: 'B2 object',
-          items: [
-            { label: 'Key', value: o.key, variant: 'mono' },
-            { label: 'Bucket', value: this.bucketOf(ctx), variant: 'mono' },
-            { label: 'ETag', value: o.etag || '—', variant: 'mono' },
-          ],
-        },
-      ];
-      return { id: resourceId, kind, name, status: objectType(name), groups };
-    }
-
-    if (kind === LOCAL_KIND) {
-      const dumpPath = this.dumpPathOf(ctx);
-      const files = await this.readLocalDump(dumpPath);
-      const f = files.find((x) => x.name === resourceId);
-      if (!f) throw new Error(`Local backup "${resourceId}" not found in ${dumpPath}.`);
-      const remote = await new B2Api(this.authFrom(ctx))
-        .listObjects(this.bucketOf(ctx), this.prefixOf(ctx))
-        .catch(() => [] as B2Object[]);
-      const inB2 = remote.some((o) => o.key.slice(o.key.lastIndexOf('/') + 1) === f.name);
-      const p = parseBackup(f.name);
-      const groups: ConnectorDetailGroup[] = [
-        {
-          title: 'Backup',
-          items: [
-            { label: 'File', value: f.name, variant: 'mono' },
-            { label: 'Guest', value: p.vmid ? `${p.guestType} ${p.vmid}` : '—' },
-            { label: 'Taken', value: p.timestamp ? fmtDate(p.timestamp) : '—' },
-            { label: 'Size', value: fmtBytes(f.sizeBytes) },
-            { label: 'Modified', value: fmtDate(f.mtime) },
-          ],
-        },
-        {
-          title: 'Sync',
-          items: [
-            { label: 'Path', value: path.join(dumpPath, f.name), variant: 'mono' },
-            { label: 'In B2', value: inB2 ? 'Yes' : 'No — not yet uploaded', variant: 'status' },
-          ],
-        },
-      ];
-      return { id: f.name, kind, name: f.name, status: inB2 ? 'synced' : 'pending', groups };
+      return { id: s.id, kind, name: fmtDate(s.time), status: s.tags[0] || 'snapshot', groups };
     }
 
     if (kind === RUN_KIND) {
       const r = this.runs ? await this.runs.get(resourceId) : null;
-      if (!r) throw new Error('Sync run not found.');
+      if (!r) throw new Error('Restore run not found.');
       const groups: ConnectorDetailGroup[] = [
         {
-          title: 'Sync run',
+          title: 'Restore run',
           items: [
             { label: 'Status', value: r.status, variant: 'status' },
             { label: 'Trigger', value: r.trigger },
@@ -624,10 +386,7 @@ export class BackblazeConnector implements Connector {
             { label: 'Duration', value: durationStr(r.startedAt, r.finishedAt) },
           ],
         },
-        {
-          title: 'Result',
-          items: [{ label: 'Message', value: r.message || '—' }],
-        },
+        { title: 'Result', items: [{ label: 'Message', value: r.message || '—' }] },
       ];
       return { id: r.id, kind, name: fmtDate(r.startedAt), status: r.status, groups };
     }
@@ -635,256 +394,140 @@ export class BackblazeConnector implements Connector {
     throw new Error(`No detail view for "${kind}".`);
   }
 
-  /** Manually delete one object from B2 (the "Backups in B2" and "Bucket browser" tabs). Confirmed in the UI. */
-  async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
-    if (kind !== REMOTE_KIND && kind !== OBJECT_KIND) {
-      return { ok: false, message: `Deleting "${kind}" is not supported.` };
-    }
-    const bucket = this.bucketOf(ctx);
-    const key = decodeKey(resourceId);
-    const name = key.slice(key.lastIndexOf('/') + 1);
-    try {
-      const api = new B2Api(this.authFrom(ctx));
-      // Confirm it exists first so a stale row gives a clear message rather than a silent no-op.
-      const head = await api.headObject(bucket, key);
-      if (!head) return { ok: false, message: `"${name}" no longer exists in the bucket.` };
-      await api.deleteObject(bucket, key);
-      ctx.log('warn', `B2 deleted ${bucket}/${key} (${fmtBytes(head.sizeBytes)}).`);
-      return { ok: true, message: `Deleted ${name} from B2.` };
-    } catch (err) {
-      const m = err instanceof Error ? err.message : 'Delete failed.';
-      ctx.log('error', `B2 delete of ${key} failed: ${m}`);
-      return { ok: false, message: m };
-    }
-  }
-
-  async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
-    const bucket = this.bucketOf(ctx);
-    const dumpPath = this.dumpPathOf(ctx);
-
-    const [remote, local] = await Promise.all([
-      new B2Api(this.authFrom(ctx)).listObjects(bucket, this.prefixOf(ctx)).catch((err) => {
-        ctx.log('warn', `B2 overview list failed: ${err instanceof Error ? err.message : err}`);
-        return [] as B2Object[];
-      }),
-      this.readLocalDump(dumpPath).catch((err) => {
-        ctx.log('warn', `Local dump read failed: ${err instanceof Error ? err.message : err}`);
-        return [] as LocalFile[];
-      }),
-    ]);
-
-    const remoteArchives = remote.filter((o) => parseBackup(o.key).isArchive);
-    const localArchives = local.filter((f) => parseBackup(f.name).isArchive);
-    const remoteNames = new Set(remote.map((o) => o.key.slice(o.key.lastIndexOf('/') + 1)));
-    const pending = localArchives.filter((f) => !remoteNames.has(f.name)).length;
-    const totalBytes = remote.reduce((s, o) => s + o.sizeBytes, 0);
-
-    const metrics: OverviewMetric[] = [
-      { key: 'b2Backups', label: 'Backups in B2', value: remoteArchives.length },
-      { key: 'b2SizeGb', label: 'B2 size', value: Math.round((totalBytes / 1024 ** 3) * 100) / 100, unit: 'GB' },
-      { key: 'localBackups', label: 'Staged on NAS', value: localArchives.length },
-    ];
-    if (pending > 0) metrics.push({ key: 'pendingUpload', label: 'Pending upload', value: pending });
-
-    // Surface the most recent backups on the dashboard radar.
-    const guests = remoteArchives
-      .map((o) => {
-        const p = parseBackup(o.key);
-        return {
-          name: o.key.slice(o.key.lastIndexOf('/') + 1),
-          kind: REMOTE_KIND,
-          status: p.guestType ? p.guestType.toLowerCase() : 'file',
-          node: 'B2',
-          _sort: (p.timestamp ?? o.lastModified ?? new Date(0)).getTime(),
-        };
-      })
-      .sort((a, b) => b._sort - a._sort)
-      .slice(0, 40)
-      .map(({ _sort, ...g }) => g);
-
-    return { metrics, guests };
-  }
-
-  /** Normalize the prefix and build the full B2 key for a local filename. */
-  private remoteKeyFor(ctx: ConnectorContext, filename: string): string {
-    const prefix = this.prefixOf(ctx);
-    const pfx = prefix ? (prefix.endsWith('/') ? prefix : `${prefix}/`) : '';
-    return pfx + filename;
-  }
-
-  async resolveOptions(ctx: ConnectorContext, sourceId: string, _values: Record<string, unknown>): Promise<ConnectorOption[]> {
-    if (sourceId !== 'remoteBackups') return [];
-    const objects = await new B2Api(this.authFrom(ctx)).listObjects(this.bucketOf(ctx), this.prefixOf(ctx));
-    return objects
-      .filter((o) => parseBackup(o.key).isArchive)
-      .map((o) => {
-        const p = parseBackup(o.key);
-        const name = o.key.slice(o.key.lastIndexOf('/') + 1);
-        const label = `${name} — ${p.vmid ? `${p.guestType} ${p.vmid} · ` : ''}${fmtBytes(o.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''}`;
-        return { label, value: o.key, description: undefined, _sort: (p.timestamp ?? o.lastModified ?? new Date(0)).getTime() };
-      })
-      .sort((a, b) => b._sort - a._sort)
-      .map(({ _sort, ...o }) => o);
-  }
-
   async runOperation(
     ctx: ConnectorContext,
     operationId: string,
-    _resourceId: string | undefined,
+    resourceId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
-    if (operationId === 'push-to-b2') return this.runPush(ctx, values, onProgress);
-    if (operationId === 'restore-from-b2') return this.runRestore(ctx, values, onProgress);
-    return { ok: false, message: `Unknown operation "${operationId}".` };
+    if (operationId !== 'restore-file') return { ok: false, message: `Unknown operation "${operationId}".` };
+    return this.runRestore(ctx, resourceId, values, onProgress);
   }
 
-  /** Upload every local archive not already in B2. Additive — never deletes or overwrites. */
-  private async runPush(
-    ctx: ConnectorContext,
-    values: Record<string, unknown>,
-    onProgress: OperationProgress,
-  ): Promise<OperationResult> {
-    const dryRun = values.dryRun === true || values.dryRun === 'true';
-    const bucket = this.bucketOf(ctx);
-    const dumpPath = this.dumpPathOf(ctx);
-    const api = new B2Api(this.authFrom(ctx));
-
-    onProgress('Comparing local dump folder against B2…');
-    const [local, remote] = await Promise.all([
-      this.readLocalDump(dumpPath),
-      api.listObjects(bucket, this.prefixOf(ctx)),
-    ]);
-    const remoteNames = new Set(remote.map((o) => o.key.slice(o.key.lastIndexOf('/') + 1)));
-    const pending = local
-      .filter((f) => parseBackup(f.name).isArchive && !remoteNames.has(f.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    if (pending.length === 0) {
-      return { ok: true, message: 'Nothing to upload — every local backup is already in B2.' };
-    }
-
-    const totalBytes = pending.reduce((s, f) => s + f.sizeBytes, 0);
-    if (dryRun) {
-      for (const f of pending) onProgress(`Would upload ${f.name} (${fmtBytes(f.sizeBytes)})`);
-      return {
-        ok: true,
-        message: `Preview: ${pending.length} backup${pending.length === 1 ? '' : 's'} (${fmtBytes(totalBytes)}) would be uploaded. Nothing was transferred.`,
-      };
-    }
-
-    let uploaded = 0;
-    let uploadedBytes = 0;
-    const failures: string[] = [];
-    for (const f of pending) {
-      const key = this.remoteKeyFor(ctx, f.name);
-      onProgress(`Uploading ${f.name} (${fmtBytes(f.sizeBytes)})…`);
-      try {
-        let lastEmit = 0;
-        await api.uploadStream(bucket, key, createReadStream(path.join(dumpPath, f.name)), f.sizeBytes, (loaded) => {
-          const now = Date.now();
-          if (now - lastEmit >= 3000) {
-            lastEmit = now;
-            const pct = f.sizeBytes ? Math.floor((loaded / f.sizeBytes) * 100) : 0;
-            onProgress(`  ${f.name}: ${fmtBytes(loaded)} / ${fmtBytes(f.sizeBytes)} (${pct}%)`);
-          }
-        });
-        // Verify by comparing the uploaded object's size to the local file.
-        const head = await api.headObject(bucket, key);
-        if (!head || head.sizeBytes !== f.sizeBytes) {
-          failures.push(`${f.name} (size mismatch after upload)`);
-          onProgress(`  ✗ ${f.name} — size mismatch, left in place`);
-          continue;
-        }
-        uploaded++;
-        uploadedBytes += f.sizeBytes;
-        onProgress(`  ✓ ${f.name} uploaded`);
-        ctx.log('info', `B2 uploaded ${f.name} → ${bucket}/${key} (${fmtBytes(f.sizeBytes)}).`);
-      } catch (err) {
-        const m = err instanceof Error ? err.message : 'upload failed';
-        failures.push(`${f.name} (${m})`);
-        onProgress(`  ✗ ${f.name} — ${m}`);
-        ctx.log('error', `B2 upload of ${f.name} failed: ${m}`);
-      }
-    }
-
-    const ok = failures.length === 0;
-    const parts = [`Uploaded ${uploaded}/${pending.length} backup${pending.length === 1 ? '' : 's'} (${fmtBytes(uploadedBytes)}) to B2.`];
-    if (failures.length) parts.push(`Failed: ${failures.join('; ')}.`);
-    return { ok, message: parts.join(' ') };
-  }
-
-  /** Pull one backup from B2 into the dump folder (temp file → verify size → atomic rename). */
+  /** Restore one backup from a snapshot into the dump folder (restic dump → temp → verify → atomic rename). */
   private async runRestore(
     ctx: ConnectorContext,
+    snapshotId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
-    const bucket = this.bucketOf(ctx);
     const dumpPath = this.dumpPathOf(ctx);
+    const filePath = String(values.file ?? '').trim();
     const overwrite = values.overwrite === true || values.overwrite === 'true';
-    const key = String(values.backup ?? '').trim();
-    if (!key) return { ok: false, message: 'Choose a backup to restore.' };
+    if (!snapshotId) return { ok: false, message: 'Missing snapshot.' };
+    if (!filePath) return { ok: false, message: 'No backup selected to restore.' };
 
     // Only ever write a bare filename into the dump folder — no path traversal.
-    const filename = path.basename(key);
+    const filename = path.basename(filePath);
     const dest = path.join(dumpPath, filename);
     const tmp = path.join(dumpPath, `.cerebro-restore-${process.pid}-${filename}`);
-    const api = new B2Api(this.authFrom(ctx));
+    const restic = new Restic(this.authFrom(ctx));
+
+    const runId = this.runs && ctx.instanceId ? await this.runs.begin(ctx.instanceId, 'restore').catch(() => null) : null;
+    const record = async (ok: boolean, message: string): Promise<OperationResult> => {
+      if (runId) await this.runs!.finish(runId, ok ? 'success' : 'error', message).catch(() => {});
+      return { ok, message };
+    };
 
     try {
-      const head = await api.headObject(bucket, key);
-      if (!head) return { ok: false, message: `Backup "${filename}" no longer exists in B2.` };
-
       const exists = await fs.stat(dest).then(() => true).catch(() => false);
       if (exists && !overwrite) {
-        return { ok: false, message: `"${filename}" already exists in the dump folder. Enable "Overwrite" to replace it.` };
+        return record(false, `"${filename}" already exists in the dump folder. Enable "Overwrite" to replace it.`);
       }
 
-      onProgress(`Downloading ${filename} (${fmtBytes(head.sizeBytes)}) from B2…`);
-      const { body } = await api.getObjectStream(bucket, key);
+      // Best-effort expected size (for progress + verification).
+      let expected = 0;
+      try {
+        const files = await restic.listFiles(snapshotId);
+        expected = files.find((f) => f.path === filePath)?.sizeBytes ?? 0;
+      } catch { /* size is optional */ }
 
-      let loaded = 0;
+      onProgress(`Restoring ${filename}${expected ? ` (${fmtBytes(expected)})` : ''} from snapshot ${snapshotId.slice(0, 8)}…`);
+      const ws = createWriteStream(tmp);
       let lastEmit = 0;
-      const counter = new Transform({
-        transform(chunk, _enc, cb) {
-          loaded += chunk.length;
+      let written: number;
+      try {
+        written = await restic.dumpTo(snapshotId, filePath, ws, (loaded) => {
           const now = Date.now();
           if (now - lastEmit >= 3000) {
             lastEmit = now;
-            const pct = head.sizeBytes ? Math.floor((loaded / head.sizeBytes) * 100) : 0;
-            onProgress(`  ${filename}: ${fmtBytes(loaded)} / ${fmtBytes(head.sizeBytes)} (${pct}%)`);
+            const pct = expected ? ` (${Math.floor((loaded / expected) * 100)}%)` : '';
+            onProgress(`  ${filename}: ${fmtBytes(loaded)}${expected ? ` / ${fmtBytes(expected)}` : ''}${pct}`);
           }
-          cb(null, chunk);
-        },
-      });
-
-      try {
-        await pipeline(body, counter, createWriteStream(tmp));
+        });
       } catch (err) {
         await fs.unlink(tmp).catch(() => {});
         throw err;
       }
 
-      // Verify the download is complete before making it visible to Proxmox.
-      const st = await fs.stat(tmp);
-      if (head.sizeBytes && st.size !== head.sizeBytes) {
+      if (expected && written !== expected) {
         await fs.unlink(tmp).catch(() => {});
-        return { ok: false, message: `Download of ${filename} was incomplete (${fmtBytes(st.size)} of ${fmtBytes(head.sizeBytes)}) — nothing was written.` };
+        return record(false, `Restore of ${filename} was incomplete (${fmtBytes(written)} of ${fmtBytes(expected)}) — nothing was written.`);
       }
 
       await fs.rename(tmp, dest);
-      ctx.log('info', `B2 restored ${bucket}/${key} → ${dest} (${fmtBytes(st.size)}).`);
+      ctx.log('info', `Restored ${filename} (${fmtBytes(written)}) from snapshot ${snapshotId.slice(0, 8)} → ${dest}.`);
       onProgress(`  ✓ ${filename} restored to ${dumpPath}`);
-      return {
-        ok: true,
-        message: `Restored ${filename} (${fmtBytes(st.size)}) to the dump folder. It should now appear in the Proxmox UI under that storage's backups, ready to restore.`,
-      };
+      return record(true, `Restored ${filename} (${fmtBytes(written)}) to the dump folder. It should now appear in the Proxmox UI under that storage's backups, ready to restore.`);
     } catch (err) {
       await fs.unlink(tmp).catch(() => {});
       const m = err instanceof Error ? err.message : 'Restore failed.';
-      ctx.log('error', `B2 restore of ${filename} failed: ${m}`);
-      return { ok: false, message: m };
+      ctx.log('error', `Restore of ${filename} failed: ${m}`);
+      return record(false, m);
     }
+  }
+
+  /** Cached (raw-data) repo stats; null when unavailable. */
+  private async cachedStats(ctx: ConnectorContext, restic: Restic, repo: string): Promise<ResticRepoStats | null> {
+    const c = this.statsCache.get(repo);
+    if (c && Date.now() - c.at < STATS_TTL_MS) return c.data;
+    try {
+      const data = await restic.stats();
+      this.statsCache.set(repo, { at: Date.now(), data });
+      return data;
+    } catch (err) {
+      ctx.log('warn', `Restic stats unavailable: ${err instanceof Error ? err.message : err}`);
+      this.statsCache.set(repo, { at: Date.now(), data: null });
+      return null;
+    }
+  }
+
+  invalidateCache(ctx: ConnectorContext): void {
+    this.statsCache.delete(this.authFrom(ctx).repository);
+  }
+
+  async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
+    const auth = this.authFrom(ctx);
+    const restic = new Restic(auth);
+
+    let snaps: ResticSnapshot[] = [];
+    try {
+      snaps = await restic.snapshots();
+    } catch (err) {
+      ctx.log('warn', `Restic overview snapshots failed: ${err instanceof Error ? err.message : err}`);
+    }
+
+    const latest = snaps[0];
+    const metrics: OverviewMetric[] = [
+      { key: 'snapshots', label: 'Snapshots', value: snaps.length },
+    ];
+    if (latest?.time) {
+      const days = Math.max(0, Math.floor((Date.now() - latest.time.getTime()) / 86400000));
+      metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: latest.time.toISOString() });
+    }
+    const stats = await this.cachedStats(ctx, restic, auth.repository);
+    if (stats) {
+      metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((stats.totalSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB' });
+    }
+
+    const guests = snaps.slice(0, 40).map((s) => ({
+      name: `${s.shortId} · ${fmtDate(s.time)}`,
+      kind: SNAPSHOT_KIND,
+      status: 'snapshot',
+      node: s.hostname || 'restic',
+    }));
+
+    return { metrics, guests };
   }
 }

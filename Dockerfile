@@ -34,8 +34,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ARG GIT_SHA=dev
 ENV GIT_SHA=$GIT_SHA
-# Prisma needs OpenSSL at runtime
-RUN apk add --no-cache openssl
+# Prisma needs OpenSSL at runtime; restic drives the Backblaze B2 backup connector.
+RUN apk add --no-cache openssl restic
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json
