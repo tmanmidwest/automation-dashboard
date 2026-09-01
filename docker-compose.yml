@@ -15,7 +15,7 @@ services:
         # Injected into the UI/version screen at build time.
         GIT_SHA: ${GIT_SHA:-dev}
         # signal-cli version bundled for the Signal notification channel.
-        SIGNAL_CLI_VERSION: ${SIGNAL_CLI_VERSION:-0.13.11}
+        SIGNAL_CLI_VERSION: ${SIGNAL_CLI_VERSION:-0.14.7}
     container_name: cerebro-app
     restart: unless-stopped
     depends_on:
