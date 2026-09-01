@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
   IsArray,
@@ -121,6 +121,22 @@ export class NotificationsController {
       meta: { count: dto.alerts.length },
     });
     return { ok: true };
+  }
+
+  @Get('history')
+  @RequirePermissions('settings:read')
+  history(
+    @Query('channel') channel?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('before') before?: string,
+  ) {
+    return this.notifications.getHistory({
+      channel,
+      status,
+      limit: limit ? Number(limit) : undefined,
+      before: before ? new Date(before) : undefined,
+    });
   }
 
   @Get('connectors/:id/alerts')

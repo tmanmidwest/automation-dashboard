@@ -166,3 +166,24 @@ model AuditLog {
   @@index([actorId])
   @@index([createdAt])
 }
+
+/// One channel-delivery outcome for a notification — powers the History view.
+model NotificationLog {
+  id          String   @id @default(cuid())
+  /// Alert type key (e.g. 'backup.failure'); null for manual test sends.
+  alertKey    String?
+  title       String
+  severity    String   // info | warning | critical
+  source      String?
+  channel     String   // email | textbelt | signal
+  status      String   // sent | failed | held | throttled
+  recipients  Int      @default(0)
+  connectorId String?
+  /// Error text or extra context.
+  detail      String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([channel])
+  @@index([status])
+}

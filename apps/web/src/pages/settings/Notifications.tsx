@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { EnableToggle, type Severity } from './notify-ui';
 import { SignalCard } from './SignalCard';
 import { AlertsMatrix } from './AlertsMatrix';
+import { NotificationHistory } from './NotificationHistory';
 
 interface QuietCfg {
   enabled: boolean;
@@ -334,6 +335,11 @@ export function Notifications() {
         Alerts
       </h2>
       <AlertsMatrix writable={writable} />
+
+      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mt-8 mb-3">
+        History
+      </h2>
+      <NotificationHistory />
     </>
   );
 }

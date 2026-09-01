@@ -8,6 +8,7 @@ import type {
   NotificationMessage,
   NotificationSeverity,
 } from '@cerebro/shared';
+import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
 import { EmailChannel } from './channels/email.channel';
@@ -136,6 +137,7 @@ export class NotificationsService {
   private readonly lastSent = new Map<string, number>();
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly logging: LoggingService,
     email: EmailChannel,
@@ -143,6 +145,49 @@ export class NotificationsService {
     signal: SignalChannel,
   ) {
     this.channels = { email, textbelt, signal };
+  }
+
+  /** Append a delivery outcome to the history table. Best-effort; never throws. */
+  private recordHistory(p: {
+    channel: RoutableChannelId;
+    status: 'sent' | 'failed' | 'held' | 'throttled';
+    msg: NotificationMessage;
+    alertKey?: string;
+    connectorId?: string;
+    recipients?: number;
+    detail?: string;
+  }): void {
+    void this.prisma.notificationLog
+      .create({
+        data: {
+          alertKey: p.alertKey ?? null,
+          title: p.msg.title,
+          severity: p.msg.severity ?? 'info',
+          source: p.msg.source ?? null,
+          channel: p.channel,
+          status: p.status,
+          recipients: p.recipients ?? 0,
+          connectorId: p.connectorId ?? null,
+          detail: p.detail ?? null,
+        },
+      })
+      .catch(() => {
+        /* history is best-effort */
+      });
+  }
+
+  /** Recent notification delivery records, newest first (for the History view). */
+  async getHistory(opts: { limit?: number; channel?: string; status?: string; before?: Date }) {
+    const limit = Math.min(opts.limit ?? 100, 500);
+    return this.prisma.notificationLog.findMany({
+      where: {
+        channel: opts.channel || undefined,
+        status: opts.status || undefined,
+        createdAt: opts.before ? { lt: opts.before } : undefined,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
   }
 
   // ── Channel config ────────────────────────────────────────
@@ -364,11 +409,15 @@ export class NotificationsService {
       source: def.category,
       dedupeKey: payload.dedupeKey ?? typeKey,
     };
-    await this.sendToChannels(msg, rule.channels);
+    await this.sendToChannels(msg, rule.channels, { alertKey: def.key, connectorId: payload.connectorId });
   }
 
   /** Deliver a message to the given channels, applying enablement, quiet hours + throttling. */
-  private async sendToChannels(msg: NotificationMessage, channelIds: NotificationChannelId[]): Promise<void> {
+  private async sendToChannels(
+    msg: NotificationMessage,
+    channelIds: NotificationChannelId[],
+    meta: { alertKey?: string; connectorId?: string } = {},
+  ): Promise<void> {
     const windowSec =
       (await this.settings.get<number>('notify.throttle.windowSec')) ?? DEFAULT_THROTTLE_SEC;
     const quiet = await this.quietConfig();
@@ -390,10 +439,12 @@ export class NotificationsService {
           'notify',
           `Quiet hours: held ${channelId} for "${msg.title}" (${severity})`,
         );
+        this.recordHistory({ channel: channelId, status: 'held', msg, ...meta, recipients: cfg.recipients.length, detail: 'Held by quiet hours' });
         continue;
       }
       if (this.isThrottled(channelId, msg, windowSec)) {
         await this.logging.debug('notify', `Throttled ${channelId} for "${msg.title}"`);
+        this.recordHistory({ channel: channelId, status: 'throttled', msg, ...meta, recipients: cfg.recipients.length, detail: 'Suppressed by dedupe window' });
         continue;
       }
       try {
@@ -403,9 +454,11 @@ export class NotificationsService {
           'notify',
           `Sent "${msg.title}" via ${channelId} to ${cfg.recipients.length} recipient(s)`,
         );
+        this.recordHistory({ channel: channelId, status: 'sent', msg, ...meta, recipients: cfg.recipients.length });
       } catch (err) {
         const m = err instanceof Error ? err.message : 'Unknown error';
         await this.logging.error('notify', `${channelId} send failed for "${msg.title}": ${m}`);
+        this.recordHistory({ channel: channelId, status: 'failed', msg, ...meta, recipients: cfg.recipients.length, detail: m });
       }
     }
   }
@@ -441,10 +494,12 @@ export class NotificationsService {
     };
     try {
       await this.channels[channel].send(msg, recipients);
+      this.recordHistory({ channel, status: 'sent', msg, recipients: recipients.length });
       return { ok: true, message: `Test sent via ${channel} to ${recipients.join(', ')}.` };
     } catch (err) {
       const m = err instanceof Error ? err.message : 'Unknown error';
       await this.logging.error('notify', `Test ${channel} failed: ${m}`);
+      this.recordHistory({ channel, status: 'failed', msg, recipients: recipients.length, detail: m });
       return { ok: false, message: m };
     }
   }
