@@ -71,6 +71,7 @@ const AWS_FULL_POLICY = JSON.stringify(
         Effect: 'Allow',
         Action: [
           'eks:ListClusters', 'eks:DescribeCluster', 'eks:ListNodegroups', 'eks:DescribeNodegroup',
+          'eks:UpdateNodegroupConfig',
           'ecs:ListClusters', 'ecs:DescribeClusters', 'ecs:ListServices', 'ecs:DescribeServices',
           'ecs:ListTasks', 'ecs:DescribeTasks', 'ecs:UpdateService', 'ecs:StopTask',
         ],
@@ -85,7 +86,7 @@ const AWS_FULL_POLICY = JSON.stringify(
           's3:ListAllMyBuckets', 's3:GetBucketLocation',
           'elasticloadbalancing:DescribeLoadBalancers',
           'lambda:ListFunctions',
-          'cloudfront:ListDistributions',
+          'cloudfront:ListDistributions', 'cloudfront:GetDistributionConfig', 'cloudfront:UpdateDistribution',
           'dynamodb:ListTables', 'dynamodb:DescribeTable',
           'elasticache:DescribeCacheClusters',
         ],
@@ -111,7 +112,7 @@ const DISCOVERY_LABELS: Record<string, Record<string, string>> = {
   ebssnap: { node: 'Source volume', cpu: 'Size', created: 'Created', description: 'Description', encrypted: 'Encrypted' },
   rdssnap: { node: 'Source database', cpu: 'Engine / size', type: 'Type', created: 'Created' },
   lambda: { node: 'Architecture', cpu: 'Runtime / memory', code: 'Code size', modified: 'Last modified' },
-  cloudfront: { node: 'State', ip: 'Domain name', aliases: 'Aliases', comment: 'Comment' },
+  cloudfront: { node: 'Deployment status', ip: 'Domain name', aliases: 'Aliases', comment: 'Comment' },
   dynamodb: { node: 'Billing mode', cpu: 'Items', size: 'Size' },
   elasticache: { node: 'Node type', cpu: 'Engine', nodes: 'Nodes' },
 };
@@ -160,6 +161,14 @@ export class AwsConnector implements Connector {
    * though overview() runs far more often. Failures cache briefly then retry.
    */
   private costCache = new Map<string, { at: number; data: AwsCostSummary | null }>();
+
+  /**
+   * Remembers the last non-zero desired task count per ECS service (keyed
+   * account:cluster:service) so "Start" after a "Stop" can restore the prior
+   * scale instead of guessing. In-memory only — falls back to 1 if unknown
+   * (e.g. after a restart, or a service stopped outside Cerebro).
+   */
+  private ecsDesiredMemory = new Map<string, number>();
 
   manifest: ConnectorManifest = {
     id: 'aws',
@@ -222,9 +231,19 @@ export class AwsConnector implements Connector {
       {
         id: EKS_KIND,
         label: 'EKS Clusters',
-        // Read-only for now: view clusters + node groups. No power/delete actions.
+        // Cluster itself is read-only; drill in to scale its managed node groups.
         actions: [],
         deletable: false,
+        subResources: [
+          {
+            id: 'nodegroup',
+            label: 'Node groups',
+            labelSingular: 'node group',
+            itemActions: [
+              { id: 'scale', label: 'Scale', operationId: 'eks-scale-nodegroup', paramKey: 'nodegroup' },
+            ],
+          },
+        ],
       },
       {
         id: ECS_KIND,
@@ -237,6 +256,8 @@ export class AwsConnector implements Connector {
             label: 'Services',
             labelSingular: 'service',
             itemActions: [
+              { id: 'start', label: 'Start', operationId: 'ecs-start-service', paramKey: 'service' },
+              { id: 'stop', label: 'Stop', operationId: 'ecs-stop-service', paramKey: 'service', confirm: 'Stop this service (scale to 0 tasks)? Cerebro remembers the current task count so Start can restore it.', intent: 'destructive' },
               { id: 'scale', label: 'Scale', operationId: 'ecs-scale-service', paramKey: 'service' },
               { id: 'redeploy', label: 'Redeploy', operationId: 'ecs-redeploy-service', paramKey: 'service', confirm: 'Force a new deployment of this service (rolling restart)?' },
             ],
@@ -287,7 +308,15 @@ export class AwsConnector implements Connector {
       { id: EBSSNAP_KIND, label: 'EBS Snapshots', actions: [], deletable: false },
       { id: RDSSNAP_KIND, label: 'RDS Snapshots', actions: [], deletable: false },
       { id: LAMBDA_KIND, label: 'Lambda', actions: [], deletable: false },
-      { id: CF_KIND, label: 'CloudFront', actions: [], deletable: false },
+      {
+        id: CF_KIND,
+        label: 'CloudFront',
+        actions: [
+          { id: 'enable', label: 'Enable', mutating: true, showWhenStatus: ['disabled'] },
+          { id: 'disable', label: 'Disable', mutating: true, confirm: 'Disable this distribution? It stops serving content until re-enabled (deployment takes a few minutes).', showWhenStatus: ['enabled'], intent: 'destructive' },
+        ],
+        deletable: false,
+      },
       { id: DDB_KIND, label: 'DynamoDB', actions: [], deletable: false },
       { id: CACHE_KIND, label: 'ElastiCache', actions: [], deletable: false },
     ],
@@ -341,10 +370,41 @@ export class AwsConnector implements Connector {
         intent: 'destructive',
         fields: [],
       },
+      {
+        id: 'ecs-start-service',
+        label: 'Start service',
+        description: 'Scale a stopped service back up to its previous task count.',
+        scope: 'resource',
+        kind: ECS_KIND,
+        fields: [],
+      },
+      {
+        id: 'ecs-stop-service',
+        label: 'Stop service',
+        description: 'Scale a service down to 0 tasks (remembering the count so Start can restore it).',
+        scope: 'resource',
+        kind: ECS_KIND,
+        intent: 'destructive',
+        fields: [],
+      },
+      {
+        id: 'eks-scale-nodegroup',
+        label: 'Scale node group',
+        description: 'Set the desired, minimum, and maximum node counts for a managed node group.',
+        scope: 'resource',
+        kind: EKS_KIND,
+        submitLabel: 'Scale',
+        prefill: true,
+        fields: [
+          { key: 'desiredSize', label: 'Desired nodes', type: 'number', required: true, help: 'Number of nodes the group should run (0 to scale it to nothing).' },
+          { key: 'minSize', label: 'Minimum nodes', type: 'number', required: true, help: 'Lower bound the autoscaler respects.' },
+          { key: 'maxSize', label: 'Maximum nodes', type: 'number', required: true, help: 'Upper bound the autoscaler respects.' },
+        ],
+      },
     ],
     help: {
       overview:
-        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate), EKS clusters with node groups (read-only), and ECS clusters — drill into a cluster to scale/redeploy its services and stop tasks.',
+        'Connects to a single AWS account and region using an IAM access key. Lists EC2 instances (launch, start, stop, reboot, terminate), EKS clusters (drill in to scale managed node groups), and ECS clusters (drill in to start/stop/scale/redeploy services and stop tasks). CloudFront distributions can be enabled/disabled, and RDS/EBS/Elastic IP tabs offer their own safe actions.',
       setupSteps: [
         'In the AWS IAM console, create (or reuse) an IAM user for Cerebro.',
         'Attach a policy granting the EC2 describe/power permissions listed below (AmazonEC2ReadOnlyAccess covers listing; add the power actions to manage state).',
@@ -359,13 +419,13 @@ export class AwsConnector implements Connector {
         'ec2:RunInstances (+ ec2:CreateTags) — required to launch new instances.',
         'ec2:DescribeImages, ec2:DescribeKeyPairs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups — populate the Launch form (all in AmazonEC2ReadOnlyAccess).',
         'ce:GetCostAndUsage, ce:GetCostForecast — OPTIONAL, for the spend tile. Requires Cost Explorer to be enabled in Billing first; each call is billed ~$0.01 by AWS (Cerebro fetches once a day).',
-        'eks:ListClusters, eks:DescribeCluster, eks:ListNodegroups, eks:DescribeNodegroup — OPTIONAL, to list EKS clusters and node groups. No AWS-managed read policy covers these for a user; attach a small custom policy with these four actions (Resource "*").',
+        'eks:ListClusters, eks:DescribeCluster, eks:ListNodegroups, eks:DescribeNodegroup — OPTIONAL, to list EKS clusters and node groups. No AWS-managed read policy covers these for a user; attach a small custom policy with these actions (Resource "*"). eks:UpdateNodegroupConfig — to scale managed node groups (min/max/desired) from Cerebro.',
         'ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices, ecs:ListTasks, ecs:DescribeTasks — OPTIONAL, to list ECS clusters, services, and tasks.',
-        'ecs:UpdateService, ecs:StopTask — OPTIONAL, to scale/redeploy services and stop tasks from Cerebro.',
+        'ecs:UpdateService, ecs:StopTask — OPTIONAL, to start/stop/scale/redeploy services and stop tasks from Cerebro (Start/Stop are scale-to-previous / scale-to-0).',
         'rds:DescribeDBInstances (+ ListTagsForResource), rds:StartDBInstance/StopDBInstance/RebootDBInstance — OPTIONAL, to view and start/stop/reboot RDS databases.',
         'ec2:DescribeVolumes, ec2:DescribeAddresses — OPTIONAL, for the EBS Volumes and Elastic IPs tabs (in AmazonEC2ReadOnlyAccess). ec2:DeleteVolume, ec2:ReleaseAddress — to delete unattached volumes / release idle Elastic IPs.',
         's3:ListAllMyBuckets, s3:GetBucketLocation — OPTIONAL, for the S3 Buckets tab (buckets are global — shows all buckets in the account).',
-        'Discovery tabs (all read-only): ec2:DescribeNatGateways, ec2:DescribeSnapshots, elasticloadbalancing:DescribeLoadBalancers, rds:DescribeDBSnapshots, lambda:ListFunctions, cloudfront:ListDistributions, dynamodb:ListTables + dynamodb:DescribeTable, elasticache:DescribeCacheClusters.',
+        'Discovery tabs (read-only): ec2:DescribeNatGateways, ec2:DescribeSnapshots, elasticloadbalancing:DescribeLoadBalancers, rds:DescribeDBSnapshots, lambda:ListFunctions, cloudfront:ListDistributions, dynamodb:ListTables + dynamodb:DescribeTable, elasticache:DescribeCacheClusters. cloudfront:GetDistributionConfig + cloudfront:UpdateDistribution — to enable/disable CloudFront distributions from Cerebro.',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -497,9 +557,11 @@ export class AwsConnector implements Connector {
       }));
     }
     if (kind === CF_KIND) {
+      // Status pill reflects the ENABLED axis (what the actions toggle); the
+      // deployment state (Deployed/InProgress) is surfaced as a detail instead.
       return (await api.listCloudFrontDistributions()).map((d) => ({
-        id: d.id, kind, name: d.aliases[0] || d.domainName || d.id, status: (d.status || '').toLowerCase() || (d.enabled ? 'enabled' : 'disabled'),
-        details: { node: d.enabled ? 'enabled' : 'disabled', ip: d.domainName ?? null, aliases: d.aliases.join(', ') || null, comment: d.comment ?? null },
+        id: d.id, kind, name: d.aliases[0] || d.domainName || d.id, status: d.enabled ? 'enabled' : 'disabled',
+        details: { node: d.status ?? null, ip: d.domainName ?? null, aliases: d.aliases.join(', ') || null, comment: d.comment ?? null },
       }));
     }
     if (kind === DDB_KIND) {
@@ -668,6 +730,18 @@ export class AwsConnector implements Connector {
         await api.releaseElasticIp(resourceId);
         ctx.log('warn', `AWS released Elastic IP ${resourceId}.`);
         return { ok: true, message: `Released Elastic IP ${resourceId}.` };
+      }
+      if (kind === CF_KIND) {
+        if (actionId !== 'enable' && actionId !== 'disable') return { ok: false, message: `Unsupported action "${actionId}".` };
+        const want = actionId === 'enable';
+        const changed = await api.setCloudFrontEnabled(resourceId, want);
+        ctx.log(want ? 'info' : 'warn', `AWS CloudFront ${resourceId} ${changed ? `${actionId}d` : `already ${actionId}d`}.`);
+        return {
+          ok: true,
+          message: changed
+            ? `${want ? 'Enabling' : 'Disabling'} ${resourceId} — CloudFront is deploying the change (a few minutes).`
+            : `${resourceId} is already ${want ? 'enabled' : 'disabled'}.`,
+        };
       }
       if (kind !== EC2_KIND) return { ok: false, message: `Unknown resource kind "${kind}".` };
       switch (actionId) {
@@ -1169,8 +1243,25 @@ export class AwsConnector implements Connector {
   }
 
   async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
-    if (kind !== ECS_KIND) return [];
     const api = new AwsApi(this.authFrom(ctx));
+    if (kind === EKS_KIND) {
+      if (subKind !== 'nodegroup') return [];
+      const groups = await api.describeEksNodegroups(resourceId);
+      return groups.map((ng) => ({
+        id: ng.name,
+        kind: 'nodegroup',
+        name: ng.name,
+        status: (ng.status || '').toLowerCase(),
+        details: {
+          summary: [
+            ng.desiredSize != null ? `${ng.desiredSize} node${ng.desiredSize === 1 ? '' : 's'} (min ${ng.minSize ?? '?'}, max ${ng.maxSize ?? '?'})` : null,
+            (ng.instanceTypes ?? []).join('/') || null,
+            ng.capacityType,
+          ].filter(Boolean).join(' · ') || '—',
+        },
+      }));
+    }
+    if (kind !== ECS_KIND) return [];
     if (subKind === 'service') {
       const services = await api.listEcsServices(resourceId);
       return services.map((s: AwsEcsService) => ({
@@ -1215,7 +1306,55 @@ export class AwsConnector implements Connector {
         /* best-effort prefill */
       }
     }
+    if (operationId === 'eks-scale-nodegroup' && resourceId && values.nodegroup) {
+      try {
+        const api = new AwsApi(this.authFrom(ctx));
+        const ng = (await api.describeEksNodegroups(resourceId)).find((g) => g.name === String(values.nodegroup));
+        if (ng) {
+          const out: Record<string, unknown> = {};
+          if (ng.desiredSize != null) out.desiredSize = ng.desiredSize;
+          if (ng.minSize != null) out.minSize = ng.minSize;
+          if (ng.maxSize != null) out.maxSize = ng.maxSize;
+          return out;
+        }
+      } catch {
+        /* best-effort prefill */
+      }
+    }
     return {};
+  }
+
+  private async runEksOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+  ): Promise<OperationResult> {
+    const cluster = resourceId;
+    if (!cluster) return { ok: false, message: 'Missing EKS cluster.' };
+    if (operationId !== 'eks-scale-nodegroup') return { ok: false, message: `Unknown operation "${operationId}".` };
+    const nodegroup = String(values.nodegroup ?? '');
+    if (!nodegroup) return { ok: false, message: 'Missing node group.' };
+    const desired = Number(values.desiredSize);
+    const min = Number(values.minSize);
+    const max = Number(values.maxSize);
+    if (![desired, min, max].every((n) => Number.isInteger(n) && n >= 0)) {
+      return { ok: false, message: 'Node counts must be whole numbers of 0 or more.' };
+    }
+    if (min > max) return { ok: false, message: 'Minimum nodes cannot exceed maximum nodes.' };
+    if (desired < min || desired > max) return { ok: false, message: 'Desired nodes must be between the minimum and maximum.' };
+    try {
+      onProgress(`Scaling ${nodegroup} to ${desired} node${desired === 1 ? '' : 's'} (min ${min}, max ${max})…`);
+      const api = new AwsApi(this.authFrom(ctx));
+      await api.updateEksNodegroupScaling(cluster, nodegroup, { desiredSize: desired, minSize: min, maxSize: max });
+      ctx.log('info', `AWS EKS scaled node group ${nodegroup} in ${cluster} to desired ${desired} (min ${min}, max ${max}).`);
+      return { ok: true, message: `Scaling ${nodegroup} to ${desired} node${desired === 1 ? '' : 's'} — EKS is applying the update.` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Operation failed.';
+      ctx.log('error', `AWS EKS ${operationId} failed: ${message}`);
+      return { ok: false, message };
+    }
   }
 
   private async runEcsOperation(
@@ -1225,9 +1364,11 @@ export class AwsConnector implements Connector {
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
-    const api = new AwsApi(this.authFrom(ctx));
+    const auth = this.authFrom(ctx);
+    const api = new AwsApi(auth);
     const cluster = resourceId;
     if (!cluster) return { ok: false, message: 'Missing ECS cluster.' };
+    const memKey = (service: string) => `${auth.accessKeyId}:${cluster}:${service}`;
     try {
       if (operationId === 'ecs-scale-service') {
         const service = String(values.service ?? '');
@@ -1236,8 +1377,34 @@ export class AwsConnector implements Connector {
         if (!Number.isInteger(desired) || desired < 0) return { ok: false, message: 'Desired task count must be 0 or more.' };
         onProgress(`Scaling ${service} to ${desired} task${desired === 1 ? '' : 's'}…`);
         await api.updateEcsService(cluster, service, { desiredCount: desired });
+        // Remember a non-zero scale so a later Stop→Start round-trips back to it.
+        if (desired > 0) this.ecsDesiredMemory.set(memKey(service), desired);
         ctx.log('info', `AWS ECS scaled ${service} to ${desired} in ${cluster}.`);
         return { ok: true, message: `Scaled ${service} to ${desired} task${desired === 1 ? '' : 's'}.` };
+      }
+      if (operationId === 'ecs-stop-service') {
+        const service = String(values.service ?? '');
+        if (!service) return { ok: false, message: 'Missing service.' };
+        // Remember the current count (if running) so Start can restore it.
+        const current = (await api.listEcsServices(cluster)).find((s) => s.name === service)?.desired ?? 0;
+        if (current > 0) this.ecsDesiredMemory.set(memKey(service), current);
+        onProgress(`Stopping ${service} (scaling to 0)…`);
+        await api.updateEcsService(cluster, service, { desiredCount: 0 });
+        ctx.log('warn', `AWS ECS stopped ${service} in ${cluster} (was ${current}).`);
+        return { ok: true, message: `Stopped ${service} (scaled to 0${current > 0 ? `, was ${current}` : ''}).` };
+      }
+      if (operationId === 'ecs-start-service') {
+        const service = String(values.service ?? '');
+        if (!service) return { ok: false, message: 'Missing service.' };
+        const svc = (await api.listEcsServices(cluster)).find((s) => s.name === service);
+        if ((svc?.desired ?? 0) > 0) {
+          return { ok: true, message: `${service} is already running ${svc?.desired} task${svc?.desired === 1 ? '' : 's'}.` };
+        }
+        const restore = this.ecsDesiredMemory.get(memKey(service)) ?? 1;
+        onProgress(`Starting ${service} (scaling to ${restore})…`);
+        await api.updateEcsService(cluster, service, { desiredCount: restore });
+        ctx.log('info', `AWS ECS started ${service} in ${cluster} (to ${restore}).`);
+        return { ok: true, message: `Started ${service} — scaling to ${restore} task${restore === 1 ? '' : 's'}.` };
       }
       if (operationId === 'ecs-redeploy-service') {
         const service = String(values.service ?? '');
@@ -1271,6 +1438,7 @@ export class AwsConnector implements Connector {
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
     if (operationId.startsWith('ecs-')) return this.runEcsOperation(ctx, operationId, resourceId, values, onProgress);
+    if (operationId.startsWith('eks-')) return this.runEksOperation(ctx, operationId, resourceId, values, onProgress);
     if (operationId !== 'launch-ec2') return { ok: false, message: `Unknown operation "${operationId}".` };
     const api = new AwsApi(this.authFrom(ctx));
     try {

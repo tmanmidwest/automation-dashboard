@@ -33,8 +33,8 @@ function fmtMetric(m: OverviewMetric): string {
 }
 
 function statusColor(status?: string) {
-  if (status === 'running' || status === 'active') return 'text-emerald-400 bg-emerald-500/15';
-  if (status === 'stopped') return 'text-muted-foreground bg-muted';
+  if (status === 'running' || status === 'active' || status === 'enabled') return 'text-emerald-400 bg-emerald-500/15';
+  if (status === 'stopped' || status === 'disabled') return 'text-muted-foreground bg-muted';
   return 'text-amber-400 bg-amber-500/15';
 }
 

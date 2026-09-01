@@ -31,7 +31,12 @@ import {
 import { S3Client, ListBucketsCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3';
 import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
-import { CloudFrontClient, ListDistributionsCommand } from '@aws-sdk/client-cloudfront';
+import {
+  CloudFrontClient,
+  ListDistributionsCommand,
+  GetDistributionConfigCommand,
+  UpdateDistributionCommand,
+} from '@aws-sdk/client-cloudfront';
 import { DynamoDBClient, ListTablesCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { ElastiCacheClient, DescribeCacheClustersCommand } from '@aws-sdk/client-elasticache';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
@@ -42,6 +47,7 @@ import {
   DescribeClusterCommand,
   ListNodegroupsCommand,
   DescribeNodegroupCommand,
+  UpdateNodegroupConfigCommand,
 } from '@aws-sdk/client-eks';
 import {
   ECSClient,
@@ -850,6 +856,29 @@ export class AwsApi {
     );
   }
 
+  /** Adjust a managed node group's scaling config (min/max/desired node counts). */
+  async updateEksNodegroupScaling(
+    clusterName: string,
+    nodegroupName: string,
+    scaling: { minSize?: number; maxSize?: number; desiredSize?: number },
+  ): Promise<void> {
+    try {
+      await this.eks.send(
+        new UpdateNodegroupConfigCommand({
+          clusterName,
+          nodegroupName,
+          scalingConfig: {
+            ...(scaling.minSize !== undefined ? { minSize: scaling.minSize } : {}),
+            ...(scaling.maxSize !== undefined ? { maxSize: scaling.maxSize } : {}),
+            ...(scaling.desiredSize !== undefined ? { desiredSize: scaling.desiredSize } : {}),
+          },
+        }),
+      );
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
   private _ecs?: ECSClient;
   private get ecs(): ECSClient {
     if (!this._ecs) {
@@ -1359,6 +1388,27 @@ export class AwsApi {
         marker = r.DistributionList?.IsTruncated ? r.DistributionList?.NextMarker : undefined;
       } while (marker);
       return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /**
+   * Enable or disable a CloudFront distribution. CloudFront has no direct toggle:
+   * fetch the current config + ETag, flip Enabled, and submit the whole config
+   * back with IfMatch. A no-op (already in the requested state) is skipped so we
+   * don't churn a deployment. Returns whether a change was actually submitted.
+   */
+  async setCloudFrontEnabled(id: string, enabled: boolean): Promise<boolean> {
+    try {
+      const cfg = await this.cf.send(new GetDistributionConfigCommand({ Id: id }));
+      const config = cfg.DistributionConfig;
+      if (!config) throw new Error(`CloudFront distribution ${id} not found.`);
+      if (config.Enabled === enabled) return false; // already in the desired state
+      await this.cf.send(
+        new UpdateDistributionCommand({ Id: id, IfMatch: cfg.ETag, DistributionConfig: { ...config, Enabled: enabled } }),
+      );
+      return true;
     } catch (err) {
       throw friendly(err);
     }
