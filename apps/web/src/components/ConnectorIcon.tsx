@@ -1,4 +1,4 @@
-import { Server, Cloud, Building2, Puzzle } from 'lucide-react';
+import { Server, Cloud, Building2, Archive, Puzzle } from 'lucide-react';
 
 /** Maps a connector manifest icon key to a glyph. */
 export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; className?: string }) {
@@ -9,6 +9,8 @@ export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; 
       return <Cloud className={className} />;
     case 'entra':
       return <Building2 className={className} />;
+    case 'backblaze':
+      return <Archive className={className} />;
     default:
       return <Puzzle className={className} />;
   }

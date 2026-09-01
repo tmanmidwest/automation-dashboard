@@ -122,6 +122,24 @@ model ConnectorInstance {
   @@index([connectorId])
 }
 
+/// One execution of a connector's scheduled sync (e.g. Backblaze NAS→B2 push).
+/// Durable history so runs survive restarts (the in-memory JobService does not).
+model BackupRun {
+  id                  String    @id @default(cuid())
+  /// The ConnectorInstance this run belongs to.
+  connectorInstanceId String
+  /// 'schedule' (cron) or 'manual'.
+  trigger             String    @default("schedule")
+  /// running | success | error.
+  status              String
+  /// The operation's result message (counts, errors, etc.).
+  message             String?
+  startedAt           DateTime  @default(now())
+  finishedAt          DateTime?
+
+  @@index([connectorInstanceId, startedAt])
+}
+
 model AppLog {
   id        String   @id @default(cuid())
   level     String   // debug | info | warn | error

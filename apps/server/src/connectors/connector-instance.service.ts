@@ -116,9 +116,28 @@ export class ConnectorInstanceService {
     }
     return {
       config,
+      instanceId: instance.id,
       log: (level, message, meta) =>
         void this.logging[level](`connector:${instance.connectorId}`, `[${instance.name}] ${message}`, meta),
     };
+  }
+
+  /**
+   * Run an operation to completion and return its result (unlike startOperation,
+   * which is fire-and-forget via JobService). Used by the scheduler, which needs
+   * the outcome to record a durable run.
+   */
+  async runOperationAwait(
+    id: string,
+    operationId: string,
+    values: Record<string, unknown>,
+  ): Promise<{ ok: boolean; message: string }> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.runOperation) throw new BadRequestException('This connector does not support operations.');
+    const ctx = await this.buildContext(instance);
+    return connector.runOperation(ctx, operationId, undefined, values, () => {});
   }
 
   private connectorFor(instance: ConnectorInstance) {

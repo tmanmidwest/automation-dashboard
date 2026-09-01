@@ -200,6 +200,8 @@ export interface ConnectorResourceDetail {
 export interface ConnectorContext {
   /** Decrypted config values (including secrets) for this connector instance. */
   config: Record<string, unknown>;
+  /** The connector instance's id. Lets a connector scope instance-specific state (e.g. sync history). */
+  instanceId?: string;
   /** Structured logger scoped to this connector instance. */
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => void;
 }
