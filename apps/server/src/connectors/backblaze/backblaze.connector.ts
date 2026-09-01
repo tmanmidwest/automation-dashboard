@@ -259,7 +259,7 @@ export class BackblazeConnector implements Connector {
         ],
       },
       { id: LOCAL_KIND, label: 'Local dump (NAS)', actions: [], deletable: false },
-      { id: RUN_KIND, label: 'Restore history', actions: [], deletable: false },
+      { id: RUN_KIND, label: 'History', actions: [], deletable: false },
     ],
     operations: [
       {
@@ -270,6 +270,17 @@ export class BackblazeConnector implements Connector {
         kind: SNAPSHOT_KIND,
         icon: 'upload',
         submitLabel: 'Back up now',
+        fields: [],
+      },
+      {
+        id: 'apply-retention',
+        label: 'Apply retention now',
+        description: 'Prune B2 snapshots older than the configured retention (restic forget --prune), without running a backup. Uses the "Delete backups older than (days)" setting.',
+        scope: 'create',
+        kind: SNAPSHOT_KIND,
+        icon: 'trash-2',
+        submitLabel: 'Prune now',
+        intent: 'destructive',
         fields: [],
       },
       {
@@ -651,8 +662,32 @@ export class BackblazeConnector implements Connector {
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
     if (operationId === 'backup-now') return this.runBackup(ctx, values, onProgress);
+    if (operationId === 'apply-retention') return this.runRetention(ctx, onProgress);
     if (operationId === 'restore-file') return this.runRestore(ctx, resourceId, values, onProgress);
     return { ok: false, message: `Unknown operation "${operationId}".` };
+  }
+
+  /** Prune B2 snapshots older than the configured retention, on demand (no backup). */
+  private async runRetention(ctx: ConnectorContext, onProgress: OperationProgress): Promise<OperationResult> {
+    const retentionDays = Math.floor(Number(ctx.config.retentionDays ?? 0)) || 0;
+    if (retentionDays <= 0) {
+      return { ok: false, message: 'Set "Delete backups older than (days)" on the connector first — it is currently blank/0 (keep everything).' };
+    }
+    const runId = this.runs && ctx.instanceId ? await this.runs.begin(ctx.instanceId, 'retention').catch(() => null) : null;
+    const record = async (ok: boolean, message: string): Promise<OperationResult> => {
+      if (runId) await this.runs!.finish(runId, ok ? 'success' : 'error', message).catch(() => {});
+      return { ok, message };
+    };
+    try {
+      onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'} (this can take a few minutes)…`);
+      await new Restic(this.authFrom(ctx)).forgetOlderThan(retentionDays);
+      ctx.log('warn', `Applied retention: kept within ${retentionDays}d, pruned older snapshots.`);
+      return record(true, `Retention applied — kept the last ${retentionDays} day${retentionDays === 1 ? '' : 's'} and pruned older snapshots from B2.`);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Retention failed.';
+      ctx.log('error', `Retention prune failed: ${m}`);
+      return record(false, m);
+    }
   }
 
   /**

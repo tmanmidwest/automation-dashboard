@@ -148,6 +148,11 @@ Pick a **frequency** (Daily / Weekly / Monthly), the **day** (for weekly/monthly
 and, if you set **Delete backups older than (days)**, prunes snapshots older than that
 afterward (the latest is always kept).
 
+Retention runs **automatically after each backup**. To prune on demand without waiting for
+a backup, use **Apply retention now** (on the Snapshots tab) — it runs `restic forget --prune`
+against the "Delete backups older than (days)" setting. It needs `deleteFiles` on the B2 key,
+and `--keep-within` always keeps the newest snapshot.
+
 > **A backup captures the whole dump folder — but restic only *uploads what's new*.**
 > Thanks to deduplication, unchanged backups from previous runs aren't re-sent; only new
 > vzdump files add data. So "back up everything" is cheap after the first run — there's no

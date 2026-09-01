@@ -21,7 +21,7 @@ export class BackupRunService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** Open a run row in the 'running' state; returns its id. */
-  async begin(connectorInstanceId: string, trigger: 'schedule' | 'manual' | 'restore'): Promise<string> {
+  async begin(connectorInstanceId: string, trigger: 'schedule' | 'manual' | 'restore' | 'retention'): Promise<string> {
     const run = await this.prisma.backupRun.create({
       data: { connectorInstanceId, trigger, status: 'running' },
     });
