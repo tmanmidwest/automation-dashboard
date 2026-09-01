@@ -57,6 +57,9 @@ function friendly(err: unknown): ResticError {
   const e = err as { code?: string | number; stderr?: string; message?: string } | undefined;
   const stderr = (e?.stderr || '').toString();
   const msg = stderr || e?.message || String(err);
+  if ((e as { name?: string })?.name === 'AbortError' || (e?.code as string) === 'ABORT_ERR') {
+    return new ResticError('Cancelled.', 'cancelled');
+  }
   if ((e?.code as string) === 'ENOENT' && /restic/.test(e?.message || '')) {
     return new ResticError('The restic binary is not installed in the server image.', 'ENOENT');
   }
@@ -92,13 +95,18 @@ export class Restic {
     };
   }
 
-  private async run(args: string[], maxBuffer = 128 * 1024 * 1024): Promise<string> {
+  private async run(args: string[], maxBuffer = 128 * 1024 * 1024, signal?: AbortSignal): Promise<string> {
     try {
-      const { stdout } = await execFileAsync('restic', args, { env: this.env(), maxBuffer });
+      const { stdout } = await execFileAsync('restic', args, { env: this.env(), maxBuffer, signal });
       return stdout;
     } catch (err) {
       throw friendly(err);
     }
+  }
+
+  /** Remove *stale* locks (from a killed/cancelled restic process). Never touches a live lock. */
+  async unlock(signal?: AbortSignal): Promise<void> {
+    await this.run(['unlock'], 8 * 1024 * 1024, signal);
   }
 
   /** restic version string (also a cheap "is the binary present" probe). */
@@ -171,13 +179,14 @@ export class Restic {
   async backup(
     paths: string[],
     tags: string[],
-    onPercent?: (pct: number) => void,
+    onStatus?: (s: { percent: number; secondsRemaining?: number }) => void,
+    signal?: AbortSignal,
   ): Promise<{ snapshotId?: string; filesNew?: number; filesChanged?: number; bytesAdded?: number; bytesProcessed?: number }> {
     const args = ['backup', ...paths];
     for (const t of tags) args.push('--tag', t);
     args.push('--json');
     return new Promise((resolve, reject) => {
-      const child = spawn('restic', args, { env: this.env() });
+      const child = spawn('restic', args, { env: this.env(), signal });
       let stderr = '';
       let buf = '';
       let summary: Record<string, unknown> | undefined;
@@ -186,8 +195,11 @@ export class Restic {
         if (!t) return;
         let o: Record<string, unknown>;
         try { o = JSON.parse(t); } catch { return; }
-        if (o.message_type === 'status' && onPercent && typeof o.percent_done === 'number') {
-          onPercent(Math.floor((o.percent_done as number) * 100));
+        if (o.message_type === 'status' && onStatus && typeof o.percent_done === 'number') {
+          onStatus({
+            percent: Math.floor((o.percent_done as number) * 100),
+            secondsRemaining: typeof o.seconds_remaining === 'number' ? (o.seconds_remaining as number) : undefined,
+          });
         } else if (o.message_type === 'summary') {
           summary = o;
         }
@@ -221,8 +233,8 @@ export class Restic {
    * Age-based retention: keep snapshots within the last `days` (relative to the
    * newest snapshot — so the latest is always kept) and prune the rest from B2.
    */
-  async forgetOlderThan(days: number): Promise<void> {
-    await this.run(['forget', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune']);
+  async forgetOlderThan(days: number, signal?: AbortSignal): Promise<void> {
+    await this.run(['forget', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune'], 128 * 1024 * 1024, signal);
   }
 
   /**
@@ -239,9 +251,9 @@ export class Restic {
    * Stream one file out of a snapshot to a writable (e.g. a file in the NAS dump
    * folder). Resolves with the number of bytes written.
    */
-  async dumpTo(snapshotId: string, filePath: string, dest: Writable, onBytes?: (n: number) => void): Promise<number> {
+  async dumpTo(snapshotId: string, filePath: string, dest: Writable, onBytes?: (n: number) => void, signal?: AbortSignal): Promise<number> {
     return new Promise<number>((resolve, reject) => {
-      const child = spawn('restic', ['dump', snapshotId, filePath], { env: this.env() });
+      const child = spawn('restic', ['dump', snapshotId, filePath], { env: this.env(), signal });
       let bytes = 0;
       let stderr = '';
       let settled = false;

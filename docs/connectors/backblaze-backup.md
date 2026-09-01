@@ -223,6 +223,22 @@ Then, in Proxmox: open that storage → **Backups**, select the file → **Resto
 
 ---
 
+### Long operations — background, progress & cancel
+
+**Back up now** and **Apply retention now** run **in the background** — no blocking dialog. A
+**running-operation banner** appears at the top of the connector page showing the job, its
+latest step, elapsed time, and (for backups) restic's **ETA**, with a **Cancel** button. Leave
+the page and come back — the banner persists as long as the job runs, and the snapshot list
+refreshes automatically when it finishes. When nothing's running, there's no banner (idle);
+the last backup's result is on the dashboard **Backups** tile and the **History** tab.
+
+Shorter operations that need input (like **Restore**) still use a dialog, which shows the same
+collapsible **Activity (N)** log and Cancel button.
+
+Cancelling kills the underlying restic process; because that can leave a *stale* lock in the
+repo, Cerebro clears stale locks automatically at the start of the next backup/prune (it never
+touches a live lock), so you won't get stuck on "repository is locked."
+
 ## Disaster recovery — "I lost Proxmox"
 
 1. Rebuild Proxmox and re-add the NAS backup storage (**Datacenter → Storage**) pointing at

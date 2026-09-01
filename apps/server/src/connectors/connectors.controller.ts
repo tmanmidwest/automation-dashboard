@@ -289,12 +289,29 @@ export class ConnectorsController {
     return { token, type: target.type, password: target.password, wsPath: '/api/console/ws' };
   }
 
+  @Get('instances/:id/active-jobs')
+  @RequirePermissions('connectors:read')
+  activeJobs(@Param('id') id: string): ConnectorJobStatus[] {
+    return this.instances.runningJobs(id).map((job) => ({
+      id: job.id, label: job.label, status: job.status, steps: job.steps,
+      message: job.message, createdResourceId: job.createdResourceId, startedAt: new Date(job.startedAt).toISOString(),
+    }));
+  }
+
   @Get('instances/:id/jobs/:jobId')
   @RequirePermissions('connectors:read')
   job(@Param('id') id: string, @Param('jobId') jobId: string): ConnectorJobStatus {
     const job = this.instances.getJob(jobId);
     if (!job || job.instanceId !== id) throw new NotFoundException('Job not found.');
-    return { id: job.id, label: job.label, status: job.status, steps: job.steps, message: job.message, createdResourceId: job.createdResourceId };
+    return { id: job.id, label: job.label, status: job.status, steps: job.steps, message: job.message, createdResourceId: job.createdResourceId, startedAt: new Date(job.startedAt).toISOString() };
+  }
+
+  @Post('instances/:id/jobs/:jobId/cancel')
+  @RequirePermissions('connectors:action')
+  cancelJob(@Param('id') id: string, @Param('jobId') jobId: string): { ok: boolean } {
+    const job = this.instances.getJob(jobId);
+    if (!job || job.instanceId !== id) throw new NotFoundException('Job not found.');
+    return { ok: this.instances.cancelJob(id, jobId) };
   }
 
   @Post('instances/:id/resources/:kind/:resourceId/actions/:actionId')

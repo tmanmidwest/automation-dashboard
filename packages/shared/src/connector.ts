@@ -245,6 +245,9 @@ export interface ConnectorOperation {
   icon?: string;
   submitLabel?: string;
   intent?: 'default' | 'destructive';
+  /** If true (and the op has no fields), the UI starts it immediately without a dialog and
+   *  surfaces progress in the page's running-operation banner — for long jobs like backups. */
+  background?: boolean;
   fields: ConnectorFormField[];
   /** If true, the UI fetches initial field values from the connector when the form opens. */
   prefill?: boolean;
@@ -352,12 +355,15 @@ export interface Connector {
     resourceId: string | undefined,
     values: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
-  /** Optional: run a parameterized operation. Long-running work reports via onProgress. */
+  /** Optional: run a parameterized operation. Long-running work reports via onProgress.
+   *  `signal` aborts when the user cancels the job — connectors may ignore it or use it
+   *  to stop child processes / long transfers. */
   runOperation?(
     ctx: ConnectorContext,
     operationId: string,
     resourceId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
+    signal?: AbortSignal,
   ): Promise<OperationResult>;
 }

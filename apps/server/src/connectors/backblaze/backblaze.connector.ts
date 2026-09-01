@@ -270,6 +270,7 @@ export class BackblazeConnector implements Connector {
         kind: SNAPSHOT_KIND,
         icon: 'upload',
         submitLabel: 'Back up now',
+        background: true, // long-running → start without a blocking dialog; progress shows in the page banner
         fields: [],
       },
       {
@@ -281,6 +282,7 @@ export class BackblazeConnector implements Connector {
         icon: 'trash-2',
         submitLabel: 'Prune now',
         intent: 'destructive',
+        background: true, // prune can take minutes → run in the background with the page banner
         fields: [],
       },
       {
@@ -660,15 +662,16 @@ export class BackblazeConnector implements Connector {
     resourceId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
+    signal?: AbortSignal,
   ): Promise<OperationResult> {
-    if (operationId === 'backup-now') return this.runBackup(ctx, values, onProgress);
-    if (operationId === 'apply-retention') return this.runRetention(ctx, onProgress);
-    if (operationId === 'restore-file') return this.runRestore(ctx, resourceId, values, onProgress);
+    if (operationId === 'backup-now') return this.runBackup(ctx, values, onProgress, signal);
+    if (operationId === 'apply-retention') return this.runRetention(ctx, onProgress, signal);
+    if (operationId === 'restore-file') return this.runRestore(ctx, resourceId, values, onProgress, signal);
     return { ok: false, message: `Unknown operation "${operationId}".` };
   }
 
   /** Prune B2 snapshots older than the configured retention, on demand (no backup). */
-  private async runRetention(ctx: ConnectorContext, onProgress: OperationProgress): Promise<OperationResult> {
+  private async runRetention(ctx: ConnectorContext, onProgress: OperationProgress, signal?: AbortSignal): Promise<OperationResult> {
     const retentionDays = Math.floor(Number(ctx.config.retentionDays ?? 0)) || 0;
     if (retentionDays <= 0) {
       return { ok: false, message: 'Set "Delete backups older than (days)" on the connector first — it is currently blank/0 (keep everything).' };
@@ -679,8 +682,10 @@ export class BackblazeConnector implements Connector {
       return { ok, message };
     };
     try {
+      const restic = new Restic(this.authFrom(ctx));
+      await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'} (this can take a few minutes)…`);
-      await new Restic(this.authFrom(ctx)).forgetOlderThan(retentionDays);
+      await restic.forgetOlderThan(retentionDays, signal);
       ctx.log('warn', `Applied retention: kept within ${retentionDays}d, pruned older snapshots.`);
       return record(true, `Retention applied — kept the last ${retentionDays} day${retentionDays === 1 ? '' : 's'} and pruned older snapshots from B2.`);
     } catch (err) {
@@ -700,6 +705,7 @@ export class BackblazeConnector implements Connector {
     ctx: ConnectorContext,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
+    signal?: AbortSignal,
   ): Promise<OperationResult> {
     const dumpPath = this.dumpPathOf(ctx);
     const trigger = values.trigger === 'schedule' ? 'schedule' : 'manual';
@@ -736,12 +742,17 @@ export class BackblazeConnector implements Connector {
         ctx.log('warn', `VM-name capture skipped: ${err instanceof Error ? err.message : err}`);
       }
 
+      await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Backing up ${archives} backup${archives === 1 ? '' : 's'} from ${dumpPath} to B2…`);
       let lastEmit = 0;
-      const summary = await restic.backup([dumpPath], ['cerebro'], (pct) => {
+      const summary = await restic.backup([dumpPath], ['cerebro'], (s) => {
         const now = Date.now();
-        if (now - lastEmit >= 3000) { lastEmit = now; onProgress(`  backing up… ${pct}%`); }
-      });
+        if (now - lastEmit >= 3000) {
+          lastEmit = now;
+          const eta = s.secondsRemaining != null ? ` (~${s.secondsRemaining < 60 ? `${s.secondsRemaining}s` : `${Math.round(s.secondsRemaining / 60)}m`} left)` : '';
+          onProgress(`  backing up… ${s.percent}%${eta}`);
+        }
+      }, signal);
       const added = summary.bytesAdded != null ? fmtBytes(summary.bytesAdded) : '—';
       onProgress(`  ✓ snapshot ${summary.snapshotId?.slice(0, 8) ?? '?'} created (${added} new)`);
 
@@ -749,7 +760,7 @@ export class BackblazeConnector implements Connector {
       if (retentionDays > 0) {
         onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'}…`);
         try {
-          await restic.forgetOlderThan(retentionDays);
+          await restic.forgetOlderThan(retentionDays, signal);
           retentionMsg = ` Pruned to the last ${retentionDays} day${retentionDays === 1 ? '' : 's'}.`;
         } catch (err) {
           retentionMsg = ` (retention failed: ${err instanceof Error ? err.message : 'error'})`;
@@ -772,6 +783,7 @@ export class BackblazeConnector implements Connector {
     snapshotId: string | undefined,
     values: Record<string, unknown>,
     onProgress: OperationProgress,
+    signal?: AbortSignal,
   ): Promise<OperationResult> {
     const dumpPath = this.dumpPathOf(ctx);
     const filePath = String(values.file ?? '').trim();
@@ -816,7 +828,7 @@ export class BackblazeConnector implements Connector {
             const pct = expected ? ` (${Math.floor((loaded / expected) * 100)}%)` : '';
             onProgress(`  ${filename}: ${fmtBytes(loaded)}${expected ? ` / ${fmtBytes(expected)}` : ''}${pct}`);
           }
-        });
+        }, signal);
       } catch (err) {
         await fs.unlink(tmp).catch(() => {});
         throw err;

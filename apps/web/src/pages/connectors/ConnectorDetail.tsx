@@ -1,9 +1,9 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Plus, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X } from 'lucide-react';
+import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Plus, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, X, Ban } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
-  ConnectorResourceDetail, ConnectorOperation, OverviewMetric,
+  ConnectorResourceDetail, ConnectorOperation, OverviewMetric, ConnectorJobStatus,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -57,6 +57,9 @@ export function ConnectorDetail() {
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
   const [connMetrics, setConnMetrics] = useState<OverviewMetric[]>([]);
   const [billingRefreshing, setBillingRefreshing] = useState(false);
+  // Background operations (e.g. backups) running for this instance — shown in a banner, no modal.
+  const [activeJobs, setActiveJobs] = useState<ConnectorJobStatus[]>([]);
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
   // Detail drawer
   const [detailFor, setDetailFor] = useState<ConnectorResource | null>(null);
@@ -133,6 +136,50 @@ export function ConnectorDetail() {
 
   // Clear the tag filters when switching resource kinds (tag facets differ per kind).
   useEffect(() => { setTagFilters([]); setAddKey(''); }, [kind]);
+
+  // Poll for background operations (backups/prunes) running on this instance.
+  const prevActiveRef = useRef(0);
+  useEffect(() => {
+    if (!inst?.enabled) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const jobs = await api.get<ConnectorJobStatus[]>(`/api/connectors/instances/${id}/active-jobs`);
+        if (!alive) return;
+        // A job just finished (count dropped) → refresh the resource list + overview tiles.
+        if (prevActiveRef.current > 0 && jobs.length < prevActiveRef.current) {
+          void loadResources();
+          api.get<{ metrics: OverviewMetric[] }>(`/api/connectors/instances/${id}/overview`).then((o) => setConnMetrics(o.metrics)).catch(() => {});
+        }
+        prevActiveRef.current = jobs.length;
+        setActiveJobs(jobs);
+      } catch { /* ignore */ }
+    };
+    void poll();
+    const t = setInterval(poll, 2500);
+    return () => { alive = false; clearInterval(t); };
+  }, [id, inst?.enabled, loadResources]);
+
+  /** Start a long operation (e.g. a backup) in the background — no dialog; progress shows in the banner. */
+  async function startBackground(op: ConnectorOperation) {
+    setMsg(null);
+    try {
+      await api.post(`/api/connectors/instances/${id}/operations/${op.id}`, { values: {} });
+      setMsg({ ok: true, text: `${op.label} started — running in the background.` });
+      api.get<ConnectorJobStatus[]>(`/api/connectors/instances/${id}/active-jobs`).then((j) => { prevActiveRef.current = j.length; setActiveJobs(j); }).catch(() => {});
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to start' });
+    }
+  }
+
+  async function cancelActive(jobId: string) {
+    setCancelling(jobId);
+    try {
+      await api.post(`/api/connectors/instances/${id}/jobs/${jobId}/cancel`, {});
+    } catch { /* the poll reflects the outcome */ } finally {
+      setCancelling(null);
+    }
+  }
 
   async function test() {
     setMsg(null);
@@ -385,6 +432,28 @@ export function ConnectorDetail() {
         </div>
       )}
 
+      {activeJobs.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {activeJobs.map((j) => {
+            const latest = j.steps.length ? j.steps[j.steps.length - 1] : 'Starting…';
+            return (
+              <div key={j.id} className="flex items-center gap-3 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm">
+                <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">{j.label} · running{j.startedAt ? ` — started ${timeAgo(j.startedAt)}` : ''}</div>
+                  <div className="text-xs text-muted-foreground truncate">{latest.trim()}</div>
+                </div>
+                {canAct && (
+                  <Button variant="ghost" size="sm" className="shrink-0" onClick={() => cancelActive(j.id)} disabled={cancelling === j.id}>
+                    {cancelling === j.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />} Cancel
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {!inst.enabled ? (
         <Card><CardContent className="pt-8 pb-8 text-center text-muted-foreground">
           This connector is disabled. Enable it to view resources.
@@ -393,7 +462,8 @@ export function ConnectorDetail() {
         <>
           {connMetrics.length > 0 && (() => {
             const svcMetrics = connMetrics.filter((m) => m.key.startsWith('costSvc:'));
-            const mainMetrics = connMetrics.filter((m) => !m.key.startsWith('costSvc:'));
+            // b2LastBackupOk is a 1/0 flag consumed by the dashboard's Backups tile — don't show the raw number here.
+            const mainMetrics = connMetrics.filter((m) => !m.key.startsWith('costSvc:') && m.key !== 'b2LastBackupOk');
             return (
               <div className="mb-4">
                 {connMetrics.some((m) => m.key.startsWith('cost')) && canWrite && (
@@ -483,7 +553,7 @@ export function ConnectorDetail() {
                 {tagKeys.map((k) => <option key={`g-${k}`} value={`tagk:${k}`}>Group by tag: {k}</option>)}
               </select>
               {operations.filter((o) => o.kind === kind).map((op) => (
-                <Button key={op.id} size="sm" onClick={() => setActiveOp(op)}>
+                <Button key={op.id} size="sm" onClick={() => (op.background && op.fields.length === 0 ? startBackground(op) : setActiveOp(op))}>
                   <Rocket className="h-4 w-4" /> {op.label}
                 </Button>
               ))}

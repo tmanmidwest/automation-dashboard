@@ -24,17 +24,21 @@ interface JobRecord {
 @Injectable()
 export class JobService {
   private readonly jobs = new Map<string, JobRecord>();
+  /** Abort controllers for in-flight jobs, so a user can cancel a long operation. */
+  private readonly aborts = new Map<string, AbortController>();
 
   constructor(private readonly logging: LoggingService) {}
 
   start(
     instanceId: string,
     label: string,
-    runner: (onProgress: OperationProgress) => Promise<OperationResult>,
+    runner: (onProgress: OperationProgress, signal: AbortSignal) => Promise<OperationResult>,
   ): string {
     const id = randomUUID();
     const record: JobRecord = { id, instanceId, label, status: 'running', steps: [], startedAt: Date.now() };
     this.jobs.set(id, record);
+    const abort = new AbortController();
+    this.aborts.set(id, abort);
 
     const onProgress: OperationProgress = (step) => {
       record.steps.push(step);
@@ -42,25 +46,45 @@ export class JobService {
     };
 
     // Fire and forget — the endpoint returns the job id immediately.
-    runner(onProgress)
+    runner(onProgress, abort.signal)
       .then((result) => {
+        // A cancel may have already settled the record; don't overwrite it.
+        if (record.status !== 'running') return;
         record.status = result.ok ? 'success' : 'error';
         record.message = result.message;
         record.createdResourceId = result.createdResourceId;
         record.finishedAt = Date.now();
       })
       .catch((err) => {
+        if (record.status !== 'running') return;
         record.status = 'error';
         record.message = err instanceof Error ? err.message : 'Operation failed.';
         record.finishedAt = Date.now();
       })
-      .finally(() => this.prune());
+      .finally(() => { this.aborts.delete(id); this.prune(); });
 
     return id;
   }
 
+  /** Cancel a running job: abort its work and mark it stopped. Returns false if not running. */
+  cancel(id: string): boolean {
+    const record = this.jobs.get(id);
+    if (!record || record.status !== 'running') return false;
+    this.aborts.get(id)?.abort();
+    record.status = 'error';
+    record.message = 'Cancelled.';
+    record.finishedAt = Date.now();
+    void this.logging.warn('connector:job', `[${record.label}] cancelled by user.`);
+    return true;
+  }
+
   get(id: string): JobRecord | undefined {
     return this.jobs.get(id);
+  }
+
+  /** Currently-running jobs for one connector instance (for the page's running-operation banner). */
+  listRunning(instanceId: string): JobRecord[] {
+    return [...this.jobs.values()].filter((j) => j.instanceId === instanceId && j.status === 'running');
   }
 
   /** Drop finished jobs older than 30 minutes. */

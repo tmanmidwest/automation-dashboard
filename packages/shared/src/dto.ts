@@ -86,6 +86,8 @@ export interface ConnectorJobStatus {
   steps: string[];
   message?: string;
   createdResourceId?: string;
+  /** ISO start time — lets the UI show elapsed time in the running-operation banner. */
+  startedAt?: string;
 }
 
 export interface OverviewGuest {

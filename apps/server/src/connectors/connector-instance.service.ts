@@ -263,13 +263,25 @@ export class ConnectorInstanceService {
     if (!op) throw new BadRequestException(`Unknown operation "${operationId}".`);
 
     const ctx = await this.buildContext(instance);
-    return this.jobs.start(instance.id, op.label, (onProgress) =>
-      connector.runOperation!(ctx, operationId, resourceId, values, onProgress),
+    return this.jobs.start(instance.id, op.label, (onProgress, signal) =>
+      connector.runOperation!(ctx, operationId, resourceId, values, onProgress, signal),
     );
   }
 
   getJob(jobId: string) {
     return this.jobs.get(jobId);
+  }
+
+  /** Running operation jobs for an instance (for the running-operation banner). */
+  runningJobs(instanceId: string) {
+    return this.jobs.listRunning(instanceId);
+  }
+
+  /** Cancel a running operation job (verifies it belongs to this instance). */
+  cancelJob(instanceId: string, jobId: string): boolean {
+    const job = this.jobs.get(jobId);
+    if (!job || job.instanceId !== instanceId) return false;
+    return this.jobs.cancel(jobId);
   }
 
   async listNodes(id: string): Promise<ConnectorNode[]> {
