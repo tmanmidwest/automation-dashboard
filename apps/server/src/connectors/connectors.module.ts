@@ -11,24 +11,31 @@ import { AwsConnector } from './aws/aws.connector';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
 import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
+import { BackupStateService } from './backblaze/backup-state.service';
+import { VmNameService } from './backblaze/vm-name.service';
 
 @Module({
   imports: [SettingsModule, ScheduleModule.forRoot()],
   controllers: [ConnectorsController],
-  providers: [ConnectorRegistry, ConnectorInstanceService, JobService, ConsoleService, BackupRunService, BackupSchedulerService],
+  providers: [
+    ConnectorRegistry, ConnectorInstanceService, JobService, ConsoleService,
+    BackupRunService, BackupSchedulerService, BackupStateService, VmNameService,
+  ],
   exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService],
 })
 export class ConnectorsModule implements OnModuleInit {
   constructor(
     private readonly registry: ConnectorRegistry,
     private readonly backupRuns: BackupRunService,
+    private readonly backupState: BackupStateService,
+    private readonly vmNames: VmNameService,
   ) {}
 
   /** Register the built-in connectors with the extension host. */
   onModuleInit() {
     this.registry.register(new ProxmoxConnector());
     this.registry.register(new AwsConnector());
-    // The Backblaze connector reads its restore history from the durable run store.
-    this.registry.register(new BackblazeConnector(this.backupRuns));
+    // The Backblaze connector reads restore history, a durable state mirror, and VM names.
+    this.registry.register(new BackblazeConnector(this.backupRuns, this.backupState, this.vmNames));
   }
 }

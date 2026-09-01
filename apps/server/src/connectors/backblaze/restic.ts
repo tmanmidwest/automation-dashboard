@@ -146,6 +146,15 @@ export class Restic {
     return out;
   }
 
+  /** Read a single small file out of a snapshot as a string, or null if it's not there. */
+  async catFile(snapshotId: string, filePath: string): Promise<string | null> {
+    try {
+      return await this.run(['dump', snapshotId, filePath], 8 * 1024 * 1024);
+    } catch {
+      return null; // file absent in this snapshot (e.g. older snapshots) — caller falls back
+    }
+  }
+
   /** Deduplicated repo size + snapshot count (scans the index — cache the result). */
   async stats(): Promise<ResticRepoStats> {
     const raw = await this.run(['stats', '--mode', 'raw-data', '--json']);

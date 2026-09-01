@@ -144,7 +144,12 @@ UI.
 Pick a **frequency** (Daily / Weekly / Monthly), the **day** (for weekly/monthly), and a
 **time** — all dropdowns, no cron. Cerebro backs up the dump folder to B2 on that schedule
 and, if you set **Delete backups older than (days)**, prunes snapshots older than that
-afterward (the latest is always kept). The **Test** result shows the schedule in plain
+afterward (the latest is always kept).
+
+> **A backup captures the whole dump folder — but restic only *uploads what's new*.**
+> Thanks to deduplication, unchanged backups from previous runs aren't re-sent; only new
+> vzdump files add data. So "back up everything" is cheap after the first run — there's no
+> need (and no benefit) to pushing files one at a time. The **Test** result shows the schedule in plain
 language. Times are the **container's local time** — set a `TZ` env on the app service
 (e.g. `TZ=America/Chicago`) if you want a specific zone.
 
@@ -167,8 +172,33 @@ what happened), durable across restarts.
   **Overwrite** to replace an existing local copy.
 - **Delete a snapshot** — open it and use **Delete** (confirm by typing its id). This runs
   `restic forget`; the space is reclaimed on the next retention prune / scheduled backup.
+- **Local dump (NAS)** tab — what's currently in the mounted dump folder, each file showing
+  VM + size + date and a **backed up / pending** flag (is it in the latest B2 snapshot yet?).
+  This is your window into the NAS and what the next backup will capture.
 - **Restore history** tab — a durable record of every backup and restore (status, when,
   duration), surviving restarts.
+
+### VM names (DR-safe)
+
+Backups and snapshot rows show the **friendly VM name** (e.g. `webserver (VM 100)`), not just
+the VMID — pulled from your Proxmox connector. Crucially, the name map is **written into the
+dump folder at backup time** (`.cerebro-vm-names.json`) so it's captured **inside every B2
+snapshot**. That means:
+
+- Names are **point-in-time** — a March snapshot shows March's names.
+- They're **DR-safe** — lose Proxmox (and even Cerebro), and the names still come back with a
+  restore, because the map lives in B2 alongside the backups.
+- The Backblaze connector never queries Proxmox directly; a small helper refreshes a cached
+  map while Proxmox is reachable and reuses the last-known map when it isn't. Snapshots taken
+  before this feature (or when Proxmox was down) simply fall back to `VM 100`.
+
+### Durable metadata
+
+Cerebro mirrors the last-good backup picture (repo size, snapshot count, latest backup, the
+snapshot inventory) into its **database** on every successful check. So the dashboard tiles —
+and any future summary/report — keep showing real numbers (with an "as of …" note) even when
+B2 is unreachable, instead of going blank. restic stays the live source; the DB is the durable
+copy. Per-event history (every backup/restore/delete) lives durably in **Restore history**.
 
 Then, in Proxmox: open that storage → **Backups**, select the file → **Restore**.
 

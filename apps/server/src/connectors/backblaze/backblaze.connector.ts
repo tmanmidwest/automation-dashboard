@@ -15,10 +15,16 @@ import type {
 } from '@cerebro/shared';
 import { Restic, ResticAuth, type ResticSnapshot, type ResticFile, type ResticRepoStats } from './restic';
 import type { BackupRunService, BackupRunView } from './backup-run.service';
+import type { BackupStateService } from './backup-state.service';
+import type { VmNameService } from './vm-name.service';
 import { parseSchedule, describeSchedule } from './schedule-util';
+
+/** Hidden file written into the dump folder at backup time so VMID→name travels into every snapshot (DR-safe). */
+const VM_NAMES_FILE = '.cerebro-vm-names.json';
 
 const SNAPSHOT_KIND = 'snapshot';
 const FILE_SUBKIND = 'file';
+const LOCAL_KIND = 'local';
 const RUN_KIND = 'run';
 
 /** vzdump archive filenames, e.g. vzdump-qemu-100-2026_08_31-03_00_00.vma.zst */
@@ -89,8 +95,20 @@ const STATS_TTL_MS = 6 * 60 * 60 * 1000;
  * systemd + restic pipeline stays the single owner of writes.
  */
 export class BackblazeConnector implements Connector {
-  /** Durable restore-history store, injected at registration. */
-  constructor(private readonly runs?: BackupRunService) {}
+  constructor(
+    /** Durable backup/restore-history store. */
+    private readonly runs?: BackupRunService,
+    /** Durable mirror of the last-good backup picture (survives a dead connection). */
+    private readonly state?: BackupStateService,
+    /** Resolves VMID→friendly name from Proxmox (cached, DR-safe). */
+    private readonly vmNames?: VmNameService,
+  ) {}
+
+  /** Friendly VM label: prefer the captured/cached name, else "VM 100". */
+  private label(map: Record<string, string>, vmid?: string, guestType?: string): string {
+    if (vmid && map[vmid]) return `${map[vmid]} (${guestType} ${vmid})`;
+    return vmid ? `${guestType} ${vmid}` : '';
+  }
 
   /** Cached repo stats per repository string (raw-data scan is expensive). */
   private statsCache = new Map<string, { at: number; data: ResticRepoStats | null }>();
@@ -224,6 +242,7 @@ export class BackblazeConnector implements Connector {
           },
         ],
       },
+      { id: LOCAL_KIND, label: 'Local dump (NAS)', actions: [], deletable: false },
       { id: RUN_KIND, label: 'Restore history', actions: [], deletable: false },
     ],
     operations: [
@@ -292,6 +311,35 @@ export class BackblazeConnector implements Connector {
 
   private dumpPathOf(ctx: ConnectorContext): string {
     return String(ctx.config.dumpPath ?? '').trim();
+  }
+
+  /** Read the local (mounted) dump folder. */
+  private async readLocalDump(dumpPath: string): Promise<{ name: string; sizeBytes: number; mtime?: Date }[]> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dumpPath);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'ENOENT') throw new Error(`Dump path "${dumpPath}" does not exist inside the container — check the mount.`);
+      if (code === 'EACCES') throw new Error(`No permission to read "${dumpPath}" — check the mount's uid/gid.`);
+      throw new Error(`Could not read "${dumpPath}": ${(err as Error).message}`);
+    }
+    const out: { name: string; sizeBytes: number; mtime?: Date }[] = [];
+    for (const name of entries) {
+      try {
+        const st = await fs.stat(path.join(dumpPath, name));
+        if (st.isFile()) out.push({ name, sizeBytes: st.size, mtime: st.mtime });
+      } catch { /* skip unreadable */ }
+    }
+    return out;
+  }
+
+  /** Basenames of the files in the newest snapshot — to flag which local files are already backed up. */
+  private async latestSnapshotBasenames(restic: Restic): Promise<Set<string>> {
+    const snaps = await restic.snapshots(true);
+    if (!snaps.length) return new Set();
+    const files = await restic.listFiles(snaps[0].id);
+    return new Set(files.map((f) => f.path.slice(f.path.lastIndexOf('/') + 1)));
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
@@ -365,12 +413,54 @@ export class BackblazeConnector implements Connector {
       const snaps = await new Restic(this.authFrom(ctx)).snapshots();
       return snaps.map((s) => this.toSnapshotResource(s));
     }
+    if (kind === LOCAL_KIND) {
+      const restic = new Restic(this.authFrom(ctx));
+      const dumpPath = this.dumpPathOf(ctx);
+      const [files, backedUp, names] = await Promise.all([
+        this.readLocalDump(dumpPath),
+        this.latestSnapshotBasenames(restic).catch(() => new Set<string>()),
+        this.localNameMap(dumpPath),
+      ]);
+      return files
+        .filter((f) => parseBackup(f.name).isArchive)
+        .sort((a, b) => b.name.localeCompare(a.name))
+        .map((f) => this.toLocalResource(f, backedUp.has(f.name), names));
+    }
     if (kind === RUN_KIND) {
       if (!this.runs || !ctx.instanceId) return [];
       const rows = await this.runs.list(ctx.instanceId, 50);
       return rows.map((r) => this.toRunResource(r));
     }
     return [];
+  }
+
+  /** VMID→name for the local dump view: prefer the file already on the NAS, else a (possibly refreshed) cache. */
+  private async localNameMap(dumpPath: string): Promise<Record<string, string>> {
+    try {
+      const raw = await fs.readFile(path.join(dumpPath, VM_NAMES_FILE), 'utf8');
+      return JSON.parse(raw) as Record<string, string>;
+    } catch { /* no local file yet */ }
+    if (this.vmNames) {
+      try { return await this.vmNames.mapFresh(60 * 60 * 1000); } catch { /* Proxmox down */ }
+    }
+    return {};
+  }
+
+  private toLocalResource(f: { name: string; sizeBytes: number; mtime?: Date }, inB2: boolean, names: Record<string, string>): ConnectorResource {
+    const p = parseBackup(f.name);
+    return {
+      id: f.name,
+      kind: LOCAL_KIND,
+      name: f.name,
+      status: inB2 ? 'backed up' : 'pending',
+      details: {
+        // Generic columns: node (VM) / cpu (size).
+        node: this.label(names, p.vmid, p.guestType) || null,
+        cpu: fmtBytes(f.sizeBytes),
+        taken: p.timestamp ? fmtDate(p.timestamp) : fmtDate(f.mtime),
+        inB2: inB2 ? 'yes' : 'no — not in the latest snapshot yet',
+      },
+    };
   }
 
   private toSnapshotResource(s: ResticSnapshot): ConnectorResource {
@@ -407,23 +497,36 @@ export class BackblazeConnector implements Connector {
 
   async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
     if (kind !== SNAPSHOT_KIND || subKind !== FILE_SUBKIND) return [];
-    const files = await new Restic(this.authFrom(ctx)).listFiles(resourceId);
+    const restic = new Restic(this.authFrom(ctx));
+    const files = await restic.listFiles(resourceId);
+    const names = await this.snapshotNameMap(restic, resourceId, files);
     return files
       .filter((f) => parseBackup(f.name).isArchive)
       .sort((a, b) => b.name.localeCompare(a.name))
-      .map((f) => this.toFileResource(f));
+      .map((f) => this.toFileResource(f, names));
   }
 
-  private toFileResource(f: ResticFile): ConnectorResource {
+  /** VMID→name for one snapshot: prefer the map captured inside it, else the cached map. */
+  private async snapshotNameMap(restic: Restic, snapshotId: string, files: ResticFile[]): Promise<Record<string, string>> {
+    const nf = files.find((f) => f.name === VM_NAMES_FILE);
+    if (nf) {
+      const raw = await restic.catFile(snapshotId, nf.path);
+      if (raw) { try { return JSON.parse(raw) as Record<string, string>; } catch { /* fall through */ } }
+    }
+    return this.vmNames ? this.vmNames.cachedMap() : {};
+  }
+
+  private toFileResource(f: ResticFile, names: Record<string, string>): ConnectorResource {
     const p = parseBackup(f.name);
     return {
       id: f.path, // full restic path — travels in the POST body, so a "/" is fine
+      // Lead with the (friendly) VM so it's readable even when the filename is truncated.
+      name: this.label(names, p.vmid, p.guestType) || f.name,
       kind: FILE_SUBKIND,
-      name: f.name,
       status: p.guestType ? p.guestType.toLowerCase() : 'file',
       details: {
-        // `created` is the subtitle the generic sub-resource row renders.
-        created: `${p.vmid ? `${p.guestType} ${p.vmid} · ` : ''}${fmtBytes(f.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''}`,
+        // `created` is the subtitle the generic sub-resource row renders — full filename + size + date.
+        created: `${fmtBytes(f.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''} · ${f.name}`,
       },
     };
   }
@@ -457,6 +560,35 @@ export class BackblazeConnector implements Connector {
         },
       ];
       return { id: s.shortId, kind, name: fmtDate(s.time), status: s.tags[0] || 'snapshot', groups };
+    }
+
+    if (kind === LOCAL_KIND) {
+      const restic = new Restic(this.authFrom(ctx));
+      const dumpPath = this.dumpPathOf(ctx);
+      const [files, backedUp, names] = await Promise.all([
+        this.readLocalDump(dumpPath),
+        this.latestSnapshotBasenames(restic).catch(() => new Set<string>()),
+        this.localNameMap(dumpPath),
+      ]);
+      const f = files.find((x) => x.name === resourceId);
+      if (!f) throw new Error(`"${resourceId}" not found in ${dumpPath}.`);
+      const p = parseBackup(f.name);
+      const inB2 = backedUp.has(f.name);
+      const groups: ConnectorDetailGroup[] = [
+        {
+          title: 'Backup file (on NAS)',
+          items: [
+            { label: 'File', value: f.name, variant: 'mono' },
+            { label: 'Guest', value: this.label(names, p.vmid, p.guestType) || '—' },
+            { label: 'Taken', value: p.timestamp ? fmtDate(p.timestamp) : '—' },
+            { label: 'Size', value: fmtBytes(f.sizeBytes) },
+            { label: 'Modified', value: fmtDate(f.mtime) },
+            { label: 'In latest B2 snapshot', value: inB2 ? 'Yes' : 'No — not backed up yet', variant: 'status' },
+            { label: 'Path', value: path.join(dumpPath, f.name), variant: 'mono' },
+          ],
+        },
+      ];
+      return { id: f.name, kind, name: f.name, status: inB2 ? 'backed up' : 'pending', groups };
     }
 
     if (kind === RUN_KIND) {
@@ -537,6 +669,20 @@ export class BackblazeConnector implements Connector {
       const archives = entries.filter((n) => parseBackup(n).isArchive).length;
       if (archives === 0) {
         return record(false, `No backups found in ${dumpPath} — nothing to back up (is the NAS mounted and are there vzdump files?).`);
+      }
+
+      // Capture the current VMID→name map into the dump folder so it's backed up alongside
+      // the vzdumps — the names then live in every snapshot (survives losing Proxmox).
+      try {
+        if (this.vmNames) {
+          const map = await this.vmNames.currentMap();
+          if (Object.keys(map).length > 0) {
+            await fs.writeFile(path.join(dumpPath, VM_NAMES_FILE), JSON.stringify(map, null, 2));
+            onProgress(`  captured ${Object.keys(map).length} VM name(s)`);
+          }
+        }
+      } catch (err) {
+        ctx.log('warn', `VM-name capture skipped: ${err instanceof Error ? err.message : err}`);
       }
 
       onProgress(`Backing up ${archives} backup${archives === 1 ? '' : 's'} from ${dumpPath} to B2…`);
@@ -665,33 +811,52 @@ export class BackblazeConnector implements Connector {
     const auth = this.authFrom(ctx);
     const restic = new Restic(auth);
 
-    let snaps: ResticSnapshot[] = [];
     try {
-      snaps = await restic.snapshots();
+      const snaps = await restic.snapshots();
+      const stats = await this.cachedStats(ctx, restic, auth.repository);
+
+      // Persist the durable mirror so a report — or the dashboard on a bad day — never sees null.
+      if (this.state && ctx.instanceId) {
+        await this.state.save(ctx.instanceId, {
+          lastOkAt: new Date().toISOString(),
+          snapshotCount: snaps.length,
+          repoSizeBytes: stats?.totalSizeBytes ?? null,
+          latestSnapshotAt: snaps[0]?.time?.toISOString() ?? null,
+          snapshots: snaps.slice(0, 50).map((s) => ({
+            shortId: s.shortId, time: s.time?.toISOString() ?? null, host: s.hostname ?? null, tags: s.tags,
+          })),
+        }).catch((err) => ctx.log('warn', `BackupState save failed: ${err instanceof Error ? err.message : err}`));
+      }
+
+      const metrics: OverviewMetric[] = [{ key: 'snapshots', label: 'Snapshots', value: snaps.length }];
+      if (snaps[0]?.time) {
+        const days = Math.max(0, Math.floor((Date.now() - snaps[0].time.getTime()) / 86400000));
+        metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: snaps[0].time.toISOString() });
+      }
+      if (stats) {
+        metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((stats.totalSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB' });
+      }
+      const guests = snaps.slice(0, 40).map((s) => ({
+        name: `${s.shortId} · ${fmtDate(s.time)}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.hostname || 'restic',
+      }));
+      return { metrics, guests };
     } catch (err) {
-      ctx.log('warn', `Restic overview snapshots failed: ${err instanceof Error ? err.message : err}`);
+      // B2/restic unreachable — serve the last-good picture from the DB rather than blanking out.
+      ctx.log('warn', `Restic overview failed, serving cached state: ${err instanceof Error ? err.message : err}`);
+      const st = this.state && ctx.instanceId ? await this.state.load(ctx.instanceId) : undefined;
+      if (!st) return { metrics: [], guests: [] };
+      const metrics: OverviewMetric[] = [{ key: 'snapshots', label: 'Snapshots', value: st.snapshotCount, asOf: st.lastOkAt }];
+      if (st.latestSnapshotAt) {
+        const days = Math.max(0, Math.floor((Date.now() - new Date(st.latestSnapshotAt).getTime()) / 86400000));
+        metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: st.lastOkAt });
+      }
+      if (st.repoSizeBytes != null) {
+        metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((st.repoSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB', asOf: st.lastOkAt });
+      }
+      const guests = st.snapshots.slice(0, 40).map((s) => ({
+        name: `${s.shortId} · ${s.time ? fmtDate(new Date(s.time)) : '—'}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.host || 'restic',
+      }));
+      return { metrics, guests };
     }
-
-    const latest = snaps[0];
-    const metrics: OverviewMetric[] = [
-      { key: 'snapshots', label: 'Snapshots', value: snaps.length },
-    ];
-    if (latest?.time) {
-      const days = Math.max(0, Math.floor((Date.now() - latest.time.getTime()) / 86400000));
-      metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: latest.time.toISOString() });
-    }
-    const stats = await this.cachedStats(ctx, restic, auth.repository);
-    if (stats) {
-      metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((stats.totalSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB' });
-    }
-
-    const guests = snaps.slice(0, 40).map((s) => ({
-      name: `${s.shortId} · ${fmtDate(s.time)}`,
-      kind: SNAPSHOT_KIND,
-      status: 'snapshot',
-      node: s.hostname || 'restic',
-    }));
-
-    return { metrics, guests };
   }
 }
