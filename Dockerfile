@@ -35,13 +35,17 @@ ENV NODE_ENV=production
 ARG GIT_SHA=dev
 ENV GIT_SHA=$GIT_SHA
 # signal-cli version to bundle (https://github.com/AsamK/signal-cli/releases).
+# NOTE: signal-cli's required JRE tracks its version — 0.13.x needs Java 21. If
+# you bump SIGNAL_CLI_VERSION, match the openjdk<N>-jre-headless package below,
+# or you'll get an UnsupportedClassVersionError at runtime.
 ARG SIGNAL_CLI_VERSION=0.13.11
 # Prisma needs OpenSSL; restic drives the Backblaze B2 backup connector.
 # signal-cli powers the Signal notification channel: it's a JVM app, so it needs
-# a JRE, and its native libsignal lib is built for glibc — gcompat/libc6-compat
-# provide the glibc shim so it runs on Alpine's musl. (If the native lib still
-# fails to load on your host, switch this runtime stage to a debian-slim base.)
-RUN apk add --no-cache openssl restic openjdk17-jre-headless gcompat libc6-compat wget \
+# a JRE (Java 21 for 0.13.x), and its native libsignal lib is built for glibc —
+# gcompat/libc6-compat provide the glibc shim so it runs on Alpine's musl. (If
+# the native lib still fails to load on your host, switch this runtime stage to
+# a debian-slim base.)
+RUN apk add --no-cache openssl restic openjdk21-jre-headless gcompat libc6-compat wget \
  && wget -qO /tmp/signal-cli.tar.gz \
       "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}.tar.gz" \
  && tar -xzf /tmp/signal-cli.tar.gz -C /opt \
