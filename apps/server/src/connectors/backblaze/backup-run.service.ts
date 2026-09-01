@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 
 /** A run row as the connector's "Sync history" tab consumes it. */
 export interface BackupRunView {
@@ -18,7 +19,10 @@ export interface BackupRunView {
  */
 @Injectable()
 export class BackupRunService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /** Open a run row in the 'running' state; returns its id. */
   async begin(connectorInstanceId: string, trigger: 'schedule' | 'manual' | 'restore' | 'retention'): Promise<string> {
@@ -28,12 +32,43 @@ export class BackupRunService {
     return run.id;
   }
 
-  /** Close a run row with its outcome. */
+  /** Close a run row with its outcome — and raise a notification for it. */
   async finish(id: string, status: 'success' | 'error', message: string): Promise<void> {
-    await this.prisma.backupRun.update({
+    const run = await this.prisma.backupRun.update({
       where: { id },
       data: { status, message, finishedAt: new Date() },
     });
+    // Fire-and-forget: a notification failure must never break the backup path.
+    void this.notify(run.connectorInstanceId, run.trigger, status, message);
+  }
+
+  /** Raise an outbound alert for a finished run (see NotificationsService for routing). */
+  private async notify(
+    instanceId: string,
+    trigger: string,
+    status: 'success' | 'error',
+    message: string,
+  ): Promise<void> {
+    try {
+      // Retention prunes run on every backup — only worth an alert when they fail.
+      if (trigger === 'retention' && status === 'success') return;
+      const inst = await this.prisma.connectorInstance.findUnique({
+        where: { id: instanceId },
+        select: { name: true },
+      });
+      const name = inst?.name ?? instanceId;
+      const label = trigger === 'restore' ? 'Restore' : trigger === 'retention' ? 'Retention prune' : 'Backup';
+      const ok = status === 'success';
+      await this.notifications.dispatch({
+        title: `${label} ${ok ? 'completed' : 'failed'}: ${name}`,
+        body: message || (ok ? 'Completed successfully.' : 'Failed.'),
+        severity: ok ? 'info' : 'critical',
+        source: 'backup',
+        dedupeKey: `backup:${instanceId}:${trigger}:${status}`,
+      });
+    } catch {
+      /* swallow — notifications are best-effort */
+    }
   }
 
   /** Most recent runs for an instance, newest first. */

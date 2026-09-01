@@ -18,6 +18,7 @@ import { About } from '@/pages/About';
 import { SettingsHome } from '@/pages/settings/SettingsHome';
 import { Authentication } from '@/pages/settings/Authentication';
 import { Email } from '@/pages/settings/Email';
+import { Notifications } from '@/pages/settings/Notifications';
 
 function FullscreenBrand() {
   return (
@@ -69,6 +70,7 @@ function Router() {
       <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
       <Route path="/settings/authentication" element={<Protected><RequirePerm perm="settings:read"><Authentication /></RequirePerm></Protected>} />
       <Route path="/settings/email" element={<Protected><RequirePerm perm="settings:read"><Email /></RequirePerm></Protected>} />
+      <Route path="/settings/notifications" element={<Protected><RequirePerm perm="settings:read"><Notifications /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 

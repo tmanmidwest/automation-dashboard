@@ -12,6 +12,7 @@ import { ProvidersModule } from './providers/providers.module';
 import { UsersModule } from './users/users.module';
 import { AccountModule } from './account/account.module';
 import { MailModule } from './mail/mail.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { ConnectorsModule } from './connectors/connectors.module';
 import { VersionModule } from './version/version.module';
 import { SeedModule } from './seed/seed.module';
@@ -35,6 +36,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     UsersModule,
     AccountModule,
     MailModule,
+    NotificationsModule,
     ConnectorsModule,
     VersionModule,
     SeedModule,

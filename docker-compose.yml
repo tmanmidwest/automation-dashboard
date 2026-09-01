@@ -14,6 +14,8 @@ services:
       args:
         # Injected into the UI/version screen at build time.
         GIT_SHA: ${GIT_SHA:-dev}
+        # signal-cli version bundled for the Signal notification channel.
+        SIGNAL_CLI_VERSION: ${SIGNAL_CLI_VERSION:-0.13.11}
     container_name: cerebro-app
     restart: unless-stopped
     depends_on:
@@ -29,6 +31,10 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       DATABASE_URL: ${DATABASE_URL:-postgresql://cerebro:cerebro_change_me@db:5432/cerebro?schema=public}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # Persistent home for signal-cli account state (see volume below).
+      SIGNAL_CLI_CONFIG: /data/signal
+    volumes:
+      - cerebro_signal:/data/signal
     ports:
       - "${APP_PORT:-3000}:3000"
     healthcheck:
@@ -70,3 +76,4 @@ services:
 volumes:
   cerebro_db:
   cerebro_redis:
+  cerebro_signal:
