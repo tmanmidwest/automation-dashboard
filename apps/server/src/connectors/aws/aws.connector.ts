@@ -303,10 +303,11 @@ export class AwsConnector implements Connector {
         actions: [],
         deletable: false,
       },
-      { id: NAT_KIND, label: 'NAT Gateways', actions: [], deletable: false },
-      { id: ELB_KIND, label: 'Load Balancers', actions: [], deletable: false },
-      { id: EBSSNAP_KIND, label: 'EBS Snapshots', actions: [], deletable: false },
-      { id: RDSSNAP_KIND, label: 'RDS Snapshots', actions: [], deletable: false },
+      // Delete unblocks cost cleanup / teardown. Guarded server-side + typed-name confirm in the UI.
+      { id: NAT_KIND, label: 'NAT Gateways', actions: [], deletable: true },
+      { id: ELB_KIND, label: 'Load Balancers', actions: [], deletable: true },
+      { id: EBSSNAP_KIND, label: 'EBS Snapshots', actions: [], deletable: true },
+      { id: RDSSNAP_KIND, label: 'RDS Snapshots', actions: [], deletable: true },
       { id: LAMBDA_KIND, label: 'Lambda', actions: [], deletable: false },
       {
         id: CF_KIND,
@@ -317,8 +318,15 @@ export class AwsConnector implements Connector {
         ],
         deletable: false,
       },
-      { id: DDB_KIND, label: 'DynamoDB', actions: [], deletable: false },
-      { id: CACHE_KIND, label: 'ElastiCache', actions: [], deletable: false },
+      { id: DDB_KIND, label: 'DynamoDB', actions: [], deletable: true },
+      {
+        id: CACHE_KIND,
+        label: 'ElastiCache',
+        actions: [
+          { id: 'reboot', label: 'Reboot', mutating: true, confirm: 'Reboot every node in this cache cluster? Brief unavailability during the restart.', showWhenStatus: ['available'] },
+        ],
+        deletable: true,
+      },
     ],
     operations: [
       {
@@ -730,6 +738,12 @@ export class AwsConnector implements Connector {
         await api.releaseElasticIp(resourceId);
         ctx.log('warn', `AWS released Elastic IP ${resourceId}.`);
         return { ok: true, message: `Released Elastic IP ${resourceId}.` };
+      }
+      if (kind === CACHE_KIND) {
+        if (actionId !== 'reboot') return { ok: false, message: `Unsupported action "${actionId}".` };
+        await api.rebootElastiCache(resourceId);
+        ctx.log('info', `AWS ElastiCache reboot on ${resourceId} requested.`);
+        return { ok: true, message: `Reboot requested for ${resourceId} — nodes restart shortly.` };
       }
       if (kind === CF_KIND) {
         if (actionId !== 'enable' && actionId !== 'disable') return { ok: false, message: `Unsupported action "${actionId}".` };

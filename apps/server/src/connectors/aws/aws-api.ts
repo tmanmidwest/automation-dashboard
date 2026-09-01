@@ -16,7 +16,9 @@ import {
   DescribeVolumesCommand,
   DeleteVolumeCommand,
   DescribeNatGatewaysCommand,
+  DeleteNatGatewayCommand,
   DescribeSnapshotsCommand,
+  DeleteSnapshotCommand,
   type Instance,
   type Tag,
 } from '@aws-sdk/client-ec2';
@@ -27,9 +29,10 @@ import {
   StopDBInstanceCommand,
   RebootDBInstanceCommand,
   DescribeDBSnapshotsCommand,
+  DeleteDBSnapshotCommand,
 } from '@aws-sdk/client-rds';
 import { S3Client, ListBucketsCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3';
-import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand, DeleteLoadBalancerCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
 import {
   CloudFrontClient,
@@ -37,8 +40,13 @@ import {
   GetDistributionConfigCommand,
   UpdateDistributionCommand,
 } from '@aws-sdk/client-cloudfront';
-import { DynamoDBClient, ListTablesCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
-import { ElastiCacheClient, DescribeCacheClustersCommand } from '@aws-sdk/client-elasticache';
+import { DynamoDBClient, ListTablesCommand, DescribeTableCommand, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
+import {
+  ElastiCacheClient,
+  DescribeCacheClustersCommand,
+  RebootCacheClusterCommand,
+  DeleteCacheClusterCommand,
+} from '@aws-sdk/client-elasticache';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand } from '@aws-sdk/client-cost-explorer';
 import {
@@ -1243,6 +1251,14 @@ export class AwsApi {
     }
   }
 
+  async deleteNatGateway(id: string): Promise<void> {
+    try {
+      await this.ec2.send(new DeleteNatGatewayCommand({ NatGatewayId: id }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
   // ── EBS Snapshots (EC2 API, owned by this account) ──
   async listEbsSnapshots(): Promise<AwsEbsSnapshot[]> {
     try {
@@ -1267,6 +1283,14 @@ export class AwsApi {
         token = r.NextToken;
       } while (token);
       return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async deleteEbsSnapshot(id: string): Promise<void> {
+    try {
+      await this.ec2.send(new DeleteSnapshotCommand({ SnapshotId: id }));
     } catch (err) {
       throw friendly(err);
     }
@@ -1305,6 +1329,14 @@ export class AwsApi {
     }
   }
 
+  async deleteLoadBalancer(arn: string): Promise<void> {
+    try {
+      await this.elb.send(new DeleteLoadBalancerCommand({ LoadBalancerArn: arn }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
   // ── RDS Snapshots ──
   async listRdsSnapshots(): Promise<AwsRdsSnapshot[]> {
     try {
@@ -1326,6 +1358,15 @@ export class AwsApi {
         marker = r.Marker;
       } while (marker);
       return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Delete a manual RDS snapshot (automated snapshots can't be deleted via this API). */
+  async deleteRdsSnapshot(id: string): Promise<void> {
+    try {
+      await this.rds.send(new DeleteDBSnapshotCommand({ DBSnapshotIdentifier: id }));
     } catch (err) {
       throw friendly(err);
     }
@@ -1451,6 +1492,14 @@ export class AwsApi {
     }
   }
 
+  async deleteDynamoTable(name: string): Promise<void> {
+    try {
+      await this.ddb.send(new DeleteTableCommand({ TableName: name }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
   // ── ElastiCache ──
   private _ec?: ElastiCacheClient;
   private get elasticache(): ElastiCacheClient {
@@ -1476,6 +1525,31 @@ export class AwsApi {
         marker = r.Marker;
       } while (marker);
       return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Reboot an ElastiCache cluster's nodes. RebootCacheCluster needs explicit node IDs,
+   *  so we fetch them first (ShowCacheNodeInfo) and reboot every node in the cluster. */
+  async rebootElastiCache(id: string): Promise<void> {
+    try {
+      const d = await this.elasticache.send(new DescribeCacheClustersCommand({ CacheClusterId: id, ShowCacheNodeInfo: true }));
+      const cluster = d.CacheClusters?.[0];
+      if (!cluster) throw new Error(`ElastiCache cluster ${id} not found in this region.`);
+      const nodeIds = (cluster.CacheNodes ?? []).map((n) => n.CacheNodeId ?? '').filter(Boolean);
+      if (!nodeIds.length) {
+        throw new Error('This cluster has no individually rebootable nodes (it may be a Redis replication group — reboot it from the AWS console).');
+      }
+      await this.elasticache.send(new RebootCacheClusterCommand({ CacheClusterId: id, CacheNodeIdsToReboot: nodeIds }));
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async deleteElastiCache(id: string): Promise<void> {
+    try {
+      await this.elasticache.send(new DeleteCacheClusterCommand({ CacheClusterId: id }));
     } catch (err) {
       throw friendly(err);
     }
