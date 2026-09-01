@@ -62,7 +62,7 @@ const AWS_FULL_POLICY = JSON.stringify(
           'ec2:DescribeVolumes', 'ec2:DescribeAddresses', 'ec2:DescribeNatGateways', 'ec2:DescribeSnapshots',
           'ec2:StartInstances', 'ec2:StopInstances', 'ec2:RebootInstances',
           'ec2:TerminateInstances', 'ec2:RunInstances', 'ec2:CreateTags',
-          'ec2:DeleteVolume', 'ec2:ReleaseAddress',
+          'ec2:DeleteVolume', 'ec2:ReleaseAddress', 'ec2:DeleteSnapshot', 'ec2:DeleteNatGateway',
         ],
         Resource: '*',
       },
@@ -81,14 +81,14 @@ const AWS_FULL_POLICY = JSON.stringify(
         Sid: 'CerebroDataAndDiscovery',
         Effect: 'Allow',
         Action: [
-          'rds:DescribeDBInstances', 'rds:ListTagsForResource', 'rds:DescribeDBSnapshots',
+          'rds:DescribeDBInstances', 'rds:ListTagsForResource', 'rds:DescribeDBSnapshots', 'rds:DeleteDBSnapshot',
           'rds:StartDBInstance', 'rds:StopDBInstance', 'rds:RebootDBInstance',
           's3:ListAllMyBuckets', 's3:GetBucketLocation',
-          'elasticloadbalancing:DescribeLoadBalancers',
+          'elasticloadbalancing:DescribeLoadBalancers', 'elasticloadbalancing:DeleteLoadBalancer',
           'lambda:ListFunctions',
           'cloudfront:ListDistributions', 'cloudfront:GetDistributionConfig', 'cloudfront:UpdateDistribution',
-          'dynamodb:ListTables', 'dynamodb:DescribeTable',
-          'elasticache:DescribeCacheClusters',
+          'dynamodb:ListTables', 'dynamodb:DescribeTable', 'dynamodb:DeleteTable',
+          'elasticache:DescribeCacheClusters', 'elasticache:RebootCacheCluster', 'elasticache:DeleteCacheCluster',
         ],
         Resource: '*',
       },
@@ -433,7 +433,8 @@ export class AwsConnector implements Connector {
         'rds:DescribeDBInstances (+ ListTagsForResource), rds:StartDBInstance/StopDBInstance/RebootDBInstance — OPTIONAL, to view and start/stop/reboot RDS databases.',
         'ec2:DescribeVolumes, ec2:DescribeAddresses — OPTIONAL, for the EBS Volumes and Elastic IPs tabs (in AmazonEC2ReadOnlyAccess). ec2:DeleteVolume, ec2:ReleaseAddress — to delete unattached volumes / release idle Elastic IPs.',
         's3:ListAllMyBuckets, s3:GetBucketLocation — OPTIONAL, for the S3 Buckets tab (buckets are global — shows all buckets in the account).',
-        'Discovery tabs (read-only): ec2:DescribeNatGateways, ec2:DescribeSnapshots, elasticloadbalancing:DescribeLoadBalancers, rds:DescribeDBSnapshots, lambda:ListFunctions, cloudfront:ListDistributions, dynamodb:ListTables + dynamodb:DescribeTable, elasticache:DescribeCacheClusters. cloudfront:GetDistributionConfig + cloudfront:UpdateDistribution — to enable/disable CloudFront distributions from Cerebro.',
+        'Discovery tabs (listing): ec2:DescribeNatGateways, ec2:DescribeSnapshots, elasticloadbalancing:DescribeLoadBalancers, rds:DescribeDBSnapshots, lambda:ListFunctions, cloudfront:ListDistributions, dynamodb:ListTables + dynamodb:DescribeTable, elasticache:DescribeCacheClusters. cloudfront:GetDistributionConfig + cloudfront:UpdateDistribution — to enable/disable CloudFront distributions.',
+        'Discovery-tab actions (OPTIONAL, add only what you want Cerebro to be able to delete/restart): ec2:DeleteSnapshot (EBS snapshots), ec2:DeleteNatGateway, rds:DeleteDBSnapshot (manual only), elasticloadbalancing:DeleteLoadBalancer, dynamodb:DeleteTable (permanent data loss), elasticache:RebootCacheCluster + elasticache:DeleteCacheCluster.',
       ],
       referenceLinks: [
         { label: 'Creating an IAM access key', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html' },
@@ -1106,6 +1107,85 @@ export class AwsConnector implements Connector {
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Delete failed.';
         ctx.log('error', `AWS delete volume ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === EBSSNAP_KIND) {
+      try {
+        await api.deleteEbsSnapshot(resourceId);
+        ctx.log('warn', `AWS deleted EBS snapshot ${resourceId}.`);
+        return { ok: true, message: `Deleted snapshot ${resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete EBS snapshot ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === RDSSNAP_KIND) {
+      try {
+        const snap = (await api.listRdsSnapshots()).find((s) => s.id === resourceId);
+        if (!snap) return { ok: false, message: `Snapshot ${resourceId} not found in this region.` };
+        if (snap.type && snap.type !== 'manual') {
+          return { ok: false, message: `Snapshot ${resourceId} is an ${snap.type} snapshot — only manual snapshots can be deleted.` };
+        }
+        await api.deleteRdsSnapshot(resourceId);
+        ctx.log('warn', `AWS deleted RDS snapshot ${resourceId}.`);
+        return { ok: true, message: `Deleted snapshot ${resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete RDS snapshot ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === NAT_KIND) {
+      try {
+        const nat = (await api.listNatGateways()).find((n) => n.id === resourceId);
+        if (!nat) return { ok: false, message: `NAT gateway ${resourceId} not found in this region.` };
+        if (['deleted', 'deleting'].includes(nat.state)) {
+          return { ok: false, message: `NAT gateway ${resourceId} is already ${nat.state}.` };
+        }
+        await api.deleteNatGateway(resourceId);
+        ctx.log('warn', `AWS deleted NAT gateway ${resourceId} (${nat.name ?? ''}).`);
+        return { ok: true, message: `Deletion requested for NAT gateway ${nat.name || resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete NAT gateway ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === ELB_KIND) {
+      try {
+        // The list/table id is the LB name; DeleteLoadBalancer needs the ARN.
+        const lb = (await api.listLoadBalancers()).find((x) => x.name === resourceId);
+        if (!lb?.arn) return { ok: false, message: `Load balancer ${resourceId} not found in this region.` };
+        await api.deleteLoadBalancer(lb.arn);
+        ctx.log('warn', `AWS deleted load balancer ${resourceId}.`);
+        return { ok: true, message: `Deleted load balancer ${resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete load balancer ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === DDB_KIND) {
+      try {
+        await api.deleteDynamoTable(resourceId);
+        ctx.log('warn', `AWS deleted DynamoDB table ${resourceId}.`);
+        return { ok: true, message: `Deleting table ${resourceId} — DynamoDB is removing it and all its data.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete DynamoDB table ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind === CACHE_KIND) {
+      try {
+        await api.deleteElastiCache(resourceId);
+        ctx.log('warn', `AWS deleted ElastiCache cluster ${resourceId}.`);
+        return { ok: true, message: `Deletion requested for cache cluster ${resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `AWS delete ElastiCache ${resourceId} failed: ${message}`);
         return { ok: false, message };
       }
     }
