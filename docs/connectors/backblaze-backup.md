@@ -152,16 +152,23 @@ Click **Back up now** (on the Snapshots tab) to run the same backup immediately.
 backup — scheduled or manual — is logged in **Restore history** (status, when, duration,
 what happened), durable across restarts.
 
-### Browse & restore
+### Browse, restore & delete
 
-- **Snapshots** tab — every restic snapshot (date, host, age), newest first.
-- Open a snapshot → its **Backups** — the VM/CT archives inside (VMID, size, date).
+- **Snapshots** tab — every restic snapshot (date, host, age), newest first. Each snapshot
+  is a point-in-time backup of the *whole* dump folder, so it contains **all your VMs at
+  once** (that's why a row is a date + id, not a single VM).
+- **Click a snapshot** to open its drawer: it shows **Backups: N**, **Total size**, and the
+  list of VM/CT archives inside (each labelled `VM 100 · 12.3 GB · date`). VM label is the
+  **VMID + type** from the filename — not the friendly VM name, which isn't stored in the
+  backup file.
 - On a backup, click **Restore to NAS** → Cerebro streams it (via `restic dump`) into the
   dump folder, with live progress, verified against the expected size and written
   atomically (temp file → rename) so Proxmox never sees a half-written file. Tick
   **Overwrite** to replace an existing local copy.
-- **Restore history** tab — a durable record of every restore (status, when, duration,
-  what was restored), surviving restarts.
+- **Delete a snapshot** — open it and use **Delete** (confirm by typing its id). This runs
+  `restic forget`; the space is reclaimed on the next retention prune / scheduled backup.
+- **Restore history** tab — a durable record of every backup and restore (status, when,
+  duration), surviving restarts.
 
 Then, in Proxmox: open that storage → **Backups**, select the file → **Restore**.
 

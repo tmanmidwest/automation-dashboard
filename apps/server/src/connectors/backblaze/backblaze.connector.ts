@@ -207,7 +207,7 @@ export class BackblazeConnector implements Connector {
         id: SNAPSHOT_KIND,
         label: 'Snapshots',
         actions: [],
-        deletable: false,
+        deletable: true,
         subResources: [
           {
             id: FILE_SUBKIND,
@@ -375,7 +375,8 @@ export class BackblazeConnector implements Connector {
 
   private toSnapshotResource(s: ResticSnapshot): ConnectorResource {
     return {
-      id: s.id,
+      // Short id (8 hex) — restic accepts it for every command, and it keeps the ID column readable.
+      id: s.shortId,
       kind: SNAPSHOT_KIND,
       name: fmtDate(s.time),
       status: s.tags[0] || 'snapshot',
@@ -383,7 +384,7 @@ export class BackblazeConnector implements Connector {
         // Generic table columns: node (host) / cpu (age).
         node: s.hostname ?? null,
         cpu: ageStr(s.time),
-        shortId: s.shortId,
+        fullId: s.id,
         paths: s.paths.join(', ') || null,
         tags: s.tags.join(', ') || null,
       },
@@ -421,16 +422,26 @@ export class BackblazeConnector implements Connector {
       name: f.name,
       status: p.guestType ? p.guestType.toLowerCase() : 'file',
       details: {
-        summary: `${p.vmid ? `${p.guestType} ${p.vmid} · ` : ''}${fmtBytes(f.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''}`,
+        // `created` is the subtitle the generic sub-resource row renders.
+        created: `${p.vmid ? `${p.guestType} ${p.vmid} · ` : ''}${fmtBytes(f.sizeBytes)}${p.timestamp ? ` · ${fmtDate(p.timestamp)}` : ''}`,
       },
     };
   }
 
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
     if (kind === SNAPSHOT_KIND) {
-      const snaps = await new Restic(this.authFrom(ctx)).snapshots();
-      const s = snaps.find((x) => x.id === resourceId);
+      const restic = new Restic(this.authFrom(ctx));
+      const snaps = await restic.snapshots();
+      const s = snaps.find((x) => x.shortId === resourceId || x.id === resourceId);
       if (!s) throw new Error(`Snapshot "${resourceId}" not found.`);
+      // One `restic ls` gives both the backup count and the total size (summed file sizes).
+      let count = 0;
+      let totalBytes = 0;
+      try {
+        const archives = (await restic.listFiles(s.id)).filter((f) => parseBackup(f.name).isArchive);
+        count = archives.length;
+        totalBytes = archives.reduce((sum, f) => sum + f.sizeBytes, 0);
+      } catch { /* best-effort */ }
       const groups: ConnectorDetailGroup[] = [
         {
           title: 'Snapshot',
@@ -439,12 +450,13 @@ export class BackblazeConnector implements Connector {
             { label: 'Taken', value: fmtDate(s.time) },
             { label: 'Age', value: ageStr(s.time) },
             { label: 'Host', value: s.hostname || '—' },
-            { label: 'Paths', value: s.paths.join(', ') || '—', variant: 'mono' },
+            { label: 'Backups', value: count ? String(count) : '—' },
+            { label: 'Total size', value: totalBytes ? fmtBytes(totalBytes) : '—' },
             { label: 'Tags', value: s.tags.join(', ') || '—' },
           ],
         },
       ];
-      return { id: s.id, kind, name: fmtDate(s.time), status: s.tags[0] || 'snapshot', groups };
+      return { id: s.shortId, kind, name: fmtDate(s.time), status: s.tags[0] || 'snapshot', groups };
     }
 
     if (kind === RUN_KIND) {
@@ -467,6 +479,20 @@ export class BackblazeConnector implements Connector {
     }
 
     throw new Error(`No detail view for "${kind}".`);
+  }
+
+  /** Delete a snapshot from B2 (restic forget). Space is reclaimed by the next retention prune. */
+  async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
+    if (kind !== SNAPSHOT_KIND) return { ok: false, message: `Deleting "${kind}" is not supported.` };
+    try {
+      await new Restic(this.authFrom(ctx)).forget(resourceId, false);
+      ctx.log('warn', `Deleted snapshot ${resourceId} from B2.`);
+      return { ok: true, message: `Deleted snapshot ${resourceId}. Space is reclaimed on the next retention prune (or scheduled backup).` };
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Delete failed.';
+      ctx.log('error', `Delete of snapshot ${resourceId} failed: ${m}`);
+      return { ok: false, message: m };
+    }
   }
 
   async runOperation(

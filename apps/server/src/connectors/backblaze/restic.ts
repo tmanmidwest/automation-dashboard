@@ -217,6 +217,16 @@ export class Restic {
   }
 
   /**
+   * Delete one snapshot. Without prune it's fast (just drops the snapshot
+   * reference); the actual data is reclaimed by the next retention prune.
+   */
+  async forget(snapshotId: string, prune = false): Promise<void> {
+    const args = ['forget', snapshotId];
+    if (prune) args.push('--prune');
+    await this.run(args);
+  }
+
+  /**
    * Stream one file out of a snapshot to a writable (e.g. a file in the NAS dump
    * folder). Resolves with the number of bytes written.
    */
