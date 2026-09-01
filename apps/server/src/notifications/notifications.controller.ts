@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Post, Put } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -9,14 +10,20 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { NOTIFICATION_SEVERITIES, type NotificationSeverity, type SessionUser } from '@cerebro/shared';
+import {
+  NOTIFICATION_SEVERITIES,
+  type NotificationChannelId,
+  type NotificationSeverity,
+  type SessionUser,
+} from '@cerebro/shared';
 import { NotificationsService } from './notifications.service';
 import { AuditService } from '../logging/audit.service';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
 
+const CHANNEL_IDS = ['email', 'textbelt', 'signal'];
+
 class ChannelDto {
   @IsBoolean() enabled!: boolean;
-  @IsIn(NOTIFICATION_SEVERITIES) minSeverity!: NotificationSeverity;
   @IsString() recipients!: string;
 }
 
@@ -33,8 +40,23 @@ class NotificationConfigDto {
 }
 
 class TestDto {
-  @IsIn(['email', 'textbelt', 'signal']) channel!: 'email' | 'textbelt' | 'signal';
+  @IsIn(CHANNEL_IDS) channel!: 'email' | 'textbelt' | 'signal';
   @IsOptional() @IsString() to?: string;
+}
+
+class AlertRuleDto {
+  @IsString() key!: string;
+  @IsBoolean() enabled!: boolean;
+  @IsIn(NOTIFICATION_SEVERITIES) severity!: NotificationSeverity;
+  @IsArray() @IsIn(CHANNEL_IDS, { each: true }) channels!: NotificationChannelId[];
+}
+
+class SaveAlertsDto {
+  @IsArray() @ValidateNested({ each: true }) @Type(() => AlertRuleDto) alerts!: AlertRuleDto[];
+}
+
+class SaveConnectorMutesDto {
+  @IsArray() @IsString({ each: true }) muted!: string[];
 }
 
 @Controller('api/settings/notifications')
@@ -58,7 +80,7 @@ export class NotificationsController {
       actorId: user.id,
       actorEmail: user.email,
       action: 'settings.notifications_updated',
-      meta: { email: dto.email.enabled, textbelt: dto.textbelt.enabled },
+      meta: { email: dto.email.enabled, textbelt: dto.textbelt.enabled, signal: dto.signal.enabled },
     });
     return { ok: true };
   }
@@ -67,5 +89,48 @@ export class NotificationsController {
   @RequirePermissions('settings:write')
   test(@Body() dto: TestDto) {
     return this.notifications.test(dto.channel, dto.to);
+  }
+
+  @Get('alerts')
+  @RequirePermissions('settings:read')
+  readAlerts() {
+    return this.notifications.getAlerts();
+  }
+
+  @Put('alerts')
+  @RequirePermissions('settings:write')
+  async updateAlerts(@Body() dto: SaveAlertsDto, @CurrentUser() user: SessionUser) {
+    await this.notifications.saveAlerts(dto.alerts);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'settings.notification_alerts_updated',
+      meta: { count: dto.alerts.length },
+    });
+    return { ok: true };
+  }
+
+  @Get('connectors/:id/alerts')
+  @RequirePermissions('settings:read')
+  readConnectorAlerts(@Param('id') id: string) {
+    return this.notifications.getConnectorAlerts(id);
+  }
+
+  @Put('connectors/:id/alerts')
+  @RequirePermissions('settings:write')
+  async updateConnectorAlerts(
+    @Param('id') id: string,
+    @Body() dto: SaveConnectorMutesDto,
+    @CurrentUser() user: SessionUser,
+  ) {
+    await this.notifications.setConnectorMutes(id, dto.muted);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'settings.connector_alerts_muted',
+      target: id,
+      meta: { muted: dto.muted },
+    });
+    return { ok: true };
   }
 }

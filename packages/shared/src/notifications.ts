@@ -34,3 +34,36 @@ export interface NotificationMessage {
    */
   dedupeKey?: string;
 }
+
+/**
+ * A kind of alert the app can raise (backup failed, connector unreachable, …).
+ * Types are defined in code; users override enabled/severity/channels per type.
+ */
+export interface AlertTypeDef {
+  /** Stable id, e.g. 'backup.failure'. */
+  key: string;
+  label: string;
+  description: string;
+  /** Grouping label for the UI, e.g. 'Backups'. */
+  category: string;
+  defaultSeverity: NotificationSeverity;
+  defaultEnabled: boolean;
+  /** Channels this alert routes to out of the box. */
+  defaultChannels: NotificationChannelId[];
+  /**
+   * True if this alert originates from a specific connector, so it can be muted
+   * per connector (on the connector's detail page). System-wide alerts are false.
+   */
+  connectorScoped: boolean;
+}
+
+/** Per-type user configuration (overrides the type's defaults). */
+export interface AlertRule {
+  enabled: boolean;
+  severity: NotificationSeverity;
+  /** Which channels this alert is delivered to (the routing matrix row). */
+  channels: NotificationChannelId[];
+}
+
+/** An alert type merged with its current (possibly overridden) rule — for the UI. */
+export type AlertView = AlertTypeDef & AlertRule;

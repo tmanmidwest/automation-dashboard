@@ -42,7 +42,16 @@ export class BackupRunService {
     void this.notify(run.connectorInstanceId, run.trigger, status, message);
   }
 
-  /** Raise an outbound alert for a finished run (see NotificationsService for routing). */
+  /** Map a finished run to an alert type key (or null to raise nothing). */
+  private alertKey(trigger: string, status: 'success' | 'error'): string | null {
+    const ok = status === 'success';
+    if (trigger === 'restore') return ok ? 'restore.success' : 'restore.failure';
+    // Retention prunes run on every backup — only worth an alert when they fail.
+    if (trigger === 'retention') return ok ? null : 'retention.failure';
+    return ok ? 'backup.success' : 'backup.failure'; // schedule | manual
+  }
+
+  /** Raise an outbound alert for a finished run (routing/severity per the alert type). */
   private async notify(
     instanceId: string,
     trigger: string,
@@ -50,8 +59,8 @@ export class BackupRunService {
     message: string,
   ): Promise<void> {
     try {
-      // Retention prunes run on every backup — only worth an alert when they fail.
-      if (trigger === 'retention' && status === 'success') return;
+      const key = this.alertKey(trigger, status);
+      if (!key) return;
       const inst = await this.prisma.connectorInstance.findUnique({
         where: { id: instanceId },
         select: { name: true },
@@ -59,12 +68,11 @@ export class BackupRunService {
       const name = inst?.name ?? instanceId;
       const label = trigger === 'restore' ? 'Restore' : trigger === 'retention' ? 'Retention prune' : 'Backup';
       const ok = status === 'success';
-      await this.notifications.dispatch({
+      await this.notifications.dispatchAlert(key, {
         title: `${label} ${ok ? 'completed' : 'failed'}: ${name}`,
         body: message || (ok ? 'Completed successfully.' : 'Failed.'),
-        severity: ok ? 'info' : 'critical',
-        source: 'backup',
-        dedupeKey: `backup:${instanceId}:${trigger}:${status}`,
+        dedupeKey: `${key}:${instanceId}`,
+        connectorId: instanceId,
       });
     } catch {
       /* swallow — notifications are best-effort */

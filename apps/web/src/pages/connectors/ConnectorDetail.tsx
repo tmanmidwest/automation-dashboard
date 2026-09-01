@@ -9,6 +9,7 @@ import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { OperationDialog } from '@/components/OperationDialog';
+import { ConnectorAlerts } from './ConnectorAlerts';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -707,6 +708,12 @@ export function ConnectorDetail() {
             </CardContent>
           </Card>
         </>
+      )}
+
+      {can('settings:read') && (
+        <div className="mt-4">
+          <ConnectorAlerts instanceId={id!} />
+        </div>
       )}
 
       {/* Resource detail drawer */}

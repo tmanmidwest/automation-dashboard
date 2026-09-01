@@ -3,9 +3,9 @@
 export type Severity = 'info' | 'warning' | 'critical';
 
 export const SEVERITIES: { value: Severity; label: string }[] = [
-  { value: 'info', label: 'Info and up (everything)' },
-  { value: 'warning', label: 'Warning and up' },
-  { value: 'critical', label: 'Critical only' },
+  { value: 'info', label: 'Info' },
+  { value: 'warning', label: 'Warning' },
+  { value: 'critical', label: 'Critical' },
 ];
 
 export function SeveritySelect({

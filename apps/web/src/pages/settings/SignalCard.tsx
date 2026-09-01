@@ -6,11 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog } from '@/components/ui/dialog';
-import { EnableToggle, SeveritySelect, type Severity } from './notify-ui';
+import { EnableToggle } from './notify-ui';
 
 interface SignalCfg {
   enabled: boolean;
-  minSeverity: Severity;
   recipients: string;
 }
 interface SignalStatus {
@@ -43,6 +42,18 @@ export function SignalCard({
   const refreshStatus = useCallback(() => {
     api.get<SignalStatus>('/api/settings/notifications/signal/status').then(setStatus).catch(() => {});
   }, []);
+  // A fresh link/registration takes a moment to reflect in signal-cli, so
+  // re-check a few times rather than once (else the card stays "not linked"
+  // until a manual page refresh).
+  const refreshStatusSoon = useCallback(() => {
+    refreshStatus();
+    const t1 = setTimeout(refreshStatus, 1500);
+    const t2 = setTimeout(refreshStatus, 4000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [refreshStatus]);
   useEffect(() => refreshStatus(), [refreshStatus]);
 
   return (
@@ -91,24 +102,14 @@ export function SignalCard({
           </div>
         )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label>Recipient numbers</Label>
-            <Input
-              value={value.recipients}
-              disabled={!writable}
-              placeholder="+15551234567, group.AbCd… (for a group)"
-              onChange={(e) => onChange({ ...value, recipients: e.target.value })}
-            />
-          </div>
-          <div>
-            <Label>Minimum severity</Label>
-            <SeveritySelect
-              value={value.minSeverity}
-              disabled={!writable}
-              onChange={(v) => onChange({ ...value, minSeverity: v })}
-            />
-          </div>
+        <div>
+          <Label>Recipient numbers</Label>
+          <Input
+            value={value.recipients}
+            disabled={!writable}
+            placeholder="+15551234567, group.AbCd… (for a group)"
+            onChange={(e) => onChange({ ...value, recipients: e.target.value })}
+          />
         </div>
 
         {writable && (
@@ -120,18 +121,20 @@ export function SignalCard({
 
       {dialog === 'link' && (
         <LinkDialog
-          onClose={() => setDialog(null)}
-          onLinked={() => {
+          onClose={() => {
+            setDialog(null);
             refreshStatus();
           }}
+          onLinked={refreshStatusSoon}
         />
       )}
       {dialog === 'register' && (
         <RegisterDialog
-          onClose={() => setDialog(null)}
-          onRegistered={() => {
+          onClose={() => {
+            setDialog(null);
             refreshStatus();
           }}
+          onRegistered={refreshStatusSoon}
         />
       )}
     </Card>

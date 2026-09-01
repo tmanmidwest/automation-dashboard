@@ -6,19 +6,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { EnableToggle, SeveritySelect, type Severity } from './notify-ui';
+import { EnableToggle } from './notify-ui';
 import { SignalCard } from './SignalCard';
+import { AlertsMatrix } from './AlertsMatrix';
 
 interface NotifCfg {
-  email: { enabled: boolean; minSeverity: Severity; recipients: string };
-  textbelt: {
-    enabled: boolean;
-    minSeverity: Severity;
-    recipients: string;
-    endpoint: string;
-    keySet: boolean;
-  };
-  signal: { enabled: boolean; minSeverity: Severity; recipients: string };
+  email: { enabled: boolean; recipients: string };
+  textbelt: { enabled: boolean; recipients: string; endpoint: string; keySet: boolean };
+  signal: { enabled: boolean; recipients: string };
   throttleWindowSec: number;
 }
 
@@ -46,7 +41,7 @@ export function Notifications() {
         throttleWindowSec: Number(cfg!.throttleWindowSec),
       });
       setTextbeltKey('');
-      setMsg({ ok: true, text: 'Notification settings saved.' });
+      setMsg({ ok: true, text: 'Channel settings saved.' });
       setCfg(await api.get<NotifCfg>('/api/settings/notifications'));
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Save failed' });
@@ -70,7 +65,7 @@ export function Notifications() {
     <>
       <PageHeader
         title="Notifications"
-        description="Send outbound alerts by email and SMS. Configure who gets notified and how loud."
+        description="Deliver outbound alerts by email, SMS, and Signal. Configure the channels, then choose which alerts go where."
       />
 
       {msg && (
@@ -85,6 +80,9 @@ export function Notifications() {
         </div>
       )}
 
+      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+        Channels
+      </h2>
       <form onSubmit={save} className="space-y-4">
         {/* ── Email ─────────────────────────────────────────── */}
         <Card>
@@ -102,26 +100,14 @@ export function Notifications() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <Label>Recipients</Label>
-                <Input
-                  value={cfg.email.recipients}
-                  disabled={!writable}
-                  placeholder="alerts@example.com, you@example.com"
-                  onChange={(e) =>
-                    setCfg({ ...cfg, email: { ...cfg.email, recipients: e.target.value } })
-                  }
-                />
-              </div>
-              <div>
-                <Label>Minimum severity</Label>
-                <SeveritySelect
-                  value={cfg.email.minSeverity}
-                  disabled={!writable}
-                  onChange={(v) => setCfg({ ...cfg, email: { ...cfg.email, minSeverity: v } })}
-                />
-              </div>
+            <div>
+              <Label>Recipients</Label>
+              <Input
+                value={cfg.email.recipients}
+                disabled={!writable}
+                placeholder="alerts@example.com, you@example.com"
+                onChange={(e) => setCfg({ ...cfg, email: { ...cfg.email, recipients: e.target.value } })}
+              />
             </div>
             {writable && (
               <Button type="button" variant="secondary" onClick={() => sendTest('email')}>
@@ -149,28 +135,16 @@ export function Notifications() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <Label>Recipient numbers</Label>
-                <Input
-                  value={cfg.textbelt.recipients}
-                  disabled={!writable}
-                  placeholder="+15551234567, +15557654321"
-                  onChange={(e) =>
-                    setCfg({ ...cfg, textbelt: { ...cfg.textbelt, recipients: e.target.value } })
-                  }
-                />
-              </div>
-              <div>
-                <Label>Minimum severity</Label>
-                <SeveritySelect
-                  value={cfg.textbelt.minSeverity}
-                  disabled={!writable}
-                  onChange={(v) =>
-                    setCfg({ ...cfg, textbelt: { ...cfg.textbelt, minSeverity: v } })
-                  }
-                />
-              </div>
+            <div>
+              <Label>Recipient numbers</Label>
+              <Input
+                value={cfg.textbelt.recipients}
+                disabled={!writable}
+                placeholder="+15551234567, +15557654321"
+                onChange={(e) =>
+                  setCfg({ ...cfg, textbelt: { ...cfg.textbelt, recipients: e.target.value } })
+                }
+              />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
@@ -234,9 +208,7 @@ export function Notifications() {
                 min={0}
                 value={cfg.throttleWindowSec}
                 disabled={!writable}
-                onChange={(e) =>
-                  setCfg({ ...cfg, throttleWindowSec: Number(e.target.value) })
-                }
+                onChange={(e) => setCfg({ ...cfg, throttleWindowSec: Number(e.target.value) })}
               />
               <p className="text-xs text-muted-foreground mt-1">
                 Identical alerts within this window are sent once. 0 disables throttling.
@@ -245,8 +217,14 @@ export function Notifications() {
           </CardContent>
         </Card>
 
-        {writable && <Button type="submit">Save changes</Button>}
+        {writable && <Button type="submit">Save channel settings</Button>}
       </form>
+
+      {/* ── Alerts ────────────────────────────────────────────── */}
+      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mt-8 mb-3">
+        Alerts
+      </h2>
+      <AlertsMatrix writable={writable} />
     </>
   );
 }

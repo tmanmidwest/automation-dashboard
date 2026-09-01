@@ -71,24 +71,22 @@ export class ConnectionMonitorService {
       const prev = this.health.get(id);
       if (ok) {
         if (prev === 'down') {
-          void this.notifications.dispatch({
+          void this.notifications.dispatchAlert('connection.recovered', {
             title: `Connector recovered: ${name}`,
             body: message || 'Connection restored.',
-            severity: 'info',
-            source: 'connection',
             dedupeKey: `conn:${id}:up`,
+            connectorId: id,
           });
         }
         this.health.set(id, 'up');
       } else {
         // Alert on the transition into "down" (including first-seen-down).
         if (prev !== 'down') {
-          void this.notifications.dispatch({
+          void this.notifications.dispatchAlert('connection.down', {
             title: `Connector unreachable: ${name}`,
             body: message || 'Connection test failed.',
-            severity: 'warning',
-            source: 'connection',
             dedupeKey: `conn:${id}:down`,
+            connectorId: id,
           });
         }
         this.health.set(id, 'down');
