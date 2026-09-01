@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -232,6 +232,12 @@ export function Dashboard() {
   const costLast = overview?.metrics.find((m) => m.key === 'costLastMonth');
   const costMtd = overview?.metrics.find((m) => m.key === 'costMtd');
   const costEst = overview?.metrics.find((m) => m.key === 'costForecast');
+  // Backblaze backup connector tiles (only when a backup connector is present).
+  const b2Snapshots = overview?.metrics.find((m) => m.key === 'snapshots');
+  const b2Size = overview?.metrics.find((m) => m.key === 'repoSizeGb');
+  const b2Cost = overview?.metrics.find((m) => m.key === 'b2CostMonthly');
+  const b2LastOk = overview?.metrics.find((m) => m.key === 'b2LastBackupOk');
+  const hasBackblaze = !!(b2Snapshots || b2Size || b2LastOk);
   const guests = overview?.guests ?? [];
 
   const sources = overview?.sources ?? [];
@@ -359,6 +365,35 @@ export function Dashboard() {
             <StatTile icon={DollarSign} label="Spend so far" value={formatMoney(costMtd.value, costMtd.unit)} sub="month to date" to="/connectors" />
             {costEst && (
               <StatTile icon={TrendingUp} label="Est. this month" value={formatMoney(costEst.value, costEst.unit)} sub="forecast" to="/connectors" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Backups — Backblaze B2, shown only when a backup connector is configured */}
+      {hasBackblaze && (
+        <div>
+          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+            <Archive className="h-3.5 w-3.5 text-accent" /> Backups
+            {b2LastOk?.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60">as of {shortDateTime(b2LastOk.asOf)}</span>}
+          </div>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+            <StatTile
+              icon={b2LastOk ? (b2LastOk.value ? ShieldCheck : ShieldAlert) : Archive}
+              label="Last backup"
+              value={b2LastOk?.asOf ? shortDateTime(b2LastOk.asOf) : '—'}
+              sub={b2LastOk ? (b2LastOk.value ? 'succeeded' : 'FAILED — check the connector') : 'no backups yet'}
+              to="/connectors"
+            />
+            <StatTile
+              icon={HardDrive}
+              label="Backup size"
+              value={b2Size ? `${b2Size.value} GB` : '—'}
+              sub={b2Snapshots ? `${b2Snapshots.value} snapshot${b2Snapshots.value === 1 ? '' : 's'} in B2` : 'in Backblaze B2'}
+              to="/connectors"
+            />
+            {b2Cost && (
+              <StatTile icon={DollarSign} label="Est. monthly cost" value={formatMoney(b2Cost.value, b2Cost.unit)} sub="B2 storage, estimated" to="/connectors" />
             )}
           </div>
         </div>

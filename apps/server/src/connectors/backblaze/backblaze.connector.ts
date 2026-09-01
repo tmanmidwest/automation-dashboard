@@ -219,6 +219,22 @@ export class BackblazeConnector implements Connector {
         placeholder: '30',
         help: 'After each backup, prune B2 snapshots older than this many days (the latest is always kept). Blank or 0 = keep everything.',
       },
+      {
+        key: 'costPerTbMonth',
+        label: 'B2 storage price (per TB / month)',
+        type: 'number',
+        default: 6,
+        placeholder: '6',
+        help: 'Used only to estimate cost. Backblaze B2 list price is ~$6/TB/month. Estimate = deduplicated repo size × this rate; it covers STORAGE only, not download/egress or API/transaction fees.',
+      },
+      {
+        key: 'currency',
+        label: 'Currency',
+        type: 'text',
+        default: 'USD',
+        placeholder: 'USD',
+        help: 'ISO currency code for the cost estimate (e.g. USD, EUR, GBP).',
+      },
     ],
     resourceKinds: [
       {
@@ -807,6 +823,31 @@ export class BackblazeConnector implements Connector {
     this.statsCache.delete(this.authFrom(ctx).repository);
   }
 
+  /**
+   * Append the estimated monthly B2 cost (from repo size × configured rate) and the
+   * last-backup status. Both work even when B2 is unreachable (cost uses the cached
+   * size; status comes from the DB), so the dashboard tiles never blank out.
+   */
+  private async appendBackupMeta(ctx: ConnectorContext, metrics: OverviewMetric[], repoSizeBytes: number | null): Promise<void> {
+    const rate = Number(ctx.config.costPerTbMonth ?? 6) || 0;
+    const currency = (String(ctx.config.currency ?? 'USD').trim().toUpperCase() || 'USD').slice(0, 3);
+    if (repoSizeBytes != null && rate > 0) {
+      const cost = (repoSizeBytes / 1e12) * rate; // decimal TB
+      metrics.push({ key: 'b2CostMonthly', label: 'B2 est. monthly', value: Math.round(cost * 100) / 100, unit: currency });
+    }
+    if (this.runs && ctx.instanceId) {
+      const last = await this.runs.latestBackup(ctx.instanceId).catch(() => null);
+      if (last) {
+        metrics.push({
+          key: 'b2LastBackupOk',
+          label: 'Last backup ok',
+          value: last.status === 'success' ? 1 : 0,
+          asOf: (last.finishedAt ?? last.startedAt).toISOString(),
+        });
+      }
+    }
+  }
+
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const auth = this.authFrom(ctx);
     const restic = new Restic(auth);
@@ -836,6 +877,7 @@ export class BackblazeConnector implements Connector {
       if (stats) {
         metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((stats.totalSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB' });
       }
+      await this.appendBackupMeta(ctx, metrics, stats?.totalSizeBytes ?? null);
       const guests = snaps.slice(0, 40).map((s) => ({
         name: `${s.shortId} · ${fmtDate(s.time)}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.hostname || 'restic',
       }));
@@ -853,6 +895,7 @@ export class BackblazeConnector implements Connector {
       if (st.repoSizeBytes != null) {
         metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((st.repoSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB', asOf: st.lastOkAt });
       }
+      await this.appendBackupMeta(ctx, metrics, st.repoSizeBytes);
       const guests = st.snapshots.slice(0, 40).map((s) => ({
         name: `${s.shortId} · ${s.time ? fmtDate(new Date(s.time)) : '—'}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.host || 'restic',
       }));

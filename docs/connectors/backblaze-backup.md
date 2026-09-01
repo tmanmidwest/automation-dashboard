@@ -124,6 +124,8 @@ set the connector's **Local dump path** to `/mnt/dump/dump`.
 | Day of week / Day of month | used for Weekly / Monthly |
 | Time — hour / minute | when the backup runs (server time) |
 | Delete backups older than (days) | retention; blank/0 = keep everything |
+| B2 storage price (per TB / month) | for the cost estimate; default 6 (B2 list price ~$6/TB/mo) |
+| Currency | ISO code for the estimate, e.g. USD |
 
 Click **Test**. A healthy result looks like:
 `Repo: OK — 14 snapshots, latest yesterday. Mount: OK — read/write. Backup: Weekly on Sunday at 04:00 (server time).`
@@ -191,6 +193,18 @@ snapshot**. That means:
 - The Backblaze connector never queries Proxmox directly; a small helper refreshes a cached
   map while Proxmox is reachable and reuses the last-known map when it isn't. Snapshots taken
   before this feature (or when Proxmox was down) simply fall back to `VM 100`.
+
+### Dashboard tiles
+
+When this connector is configured, the main **dashboard** shows a **Backups** row:
+- **Last backup** — date/time of the most recent backup run + **succeeded / FAILED**.
+- **Backup size** — deduplicated repo size in B2 (+ snapshot count).
+- **Est. monthly cost** — `repo size × your B2 rate`, **storage only** (excludes download/egress
+  and API/transaction fees). Set the rate + currency on the connector; the tile and the
+  connector's field both spell out how it's calculated.
+
+These tiles read the durable mirror (below), so they keep showing real numbers with an
+"as of …" note even if B2 is briefly unreachable.
 
 ### Durable metadata
 

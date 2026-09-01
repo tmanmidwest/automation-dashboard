@@ -49,6 +49,14 @@ export class BackupRunService {
     return this.prisma.backupRun.findUnique({ where: { id } });
   }
 
+  /** The most recent BACKUP run (schedule or manual — not a restore) for an instance. */
+  async latestBackup(connectorInstanceId: string): Promise<BackupRunView | null> {
+    return this.prisma.backupRun.findFirst({
+      where: { connectorInstanceId, trigger: { in: ['schedule', 'manual'] } },
+      orderBy: { startedAt: 'desc' },
+    });
+  }
+
   /** True if a run for this instance started at or after `since` (restart-safe schedule de-dup). */
   async hasRunSince(connectorInstanceId: string, since: Date): Promise<boolean> {
     const n = await this.prisma.backupRun.count({
