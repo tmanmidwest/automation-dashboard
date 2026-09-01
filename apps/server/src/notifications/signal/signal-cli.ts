@@ -6,9 +6,13 @@ const execFileAsync = promisify(execFile);
 /**
  * Where signal-cli keeps its account state (keys, registration). This MUST be a
  * persistent volume in production, or the account is lost on every restart.
- * Passed to signal-cli as `--config` on every invocation.
+ * Passed to signal-cli as `--data-dir` on every invocation.
+ *
+ * NB: do NOT use signal-cli's own `SIGNAL_CLI_CONFIG` env var for this — in
+ * 0.14+ that names a config *file*, and pointing it at a directory breaks every
+ * command (even `--version`). We use our own `SIGNAL_CLI_DATA_DIR`.
  */
-export const SIGNAL_CONFIG_DIR = process.env.SIGNAL_CLI_CONFIG || '/data/signal';
+export const SIGNAL_CONFIG_DIR = process.env.SIGNAL_CLI_DATA_DIR || '/data/signal';
 
 export class SignalError extends Error {
   constructor(
@@ -61,7 +65,7 @@ export class SignalCli {
   constructor(private readonly configDir: string = SIGNAL_CONFIG_DIR) {}
 
   private base(): string[] {
-    return ['--config', this.configDir];
+    return ['--data-dir', this.configDir];
   }
 
   private async run(args: string[], maxBuffer = 16 * 1024 * 1024): Promise<string> {

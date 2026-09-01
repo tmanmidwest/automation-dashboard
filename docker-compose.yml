@@ -31,8 +31,8 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       DATABASE_URL: ${DATABASE_URL:-postgresql://cerebro:cerebro_change_me@db:5432/cerebro?schema=public}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      # Persistent home for signal-cli account state (see volume below).
-      SIGNAL_CLI_CONFIG: /data/signal
+      # Persistent home for signal-cli account state (--data-dir; see volume below).
+      SIGNAL_CLI_DATA_DIR: /data/signal
     volumes:
       - cerebro_signal:/data/signal
     ports:

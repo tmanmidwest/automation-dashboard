@@ -69,7 +69,9 @@ RUN apt-get update \
 ENV JAVA_HOME=/opt/java
 ENV PATH="/opt/java/bin:${PATH}"
 # signal-cli account state (keys, registration) lives here — mount a volume.
-ENV SIGNAL_CLI_CONFIG=/data/signal
+# NOTE: our own var, passed to signal-cli as --data-dir. Do NOT name it
+# SIGNAL_CLI_CONFIG — that's signal-cli's config *file* path in 0.14+.
+ENV SIGNAL_CLI_DATA_DIR=/data/signal
 RUN mkdir -p /data/signal
 
 COPY --from=build /app/node_modules ./node_modules
