@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { severityRank } from '@cerebro/shared';
 import type {
   AlertRule,
   AlertTypeDef,
@@ -14,6 +15,7 @@ import { TextbeltChannel } from './channels/textbelt.channel';
 import { SignalChannel } from './channels/signal.channel';
 import { NotificationChannel } from './channels/notification-channel';
 import { ALERT_TYPES, getAlertType } from './alerts/alert-registry';
+import { METRIC_THRESHOLDS } from './alerts/metric-thresholds';
 
 type RoutableChannelId = 'email' | 'textbelt' | 'signal';
 const ROUTABLE_CHANNELS: RoutableChannelId[] = ['email', 'textbelt', 'signal'];
@@ -24,6 +26,13 @@ const CHANNEL_LABELS: Record<RoutableChannelId, string> = {
 };
 
 const DEFAULT_THROTTLE_SEC = 300;
+const DEFAULT_QUIET: QuietConfig = {
+  enabled: false,
+  start: '22:00',
+  end: '07:00',
+  floor: 'critical',
+  channels: ['textbelt', 'signal'],
+};
 
 interface ChannelConfig {
   enabled: boolean;
@@ -35,12 +44,22 @@ interface ChannelView {
   recipients: string;
 }
 
+/** Quiet-hours window (server time): during it, only alerts >= floor go to the listed channels. */
+interface QuietConfig {
+  enabled: boolean;
+  start: string; // 'HH:MM'
+  end: string; // 'HH:MM'
+  floor: NotificationSeverity;
+  channels: RoutableChannelId[];
+}
+
 /** Shape returned to the settings UI (recipients flattened to a string). */
 export interface NotificationConfigView {
   email: ChannelView;
   textbelt: ChannelView & { endpoint: string; keySet: boolean };
   signal: ChannelView;
   throttleWindowSec: number;
+  quiet: QuietConfig;
 }
 
 /** Shape accepted from the settings UI on save. */
@@ -49,6 +68,22 @@ export interface SaveNotificationConfig {
   textbelt: ChannelView & { endpoint?: string; key?: string };
   signal: ChannelView;
   throttleWindowSec: number;
+  quiet: QuietConfig;
+}
+
+/** Minutes-since-midnight for 'HH:MM'. */
+function hmToMinutes(s: string): number {
+  const [h, m] = s.split(':').map((n) => parseInt(n, 10));
+  return (h || 0) * 60 + (m || 0);
+}
+
+/** Is `now` (server-local) inside the [start,end) window, handling midnight wrap? */
+function inQuietWindow(now: Date, start: string, end: string): boolean {
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const s = hmToMinutes(start);
+  const e = hmToMinutes(end);
+  if (s === e) return false; // empty window
+  return s < e ? cur >= s && cur < e : cur >= s || cur < e;
 }
 
 /** One channel's availability, for the alert matrix UI. */
@@ -144,6 +179,20 @@ export class NotificationsService {
       signal: this.view(signal),
       throttleWindowSec:
         (await this.settings.get<number>('notify.throttle.windowSec')) ?? DEFAULT_THROTTLE_SEC,
+      quiet: await this.quietConfig(),
+    };
+  }
+
+  private async quietConfig(): Promise<QuietConfig> {
+    return {
+      enabled: (await this.settings.get<boolean>('notify.quiet.enabled')) ?? DEFAULT_QUIET.enabled,
+      start: (await this.settings.get<string>('notify.quiet.start')) ?? DEFAULT_QUIET.start,
+      end: (await this.settings.get<string>('notify.quiet.end')) ?? DEFAULT_QUIET.end,
+      floor:
+        (await this.settings.get<NotificationSeverity>('notify.quiet.floor')) ?? DEFAULT_QUIET.floor,
+      channels:
+        (await this.settings.get<RoutableChannelId[]>('notify.quiet.channels')) ??
+        DEFAULT_QUIET.channels,
     };
   }
 
@@ -164,6 +213,17 @@ export class NotificationsService {
     await this.settings.set('notify.signal.recipients', this.parseRecipients(cfg.signal.recipients));
 
     await this.settings.set('notify.throttle.windowSec', Math.max(0, cfg.throttleWindowSec));
+
+    await this.settings.set('notify.quiet.enabled', cfg.quiet.enabled);
+    await this.settings.set('notify.quiet.start', cfg.quiet.start);
+    await this.settings.set('notify.quiet.end', cfg.quiet.end);
+    await this.settings.set('notify.quiet.floor', cfg.quiet.floor);
+    await this.settings.set(
+      'notify.quiet.channels',
+      cfg.quiet.channels.filter((c): c is RoutableChannelId =>
+        ROUTABLE_CHANNELS.includes(c as RoutableChannelId),
+      ),
+    );
   }
 
   // ── Alert catalog ─────────────────────────────────────────
@@ -212,8 +272,25 @@ export class NotificationsService {
     return (await this.settings.get<string[]>(`notify.connector.${connectorId}.mutedAlerts`)) ?? [];
   }
 
-  /** Connector-scoped alerts with their global rule + this connector's mute state. */
-  async getConnectorAlerts(connectorId: string): Promise<{ alerts: ConnectorAlertView[] }> {
+  private thresholdKey(connectorId: string, defId: string): string {
+    return `notify.connector.${connectorId}.threshold.${defId}`;
+  }
+
+  /** A per-connector metric threshold (0 = no alert). See metric-thresholds.ts. */
+  async connectorThreshold(connectorId: string, defId: string): Promise<number> {
+    const v = await this.settings.get<number>(this.thresholdKey(connectorId, defId));
+    if (v !== undefined) return v;
+    // Back-compat: cost used `costThreshold` before thresholds were generalized.
+    if (defId === 'cost') {
+      return (await this.settings.get<number>(`notify.connector.${connectorId}.costThreshold`)) ?? 0;
+    }
+    return 0;
+  }
+
+  /** Connector-scoped alerts with their global rule + mute state + metric thresholds. */
+  async getConnectorAlerts(
+    connectorId: string,
+  ): Promise<{ alerts: ConnectorAlertView[]; thresholds: Record<string, number> }> {
     const muted = new Set(await this.mutedAlerts(connectorId));
     const alerts = await Promise.all(
       ALERT_TYPES.filter((t) => t.connectorScoped).map(async (def) => {
@@ -230,12 +307,25 @@ export class NotificationsService {
         };
       }),
     );
-    return { alerts };
+    const thresholds: Record<string, number> = {};
+    for (const t of METRIC_THRESHOLDS) thresholds[t.id] = await this.connectorThreshold(connectorId, t.id);
+    return { alerts, thresholds };
   }
 
-  async setConnectorMutes(connectorId: string, mutedKeys: string[]): Promise<void> {
-    const valid = mutedKeys.filter((k) => getAlertType(k)?.connectorScoped);
+  async saveConnectorAlertConfig(
+    connectorId: string,
+    cfg: { muted: string[]; thresholds?: Record<string, number> },
+  ): Promise<void> {
+    const valid = cfg.muted.filter((k) => getAlertType(k)?.connectorScoped);
     await this.settings.set(`notify.connector.${connectorId}.mutedAlerts`, [...new Set(valid)]);
+    if (cfg.thresholds) {
+      for (const t of METRIC_THRESHOLDS) {
+        const v = cfg.thresholds[t.id];
+        if (v !== undefined) {
+          await this.settings.set(this.thresholdKey(connectorId, t.id), Math.max(0, Number(v) || 0));
+        }
+      }
+    }
   }
 
   // ── Dispatch ──────────────────────────────────────────────
@@ -277,16 +367,31 @@ export class NotificationsService {
     await this.sendToChannels(msg, rule.channels);
   }
 
-  /** Deliver a message to the given channels, applying enablement + throttling. */
+  /** Deliver a message to the given channels, applying enablement, quiet hours + throttling. */
   private async sendToChannels(msg: NotificationMessage, channelIds: NotificationChannelId[]): Promise<void> {
     const windowSec =
       (await this.settings.get<number>('notify.throttle.windowSec')) ?? DEFAULT_THROTTLE_SEC;
+    const quiet = await this.quietConfig();
+    const quietNow = quiet.enabled && inQuietWindow(new Date(), quiet.start, quiet.end);
+    const severity = msg.severity ?? 'info';
 
     for (const id of channelIds) {
       if (!ROUTABLE_CHANNELS.includes(id as RoutableChannelId)) continue;
       const channelId = id as RoutableChannelId;
       const cfg = await this.channelConfig(channelId);
       if (!cfg.enabled || cfg.recipients.length === 0) continue;
+      // Quiet hours: on opted-in channels, hold anything below the floor severity.
+      if (
+        quietNow &&
+        quiet.channels.includes(channelId) &&
+        severityRank(severity) < severityRank(quiet.floor)
+      ) {
+        await this.logging.debug(
+          'notify',
+          `Quiet hours: held ${channelId} for "${msg.title}" (${severity})`,
+        );
+        continue;
+      }
       if (this.isThrottled(channelId, msg, windowSec)) {
         await this.logging.debug('notify', `Throttled ${channelId} for "${msg.title}"`);
         continue;

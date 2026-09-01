@@ -5,8 +5,10 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
+  Matches,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -32,11 +34,20 @@ class TextbeltDto extends ChannelDto {
   @IsOptional() @IsString() key?: string;
 }
 
+class QuietHoursDto {
+  @IsBoolean() enabled!: boolean;
+  @Matches(/^\d{2}:\d{2}$/, { message: 'Time must be HH:MM' }) start!: string;
+  @Matches(/^\d{2}:\d{2}$/, { message: 'Time must be HH:MM' }) end!: string;
+  @IsIn(NOTIFICATION_SEVERITIES) floor!: NotificationSeverity;
+  @IsArray() @IsIn(CHANNEL_IDS, { each: true }) channels!: NotificationChannelId[];
+}
+
 class NotificationConfigDto {
   @ValidateNested() @Type(() => ChannelDto) email!: ChannelDto;
   @ValidateNested() @Type(() => TextbeltDto) textbelt!: TextbeltDto;
   @ValidateNested() @Type(() => ChannelDto) signal!: ChannelDto;
   @IsInt() @Min(0) throttleWindowSec!: number;
+  @ValidateNested() @Type(() => QuietHoursDto) quiet!: QuietHoursDto;
 }
 
 class TestDto {
@@ -57,6 +68,8 @@ class SaveAlertsDto {
 
 class SaveConnectorMutesDto {
   @IsArray() @IsString({ each: true }) muted!: string[];
+  /** Per-connector metric thresholds keyed by def id (e.g. { cost: 50, storage: 100 }). */
+  @IsOptional() @IsObject() thresholds?: Record<string, number>;
 }
 
 @Controller('api/settings/notifications')
@@ -123,13 +136,16 @@ export class NotificationsController {
     @Body() dto: SaveConnectorMutesDto,
     @CurrentUser() user: SessionUser,
   ) {
-    await this.notifications.setConnectorMutes(id, dto.muted);
+    await this.notifications.saveConnectorAlertConfig(id, {
+      muted: dto.muted,
+      thresholds: dto.thresholds,
+    });
     await this.audit.record({
       actorId: user.id,
       actorEmail: user.email,
       action: 'settings.connector_alerts_muted',
       target: id,
-      meta: { muted: dto.muted },
+      meta: { muted: dto.muted, thresholds: dto.thresholds },
     });
     return { ok: true };
   }

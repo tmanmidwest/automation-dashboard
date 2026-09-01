@@ -82,6 +82,49 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  // ── Resources ────────────────────────────────────────────
+  {
+    key: 'resource.stopped',
+    label: 'Resource stopped',
+    description: 'A VM, container, or instance changed to a stopped state.',
+    category: 'Resources',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'resource.started',
+    label: 'Resource started',
+    description: 'A VM, container, or instance changed to a running state.',
+    category: 'Resources',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  // ── Cost ─────────────────────────────────────────────────
+  {
+    key: 'cost.threshold',
+    label: 'Monthly cost over threshold',
+    description: "A connector's month-to-date spend crossed the limit set on its page.",
+    category: 'Cost',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  // ── Storage ──────────────────────────────────────────────
+  {
+    key: 'storage.threshold',
+    label: 'Storage over threshold',
+    description: "A connector's storage size crossed the limit set on its page.",
+    category: 'Storage',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

@@ -6,16 +6,35 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { EnableToggle } from './notify-ui';
+import { EnableToggle, type Severity } from './notify-ui';
 import { SignalCard } from './SignalCard';
 import { AlertsMatrix } from './AlertsMatrix';
 
+interface QuietCfg {
+  enabled: boolean;
+  start: string;
+  end: string;
+  floor: Severity;
+  channels: string[];
+}
 interface NotifCfg {
   email: { enabled: boolean; recipients: string };
   textbelt: { enabled: boolean; recipients: string; endpoint: string; keySet: boolean };
   signal: { enabled: boolean; recipients: string };
   throttleWindowSec: number;
+  quiet: QuietCfg;
 }
+
+const QUIET_CHANNELS: { id: string; label: string }[] = [
+  { id: 'email', label: 'Email' },
+  { id: 'textbelt', label: 'SMS' },
+  { id: 'signal', label: 'Signal' },
+];
+const QUIET_FLOORS: { value: Severity; label: string }[] = [
+  { value: 'critical', label: 'Critical only' },
+  { value: 'warning', label: 'Warning & Critical' },
+  { value: 'info', label: 'Everything (no hold)' },
+];
 
 export function Notifications() {
   const { can } = useAuth();
@@ -39,6 +58,7 @@ export function Notifications() {
         textbelt: { ...cfg!.textbelt, key: textbeltKey || undefined },
         signal: cfg!.signal,
         throttleWindowSec: Number(cfg!.throttleWindowSec),
+        quiet: cfg!.quiet,
       });
       setTextbeltKey('');
       setMsg({ ok: true, text: 'Channel settings saved.' });
@@ -191,6 +211,95 @@ export function Notifications() {
           onChange={(signal) => setCfg({ ...cfg, signal })}
           onTest={() => sendTest('signal')}
         />
+
+        {/* ── Quiet hours ───────────────────────────────────── */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle className="text-base">Quiet hours</CardTitle>
+                <CardDescription>
+                  Hold non-urgent alerts overnight on the chosen channels (server time).
+                </CardDescription>
+              </div>
+              <EnableToggle
+                checked={cfg.quiet.enabled}
+                disabled={!writable}
+                onChange={(enabled) => setCfg({ ...cfg, quiet: { ...cfg.quiet, enabled } })}
+              />
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <Label>From</Label>
+                <Input
+                  type="time"
+                  value={cfg.quiet.start}
+                  disabled={!writable || !cfg.quiet.enabled}
+                  onChange={(e) => setCfg({ ...cfg, quiet: { ...cfg.quiet, start: e.target.value } })}
+                />
+              </div>
+              <div>
+                <Label>To</Label>
+                <Input
+                  type="time"
+                  value={cfg.quiet.end}
+                  disabled={!writable || !cfg.quiet.enabled}
+                  onChange={(e) => setCfg({ ...cfg, quiet: { ...cfg.quiet, end: e.target.value } })}
+                />
+              </div>
+              <div>
+                <Label>Still deliver</Label>
+                <select
+                  value={cfg.quiet.floor}
+                  disabled={!writable || !cfg.quiet.enabled}
+                  onChange={(e) =>
+                    setCfg({ ...cfg, quiet: { ...cfg.quiet, floor: e.target.value as Severity } })
+                  }
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm disabled:opacity-50"
+                >
+                  {QUIET_FLOORS.map((f) => (
+                    <option key={f.value} value={f.value} className="bg-background">
+                      {f.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div>
+              <Label>Applies to</Label>
+              <div className="flex flex-wrap gap-4 mt-1">
+                {QUIET_CHANNELS.map((ch) => (
+                  <label key={ch.id} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[hsl(var(--primary))]"
+                      checked={cfg.quiet.channels.includes(ch.id)}
+                      disabled={!writable || !cfg.quiet.enabled}
+                      onChange={(e) =>
+                        setCfg({
+                          ...cfg,
+                          quiet: {
+                            ...cfg.quiet,
+                            channels: e.target.checked
+                              ? [...new Set([...cfg.quiet.channels, ch.id])]
+                              : cfg.quiet.channels.filter((c) => c !== ch.id),
+                          },
+                        })
+                      }
+                    />
+                    <span className="text-sm">{ch.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1.5">
+                During quiet hours, only alerts at the “still deliver” level and above go to these
+                channels. Others (e.g. Email) are unaffected.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* ── Delivery ──────────────────────────────────────── */}
         <Card>

@@ -712,7 +712,7 @@ export function ConnectorDetail() {
 
       {can('settings:read') && (
         <div className="mt-4">
-          <ConnectorAlerts instanceId={id!} />
+          <ConnectorAlerts instanceId={id!} metrics={connMetrics} />
         </div>
       )}
 

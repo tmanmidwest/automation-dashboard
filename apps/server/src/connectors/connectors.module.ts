@@ -5,6 +5,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { ConnectorRegistry } from './connector-registry.service';
 import { ConnectorInstanceService } from './connector-instance.service';
 import { ConnectionMonitorService } from './connection-monitor.service';
+import { ResourceMonitorService } from './resource-monitor.service';
+import { MetricThresholdMonitorService } from './metric-threshold-monitor.service';
 import { JobService } from './job.service';
 import { ConsoleService } from './console.service';
 import { ConnectorsController } from './connectors.controller';
@@ -20,7 +22,7 @@ import { VmNameService } from './backblaze/vm-name.service';
   imports: [SettingsModule, NotificationsModule, ScheduleModule.forRoot()],
   controllers: [ConnectorsController],
   providers: [
-    ConnectorRegistry, ConnectorInstanceService, ConnectionMonitorService, JobService, ConsoleService,
+    ConnectorRegistry, ConnectorInstanceService, ConnectionMonitorService, ResourceMonitorService, MetricThresholdMonitorService, JobService, ConsoleService,
     BackupRunService, BackupSchedulerService, BackupStateService, VmNameService,
   ],
   exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService],
