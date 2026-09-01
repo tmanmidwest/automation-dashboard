@@ -1,20 +1,22 @@
 # Backblaze B2 Backup connector (restic)
 
-Browse and **restore** your Proxmox `vzdump` backups that live in a Backblaze B2
-**restic** repository. Cerebro reads the repo through restic (read-only), lists snapshots
-and the VM backups inside them, and restores a chosen backup into your **NAS dump folder**
-— from which Proxmox restores it natively through its own UI.
+Cerebro **owns off-siting** your Proxmox `vzdump` backups to a Backblaze B2 **restic**
+repository. It backs up the **NAS dump folder** to B2 on a schedule you pick (frequency +
+day + time — no cron), prunes old backups by age, lets you browse snapshots, and restores
+a chosen backup back into the dump folder — from which Proxmox restores it natively.
 
-It is **read-only against the repo**: it never backs up, prunes, or deletes. Your existing
-Proxmox systemd + restic job stays the sole owner of writes.
+Proxmox still *creates* the vzdump files on the NAS; Cerebro handles getting them to B2 and
+back. (The old Proxmox-side restic→B2 job has been retired — Cerebro is the writer now.)
 
 ```
-  ┌───────────┐  restic backup  ┌─────────────┐          ┌──────────┐  restic dump   ┌──────────────┐
-  │  Proxmox  │ ───────────────▶│ Backblaze   │◀────read──│ Cerebro  │──restore file─▶│ UNAS Pro     │
-  │ (systemd) │  (the writer)   │ B2 (restic  │           │ (restic, │  into dump/    │ dump/ (mount)│
-  └───────────┘                 │  repository)│           │ read-only)│               └──────┬───────┘
-        ▲                       └─────────────┘           └──────────┘                       │
-        └──────────────────  restore the file via the Proxmox UI  ◀──────────────────────────┘
+  ┌───────────┐  vzdump   ┌──────────────┐  restic backup   ┌─────────────┐
+  │  Proxmox  │ ─────────▶│ UNAS Pro     │◀───────┐         │ Backblaze   │
+  │           │  writes   │ dump/ (mount)│        │         │ B2 (restic  │
+  └───────────┘           └──────┬───────┘   ┌────┴─────┐   │  repository)│
+        ▲                        │           │ Cerebro  │──▶│             │
+        │            restic dump │           │ (restic) │◀──│  (backup +  │
+        │            restore ◀───┘           └──────────┘   │   prune)    │
+        └──────  restore the file via the Proxmox UI  ◀──   └─────────────┘
 ```
 
 ## Why restic changes things
@@ -36,9 +38,11 @@ connector needs the restic password (read-only) in addition to a B2 key.
 
 ## Step 1 — Credentials (read-only)
 
-1. **Read-only B2 key.** In Backblaze → **Account → Application Keys → Add a New
-   Application Key**, scoped to your backup bucket, with **`listFiles` + `readFiles`**
-   only (no write/delete). Copy the `keyID` and `applicationKey`.
+1. **B2 key (read + write).** In Backblaze → **Account → Application Keys → Add a New
+   Application Key**, scoped to your backup bucket, with **`listFiles`, `readFiles`,
+   `writeFiles`** (add **`deleteFiles`** if you'll use retention). Copy the `keyID` and
+   `applicationKey`. *(Cerebro is the backup writer now, so it needs write; delete is only
+   for pruning old snapshots.)*
 2. **Dedicated restic password (recommended).** On the Proxmox host, add a separate repo
    key for Cerebro so it's independently revocable:
    ```bash
@@ -111,14 +115,18 @@ set the connector's **Local dump path** to `/mnt/dump/dump`.
 
 | Field | Value |
 |---|---|
-| B2 Application Key ID | the **read-only** B2 `keyID` |
+| B2 Application Key ID | the read+write B2 `keyID` |
 | B2 Application Key | the B2 `applicationKey` (stored encrypted) |
 | Restic repository | e.g. `b2:trevor-homelab-offsite:/` |
 | Restic repository password | the dedicated (or existing) repo password (stored encrypted) |
 | Local dump path | `/mnt/dump` |
+| Automatic backup | Off / Daily / Weekly / Monthly |
+| Day of week / Day of month | used for Weekly / Monthly |
+| Time — hour / minute | when the backup runs (server time) |
+| Delete backups older than (days) | retention; blank/0 = keep everything |
 
 Click **Test**. A healthy result looks like:
-`Repo: OK — 14 snapshots, latest yesterday. Mount: OK — read/write.`
+`Repo: OK — 14 snapshots, latest yesterday. Mount: OK — read/write. Backup: Weekly on Sunday at 04:00 (server time).`
 
 - **Repo FAILED** → check the B2 key, repository string, and restic password.
 - **Mount FAILED / READ-ONLY** → the share isn't mounted or the user lacks write
@@ -130,6 +138,21 @@ UI.
 ---
 
 ## Using it
+
+### Automatic backups
+
+Pick a **frequency** (Daily / Weekly / Monthly), the **day** (for weekly/monthly), and a
+**time** — all dropdowns, no cron. Cerebro backs up the dump folder to B2 on that schedule
+and, if you set **Delete backups older than (days)**, prunes snapshots older than that
+afterward (the latest is always kept). The **Test** result shows the schedule in plain
+language. Times are the **container's local time** — set a `TZ` env on the app service
+(e.g. `TZ=America/Chicago`) if you want a specific zone.
+
+Click **Back up now** (on the Snapshots tab) to run the same backup immediately. Every
+backup — scheduled or manual — is logged in **Restore history** (status, when, duration,
+what happened), durable across restarts.
+
+### Browse & restore
 
 - **Snapshots** tab — every restic snapshot (date, host, age), newest first.
 - Open a snapshot → its **Backups** — the VM/CT archives inside (VMID, size, date).
@@ -167,12 +190,15 @@ Then, in Proxmox: open that storage → **Backups**, select the file → **Resto
 
 ## Security
 
-- Cerebro uses a **read-only B2 key** → it can list and restore but never modify the repo.
-- The restic password is stored **encrypted** in Cerebro's vault; worst case (full host
-  compromise incl. `APP_ENCRYPTION_KEY`) an attacker gets **read** access to backups — not
-  the ability to alter or delete them — and you can revoke Cerebro's restic key + B2 key
-  without touching Proxmox.
-- Keep `APP_ENCRYPTION_KEY` strong and out of the repo (`.env`, `chmod 600`).
+- Cerebro now **owns backups**, so it uses a **read + write** B2 key (plus delete for
+  retention). That's a deliberate step up from read-only — it can write and prune the repo.
+- Both the B2 key and the restic password are stored **encrypted** (AES-256-GCM) in
+  Cerebro's vault and never shown back in the UI. Worst case (full host compromise incl.
+  `APP_ENCRYPTION_KEY`) an attacker could read, write, or delete backups — so keep
+  `APP_ENCRYPTION_KEY` strong and out of the repo (`.env`, `chmod 600`), and use a
+  **dedicated restic key + dedicated B2 key** so both are revocable independently.
+- Because Cerebro can now prune, retention deletes are real deletions in B2 (subject to any
+  bucket lifecycle/versioning you have).
 
 ---
 
@@ -194,7 +220,10 @@ Then, in Proxmox: open that storage → **Backups**, select the file → **Resto
 
 ## Notes
 
-- Cerebro **does not** schedule backups, prune, or delete — that stays with your Proxmox
-  systemd + restic job. This connector only reads and restores.
+- Cerebro now **schedules the backups and prunes** the B2 repo (you retired the Proxmox
+  systemd job). Proxmox still *creates* the vzdump files on the NAS on its own schedule;
+  Cerebro backs those up to B2 and restores them back.
+- Backups run in the **container's local time** — set `TZ` on the app service for a specific
+  timezone.
 - The restore writes the single backup file flat into the dump folder (via `restic dump`),
   not restic's full path tree — so it lands exactly where Proxmox expects it.

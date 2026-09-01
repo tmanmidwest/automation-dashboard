@@ -1,4 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { SettingsModule } from '../settings/settings.module';
 import { ConnectorRegistry } from './connector-registry.service';
 import { ConnectorInstanceService } from './connector-instance.service';
@@ -9,11 +10,12 @@ import { ProxmoxConnector } from './proxmox/proxmox.connector';
 import { AwsConnector } from './aws/aws.connector';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
+import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
 
 @Module({
-  imports: [SettingsModule],
+  imports: [SettingsModule, ScheduleModule.forRoot()],
   controllers: [ConnectorsController],
-  providers: [ConnectorRegistry, ConnectorInstanceService, JobService, ConsoleService, BackupRunService],
+  providers: [ConnectorRegistry, ConnectorInstanceService, JobService, ConsoleService, BackupRunService, BackupSchedulerService],
   exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService],
 })
 export class ConnectorsModule implements OnModuleInit {

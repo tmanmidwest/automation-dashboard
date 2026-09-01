@@ -15,6 +15,7 @@ import type {
 } from '@cerebro/shared';
 import { Restic, ResticAuth, type ResticSnapshot, type ResticFile, type ResticRepoStats } from './restic';
 import type { BackupRunService, BackupRunView } from './backup-run.service';
+import { parseSchedule, describeSchedule } from './schedule-util';
 
 const SNAPSHOT_KIND = 'snapshot';
 const FILE_SUBKIND = 'file';
@@ -98,8 +99,8 @@ export class BackblazeConnector implements Connector {
     id: 'backblaze',
     name: 'Backblaze B2 Backups',
     description:
-      'Browse and restore Proxmox vzdump backups stored in a Backblaze B2 restic repository. Lists snapshots and their VM backups, and restores a chosen backup into the NAS dump folder for a native Proxmox restore. Read-only — it never backs up, prunes, or deletes.',
-    version: '0.2.0',
+      'Own your Proxmox vzdump off-siting: back up the NAS dump folder to a Backblaze B2 restic repository on a schedule, prune old backups by age, browse snapshots, and restore a backup into the dump folder for a native Proxmox restore.',
+    version: '0.3.0',
     icon: 'backblaze',
     configFields: [
       {
@@ -108,7 +109,7 @@ export class BackblazeConnector implements Connector {
         type: 'text',
         required: true,
         placeholder: '0057…',
-        help: 'The keyID of a READ-ONLY B2 application key (listFiles + readFiles) scoped to the backup bucket.',
+        help: 'The keyID of a B2 application key scoped to the backup bucket (needs read + write; add delete for retention).',
       },
       {
         key: 'b2AppKey',
@@ -123,7 +124,7 @@ export class BackblazeConnector implements Connector {
         label: 'Restic repository',
         type: 'text',
         required: true,
-        placeholder: 'b2:trevor-homelab-offsite:/',
+        placeholder: 'b2:your-bucket-name:/',
         help: 'The restic repository string, exactly as in your Proxmox b2-credentials (RESTIC_REPOSITORY).',
       },
       {
@@ -132,7 +133,7 @@ export class BackblazeConnector implements Connector {
         type: 'password',
         secret: true,
         required: true,
-        help: 'The repository password (ideally a dedicated key added for Cerebro via "restic key add"). Stored encrypted; decrypts read access only.',
+        help: 'The repository password (ideally a dedicated key added for Cerebro via "restic key add"). Stored encrypted.',
       },
       {
         key: 'dumpPath',
@@ -140,7 +141,65 @@ export class BackblazeConnector implements Connector {
         type: 'text',
         required: true,
         placeholder: '/mnt/dump',
-        help: 'The Proxmox "dump" folder as seen inside the Cerebro container — where restored backups are written. See the setup guide for mounting the NAS share.',
+        help: 'The Proxmox "dump" folder as seen inside the Cerebro container — the backup source and the restore target. See the setup guide for mounting the NAS share.',
+      },
+      {
+        key: 'backupFrequency',
+        label: 'Automatic backup',
+        type: 'select',
+        default: 'off',
+        options: [
+          { label: 'Off (manual only)', value: 'off' },
+          { label: 'Daily', value: 'daily' },
+          { label: 'Weekly', value: 'weekly' },
+          { label: 'Monthly', value: 'monthly' },
+        ],
+        help: 'How often Cerebro backs up the dump folder to B2.',
+      },
+      {
+        key: 'backupDayOfWeek',
+        label: 'Day of week (for Weekly)',
+        type: 'select',
+        default: '0',
+        options: [
+          { label: 'Sunday', value: '0' }, { label: 'Monday', value: '1' }, { label: 'Tuesday', value: '2' },
+          { label: 'Wednesday', value: '3' }, { label: 'Thursday', value: '4' }, { label: 'Friday', value: '5' },
+          { label: 'Saturday', value: '6' },
+        ],
+        help: 'Used only when Automatic backup is Weekly.',
+      },
+      {
+        key: 'backupDayOfMonth',
+        label: 'Day of month (for Monthly)',
+        type: 'select',
+        default: '1',
+        options: Array.from({ length: 28 }, (_, i) => ({ label: String(i + 1), value: String(i + 1) })),
+        help: 'Used only when Automatic backup is Monthly (1–28).',
+      },
+      {
+        key: 'backupHour',
+        label: 'Time — hour',
+        type: 'select',
+        default: '4',
+        options: Array.from({ length: 24 }, (_, i) => ({ label: String(i).padStart(2, '0'), value: String(i) })),
+        help: 'Hour of day (server time) for automatic backups.',
+      },
+      {
+        key: 'backupMinute',
+        label: 'Time — minute',
+        type: 'select',
+        default: '0',
+        options: [
+          { label: '00', value: '0' }, { label: '15', value: '15' }, { label: '30', value: '30' }, { label: '45', value: '45' },
+        ],
+        help: 'Minute of the hour for automatic backups.',
+      },
+      {
+        key: 'retentionDays',
+        label: 'Delete backups older than (days)',
+        type: 'number',
+        placeholder: '30',
+        help: 'After each backup, prune B2 snapshots older than this many days (the latest is always kept). Blank or 0 = keep everything.',
       },
     ],
     resourceKinds: [
@@ -169,6 +228,16 @@ export class BackblazeConnector implements Connector {
     ],
     operations: [
       {
+        id: 'backup-now',
+        label: 'Back up now',
+        description: 'Back up the dump folder to B2 immediately (the same operation the schedule runs). Applies retention afterward if set.',
+        scope: 'create',
+        kind: SNAPSHOT_KIND,
+        icon: 'upload',
+        submitLabel: 'Back up now',
+        fields: [],
+      },
+      {
         id: 'restore-file',
         label: 'Restore to NAS',
         description:
@@ -188,17 +257,17 @@ export class BackblazeConnector implements Connector {
     ],
     help: {
       overview:
-        'Your Proxmox host backs up to B2 with restic, so the bucket holds an encrypted, deduplicated restic repository. This connector reads it through restic: browse Snapshots and the VM backups inside each, then "Restore to NAS" pulls one into the mounted dump folder for a native Proxmox restore. It never backs up, prunes, or deletes — your systemd + restic job stays in charge of that.',
+        'Cerebro owns off-siting your Proxmox backups: it backs up the mounted NAS dump folder to a Backblaze B2 restic repository on the schedule you pick (frequency + day + time — no cron), prunes snapshots older than your chosen age, and lets you browse Snapshots and Restore a backup into the dump folder for a native Proxmox restore. Proxmox still makes the vzdump files on the NAS; Cerebro handles getting them to B2 and back.',
       setupSteps: [
-        'Create a READ-ONLY B2 application key (listFiles + readFiles) scoped to your backup bucket; copy the keyID and applicationKey.',
-        'Optionally add a dedicated restic key for Cerebro on the Proxmox host: `restic key add` (so it is independently revocable).',
-        'Mount your NAS backup share into the Cerebro container (see the setup guide) and note the mount path.',
-        'Enter the B2 key, the restic repository string (RESTIC_REPOSITORY), the restic password, and the local dump path, then run Test.',
+        'Create a B2 application key scoped to your backup bucket with read + write (add delete for retention); copy the keyID and applicationKey.',
+        'Use (or add) a restic repository password for Cerebro — a dedicated key via `restic key add` is cleanest.',
+        'Mount your NAS backup share into the Cerebro container read/write (see the setup guide) and note the mount path.',
+        'Enter the B2 key, the restic repository string, the password, and the dump path; pick an Automatic backup schedule and retention; then run Test.',
       ],
       requiredPermissions: [
-        'A READ-ONLY B2 application key (listFiles + readFiles) on the bucket — Cerebro cannot write, prune, or delete.',
-        'The restic repository password (a dedicated key is recommended so it can be revoked without touching Proxmox).',
-        'The NAS backup share mounted read/write at the dump path (restores are written there).',
+        'A B2 application key with read + write on the bucket (listFiles, readFiles, writeFiles) — plus deleteFiles if you use retention.',
+        'The restic repository password (a dedicated key is recommended so it can be revoked without touching other keys).',
+        'The NAS backup share mounted read/write at the dump path (it is both the backup source and the restore target).',
         'The server image must include the restic binary (bundled in the Cerebro Docker image).',
       ],
       referenceLinks: [
@@ -207,7 +276,7 @@ export class BackblazeConnector implements Connector {
         { label: 'Proxmox backup & restore', url: 'https://pve.proxmox.com/wiki/Backup_and_Restore' },
       ],
       notes:
-        'This connector never contacts Proxmox and never modifies the repository. It reads snapshots and restores files to a mounted dump folder; Proxmox restores them from there through its own UI.',
+        'This connector never contacts Proxmox. It backs up and prunes the B2 restic repository itself (Cerebro is now the writer, since you retired the Proxmox-side job) and restores files to the mounted dump folder, from which Proxmox restores them through its own UI. Backups run in the server\'s local time — set the container TZ env if you want a specific timezone.',
     },
   };
 
@@ -272,11 +341,17 @@ export class BackblazeConnector implements Connector {
       ctx.log('warn', `Dump-path check failed: ${mountMsg}`);
     }
 
+    // ── Schedule (informational) ──
+    const schedule = describeSchedule(parseSchedule(ctx.config));
+    const retentionDays = Math.floor(Number(ctx.config.retentionDays ?? 0)) || 0;
+    details.schedule = schedule;
+    details.retention = retentionDays > 0 ? `prune older than ${retentionDays} days` : 'keep everything';
+
     const ok = repoOk && mountOk;
-    if (ok) ctx.log('info', `Backblaze connector OK — repo: ${repoMsg}; mount: ${mountMsg}.`);
+    if (ok) ctx.log('info', `Backblaze connector OK — repo: ${repoMsg}; mount: ${mountMsg}; backup: ${schedule}.`);
     return {
       ok,
-      message: `Repo: ${repoOk ? 'OK — ' + repoMsg : 'FAILED — ' + repoMsg}. Mount: ${mountOk ? 'OK — ' + mountMsg : 'FAILED — ' + mountMsg}.`,
+      message: `Repo: ${repoOk ? 'OK — ' + repoMsg : 'FAILED — ' + repoMsg}. Mount: ${mountOk ? 'OK — ' + mountMsg : 'FAILED — ' + mountMsg}. Backup: ${schedule}.`,
       details,
     };
   }
@@ -401,8 +476,71 @@ export class BackblazeConnector implements Connector {
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
-    if (operationId !== 'restore-file') return { ok: false, message: `Unknown operation "${operationId}".` };
-    return this.runRestore(ctx, resourceId, values, onProgress);
+    if (operationId === 'backup-now') return this.runBackup(ctx, values, onProgress);
+    if (operationId === 'restore-file') return this.runRestore(ctx, resourceId, values, onProgress);
+    return { ok: false, message: `Unknown operation "${operationId}".` };
+  }
+
+  /**
+   * Back up the dump folder to B2, then apply age retention if configured.
+   * Records a durable run (trigger 'schedule' when the scheduler calls it, else
+   * 'manual'). This is the operation both the "Back up now" button and the
+   * scheduler invoke.
+   */
+  async runBackup(
+    ctx: ConnectorContext,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+  ): Promise<OperationResult> {
+    const dumpPath = this.dumpPathOf(ctx);
+    const trigger = values.trigger === 'schedule' ? 'schedule' : 'manual';
+    const retentionDays = Math.floor(Number(ctx.config.retentionDays ?? 0)) || 0;
+    const restic = new Restic(this.authFrom(ctx));
+
+    const runId = this.runs && ctx.instanceId ? await this.runs.begin(ctx.instanceId, trigger).catch(() => null) : null;
+    const record = async (ok: boolean, message: string): Promise<OperationResult> => {
+      if (runId) await this.runs!.finish(runId, ok ? 'success' : 'error', message).catch(() => {});
+      return { ok, message };
+    };
+
+    try {
+      // Guard: don't back up an empty/unmounted folder (would create a useless snapshot).
+      const entries = await fs.readdir(dumpPath).catch((err) => {
+        throw new Error(`Cannot read dump path "${dumpPath}": ${err instanceof Error ? err.message : err}`);
+      });
+      const archives = entries.filter((n) => parseBackup(n).isArchive).length;
+      if (archives === 0) {
+        return record(false, `No backups found in ${dumpPath} — nothing to back up (is the NAS mounted and are there vzdump files?).`);
+      }
+
+      onProgress(`Backing up ${archives} backup${archives === 1 ? '' : 's'} from ${dumpPath} to B2…`);
+      let lastEmit = 0;
+      const summary = await restic.backup([dumpPath], ['cerebro'], (pct) => {
+        const now = Date.now();
+        if (now - lastEmit >= 3000) { lastEmit = now; onProgress(`  backing up… ${pct}%`); }
+      });
+      const added = summary.bytesAdded != null ? fmtBytes(summary.bytesAdded) : '—';
+      onProgress(`  ✓ snapshot ${summary.snapshotId?.slice(0, 8) ?? '?'} created (${added} new)`);
+
+      let retentionMsg = '';
+      if (retentionDays > 0) {
+        onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'}…`);
+        try {
+          await restic.forgetOlderThan(retentionDays);
+          retentionMsg = ` Pruned to the last ${retentionDays} day${retentionDays === 1 ? '' : 's'}.`;
+        } catch (err) {
+          retentionMsg = ` (retention failed: ${err instanceof Error ? err.message : 'error'})`;
+          ctx.log('warn', `Retention prune failed: ${retentionMsg}`);
+        }
+      }
+
+      ctx.log('info', `B2 backup done — snapshot ${summary.snapshotId?.slice(0, 8) ?? '?'}, ${added} new.${retentionMsg}`);
+      return record(true, `Backed up ${archives} backup${archives === 1 ? '' : 's'} (${added} new data) to B2 as snapshot ${summary.snapshotId?.slice(0, 8) ?? '?'}.${retentionMsg}`);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Backup failed.';
+      ctx.log('error', `B2 backup failed: ${m}`);
+      return record(false, m);
+    }
   }
 
   /** Restore one backup from a snapshot into the dump folder (restic dump → temp → verify → atomic rename). */

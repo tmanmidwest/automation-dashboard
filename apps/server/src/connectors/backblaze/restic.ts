@@ -154,6 +154,69 @@ export class Restic {
   }
 
   /**
+   * Back up one or more paths into the repository (Cerebro owns the backup now
+   * that the Proxmox-side restic job was retired). Streams restic's --json output
+   * so progress can be reported without buffering the whole thing; returns the
+   * final summary.
+   */
+  async backup(
+    paths: string[],
+    tags: string[],
+    onPercent?: (pct: number) => void,
+  ): Promise<{ snapshotId?: string; filesNew?: number; filesChanged?: number; bytesAdded?: number; bytesProcessed?: number }> {
+    const args = ['backup', ...paths];
+    for (const t of tags) args.push('--tag', t);
+    args.push('--json');
+    return new Promise((resolve, reject) => {
+      const child = spawn('restic', args, { env: this.env() });
+      let stderr = '';
+      let buf = '';
+      let summary: Record<string, unknown> | undefined;
+      const handleLine = (line: string) => {
+        const t = line.trim();
+        if (!t) return;
+        let o: Record<string, unknown>;
+        try { o = JSON.parse(t); } catch { return; }
+        if (o.message_type === 'status' && onPercent && typeof o.percent_done === 'number') {
+          onPercent(Math.floor((o.percent_done as number) * 100));
+        } else if (o.message_type === 'summary') {
+          summary = o;
+        }
+      };
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const l of lines) handleLine(l);
+      });
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      child.on('error', (err) => reject(friendly(err)));
+      child.on('close', (code) => {
+        if (buf) handleLine(buf);
+        if (code === 0) {
+          resolve({
+            snapshotId: summary?.snapshot_id as string | undefined,
+            filesNew: summary?.files_new as number | undefined,
+            filesChanged: summary?.files_changed as number | undefined,
+            bytesAdded: summary?.data_added as number | undefined,
+            bytesProcessed: summary?.total_bytes_processed as number | undefined,
+          });
+        } else {
+          reject(friendly({ code: code ?? undefined, stderr }));
+        }
+      });
+    });
+  }
+
+  /**
+   * Age-based retention: keep snapshots within the last `days` (relative to the
+   * newest snapshot — so the latest is always kept) and prune the rest from B2.
+   */
+  async forgetOlderThan(days: number): Promise<void> {
+    await this.run(['forget', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune']);
+  }
+
+  /**
    * Stream one file out of a snapshot to a writable (e.g. a file in the NAS dump
    * folder). Resolves with the number of bytes written.
    */
