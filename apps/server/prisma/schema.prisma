@@ -39,6 +39,8 @@ model User {
   roleId       String
   /// Linked external identities (Google, Entra, Authentik, ...). A user may have several.
   identities   UserIdentity[]
+  /// Programmatic API tokens minted by this user (bearer auth for API/MCP clients).
+  apiTokens    ApiToken[]
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -85,6 +87,33 @@ model UserIdentity {
   createdAt  DateTime         @default(now())
 
   @@unique([providerId, subject])
+  @@index([userId])
+}
+
+/// A programmatic bearer credential for the API / MCP server. The plaintext token
+/// (`cbro_<prefix>_<secret>`) is shown once at creation and never stored; we keep only
+/// the sha256 of the secret. Effective permissions are the token's `scopes` intersected
+/// with the owner's current role permissions, recomputed on every request.
+model ApiToken {
+  id         String    @id @default(cuid())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  /// Human label identifying the client/source, e.g. "Claude Desktop", "home cron".
+  name       String
+  /// Public, indexed lookup id (the `<prefix>` segment). Unique across all tokens.
+  prefix     String    @unique
+  /// Hex sha256 of the secret segment. Never the plaintext.
+  hash       String
+  /// Granted Permission strings (⊆ owner's role at mint time). Read-only in Phase 1.
+  scopes     String[]
+  /// Throttled last-use timestamp (updated at most once per minute).
+  lastUsedAt DateTime?
+  /// Optional expiry; null = long-lived (revocable).
+  expiresAt  DateTime?
+  /// Set when revoked; a revoked token is rejected but kept for the audit trail.
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
   @@index([userId])
 }
 

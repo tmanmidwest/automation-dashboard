@@ -11,12 +11,14 @@ import { AuthModule } from './auth/auth.module';
 import { ProvidersModule } from './providers/providers.module';
 import { UsersModule } from './users/users.module';
 import { AccountModule } from './account/account.module';
+import { TokensModule } from './tokens/tokens.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ConnectorsModule } from './connectors/connectors.module';
 import { MonitorsModule } from './monitors/monitors.module';
 import { VersionModule } from './version/version.module';
 import { SeedModule } from './seed/seed.module';
+import { McpModule } from './mcp/mcp.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -26,7 +28,8 @@ import { PermissionsGuard } from './auth/permissions.guard';
     // Serve the built React UI. API routes are excluded so controllers win.
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'public'),
-      exclude: ['/api/(.*)'],
+      // Exclude API routes and the MCP endpoint so controllers win over the SPA.
+      exclude: ['/api/(.*)', '/mcp'],
     }),
     PrismaModule,
     CommonModule,
@@ -36,12 +39,14 @@ import { PermissionsGuard } from './auth/permissions.guard';
     ProvidersModule,
     UsersModule,
     AccountModule,
+    TokensModule,
     MailModule,
     NotificationsModule,
     ConnectorsModule,
     MonitorsModule,
     VersionModule,
     SeedModule,
+    McpModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

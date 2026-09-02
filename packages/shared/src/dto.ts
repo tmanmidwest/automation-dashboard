@@ -133,3 +133,22 @@ export interface AuditLogEntry {
   meta?: Record<string, unknown>;
   createdAt: string;
 }
+
+/** An API token as returned to its owner (never includes the secret). */
+export interface ApiTokenSummary {
+  id: string;
+  name: string;
+  /** Public prefix segment, shown so the owner can recognize a token (e.g. "k3f9x2a1"). */
+  prefix: string;
+  scopes: Permission[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+/** Returned once, immediately after minting: the full plaintext token to copy. */
+export interface ApiTokenCreated {
+  token: ApiTokenSummary;
+  /** The full `cbro_<prefix>_<secret>` string — shown once and never retrievable again. */
+  secret: string;
+}

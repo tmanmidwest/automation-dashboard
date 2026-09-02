@@ -8,6 +8,13 @@
     "sourceMap": true,
     "outDir": "./dist",
     "baseUrl": "./",
+    "paths": {
+      "//": ["MCP SDK ships ESM/CJS via package `exports`, which classic Node10 resolution ignores; map its subpath imports to the physical CJS type declarations. Runtime require() still uses the exports-valid specifier."],
+      "@modelcontextprotocol/sdk/*.js": [
+        "./node_modules/@modelcontextprotocol/sdk/dist/cjs/*",
+        "../../node_modules/@modelcontextprotocol/sdk/dist/cjs/*"
+      ]
+    },
     "incremental": true,
     "strict": true,
     "strictPropertyInitialization": false,
