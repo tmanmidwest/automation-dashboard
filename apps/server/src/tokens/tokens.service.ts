@@ -1,14 +1,15 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import type { ApiToken } from '@prisma/client';
 import type { ApiTokenCreated, ApiTokenSummary, Permission, SessionUser } from '@cerebro/shared';
+import { GRANTABLE_TOKEN_SCOPES } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { TokenAuthService } from '../auth/token-auth.service';
 import { AuditService } from '../logging/audit.service';
 
 /**
- * Self-service management of a user's own API tokens. Scopes are clamped to the
- * caller's own permissions and, in Phase 1, to read-only (`*:read`) — a token can
- * never grant more than its owner holds, and cannot yet perform actions.
+ * Self-service management of a user's own API tokens. Scopes are limited to the grantable
+ * catalog (read scopes + connectors:action / monitors:write) and clamped to the caller's own
+ * permissions — a token can never grant more than its owner holds.
  */
 @Injectable()
 export class TokensService {
@@ -87,16 +88,17 @@ export class TokensService {
     });
   }
 
-  /** Scopes must be non-empty, held by the owner, and (Phase 1) read-only. */
+  /** Scopes must be non-empty, grantable to a token, and held by the owner. */
   private validateScopes(user: SessionUser, requested: string[]): string[] {
     if (!Array.isArray(requested) || requested.length === 0) {
       throw new BadRequestException('At least one scope is required.');
     }
     const scopes = [...new Set(requested)];
+    const grantable = new Set<string>(GRANTABLE_TOKEN_SCOPES);
     const owned = new Set<string>(user.permissions);
     for (const scope of scopes) {
-      if (!scope.endsWith(':read')) {
-        throw new BadRequestException(`Scope "${scope}" is not allowed — only read scopes are available.`);
+      if (!grantable.has(scope)) {
+        throw new BadRequestException(`Scope "${scope}" cannot be granted to a token.`);
       }
       if (!owned.has(scope)) {
         throw new BadRequestException(`You do not hold the "${scope}" permission.`);

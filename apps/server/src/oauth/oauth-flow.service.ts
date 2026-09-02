@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import type { OAuthClient } from '@prisma/client';
 import type { Permission } from '@cerebro/shared';
 import type { OAuthGrantSummary } from '@cerebro/shared';
+import { GRANTABLE_TOKEN_SCOPES } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { OAuthTokenService } from '../auth/oauth-token.service';
 
@@ -99,10 +100,11 @@ export class OAuthFlowService {
     return [...new Set((scope ?? '').split(/\s+/).filter(Boolean))] as Permission[];
   }
 
-  /** Requested ∩ user's permissions ∩ read-only. Empty means nothing grantable. */
+  /** Requested ∩ user's permissions ∩ grantable catalog. Empty means nothing grantable. */
   effectiveScopes(userPermissions: Permission[], requested: Permission[]): Permission[] {
     const owned = new Set<string>(userPermissions);
-    return requested.filter((s) => s.endsWith(':read') && owned.has(s));
+    const grantable = new Set<string>(GRANTABLE_TOKEN_SCOPES);
+    return requested.filter((s) => grantable.has(s) && owned.has(s));
   }
 
   // ── Authorize-request validation ─────────────────────────

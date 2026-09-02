@@ -1,6 +1,6 @@
 # Programmatic API + MCP Server — Design Note
 
-Status: **Phase 1 deployed & verified. Phases 2 + 3 (3a/3b/3c) built, awaiting deploy — the OAuth "Connect" flow is complete end to end. Only Phase 4 (actions) remains.** Last updated 2026-09-02.
+Status: **All phases built. Phase 1 deployed & verified; Phases 2, 3 (a/b/c), 4 (a/b) built and in-memory-verified, awaiting deploy.** The full arc — read-only MCP, OAuth "Connect", and guarded write actions — is code-complete. Last updated 2026-09-02.
 
 > **Phase 1 is live and smoke-tested.** Backend: `ApiToken` model + migration
 > `0005_api_tokens`, `auth/token-auth.service.ts`, combined `auth.guard.ts` (session or
@@ -102,8 +102,8 @@ permission enforcement downstream is untouched.
 - **Phase 3 — OAuth 2.1 (SCOPED 2026-09-02).** Cerebro becomes its own OAuth 2.1
   **Authorization Server** *and* **Resource Server**, so a browser-based MCP client connects
   via login + consent instead of a pasted token. See the dedicated section below.
-- **Phase 4 — Actions.** Add `*:action` scopes to tokens/consent and expose write/action
-  tools. Guard work already done; this is tool definitions + a confirmation/safety posture.
+- **Phase 4 — Actions (SCOPED 2026-09-02).** Expose the connectors' existing mutating
+  capabilities over MCP, behind a layered safety posture. See the dedicated section below.
 
 ## Phase 3 — OAuth 2.1 (detailed scope)
 
@@ -212,6 +212,93 @@ to the guard, everything downstream is untouched.
   wrong-client-secret rejected, cross-client revoke isolation, grant listing (name + active token
   count + scopes), grant revocation cascade, and per-user isolation. Server + web build clean.
   *(Access-token `aud`/resource enforcement intentionally deferred — single resource today.)*
+
+## Phase 4 — Actions (detailed scope)
+
+Status: **Scoped, not built.** Turns the read-only MCP server into one that can *change*
+infrastructure, reusing the connectors' already self-describing action model and the
+`connectors:action` / `monitors:write` permissions that already exist in RBAC.
+
+### The action model we build on (already exists)
+
+- **Resource actions** (`ConnectorAction`): start/stop/reboot etc. Each declares `mutating`,
+  `intent: 'default' | 'destructive'`, `confirm` copy, and `showWhenStatus`. Invoked at
+  `POST .../resources/:kind/:resourceId/actions/:actionId` (`connectors:action`).
+- **Operations** (`ConnectorOperation`): parameterized create/deploy/backup with `fields[]`;
+  async → return a `jobId`. Invoked at `POST .../operations/:operationId` (`connectors:action`).
+- **Monitor writes**: pause/resume/check-now (`monitors:write`).
+
+Because actions are connector-defined and dynamic, we expose **generic tools** driven by that
+metadata rather than hand-authoring one tool per action.
+
+### Decisions (locked with the user)
+
+- **Safety posture:** MCP **annotations** (`readOnlyHint:false`, `destructiveHint`) on every
+  action tool *and* a **required `confirm: true` argument on every mutating tool** (a cheap,
+  client-agnostic second decision). Destructive actions always require it and carry
+  `destructiveHint:true`.
+- **Coverage:** expose **all** actions including destructive (stop/reboot/delete/terminate);
+  destructive ones are annotated destructive and always require `confirm`.
+- **Grantable write scopes:** `connectors:action` and `monitors:write` only. `connectors:write`
+  (connector install/config) and `settings:*` / `users:*` stay **out** of MCP tokens/consent.
+- **Audit:** MCP tools call services directly, which bypasses the controllers' audit — so the
+  MCP action tools must record audit themselves, tagged `via: 'mcp'` with the token/OAuth
+  client id and the acting user.
+
+### 4a — Unlock action scopes in credentials — BUILT (2026-09-02), not yet deployed
+
+- `GRANTABLE_TOKEN_SCOPES` + `isWriteScope()` centralized in `packages/shared/src/rbac.ts`
+  (read scopes + `connectors:action`, `monitors:write`; deliberately excludes
+  `connectors:write` and `settings:*`/`users:*` writes). Tokens, OAuth `effectiveScopes`,
+  metadata `scopes_supported`, and the UI all reference it.
+- `TokensService.validateScopes` now allows any grantable scope (still ⊆ owner) instead of
+  read-only. `OAuthFlowService.effectiveScopes` filters by the grantable catalog ∩ user perms.
+  Metadata `scopes_supported` = `GRANTABLE_TOKEN_SCOPES`.
+- Frontend: API-Tokens picker offers the two write scopes with an amber "write" treatment + a
+  warning line; consent screen flags write scopes with a warning icon + banner. (Web imports
+  only *types* from the CJS-built shared package, so `isWriteScope` is inlined in `Consent.tsx`
+  rather than imported — a runtime value export wouldn't survive rollup's CJS interop.)
+- Verified in-memory (10/10): catalog membership, `effectiveScopes` keeps action / drops
+  connector-config + unheld, and an action-scoped token authenticates with `connectors:action`.
+  No DB change. No new deps.
+
+### 4b — Action tools (MCP) with the safety posture — BUILT (2026-09-02), not yet deployed
+
+Implemented in `mcp-server.factory.ts` via an `actionTool` helper: adds `confirm?: boolean` to
+the schema (optional, so an omitted value reaches the handler for a clear refusal rather than a
+raw schema error), refuses unless `confirm === true` (except `check_monitor_now`), sets
+annotations `{ readOnlyHint:false, destructiveHint }`, and self-audits every successful call as
+`mcp.<tool>` with `{ via:'mcp', tokenId|oauthClientId, userId, ...args }` (confirm stripped). The
+factory now injects `AuditService` and takes an `McpOrigin` from the controller (`req.apiTokenId`
+/ `req.oauthClientId`). Tools: `list_actions`/`get_job` (`connectors:read`); `run_action`,
+`run_operation`, `cancel_job` (`connectors:action`, run_action/run_operation destructive-hinted);
+`pause_monitor`/`resume_monitor` (confirm) + `check_monitor_now` (no confirm) (`monitors:write`).
+Verified in-memory (21/21): scope-gated presence, destructive annotations, confirm-required
+schema, the confirm guard (refused calls don't touch the service or audit), successful execution
++ audit with origin, and monitor writes. No DB change. No new deps.
+
+*(Original 4b plan, for reference:)* New tools in `mcp-server.factory.ts`, scope-gated as today:
+- `connectors:read` — `list_actions(instanceId, kind, resourceId?)` (surfaces each action's
+  `mutating`/`intent`/`confirm`/`showWhenStatus` and each operation's `fields`); `get_job`.
+- `connectors:action` — `run_action(instanceId, kind, resourceId, actionId, confirm)`,
+  `run_operation(instanceId, operationId, resourceId?, values, confirm)`,
+  `cancel_job(instanceId, jobId, confirm)`.
+- `monitors:write` — `pause_monitor(monitorId, confirm)`, `resume_monitor(monitorId, confirm)`,
+  `check_monitor_now(monitorId)` (a trigger, not a state change → no `confirm`).
+
+Enforcement in the tool wrapper: mutating handlers reject with a clear `isError` message unless
+`confirm === true`; annotations set per tool (`run_action`/`run_operation` →
+`destructiveHint:true` conservatively, since a generic action may be destructive); every
+successful action records audit (`AuditService` injected into the factory) with
+`{ via:'mcp', clientId|tokenId, userId }`. Read-only stays the default — a token/grant only
+gets these tools if it was explicitly granted the action scope.
+
+**Open build-time checks:** enumerate resource actions for a kind (from the manifest — confirm
+the accessor); confirm `startOperation`/`performAction`/`setEnabled`/`checkNow` service
+signatures; decide whether static API tokens may hold action scopes (default: yes, for
+automation like scheduled backups, but flagged) vs. OAuth-only.
+
+**Sub-slices:** 4a (unlock scopes) → 4b (action tools). Each independently shippable.
 
 ## Grounding notes (current code)
 

@@ -66,3 +66,27 @@ export function hasPermission(
 ): boolean {
   return !!granted && granted.includes(required);
 }
+
+/**
+ * The permissions that may be granted to a programmatic credential (API token / OAuth
+ * access token) for the API + MCP server. A superset of the read scopes plus the two write
+ * capabilities we expose to automation. Deliberately excludes connector install/config
+ * (`connectors:write`) and all `settings:*` / `users:*` writes — those stay UI/session-only.
+ * A credential's scopes are still additionally clamped to the granting user's own role.
+ */
+export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
+  'connectors:read',
+  'monitors:read',
+  'logs:read',
+  'audit:read',
+  'users:read',
+  'settings:read',
+  // Write / action scopes:
+  'connectors:action',
+  'monitors:write',
+];
+
+/** True for a grantable scope that lets a credential change state (not read-only). */
+export function isWriteScope(scope: Permission): boolean {
+  return !scope.endsWith(':read');
+}

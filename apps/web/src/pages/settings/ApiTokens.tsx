@@ -10,14 +10,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog } from '@/components/ui/dialog';
 
-/** Read scopes offerable in Phase 1, with friendly labels. Filtered to what the user holds. */
-const READ_SCOPES: { scope: Permission; label: string; desc: string }[] = [
+/** Scopes offerable to a token, with friendly labels. Filtered to what the user holds. */
+const SCOPES: { scope: Permission; label: string; desc: string; write?: boolean }[] = [
   { scope: 'connectors:read', label: 'Connectors', desc: 'Read connector instances and their resources.' },
   { scope: 'monitors:read', label: 'Monitors', desc: 'Read uptime monitors and their status.' },
   { scope: 'logs:read', label: 'Logs', desc: 'Read application logs.' },
   { scope: 'audit:read', label: 'Audit trail', desc: 'Read the audit log.' },
   { scope: 'users:read', label: 'Users', desc: 'Read user accounts.' },
   { scope: 'settings:read', label: 'Settings', desc: 'Read application settings.' },
+  { scope: 'connectors:action', label: 'Connector actions', desc: 'Start/stop/reboot resources and run operations.', write: true },
+  { scope: 'monitors:write', label: 'Monitor management', desc: 'Pause, resume, and trigger monitors.', write: true },
 ];
 
 function relative(iso: string | null): string {
@@ -33,7 +35,7 @@ function relative(iso: string | null): string {
 
 export function ApiTokens() {
   const { can } = useAuth();
-  const available = useMemo(() => READ_SCOPES.filter((s) => can(s.scope)), [can]);
+  const available = useMemo(() => SCOPES.filter((s) => can(s.scope)), [can]);
 
   const [tokens, setTokens] = useState<ApiTokenSummary[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -194,7 +196,8 @@ export function ApiTokens() {
             <Label>Scopes</Label>
             <div className="space-y-2 mt-1">
               {available.map((s) => (
-                <label key={s.scope} className="flex items-start gap-3 cursor-pointer rounded-md border border-border p-3 hover:bg-muted/50">
+                <label key={s.scope} className={`flex items-start gap-3 cursor-pointer rounded-md border p-3 ${
+                  s.write ? 'border-amber-500/40 bg-amber-500/5 hover:bg-amber-500/10' : 'border-border hover:bg-muted/50'}`}>
                   <input
                     type="checkbox"
                     className="mt-0.5 h-4 w-4 accent-[hsl(var(--primary))]"
@@ -202,12 +205,20 @@ export function ApiTokens() {
                     onChange={() => toggleScope(s.scope)}
                   />
                   <span>
-                    <span className="text-sm font-medium">{s.label}</span>
+                    <span className="text-sm font-medium">
+                      {s.label}
+                      {s.write && <span className="ml-2 text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 bg-amber-500/20 text-amber-500">write</span>}
+                    </span>
                     <span className="block text-xs text-muted-foreground">{s.desc}</span>
                   </span>
                 </label>
               ))}
             </div>
+            {[...scopes].some((sc) => SCOPES.find((x) => x.scope === sc)?.write) && (
+              <p className="mt-2 text-xs text-amber-500">
+                This token will be able to change infrastructure (start/stop resources, run operations, manage monitors). Store it carefully.
+              </p>
+            )}
           </div>
           <div>
             <Label>Expiry <span className="text-muted-foreground font-normal">(optional)</span></Label>

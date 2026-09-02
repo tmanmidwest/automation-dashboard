@@ -1,10 +1,10 @@
 import { Controller, Get, Req } from '@nestjs/common';
 import type { Request } from 'express';
-import { BUILTIN_ROLES } from '@cerebro/shared';
+import { GRANTABLE_TOKEN_SCOPES } from '@cerebro/shared';
 import { Public } from '../auth/decorators';
 
-/** Read-only scopes an OAuth token may request (Phase 3). The Viewer role is exactly the read set. */
-const SUPPORTED_SCOPES = BUILTIN_ROLES.viewer.permissions;
+/** Scopes an OAuth token may request — the grantable catalog (read + action scopes). */
+const SUPPORTED_SCOPES = GRANTABLE_TOKEN_SCOPES;
 
 /**
  * OAuth 2.1 discovery metadata. Both documents are public (unauthenticated) so MCP clients

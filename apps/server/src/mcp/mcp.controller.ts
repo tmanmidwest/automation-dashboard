@@ -20,7 +20,7 @@ export class McpController {
   @All()
   async handle(@Req() req: Request, @Res() res: Response): Promise<void> {
     const user = req.user as SessionUser; // guaranteed by the global auth guard
-    const server = this.factory.build(user);
+    const server = this.factory.build(user, { tokenId: req.apiTokenId, oauthClientId: req.oauthClientId });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
       enableJsonResponse: true,
