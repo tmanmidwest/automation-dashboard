@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import type { Permission, SessionUser } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
+import { LoggingService } from '../logging/logging.service';
 import { AuthService } from './auth.service';
 import { OAuthTokenService } from './oauth-token.service';
 
@@ -31,6 +32,7 @@ export class TokenAuthService {
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
     private readonly oauthTokens: OAuthTokenService,
+    private readonly logging: LoggingService,
   ) {}
 
   private hashSecret(secret: string): string {
@@ -63,19 +65,36 @@ export class TokenAuthService {
 
     const body = raw.slice(TOKEN_PREFIX.length);
     const sep = body.indexOf('_');
-    if (sep <= 0) return null;
-    const prefix = body.slice(0, sep);
-    const secret = body.slice(sep + 1);
-    if (!prefix || !secret) return null;
+    const prefix = sep > 0 ? body.slice(0, sep) : '';
+    const secret = sep > 0 ? body.slice(sep + 1) : '';
+    if (!prefix || !secret) {
+      this.logging.warn('auth', 'API token rejected: malformed (expected cbro_<prefix>_<secret>).');
+      return null;
+    }
 
     const token = await this.prisma.apiToken.findUnique({ where: { prefix } });
-    if (!token) return null;
-    if (token.revokedAt) return null;
-    if (token.expiresAt && token.expiresAt.getTime() <= Date.now()) return null;
-    if (!this.hashMatches(secret, token.hash)) return null;
+    if (!token) {
+      this.logging.warn('auth', 'API token rejected: no token with this prefix.', { prefix });
+      return null;
+    }
+    if (token.revokedAt) {
+      this.logging.warn('auth', 'API token rejected: revoked.', { prefix });
+      return null;
+    }
+    if (token.expiresAt && token.expiresAt.getTime() <= Date.now()) {
+      this.logging.warn('auth', 'API token rejected: expired.', { prefix });
+      return null;
+    }
+    if (!this.hashMatches(secret, token.hash)) {
+      this.logging.warn('auth', 'API token rejected: secret does not match.', { prefix });
+      return null;
+    }
 
     const owner = await this.authService.buildSessionUser(token.userId);
-    if (!owner) return null; // owner deleted/disabled → token is dead
+    if (!owner) {
+      this.logging.warn('auth', 'API token rejected: owner account missing or disabled.', { prefix });
+      return null;
+    }
 
     // Effective permissions: granted scopes ∩ owner's current role permissions.
     const scopes = token.scopes as Permission[];
@@ -92,13 +111,28 @@ export class TokenAuthService {
    */
   private async resolveOAuth(raw: string): Promise<TokenPrincipal | null> {
     // Cheap structural gate — a JWT is three dot-separated segments — before verifying.
-    if (raw.split('.').length !== 3) return null;
+    if (raw.split('.').length !== 3) {
+      this.logging.warn(
+        'auth',
+        'Bearer token rejected: not a Cerebro credential. It is neither a cbro_ API token nor a JWT — e.g. an opaque token from an external gateway/IdP (Google access tokens are opaque). Cerebro only accepts its own API tokens or OAuth access tokens.',
+      );
+      return null;
+    }
 
     const claims = await this.oauthTokens.verifyAccessToken(raw);
-    if (!claims) return null;
+    if (!claims) {
+      this.logging.warn(
+        'auth',
+        'Bearer JWT rejected: failed verification — bad signature, expired, or not issued by Cerebro. A JWT minted by an external IdP (e.g. Google) will fail here; Cerebro must issue the token itself, or use a cbro_ API token.',
+      );
+      return null;
+    }
 
     const owner = await this.authService.buildSessionUser(claims.sub);
-    if (!owner) return null; // user deleted/disabled → token is dead
+    if (!owner) {
+      this.logging.warn('auth', 'OAuth token rejected: subject user missing or disabled.', { sub: claims.sub });
+      return null;
+    }
 
     const scopes = claims.scope.split(' ').filter(Boolean) as Permission[];
     const permissions = owner.permissions.filter((p) => scopes.includes(p));

@@ -300,6 +300,25 @@ automation like scheduled backups, but flagged) vs. OAuth-only.
 
 **Sub-slices:** 4a (unlock scopes) → 4b (action tools). Each independently shippable.
 
+## Diagnostic logging (2026-09-02)
+
+Auth + MCP activity is written to the app log (`LoggingService` → AppLog table, visible in the
+Logs UI, and stdout). Built to debug gateway/OAuth integration:
+- **Auth rejections** (`context: 'auth'`, warn): `TokenAuthService` logs *why* a presented
+  bearer failed — malformed / unknown-prefix / revoked / expired / secret-mismatch for
+  `cbro_` tokens; "not a Cerebro credential (opaque external token)" for non-JWT bearers;
+  "JWT failed verification (external-IdP token won't work here)" for foreign JWTs. The guard
+  logs the rejected `METHOD /path`; a no-credential request is `debug` (normal discovery probe).
+- **MCP activity** (`context: 'mcp'`, info): the controller logs each JSON-RPC `request: <method>`
+  with the caller; the factory logs `tool: <name>` / `action: <name>` / `action refused (no
+  confirm)` per call. (Action tools also write the audit trail as before.)
+- Never logs token secrets — only the public prefix, credential *type*, and reason.
+
+Note for external gateways (Saviynt, etc.): Cerebro accepts **only its own** credentials
+(`cbro_` API tokens or Cerebro-issued OAuth JWTs). A gateway that forwards a Google/external
+token to `/mcp` will 401 — the gateway's downstream hop must present a Cerebro API token.
+External validation of Cerebro's own tokens isn't possible today (HS256, no JWKS/introspection).
+
 ## Grounding notes (current code)
 
 - Global guards: `SessionAuthGuard` then `PermissionsGuard`, wired via `APP_GUARD` in

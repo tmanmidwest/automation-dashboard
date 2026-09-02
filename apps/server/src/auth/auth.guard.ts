@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { IS_PUBLIC_KEY, SESSION_ONLY_KEY } from './decorators';
 import { AuthService } from './auth.service';
 import { TokenAuthService } from './token-auth.service';
+import { LoggingService } from '../logging/logging.service';
 
 /**
  * Global guard: resolves the caller to a SessionUser and attaches it to the request.
@@ -18,6 +19,7 @@ export class SessionAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly authService: AuthService,
     private readonly tokenAuth: TokenAuthService,
+    private readonly logging: LoggingService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -41,6 +43,7 @@ export class SessionAuthGuard implements CanActivate {
       if (!user) {
         // Stale session (user deleted/disabled) — clear it.
         req.session?.destroy(() => undefined);
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: session no longer valid (user deleted or disabled).`);
         throw new UnauthorizedException('Session no longer valid');
       }
       req.user = user;
@@ -52,6 +55,7 @@ export class SessionAuthGuard implements CanActivate {
     const principal = await this.tokenAuth.resolve(req.headers.authorization);
     if (principal) {
       if (sessionOnly) {
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: this route requires an interactive session, not a bearer token.`);
         throw new ForbiddenException('This action requires an interactive session, not an API token.');
       }
       req.user = principal.user;
@@ -59,6 +63,14 @@ export class SessionAuthGuard implements CanActivate {
       req.apiTokenId = principal.tokenId;
       req.oauthClientId = principal.oauthClientId;
       return true;
+    }
+
+    // Rejected. Log at the request level (tokenAuth.resolve already logged the *why* for a
+    // presented bearer). A request with no credential at all is a normal discovery probe.
+    if (req.headers.authorization) {
+      this.logging.warn('auth', `Rejected ${req.method} ${req.path}: credential presented but not accepted (see the preceding reason).`);
+    } else {
+      this.logging.debug('auth', `Unauthenticated ${req.method} ${req.path}: no credential — sent discovery challenge.`);
     }
 
     // No credentials: advertise the OAuth flow (RFC 9728) so MCP clients can discover it.

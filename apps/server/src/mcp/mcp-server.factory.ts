@@ -11,6 +11,7 @@ import { ConnectorRegistry } from '../connectors/connector-registry.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { MonitorsService } from '../monitors/monitors.service';
 import { AuditService } from '../logging/audit.service';
+import { LoggingService } from '../logging/logging.service';
 
 const SERVER_NAME = 'cerebro';
 
@@ -35,6 +36,7 @@ export class McpServerFactory {
     private readonly instances: ConnectorInstanceService,
     private readonly monitors: MonitorsService,
     private readonly audit: AuditService,
+    private readonly logging: LoggingService,
   ) {}
 
   build(user: SessionUser, origin: McpOrigin = {}): McpServer {
@@ -49,12 +51,13 @@ export class McpServerFactory {
       run: (args: z.infer<z.ZodObject<A>>) => Promise<unknown>,
     ) => {
       const handler = async (args: unknown) => {
+        void this.logging.info('mcp', `tool: ${name}`, { user: user.email });
         try {
           const data = await run((args ?? {}) as z.infer<z.ZodObject<A>>);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`MCP tool ${name} failed: ${message}`);
+          void this.logging.warn('mcp', `tool ${name} failed: ${message}`, { user: user.email });
           return { isError: true, content: [{ type: 'text' as const, text: `Error: ${message}` }] };
         }
       };
@@ -82,18 +85,20 @@ export class McpServerFactory {
       const handler = async (rawArgs: unknown) => {
         const args = (rawArgs ?? {}) as z.infer<z.ZodObject<A>> & { confirm?: boolean };
         if (needsConfirm && args.confirm !== true) {
+          void this.logging.info('mcp', `action refused (no confirm): ${name}`, { user: user.email });
           return {
             isError: true,
             content: [{ type: 'text' as const, text: `Refused: "${name}" changes state. Re-call with confirm: true to proceed. (${config.description})` }],
           };
         }
+        void this.logging.info('mcp', `action: ${name}`, { user: user.email });
         try {
           const data = await run(args);
           await this.recordAudit(user, origin, name, args);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`MCP tool ${name} failed: ${message}`);
+          void this.logging.warn('mcp', `action ${name} failed: ${message}`, { user: user.email });
           return { isError: true, content: [{ type: 'text' as const, text: `Error: ${message}` }] };
         }
       };
