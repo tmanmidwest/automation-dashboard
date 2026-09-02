@@ -31,6 +31,12 @@ export function Login() {
     try {
       await api.post('/api/auth/login', { email, password });
       await refresh();
+      // Honor a safe, same-origin returnTo (used by the OAuth authorize bounce).
+      const returnTo = params.get('returnTo');
+      if (returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//')) {
+        window.location.href = returnTo; // full navigation — may target a backend route
+        return;
+      }
       navigate('/');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Sign-in failed');

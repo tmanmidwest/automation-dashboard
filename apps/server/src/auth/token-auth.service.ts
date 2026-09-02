@@ -3,11 +3,15 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import type { Permission, SessionUser } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
+import { OAuthTokenService } from './oauth-token.service';
 
-/** A resolved bearer principal — a normal SessionUser plus the token it came from. */
+/** A resolved bearer principal — a normal SessionUser plus how it authenticated. */
 export interface TokenPrincipal {
   user: SessionUser;
-  tokenId: string;
+  /** Set when authenticated by a static API token. */
+  tokenId?: string;
+  /** Set when authenticated by an OAuth access token. */
+  oauthClientId?: string;
 }
 
 const TOKEN_PREFIX = 'cbro_';
@@ -26,6 +30,7 @@ export class TokenAuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
+    private readonly oauthTokens: OAuthTokenService,
   ) {}
 
   private hashSecret(secret: string): string {
@@ -50,7 +55,11 @@ export class TokenAuthService {
    */
   async resolve(authHeader: string | undefined): Promise<TokenPrincipal | null> {
     const raw = this.extractBearer(authHeader);
-    if (!raw || !raw.startsWith(TOKEN_PREFIX)) return null;
+    if (!raw) return null;
+
+    // Two bearer credential types share this path: static API tokens (`cbro_…`) and
+    // OAuth access tokens (JWTs). Both resolve to the same scoped principal.
+    if (!raw.startsWith(TOKEN_PREFIX)) return this.resolveOAuth(raw);
 
     const body = raw.slice(TOKEN_PREFIX.length);
     const sep = body.indexOf('_');
@@ -75,6 +84,26 @@ export class TokenAuthService {
     await this.touchLastUsed(token.id, token.lastUsedAt);
 
     return { user: { ...owner, permissions }, tokenId: token.id };
+  }
+
+  /**
+   * Resolve an OAuth access token (JWT). Same principal model as an API token: the token's
+   * scopes are intersected with the owner's current role permissions on every request.
+   */
+  private async resolveOAuth(raw: string): Promise<TokenPrincipal | null> {
+    // Cheap structural gate — a JWT is three dot-separated segments — before verifying.
+    if (raw.split('.').length !== 3) return null;
+
+    const claims = await this.oauthTokens.verifyAccessToken(raw);
+    if (!claims) return null;
+
+    const owner = await this.authService.buildSessionUser(claims.sub);
+    if (!owner) return null; // user deleted/disabled → token is dead
+
+    const scopes = claims.scope.split(' ').filter(Boolean) as Permission[];
+    const permissions = owner.permissions.filter((p) => scopes.includes(p));
+
+    return { user: { ...owner, permissions }, oauthClientId: claims.client_id };
   }
 
   private extractBearer(authHeader: string | undefined): string | null {

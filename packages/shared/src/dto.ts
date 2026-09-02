@@ -152,3 +152,33 @@ export interface ApiTokenCreated {
   /** The full `cbro_<prefix>_<secret>` string — shown once and never retrievable again. */
   secret: string;
 }
+
+/** An OAuth client as shown to an admin (never includes the secret). */
+export interface OAuthClientSummary {
+  id: string;
+  clientId: string;
+  name: string;
+  type: 'public' | 'confidential';
+  redirectUris: string[];
+  disabled: boolean;
+  /** True for confidential clients that have a secret stored. */
+  clientSecretSet: boolean;
+  createdAt: string;
+}
+
+/** Returned once at creation: the client plus, for confidential clients, its plaintext secret. */
+export interface OAuthClientCreated {
+  client: OAuthClientSummary;
+  /** The client secret — shown once, only for confidential clients. */
+  clientSecret?: string;
+}
+
+/** A user's remembered authorization of an OAuth client (for the "authorized apps" view). */
+export interface OAuthGrantSummary {
+  clientId: string;
+  clientName: string;
+  scopes: Permission[];
+  createdAt: string;
+  /** Count of the user's currently-active (non-revoked, unexpired) refresh tokens for this client. */
+  activeTokenCount: number;
+}

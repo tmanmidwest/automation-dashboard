@@ -41,6 +41,10 @@ model User {
   identities   UserIdentity[]
   /// Programmatic API tokens minted by this user (bearer auth for API/MCP clients).
   apiTokens    ApiToken[]
+  /// OAuth artifacts owned by this user (auth codes, remembered consents, refresh tokens).
+  oauthCodes         OAuthAuthorizationCode[]
+  oauthGrants        OAuthGrant[]
+  oauthRefreshTokens OAuthRefreshToken[]
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -115,6 +119,87 @@ model ApiToken {
   createdAt  DateTime  @default(now())
 
   @@index([userId])
+}
+
+/// An OAuth 2.1 client, for MCP/API clients that authenticate via the OAuth flow rather
+/// than a static API token. Admin-registered (no dynamic registration): created in
+/// Settings → OAuth Clients. Public clients use PKCE and hold no secret; confidential
+/// clients store only the sha256 of their secret (shown once at creation).
+model OAuthClient {
+  id               String   @id @default(cuid())
+  /// Public client identifier issued to the client (e.g. "oc_ab12…"). Unique.
+  clientId         String   @unique
+  /// Human label shown on the consent screen and in Settings.
+  name             String
+  /// 'public' (PKCE, no secret) or 'confidential' (secret required).
+  type             String   @default("public")
+  /// sha256 of the client secret; null for public clients.
+  clientSecretHash String?
+  /// Allowed redirect URIs. Loopback entries match any port (RFC 8252) at authorize time.
+  redirectUris     String[]
+  /// Disabled clients cannot start an authorization or exchange tokens.
+  disabled         Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+/// A short-lived OAuth authorization code (PKCE-bound). Only the sha256 of the code is
+/// stored; it is single-use and expires within ~60s. Exchanged at /oauth/token for tokens.
+model OAuthAuthorizationCode {
+  id                  String    @id @default(cuid())
+  /// sha256 of the authorization code.
+  codeHash            String    @unique
+  /// The public client_id this code was issued to.
+  clientId            String
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId              String
+  scopes              String[]
+  redirectUri         String
+  codeChallenge       String
+  codeChallengeMethod String    @default("S256")
+  /// RFC 8707 resource indicator the token will be bound to.
+  resource            String?
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  createdAt           DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// Remembered consent: once a user approves a client for a scope set, later authorizations
+/// covered by that set skip the consent screen (until revoked). One row per (user, client).
+model OAuthGrant {
+  id        String    @id @default(cuid())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  clientId  String
+  scopes    String[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  revokedAt DateTime?
+
+  @@unique([userId, clientId])
+  @@index([userId])
+}
+
+/// An OAuth refresh token. Only the sha256 is stored; rotated on every use (the old row is
+/// revoked and points at its successor via rotatedTo).
+model OAuthRefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  clientId  String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  scopes    String[]
+  resource  String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  /// Id of the successor token after rotation (audit trail / reuse detection).
+  rotatedTo String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([clientId])
 }
 
 /// Non-secret application settings (SMTP host/port, OIDC issuer, feature flags...).

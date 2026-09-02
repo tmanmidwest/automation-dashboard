@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck, Mail, Bell, KeyRound } from 'lucide-react';
+import { ShieldCheck, Mail, Bell, KeyRound, Boxes } from 'lucide-react';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
 
@@ -9,6 +9,7 @@ export function SettingsHome() {
     { to: '/settings/email', icon: Mail, title: 'Email', desc: 'Outbound SMTP server for notifications.' },
     { to: '/settings/notifications', icon: Bell, title: 'Notifications', desc: 'Outbound alerts by email and SMS.' },
     { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.' },
+    { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
   ];
   return (
     <>

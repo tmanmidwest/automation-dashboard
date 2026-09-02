@@ -1,6 +1,6 @@
 # Programmatic API + MCP Server — Design Note
 
-Status: **Phase 1 deployed & verified. Phase 2 (MCP) built, awaiting deploy.** Last updated 2026-09-02.
+Status: **Phase 1 deployed & verified. Phases 2 + 3 (3a/3b/3c) built, awaiting deploy — the OAuth "Connect" flow is complete end to end. Only Phase 4 (actions) remains.** Last updated 2026-09-02.
 
 > **Phase 1 is live and smoke-tested.** Backend: `ApiToken` model + migration
 > `0005_api_tokens`, `auth/token-auth.service.ts`, combined `auth.guard.ts` (session or
@@ -99,11 +99,119 @@ permission enforcement downstream is untouched.
   > `registerTool` call to dodge TS2589. And note the `deleteOutDir` + `incremental` quirk:
   > a warm `.tsbuildinfo` can skip re-emitting unchanged files — a clean container build is
   > unaffected.
-- **Phase 3 — OAuth 2.1.** Protected-resource + AS metadata discovery, Dynamic Client
-  Registration, authorize (reuses existing login for consent), token/refresh. Modern MCP
-  clients add Cerebro via the OAuth "Connect" flow.
+- **Phase 3 — OAuth 2.1 (SCOPED 2026-09-02).** Cerebro becomes its own OAuth 2.1
+  **Authorization Server** *and* **Resource Server**, so a browser-based MCP client connects
+  via login + consent instead of a pasted token. See the dedicated section below.
 - **Phase 4 — Actions.** Add `*:action` scopes to tokens/consent and expose write/action
   tools. Guard work already done; this is tool definitions + a confirmation/safety posture.
+
+## Phase 3 — OAuth 2.1 (detailed scope)
+
+Status: **Scoped, not built.** Cerebro plays both OAuth roles in one process: the
+**Authorization Server** (issues tokens) and the **Resource Server** (`/mcp` + `/api`
+validate them). API tokens (`cbro_`) and OAuth JWTs both resolve through the *same* bearer
+guard to the same *(principal, scoped `Permission[]`)* — Phase 3 only adds a second branch
+to the guard, everything downstream is untouched.
+
+### Decisions (locked with the user)
+
+- **Client registration: admin-gated — no open DCR.** Clients are pre-created in
+  **Settings → OAuth Clients**; there is no `/oauth/register` and the AS metadata omits
+  `registration_endpoint`. Consequence: each client is registered once by hand, and any MCP
+  client that *only* supports DCR (can't accept a pre-issued `client_id`) won't connect.
+  (Deferred alternative if this chafes: auto-register but land new clients **disabled** until
+  an admin approves them — admin control without pre-registration friction.)
+- **Loopback redirect URIs are port-flexible** (RFC 8252 §7.3): register `http://localhost/…`
+  once, the AS matches any port — so desktop/CLI clients with a random callback port still
+  work under admin-gating.
+- **Consent is remembered per client.** First authorization for a (user, client, scopes)
+  shows the consent screen; later ones with scopes ⊆ a stored grant skip it. Grants are
+  listed and revocable in Settings.
+- **Access token = HS256 JWT**, signing secret in the encrypted `Secret` vault. Clients treat
+  the access token as opaque (only our RS validates it), so format is our call; HS256 in one
+  process is the simple correct choice. RS256 + JWKS is a later swap if `/mcp` is split out.
+- **Defaults:** access-token TTL 60 min; refresh TTL 30 days, **rotated on use**; PKCE **S256
+  required** for public clients; JWT via **`jsonwebtoken`** (CJS — avoids the ESM-resolution
+  pain from Phase 2). Scopes stay **read-only** until Phase 4.
+
+### The flow
+
+1. Client hits `/mcp` unauthenticated → **401 `WWW-Authenticate: Bearer resource_metadata=…`**.
+2. Client reads `/.well-known/oauth-protected-resource` → AS → `/.well-known/oauth-authorization-server`.
+3. Client opens `/oauth/authorize?response_type=code&client_id=…&redirect_uri=…&scope=…&code_challenge=…&code_challenge_method=S256&state=…&resource=…`.
+4. Cerebro: **no session → bounce to the existing login** (return-to back to authorize);
+   **session → skip consent if a remembered grant covers the scopes, else show consent**.
+   Requested scopes are clamped to what the user holds (read-only for now).
+5. Approve → mint a short-lived, PKCE-bound **authorization code** → redirect to the client.
+6. Client exchanges code + PKCE verifier at `POST /oauth/token` → **JWT access token** +
+   rotating refresh token.
+7. Client calls `/mcp` with the JWT; the bearer guard validates it and builds the scoped
+   `req.user` exactly as for an API token.
+
+### Endpoints
+
+- `GET /.well-known/oauth-protected-resource`, `GET /.well-known/oauth-authorization-server`
+  (no `registration_endpoint`).
+- `GET /oauth/authorize`, `POST /oauth/authorize/decision` (consent approve/deny).
+- `POST /oauth/token` (auth-code + refresh grants), `POST /oauth/revoke`.
+- Admin CRUD `GET/POST/PATCH/DELETE /api/oauth/clients` + grant list/revoke (`settings:write`).
+- 401 `WWW-Authenticate` header on `/mcp`.
+
+### Data model (new)
+
+- `OAuthClient` — clientId, name, redirectUris[], type `public|confidential`,
+  clientSecretHash?, maxScopes?, disabled, timestamps. Admin-managed.
+- `OAuthAuthorizationCode` — codeHash, clientId, userId, scopes[], redirectUri, codeChallenge,
+  codeChallengeMethod, resource, expiresAt (~60s), consumedAt.
+- `OAuthGrant` — (userId, clientId, scopes[]) consent memory; revocable.
+- `OAuthRefreshToken` — tokenHash, clientId, userId, scopes[], expiresAt, revokedAt,
+  rotatedFrom?. Access tokens are stateless JWTs, never stored.
+
+### Frontend
+
+- **Settings → OAuth Clients**: create/list/disable/delete clients (reveal confidential secret
+  once), and view/revoke remembered grants.
+- **`/oauth/consent`** React route reusing the login/return-to pattern; posts approve/deny.
+
+### Ship in three slices
+
+- **3a — BUILT (2026-09-02), not yet deployed.** `OAuthClient` model + migration
+  `0006_oauth_clients`; `auth/oauth-token.service.ts` (HS256 JWT sign/verify, signing secret
+  auto-generated in the `oauth:jwtSecret` vault key); `TokenAuthService.resolve` gained an
+  OAuth-JWT branch (JWT-shaped bearer → verify → `buildSessionUser(sub)` → scopes ∩ role),
+  converging with the `cbro_` path; `oauth/` module = `OAuthClientService` +
+  `OAuthAdminController` (`/api/settings/oauth/clients`, `settings:read`/`write`, audited) +
+  `OAuthMetadataController` (`@Public()` `/.well-known/oauth-authorization-server` &
+  `/oauth-protected-resource`, **no** `registration_endpoint`). ServeStatic now also excludes
+  `/oauth/(.*)` and `/.well-known/(.*)`. New dep `jsonwebtoken`. Frontend: Settings → OAuth
+  Clients (register/list/enable-disable/delete, reveal client secret once). Verified via an
+  in-memory suite (11/11): JWT branch intersection, tamper/foreign-sig/expired/unknown-user
+  rejection, `cbro_` path intact; plus metadata shape. Server + web build clean.
+- **3b — BUILT (2026-09-02), not yet deployed.** Full interactive flow. Migration
+  `0007_oauth_flow` (`OAuthAuthorizationCode`, `OAuthGrant`, `OAuthRefreshToken`, all
+  user-cascade). `oauth/oauth-flow.service.ts` — request validation, loopback-port-flexible
+  redirect matching, PKCE **S256**, single-use codes (60s), remembered-grant check/upsert
+  (merge-not-narrow), token issuance, and **refresh rotation with reuse-detection**.
+  Controllers: `oauth-authorize.controller.ts` (`@Public` `GET /oauth/authorize` — validate →
+  login-bounce (`/login?returnTo=`) → remembered-grant auto-approve → else `/consent`),
+  `oauth-consent.controller.ts` (`@SessionOnly` `/api/oauth/consent-info` + `authorize/decision`),
+  `oauth-token.controller.ts` (`@Public` `POST /oauth/token` — auth-code + refresh grants,
+  client auth via `client_secret_post`/`client_secret_basic`). Frontend: `returnTo` in
+  `Login.tsx` (same-origin only) + standalone `Consent.tsx` at `/consent`. **Pulled forward
+  from 3c:** the 401 `WWW-Authenticate: Bearer resource_metadata=…` header (in `auth.guard.ts`)
+  so MCP clients auto-discover the flow. Verified via an in-memory suite (20/20): PKCE
+  happy/negative, single-use replay, redirect mismatch, confidential secret auth, refresh
+  rotation + reuse rejection, remembered grants, scope intersection, validate-authorize error
+  classification. Server + web build clean.
+- **3c — BUILT (2026-09-02), not yet deployed.** `POST /oauth/revoke` (RFC 7009, client-authed,
+  refresh-token revocation, always-200 semantics) in `oauth-token.controller.ts`; self-service
+  `GET/DELETE /api/oauth/grants` (`oauth-grants.controller.ts`, `@SessionOnly`) where revoking a
+  grant also kills that client's live refresh tokens; `OAuthFlowService.revokeToken` /
+  `listUserGrants` / `revokeUserGrant`. Frontend: "Authorized applications" card on the OAuth
+  Clients page (per-user, revoke). Verified in-memory (10/10): revoke prevents refresh reuse,
+  wrong-client-secret rejected, cross-client revoke isolation, grant listing (name + active token
+  count + scopes), grant revocation cascade, and per-user isolation. Server + web build clean.
+  *(Access-token `aud`/resource enforcement intentionally deferred — single resource today.)*
 
 ## Grounding notes (current code)
 

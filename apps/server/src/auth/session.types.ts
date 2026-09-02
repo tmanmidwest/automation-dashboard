@@ -15,7 +15,9 @@ declare module 'express' {
     user?: SessionUser;
     /** Which credential authenticated the request. */
     principalType?: 'session' | 'token';
-    /** The ApiToken id, when the request was authenticated by a bearer token. */
+    /** The ApiToken id, when the request was authenticated by a static API token. */
     apiTokenId?: string;
+    /** The OAuth client_id, when the request was authenticated by an OAuth access token. */
+    oauthClientId?: string;
   }
 }

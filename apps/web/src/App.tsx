@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from '@/auth/AuthContext';
 import { AppShell } from '@/components/AppShell';
 import { Brand } from '@/components/Brand';
 import { Login } from '@/pages/Login';
+import { Consent } from '@/pages/Consent';
 import { Setup } from '@/pages/Setup';
 import { Dashboard } from '@/pages/Dashboard';
 import { Account } from '@/pages/Account';
@@ -23,6 +24,7 @@ import { Authentication } from '@/pages/settings/Authentication';
 import { Email } from '@/pages/settings/Email';
 import { Notifications } from '@/pages/settings/Notifications';
 import { ApiTokens } from '@/pages/settings/ApiTokens';
+import { OAuthClients } from '@/pages/settings/OAuthClients';
 
 function FullscreenBrand() {
   return (
@@ -61,6 +63,8 @@ function Router() {
     <Routes>
       <Route path="/login" element={<Gate>{needsSetup && !loading ? <Navigate to="/setup" replace /> : <Login />}</Gate>} />
       <Route path="/setup" element={<Gate><Setup /></Gate>} />
+      {/* OAuth consent — standalone; the page itself bounces to login if unauthenticated. */}
+      <Route path="/consent" element={<Consent />} />
 
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/overview/:kind" element={<Protected><RequirePerm perm="connectors:read"><OverviewResources /></RequirePerm></Protected>} />
@@ -80,6 +84,7 @@ function Router() {
       <Route path="/settings/email" element={<Protected><RequirePerm perm="settings:read"><Email /></RequirePerm></Protected>} />
       <Route path="/settings/notifications" element={<Protected><RequirePerm perm="settings:read"><Notifications /></RequirePerm></Protected>} />
       <Route path="/settings/api-tokens" element={<Protected><RequirePerm perm="settings:read"><ApiTokens /></RequirePerm></Protected>} />
+      <Route path="/settings/oauth-clients" element={<Protected><RequirePerm perm="settings:read"><OAuthClients /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 

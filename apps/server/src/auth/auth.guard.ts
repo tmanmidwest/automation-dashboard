@@ -57,9 +57,23 @@ export class SessionAuthGuard implements CanActivate {
       req.user = principal.user;
       req.principalType = 'token';
       req.apiTokenId = principal.tokenId;
+      req.oauthClientId = principal.oauthClientId;
       return true;
     }
 
+    // No credentials: advertise the OAuth flow (RFC 9728) so MCP clients can discover it.
+    this.setResourceMetadataChallenge(context, req);
     throw new UnauthorizedException('Not authenticated');
+  }
+
+  /** Sets `WWW-Authenticate: Bearer resource_metadata=…` so clients find the auth server. */
+  private setResourceMetadataChallenge(context: ExecutionContext, req: Request): void {
+    const res = context.switchToHttp().getResponse<{ setHeader?: (k: string, v: string) => void }>();
+    if (typeof res.setHeader !== 'function') return;
+    const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    res.setHeader(
+      'WWW-Authenticate',
+      `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
+    );
   }
 }
