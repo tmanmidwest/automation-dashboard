@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert } from 'lucide-react';
-import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry } from '@cerebro/shared';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge } from 'lucide-react';
+import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
@@ -195,7 +195,9 @@ function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{
 }
 
 export function Dashboard() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
+  const canMonitors = can('monitors:read');
+  const [monitors, setMonitors] = useState<MonitorSummary[] | null>(null);
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [audit, setAudit] = useState<AuditLogEntry[]>([]);
@@ -227,6 +229,22 @@ export function Dashboard() {
     const clock = setInterval(() => tick((x) => x + 1), 1000);
     return () => { clearInterval(t); clearInterval(clock); };
   }, []);
+
+  // Uptime monitors — polled on their own cadence (the list endpoint aggregates history).
+  useEffect(() => {
+    if (!canMonitors) return;
+    const load = () => api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [canMonitors]);
+
+  const monUp = monitors?.filter((m) => m.status === 'up').length ?? 0;
+  const monDown = monitors?.filter((m) => m.status === 'down') ?? [];
+  const monPending = monitors?.filter((m) => m.status === 'pending').length ?? 0;
+  const monPaused = monitors?.filter((m) => m.status === 'paused').length ?? 0;
+  const monActive = monitors?.filter((m) => m.enabled && m.uptime24h !== null) ?? [];
+  const monAvgUptime = monActive.length > 0 ? monActive.reduce((a, m) => a + (m.uptime24h ?? 0), 0) / monActive.length : null;
 
   const metric = (k: string) => overview?.metrics.find((m) => m.key === k)?.value ?? 0;
   const costLast = overview?.metrics.find((m) => m.key === 'costLastMonth');
@@ -350,6 +368,38 @@ export function Dashboard() {
         <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
         <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
       </div>
+
+      {/* Uptime monitors — shown once at least one monitor exists */}
+      {monitors && monitors.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+            <HeartPulse className="h-3.5 w-3.5 text-accent" /> Monitors
+          </div>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+            <StatTile
+              icon={HeartPulse}
+              label="Monitors up"
+              value={`${monUp} / ${monitors.length - monPaused}`}
+              sub={[monPending > 0 ? `${monPending} pending` : null, monPaused > 0 ? `${monPaused} paused` : null].filter(Boolean).join(' · ') || 'all checks reporting'}
+              to="/monitors"
+            />
+            <StatTile
+              icon={monDown.length > 0 ? ShieldAlert : ShieldCheck}
+              label="Down now"
+              value={monDown.length === 0 ? 'None' : String(monDown.length)}
+              sub={monDown.length === 0 ? 'nothing failing' : monDown.slice(0, 3).map((m) => m.name).join(', ') + (monDown.length > 3 ? ` +${monDown.length - 3} more` : '')}
+              to={monDown.length === 1 ? `/monitors/${monDown[0].id}` : '/monitors'}
+            />
+            <StatTile
+              icon={Gauge}
+              label="Uptime 24h"
+              value={monAvgUptime === null ? '—' : `${(monAvgUptime * 100).toFixed(monAvgUptime >= 0.9995 ? 0 : 2)}%`}
+              sub={monActive.length > 0 ? `average across ${monActive.length} monitor${monActive.length === 1 ? '' : 's'}` : 'no history yet'}
+              to="/monitors"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Cloud spend — its own row so it doesn't crowd the telemetry tiles */}
       {costMtd && (
