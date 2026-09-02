@@ -14,6 +14,7 @@ import { AccountModule } from './account/account.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ConnectorsModule } from './connectors/connectors.module';
+import { MonitorsModule } from './monitors/monitors.module';
 import { VersionModule } from './version/version.module';
 import { SeedModule } from './seed/seed.module';
 
@@ -38,6 +39,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     MailModule,
     NotificationsModule,
     ConnectorsModule,
+    MonitorsModule,
     VersionModule,
     SeedModule,
   ],

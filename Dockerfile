@@ -49,10 +49,11 @@ ARG SIGNAL_CLI_VERSION=0.14.7
 # it runs on this Debian base regardless of the JRE's own build distro.
 ARG JAVA_VERSION=25
 
-# openssl → Prisma engine; restic → Backblaze B2 backup connector; then fetch a
-# Temurin JRE (arch-matched) and signal-cli, and symlink signal-cli onto PATH.
+# openssl → Prisma engine; restic → Backblaze B2 backup connector; iputils-ping →
+# the uptime monitor's Ping probe (needs CAP_NET_RAW on the container, see compose);
+# then fetch a Temurin JRE (arch-matched) and signal-cli, and symlink signal-cli onto PATH.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl restic ca-certificates wget \
+ && apt-get install -y --no-install-recommends openssl restic ca-certificates wget iputils-ping \
  && rm -rf /var/lib/apt/lists/* \
  && ARCH="$(dpkg --print-architecture)" \
  && case "$ARCH" in amd64) JARCH=x64;; arm64) JARCH=aarch64;; *) JARCH="$ARCH";; esac \

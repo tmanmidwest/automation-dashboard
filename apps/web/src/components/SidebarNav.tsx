@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
   Puzzle,
+  Activity,
   Users,
   ScrollText,
   Settings,
@@ -23,6 +24,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read' },
+  { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read' },
   { to: '/users', label: 'Users', icon: Users, perm: 'users:read' },
   { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read' },
   { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read' },

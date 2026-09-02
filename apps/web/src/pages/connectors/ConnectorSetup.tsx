@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
-import type { ConnectorInstanceConfig, ConnectorManifest, ConnectorConfigField } from '@cerebro/shared';
+import type { ConnectorInstanceConfig, ConnectorManifest } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { ConnectorHelpPanel } from '@/components/ConnectorHelpPanel';
+import { ConfigField } from '@/components/ConfigField';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -119,7 +120,7 @@ export function ConnectorSetup() {
               </div>
 
               {manifest.configFields.map((f) => (
-                <Field key={f.key} field={f} value={values[f.key]} secretSet={secretsSet[f.key]}
+                <ConfigField key={f.key} field={f} value={values[f.key]} secretSet={secretsSet[f.key]}
                   disabled={!writable} onChange={(v) => setField(f.key, v)} />
               ))}
 
@@ -135,51 +136,5 @@ export function ConnectorSetup() {
         <ConnectorHelpPanel help={manifest.help} />
       </div>
     </>
-  );
-}
-
-function Field({
-  field, value, secretSet, disabled, onChange,
-}: {
-  field: ConnectorConfigField;
-  value: unknown;
-  secretSet?: boolean;
-  disabled?: boolean;
-  onChange: (v: unknown) => void;
-}) {
-  if (field.type === 'boolean') {
-    return (
-      <label className="flex items-center gap-3 cursor-pointer">
-        <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--primary))]"
-          checked={value === true} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-        <span className="text-sm">{field.label}{field.help && <span className="text-muted-foreground font-normal"> — {field.help}</span>}</span>
-      </label>
-    );
-  }
-  if (field.type === 'select') {
-    return (
-      <div>
-        <Label>{field.label}</Label>
-        <select className="flex h-10 w-full rounded-md border border-input bg-background/60 px-3 text-sm"
-          value={String(value ?? '')} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
-          {field.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-        {field.help && <p className="text-xs text-muted-foreground mt-1">{field.help}</p>}
-      </div>
-    );
-  }
-  const inputType = field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : field.type === 'url' ? 'url' : 'text';
-  return (
-    <div>
-      <Label>
-        {field.label}
-        {field.secret && secretSet && <span className="text-muted-foreground font-normal"> (saved — blank keeps)</span>}
-      </Label>
-      <Input type={inputType} value={String(value ?? '')} disabled={disabled}
-        required={field.required && !(field.secret && secretSet)}
-        placeholder={field.secret && secretSet ? '••••••••' : field.placeholder}
-        onChange={(e) => onChange(field.type === 'number' ? Number(e.target.value) : e.target.value)} />
-      {field.help && <p className="text-xs text-muted-foreground mt-1">{field.help}</p>}
-    </div>
   );
 }

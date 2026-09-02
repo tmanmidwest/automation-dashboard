@@ -18,7 +18,10 @@ export type Permission =
   // Connectors (extension host)
   | 'connectors:read'
   | 'connectors:write' // install / configure / enable
-  | 'connectors:action'; // perform managing actions (start/stop VM, etc.)
+  | 'connectors:action' // perform managing actions (start/stop VM, etc.)
+  // Uptime monitors
+  | 'monitors:read'
+  | 'monitors:write'; // add / edit / pause / delete monitors
 
 /** The two built-in roles requested for launch: View Only and Full Control. */
 export const BUILTIN_ROLES = {
@@ -32,6 +35,7 @@ export const BUILTIN_ROLES = {
       'logs:read',
       'audit:read',
       'connectors:read',
+      'monitors:read',
     ] as Permission[],
   },
   admin: {
@@ -48,6 +52,8 @@ export const BUILTIN_ROLES = {
       'connectors:read',
       'connectors:write',
       'connectors:action',
+      'monitors:read',
+      'monitors:write',
     ] as Permission[],
   },
 } as const;

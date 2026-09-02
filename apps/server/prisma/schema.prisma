@@ -187,3 +187,77 @@ model NotificationLog {
   @@index([channel])
   @@index([status])
 }
+
+// ── Uptime monitoring ────────────────────────────────────────
+
+/// One probed target (ping / http / tcp / dns). Last-known state is
+/// denormalized here so the list view needs no per-row heartbeat lookup.
+model Monitor {
+  id               String   @id @default(cuid())
+  name             String
+  /// Probe type id: ping | http | tcp | dns
+  type             String
+  /// Probe-type-specific settings (host, url, keyword, …).
+  config           Json     @default("{}")
+  enabled          Boolean  @default(true)
+  intervalSec      Int      @default(60)
+  retryIntervalSec Int      @default(60)
+  timeoutSec       Int      @default(10)
+  /// Failed checks tolerated before flipping to down.
+  retries          Int      @default(1)
+  /// While down, re-notify every N failed checks (0 = only on transition).
+  resendEveryN     Int      @default(0)
+  /// Invert: "up" means the target is unreachable.
+  upsideDown       Boolean  @default(false)
+  description      String?
+  tags             String[]
+  sortOrder        Int      @default(0)
+
+  // Last-known state (mirrors the newest heartbeat).
+  status         String    @default("pending") // up | down | pending | paused
+  lastChangeAt   DateTime?
+  lastCheckAt    DateTime?
+  lastLatencyMs  Int?
+  lastMessage    String?
+  certExpiresAt  DateTime?
+
+  heartbeats MonitorHeartbeat[]
+  rollups    MonitorRollup[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+/// Raw check results. Pruned after the raw retention window (default 7 days).
+model MonitorHeartbeat {
+  id        Int      @id @default(autoincrement())
+  monitor   Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  monitorId String
+  status    String   // up | down | pending
+  latencyMs Int?
+  message   String?
+  /// Status changed with this beat — shown in the events list.
+  important Boolean  @default(false)
+  at        DateTime @default(now())
+
+  @@index([monitorId, at])
+  @@index([monitorId, important])
+  @@index([at])
+}
+
+/// Hourly aggregate of heartbeats, kept for long-range uptime (default 1 year).
+model MonitorRollup {
+  id           Int      @id @default(autoincrement())
+  monitor      Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  monitorId    String
+  /// Start of the hour (UTC).
+  bucket       DateTime
+  total        Int
+  up           Int
+  down         Int
+  avgLatencyMs Int?
+  minLatencyMs Int?
+  maxLatencyMs Int?
+
+  @@unique([monitorId, bucket])
+  @@index([bucket])
+}

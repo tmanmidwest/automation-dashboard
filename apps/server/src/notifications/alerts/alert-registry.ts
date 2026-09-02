@@ -125,6 +125,40 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  // ── Monitors ─────────────────────────────────────────────
+  {
+    key: 'monitor.down',
+    label: 'Monitor down',
+    description: 'An uptime monitor failed its checks (after retries) and is now down.',
+    category: 'Monitors',
+    defaultSeverity: 'critical',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+    monitorScoped: true,
+  },
+  {
+    key: 'monitor.up',
+    label: 'Monitor recovered',
+    description: 'A previously-down uptime monitor is passing again.',
+    category: 'Monitors',
+    defaultSeverity: 'info',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+    monitorScoped: true,
+  },
+  {
+    key: 'monitor.cert_expiring',
+    label: 'Certificate expiring',
+    description: "An HTTPS monitor's TLS certificate expires within its warning window.",
+    category: 'Monitors',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+    monitorScoped: true,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

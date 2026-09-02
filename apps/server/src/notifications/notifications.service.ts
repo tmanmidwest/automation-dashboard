@@ -373,6 +373,38 @@ export class NotificationsService {
     }
   }
 
+  // ── Per-monitor alert overrides (mute) ────────────────────
+
+  private async monitorMutedAlerts(monitorId: string): Promise<string[]> {
+    return (await this.settings.get<string[]>(`notify.monitor.${monitorId}.mutedAlerts`)) ?? [];
+  }
+
+  /** Monitor-scoped alerts with their global rule + this monitor's mute state. */
+  async getMonitorAlerts(monitorId: string): Promise<{ alerts: ConnectorAlertView[] }> {
+    const muted = new Set(await this.monitorMutedAlerts(monitorId));
+    const alerts = await Promise.all(
+      ALERT_TYPES.filter((t) => t.monitorScoped).map(async (def) => {
+        const rule = await this.alertRule(def);
+        return {
+          key: def.key,
+          label: def.label,
+          description: def.description,
+          category: def.category,
+          globalEnabled: rule.enabled,
+          globalSeverity: rule.severity,
+          globalChannels: rule.channels,
+          muted: muted.has(def.key),
+        };
+      }),
+    );
+    return { alerts };
+  }
+
+  async saveMonitorMutes(monitorId: string, muted: string[]): Promise<void> {
+    const valid = muted.filter((k) => getAlertType(k)?.monitorScoped);
+    await this.settings.set(`notify.monitor.${monitorId}.mutedAlerts`, [...new Set(valid)]);
+  }
+
   // ── Dispatch ──────────────────────────────────────────────
 
   /**
@@ -382,7 +414,7 @@ export class NotificationsService {
    */
   async dispatchAlert(
     typeKey: string,
-    payload: { title: string; body: string; dedupeKey?: string; connectorId?: string },
+    payload: { title: string; body: string; dedupeKey?: string; connectorId?: string; monitorId?: string },
   ): Promise<void> {
     const def = getAlertType(typeKey);
     if (!def) {
@@ -399,6 +431,14 @@ export class NotificationsService {
           'notify',
           `Alert "${typeKey}" muted for connector ${payload.connectorId}`,
         );
+        return;
+      }
+    }
+    // Per-monitor mute: this uptime monitor opted out of this alert.
+    if (payload.monitorId && def.monitorScoped) {
+      const muted = await this.monitorMutedAlerts(payload.monitorId);
+      if (muted.includes(typeKey)) {
+        await this.logging.debug('notify', `Alert "${typeKey}" muted for monitor ${payload.monitorId}`);
         return;
       }
     }

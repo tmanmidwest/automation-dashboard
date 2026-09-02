@@ -55,6 +55,8 @@ export interface AlertTypeDef {
    * per connector (on the connector's detail page). System-wide alerts are false.
    */
   connectorScoped: boolean;
+  /** True if this alert originates from an uptime monitor, so it can be muted per monitor. */
+  monitorScoped?: boolean;
 }
 
 /** Per-type user configuration (overrides the type's defaults). */

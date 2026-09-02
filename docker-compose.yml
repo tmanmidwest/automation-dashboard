@@ -35,6 +35,9 @@ services:
       SIGNAL_CLI_DATA_DIR: /data/signal
     volumes:
       - cerebro_signal:/data/signal
+    # ICMP for the uptime monitor's Ping probe (system `ping` needs a raw socket).
+    cap_add:
+      - NET_RAW
     ports:
       - "${APP_PORT:-3000}:3000"
     healthcheck:

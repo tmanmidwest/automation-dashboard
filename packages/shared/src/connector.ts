@@ -12,7 +12,7 @@
 export interface ConnectorConfigField {
   key: string;
   label: string;
-  type: 'text' | 'password' | 'url' | 'number' | 'boolean' | 'select';
+  type: 'text' | 'password' | 'url' | 'number' | 'boolean' | 'select' | 'textarea';
   /** Marks the value as a secret → stored in the encrypted vault, never returned to the UI. */
   secret?: boolean;
   required?: boolean;
