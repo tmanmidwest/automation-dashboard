@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
 import { Brand } from '@/components/Brand';
+import { MonitorRadar } from '@/components/MonitorRadar';
 
 function useCountUp(target: number, ms = 700) {
   const [n, setN] = useState(0);
@@ -51,29 +52,7 @@ function providerTag(kind: string): string {
 
 interface Blip { g: OverviewGuest; i: number; x: number; y: number; aDeg: number }
 
-/** Reserved status colours for monitor diamonds — matches the Monitors pages. */
-function monitorColor(status: MonitorSummary['status']): string {
-  if (status === 'up') return 'hsl(160 84% 55%)';        // emerald
-  if (status === 'down') return 'hsl(var(--destructive))';
-  if (status === 'pending') return 'hsl(43 96% 56%)';    // amber
-  return 'hsl(var(--muted-foreground) / 0.6)';           // paused
-}
-
-/** Cap the ring at RING_MAX diamonds, always keeping every down monitor visible. */
-const RING_MAX = 30;
-function ringMonitors(all: MonitorSummary[]): MonitorSummary[] {
-  if (all.length <= RING_MAX) return all;
-  const down = all.filter((m) => m.status === 'down');
-  const rest = all.filter((m) => m.status !== 'down').slice(0, Math.max(0, RING_MAX - down.length));
-  return [...down, ...rest];
-}
-
-interface MonBlip { m: MonitorSummary; x: number; y: number; aDeg: number }
-
-function RadarScope({ guests, hovered, onHover, monitors, hoveredMon, onHoverMon }: {
-  guests: OverviewGuest[]; hovered: number | null; onHover: (i: number | null) => void;
-  monitors: MonitorSummary[]; hoveredMon: string | null; onHoverMon: (id: string | null) => void;
-}) {
+function RadarScope({ guests, hovered, onHover }: { guests: OverviewGuest[]; hovered: number | null; onHover: (i: number | null) => void }) {
   // Group the real systems by connector so each provider owns an angular wedge
   // of the scope — AWS clusters in one arc, Proxmox in another — instead of a
   // meaningless scatter. Original indices are preserved for hover-sync with the
@@ -106,16 +85,6 @@ function RadarScope({ guests, hovered, onHover, monitors, hoveredMon, onHoverMon
       const a = (aDeg * Math.PI) / 180;
       blips.push({ g: it.g, i: it.i, x: 150 + Math.cos(a) * radius, y: 150 + Math.sin(a) * radius, aDeg });
     });
-  });
-
-  // Monitors live on their own ring just inside the rim (r=134; guest blips
-  // reach r=123), spread evenly regardless of connector wedge so the wedges
-  // stay untouched. Offset by half a step so a diamond never sits on a spoke.
-  const ring = ringMonitors(monitors);
-  const monBlips: MonBlip[] = ring.map((m, j) => {
-    const aDeg = -90 + (j + 0.5) * (360 / ring.length);
-    const a = (aDeg * Math.PI) / 180;
-    return { m, x: 150 + Math.cos(a) * 134, y: 150 + Math.sin(a) * 134, aDeg };
   });
 
   return (
@@ -171,27 +140,6 @@ function RadarScope({ guests, hovered, onHover, monitors, hoveredMon, onHoverMon
                   <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
                 </circle>
               )}
-            </g>
-          );
-        })}
-        {/* Monitor diamonds on the outer ring. Up = pings with the sweep; down = red pulsing halo; paused = hollow. */}
-        {monBlips.map(({ m, x, y, aDeg }) => {
-          const hot = hoveredMon === m.id;
-          const color = monitorColor(m.status);
-          const up = m.status === 'up';
-          const down = m.status === 'down';
-          const r = hot ? 6.5 : down ? 5.5 : 4.5;
-          const delay = ((((aDeg + 90) % 360) + 360) % 360) / 360 * SWEEP_SECONDS;
-          const d = `M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z`;
-          return (
-            <g key={`mon-${m.id}`} onMouseEnter={() => onHoverMon(m.id)} onMouseLeave={() => onHoverMon(null)} style={{ cursor: 'pointer' }}>
-              {down && <circle cx={x} cy={y} r="9" fill="none" stroke={color} strokeWidth="1" className="cb-pulse-ring" />}
-              {hot && <circle cx={x} cy={y} r="11" fill="none" stroke={color} strokeWidth="1" opacity="0.8" />}
-              <path d={d} fill={m.status === 'paused' ? 'transparent' : color} stroke={color} strokeWidth={1.4}
-                className={up && !hot ? 'cb-ping' : ''}
-                style={{ animationDelay: `${delay}s`, filter: up || down || hot ? `drop-shadow(0 0 5px ${color})` : undefined, transformBox: 'fill-box', transformOrigin: 'center' }}>
-                <title>{m.name} · {m.target} · {m.status}{m.lastLatencyMs != null && up ? ` · ${m.lastLatencyMs} ms` : ''}</title>
-              </path>
             </g>
           );
         })}
@@ -256,7 +204,6 @@ export function Dashboard() {
   const [audit, setAudit] = useState<AuditLogEntry[]>([]);
   const [userCount, setUserCount] = useState(0);
   const [hovered, setHovered] = useState<number | null>(null);
-  const [hoveredMon, setHoveredMon] = useState<string | null>(null);
   const startedRef = useRef(Date.now());
   const lastPollRef = useRef(Date.now());
   const [, tick] = useState(0);
@@ -318,14 +265,7 @@ export function Dashboard() {
   const stale = secsSinceScan > 15;
   const runningGuests = guests.filter((g) => g.status === 'running').length;
   const idleGuests = guests.length - runningGuests;
-  const monList = monitors ?? [];
-  const monDownRadar = monList.filter((m) => m.status === 'down');
-  const monActiveCount = monList.filter((m) => m.enabled).length;
-  const alert = offline.length > 0 || stale || monDownRadar.length > 0;
-  const problems = [
-    ...offline.map((s) => ({ key: `src:${s.name}`, label: `${s.name} · unreachable` })),
-    ...monDownRadar.map((m) => ({ key: `mon:${m.id}`, label: `${m.name} · down` })),
-  ];
+  const alert = offline.length > 0 || stale;
 
   const vms = useCountUp(metric('vmsRunning'));
   const cts = useCountUp(metric('ctsRunning'));
@@ -358,14 +298,6 @@ export function Dashboard() {
             <div className={cn('text-sm', offline.length ? 'text-amber-400' : 'text-emerald-400')}>
               {overview?.connectors.ok ?? 0}/{overview?.connectors.total ?? 0}
             </div>
-            {monList.length > 0 && (
-              <>
-                <div className="text-muted-foreground/70 mt-1">Monitors</div>
-                <div className={cn('text-sm', monDownRadar.length ? 'text-destructive' : 'text-emerald-400')}>
-                  {monList.filter((m) => m.status === 'up').length}/{monActiveCount}
-                </div>
-              </>
-            )}
           </HudBox>
 
           <HudBox pos="top-4 right-5 text-right">
@@ -374,14 +306,14 @@ export function Dashboard() {
           </HudBox>
 
           <HudBox pos="bottom-4 left-5">
-            {problems.length > 0 ? (
+            {offline.length > 0 ? (
               <div className="space-y-0.5">
-                {problems.slice(0, 3).map((p) => (
-                  <div key={p.key} className="text-destructive flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-pulse" /> {p.label}
+                {offline.slice(0, 3).map((s) => (
+                  <div key={s.name} className="text-destructive flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-pulse" /> {s.name} · unreachable
                   </div>
                 ))}
-                {problems.length > 3 && <div className="text-destructive/70">+{problems.length - 3} more</div>}
+                {offline.length > 3 && <div className="text-destructive/70">+{offline.length - 3} more</div>}
               </div>
             ) : (
               <div className="text-emerald-400 flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> All systems nominal</div>
@@ -395,7 +327,7 @@ export function Dashboard() {
           </HudBox>
 
           <div className="relative grid place-items-center py-6 min-h-[340px]">
-            <RadarScope guests={guests} hovered={hovered} onHover={setHovered} monitors={monList} hoveredMon={hoveredMon} onHoverMon={setHoveredMon} />
+            <RadarScope guests={guests} hovered={hovered} onHover={setHovered} />
           </div>
         </div>
 
@@ -403,9 +335,9 @@ export function Dashboard() {
           <div className="flex items-center gap-2 mb-3">
             <Radar className="h-4 w-4 text-accent" />
             <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">Live signals</span>
-            <span className="ml-auto text-xs text-muted-foreground">{guests.length + monList.length}</span>
+            <span className="ml-auto text-xs text-muted-foreground">{guests.length}</span>
           </div>
-          {guests.length === 0 && monList.length === 0 ? (
+          {guests.length === 0 ? (
             <div className="flex-1 grid place-items-center text-center text-sm text-muted-foreground py-8">No signals detected.</div>
           ) : (
             <div className="space-y-1 overflow-y-auto max-h-[280px] pr-1">
@@ -423,29 +355,13 @@ export function Dashboard() {
                   <span className="ml-auto text-[10px] font-mono uppercase tracking-wider text-muted-foreground shrink-0">{g.node}</span>
                 </div>
               ))}
-              {monList.length > 0 && (
-                <div className="flex items-center gap-2 pt-2 pb-1 px-2 text-[10px] font-mono uppercase tracking-[0.2em] text-muted-foreground/70">
-                  <HeartPulse className="h-3 w-3" /> Monitors
-                  <span className="ml-auto">{monList.length}</span>
-                </div>
-              )}
-              {monList.map((m) => (
-                <Link key={m.id} to={`/monitors/${m.id}`} onMouseEnter={() => setHoveredMon(m.id)} onMouseLeave={() => setHoveredMon(null)}
-                  className={cn('flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors', hoveredMon === m.id ? 'bg-muted/60' : 'hover:bg-muted/40')}>
-                  <span className="h-2 w-2 rotate-45 shrink-0"
-                    style={m.status === 'paused'
-                      ? { border: `1px solid ${monitorColor(m.status)}` }
-                      : { background: monitorColor(m.status), boxShadow: m.status !== 'pending' ? `0 0 6px ${monitorColor(m.status)}` : undefined }} />
-                  <span className={cn('text-sm truncate', m.status === 'down' && 'text-destructive')}>{m.name}</span>
-                  <span className="ml-auto text-[10px] font-mono uppercase tracking-wider shrink-0 text-muted-foreground">
-                    {m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status}
-                  </span>
-                </Link>
-              ))}
             </div>
           )}
         </div>
       </div>
+
+      {/* Monitor radar — its own scope so monitor status never competes with the connector blips */}
+      {monitors && monitors.length > 0 && <MonitorRadar monitors={monitors} />}
 
       {/* Telemetry tiles */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
