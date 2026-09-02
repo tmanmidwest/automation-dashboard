@@ -1,35 +1,39 @@
 import type { MonitorInput } from '@cerebro/shared';
 
 /**
- * Translate an Uptime Kuma backup export (Settings → Backup → Export, 1.x)
- * into monitor inputs. Only the types we have probes for are mapped; the rest
- * are reported back as skipped so nothing silently disappears.
+ * Translate Uptime Kuma monitors into monitor inputs. Accepts either shape:
+ *  - the 1.x backup JSON (`{ monitorList: [...] }`, camelCase keys), or
+ *  - rows straight from Kuma's `monitor` table (snake_case columns) — what we
+ *    read out of a 2.x `kuma.db`, or a `sqlite3 -json` dump of it.
+ * Only the types we have probes for are mapped; the rest are reported back as
+ * skipped so nothing silently disappears.
  */
+export type KumaRow = Record<string, unknown>;
+
 export function kumaToInputs(payload: unknown): { inputs: MonitorInput[]; skipped: { name: string; reason: string }[] } {
   const inputs: MonitorInput[] = [];
   const skipped: { name: string; reason: string }[] = [];
   const root = (payload ?? {}) as Record<string, unknown>;
   const list = Array.isArray(root.monitorList) ? root.monitorList : Array.isArray(payload) ? payload : null;
-  if (!list) throw new Error('Not a Kuma backup: expected a "monitorList" array.');
+  if (!list) throw new Error('Not a Kuma backup: expected a "monitorList" array (or an array of monitor rows).');
 
   for (const raw of list) {
-    const m = (raw ?? {}) as Record<string, unknown>;
+    const m = (raw ?? {}) as KumaRow;
     const name = String(m.name ?? '').trim() || 'Imported monitor';
     const type = String(m.type ?? '');
+    const interval = toInt(m.interval, 60);
     const common = {
       name,
-      enabled: m.active === undefined ? true : !!m.active,
-      intervalSec: toInt(m.interval, 60),
+      enabled: m.active === undefined || m.active === null ? true : truthy(m.active),
+      intervalSec: interval,
       retries: toInt(m.maxretries, 0),
-      retryIntervalSec: toInt(m.retryInterval, toInt(m.interval, 60)),
+      retryIntervalSec: toInt(pick(m, 'retryInterval', 'retry_interval'), interval),
       timeoutSec: Math.max(1, Math.round(toNum(m.timeout, 10))),
-      // Kuma stores resend as an interval of beats too.
-      resendEveryN: toInt(m.resendInterval, 0),
-      upsideDown: !!m.upsideDown,
+      // Kuma's "resend interval" is a count of consecutive failures, like ours.
+      resendEveryN: toInt(pick(m, 'resendInterval', 'resend_interval'), 0),
+      upsideDown: truthy(pick(m, 'upsideDown', 'upside_down')),
       description: m.description ? String(m.description) : undefined,
-      tags: Array.isArray(m.tags)
-        ? (m.tags as Record<string, unknown>[]).map((t) => (t.value ? `${t.name}:${t.value}` : String(t.name ?? ''))).filter(Boolean)
-        : [],
+      tags: kumaTags(m.tags),
     };
 
     switch (type) {
@@ -42,11 +46,13 @@ export function kumaToInputs(payload: unknown): { inputs: MonitorInput[]; skippe
           config: {
             url: String(m.url ?? ''),
             method: String(m.method ?? 'GET').toUpperCase(),
-            acceptedStatus: Array.isArray(m.accepted_statuscodes) ? m.accepted_statuscodes.join(', ') : '200-299',
+            acceptedStatus: acceptedCodes(pick(m, 'accepted_statuscodes', 'accepted_statuscodes_json')),
             keyword: type === 'keyword' ? String(m.keyword ?? '') : '',
-            keywordInvert: type === 'keyword' ? !!m.invertKeyword : false,
-            ignoreTls: !!m.ignoreTls,
-            certExpiryDays: m.expiryNotification === false ? 0 : 14,
+            keywordInvert: type === 'keyword' ? truthy(pick(m, 'invertKeyword', 'invert_keyword')) : false,
+            ignoreTls: truthy(pick(m, 'ignoreTls', 'ignore_tls')),
+            certExpiryDays: pick(m, 'expiryNotification', 'expiry_notification') === undefined
+              ? 14
+              : truthy(pick(m, 'expiryNotification', 'expiry_notification')) ? 14 : 0,
             maxRedirects: toInt(m.maxredirects, 10),
             headers: kumaHeaders(m.headers),
             body: m.body ? String(m.body) : '',
@@ -66,17 +72,29 @@ export function kumaToInputs(payload: unknown): { inputs: MonitorInput[]; skippe
           type: 'dns',
           config: {
             hostname: String(m.hostname ?? ''),
-            recordType: String(m.dns_resolve_type ?? 'A').toUpperCase(),
-            resolver: m.dns_resolve_server ? String(m.dns_resolve_server) : '',
+            recordType: String(pick(m, 'dns_resolve_type') ?? 'A').toUpperCase(),
+            resolver: pick(m, 'dns_resolve_server') ? String(pick(m, 'dns_resolve_server')) : '',
             expected: '',
           },
         });
+        break;
+      case 'group':
+        skipped.push({ name, reason: 'Groups are not supported; its child monitors were imported individually.' });
         break;
       default:
         skipped.push({ name, reason: `Monitor type "${type || 'unknown'}" is not supported.` });
     }
   }
   return { inputs, skipped };
+}
+
+function pick(m: KumaRow, ...keys: string[]): unknown {
+  for (const k of keys) if (m[k] !== undefined && m[k] !== null) return m[k];
+  return undefined;
+}
+
+function truthy(v: unknown): boolean {
+  return v === true || v === 1 || v === '1' || v === 'true';
 }
 
 function toNum(v: unknown, dflt: number): number {
@@ -86,6 +104,27 @@ function toNum(v: unknown, dflt: number): number {
 
 function toInt(v: unknown, dflt: number): number {
   return Math.round(toNum(v, dflt));
+}
+
+/** Accepted status codes arrive as an array (JSON export) or a JSON string (DB column). */
+function acceptedCodes(v: unknown): string {
+  let arr: unknown = v;
+  if (typeof v === 'string') {
+    try { arr = JSON.parse(v); } catch { arr = [v]; }
+  }
+  return Array.isArray(arr) && arr.length > 0 ? arr.map(String).join(', ') : '200-299';
+}
+
+/** Tags: JSON export gives [{name,value}], the DB reader hands us ["name:value"] strings. */
+function kumaTags(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((t) => {
+      if (typeof t === 'string') return t;
+      const o = (t ?? {}) as Record<string, unknown>;
+      return o.value ? `${o.name}:${o.value}` : String(o.name ?? '');
+    })
+    .filter(Boolean);
 }
 
 /** Kuma stores headers as a JSON object string; we use "Name: value" lines. */

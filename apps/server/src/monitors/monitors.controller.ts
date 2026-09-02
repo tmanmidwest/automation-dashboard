@@ -1,4 +1,7 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { tmpdir } from 'os';
+import { unlink } from 'fs/promises';
 import { IsArray, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 import type { MonitorChartRange, SessionUser } from '@cerebro/shared';
 import { MonitorsService } from './monitors.service';
@@ -20,6 +23,13 @@ class MonitorDto {
   @IsBoolean() upsideDown!: boolean;
   @IsOptional() @IsString() @MaxLength(1000) description?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) tags?: string[];
+}
+
+/** The subset of multer's file object we use (avoids a @types/multer dependency). */
+interface UploadedTempFile {
+  path: string;
+  size: number;
+  originalname: string;
 }
 
 class EnabledDto {
@@ -76,6 +86,25 @@ export class MonitorsController {
     const r = await this.monitors.importKuma(dto.backup);
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'monitor.imported', meta: { imported: r.imported, skipped: r.skipped.length } });
     return r;
+  }
+
+  /**
+   * Import straight from Kuma's SQLite database (`data/kuma.db`). Multipart
+   * field "file". Streamed to a temp file by multer (the DB can be hundreds of
+   * MB of heartbeats), read once, then deleted.
+   */
+  @Post('import/kuma-db')
+  @RequirePermissions('monitors:write')
+  @UseInterceptors(FileInterceptor('file', { dest: tmpdir(), limits: { fileSize: 4 * 1024 * 1024 * 1024 } }))
+  async importKumaDb(@UploadedFile() file: UploadedTempFile | undefined, @CurrentUser() user: SessionUser) {
+    if (!file?.path) throw new BadRequestException('Upload the kuma.db file in the "file" field.');
+    try {
+      const r = await this.monitors.importKumaDb(file.path);
+      await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'monitor.imported', meta: { source: 'kuma.db', imported: r.imported, skipped: r.skipped.length } });
+      return r;
+    } finally {
+      await unlink(file.path).catch(() => {});
+    }
   }
 
   @Get(':id')

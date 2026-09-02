@@ -18,6 +18,7 @@ import { LoggingService } from '../logging/logging.service';
 import { ProbeRegistry } from './probe-registry.service';
 import { MonitorSchedulerService } from './monitor-scheduler.service';
 import { kumaToInputs } from './kuma-import';
+import { readKumaDatabase } from './kuma-sqlite';
 
 const RECENT_BEATS = 50;
 const AGG_CACHE_MS = 15_000;
@@ -202,7 +203,18 @@ export class MonitorsService {
     return { ok: r.ok, message: r.message, latencyMs: r.latencyMs };
   }
 
-  /** Import monitors from an Uptime Kuma backup JSON export. */
+  /** Import monitors from an Uptime Kuma SQLite database file (kuma.db). */
+  async importKumaDb(path: string): Promise<MonitorImportResult> {
+    let rows: unknown[];
+    try {
+      rows = readKumaDatabase(path);
+    } catch (err) {
+      throw new BadRequestException(err instanceof Error ? err.message : 'Could not read database');
+    }
+    return this.importKuma(rows);
+  }
+
+  /** Import monitors from an Uptime Kuma backup JSON export (or an array of monitor rows). */
   async importKuma(payload: unknown): Promise<MonitorImportResult> {
     let parsed: ReturnType<typeof kumaToInputs>;
     try {
