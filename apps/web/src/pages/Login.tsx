@@ -19,30 +19,65 @@ export function Login() {
   const [error, setError] = useState<string | null>(params.get('error'));
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<PublicIdentityProvider[]>([]);
+  // Second-factor step: shown after a correct password when the account has TOTP enabled.
+  const [mfaStep, setMfaStep] = useState(false);
+  const [code, setCode] = useState('');
+  const [useRecovery, setUseRecovery] = useState(false);
 
   useEffect(() => {
     api.get<PublicIdentityProvider[]>('/api/auth/providers').then(setProviders).catch(() => {});
   }, []);
+
+  // Complete sign-in after the session is fully established. Honors a safe, same-origin
+  // returnTo (used by the OAuth authorize bounce).
+  async function finishLogin() {
+    await refresh();
+    const returnTo = params.get('returnTo');
+    if (returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//')) {
+      window.location.href = returnTo; // full navigation — may target a backend route
+      return;
+    }
+    navigate('/');
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await api.post('/api/auth/login', { email, password });
-      await refresh();
-      // Honor a safe, same-origin returnTo (used by the OAuth authorize bounce).
-      const returnTo = params.get('returnTo');
-      if (returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//')) {
-        window.location.href = returnTo; // full navigation — may target a backend route
-        return;
+      const res = await api.post<{ ok?: true; mfaRequired?: true }>('/api/auth/login', { email, password });
+      if (res?.mfaRequired) {
+        setMfaStep(true);
+        return; // hold for the second factor; session is not yet authenticated
       }
-      navigate('/');
+      await finishLogin();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Sign-in failed');
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submitTotp(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/api/auth/login/totp', { code: code.trim() });
+      await finishLogin();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Verification failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function restart() {
+    setMfaStep(false);
+    setCode('');
+    setUseRecovery(false);
+    setPassword('');
+    setError(null);
   }
 
   return (
@@ -53,8 +88,14 @@ export function Login() {
         </div>
         <Card className="backdrop-blur bg-card/80">
           <CardContent className="pt-6">
-            <h1 className="text-xl font-semibold mb-1">Welcome back</h1>
-            <p className="text-sm text-muted-foreground mb-5">Sign in to your Cerebro console.</p>
+            <h1 className="text-xl font-semibold mb-1">{mfaStep ? 'Two-factor authentication' : 'Welcome back'}</h1>
+            <p className="text-sm text-muted-foreground mb-5">
+              {mfaStep
+                ? useRecovery
+                  ? 'Enter one of your saved recovery codes.'
+                  : 'Enter the 6-digit code from your authenticator app.'
+                : 'Sign in to your Cerebro console.'}
+            </p>
 
             {error && (
               <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">
@@ -62,23 +103,47 @@ export function Login() {
               </div>
             )}
 
-            <form onSubmit={submit} className="space-y-4">
-              <div>
-                <Label htmlFor="email">Email</Label>
-                <Input id="email" type="email" autoComplete="username" value={email}
-                  onChange={(e) => setEmail(e.target.value)} required />
-              </div>
-              <div>
-                <Label htmlFor="password">Password</Label>
-                <Input id="password" type="password" autoComplete="current-password" value={password}
-                  onChange={(e) => setPassword(e.target.value)} required />
-              </div>
-              <Button type="submit" className="w-full" disabled={busy}>
-                {busy ? 'Signing in…' : 'Sign in'}
-              </Button>
-            </form>
+            {mfaStep ? (
+              <form onSubmit={submitTotp} className="space-y-4">
+                <div>
+                  <Label htmlFor="code">{useRecovery ? 'Recovery code' : 'Authentication code'}</Label>
+                  <Input id="code" autoComplete="one-time-code" autoFocus value={code}
+                    inputMode={useRecovery ? 'text' : 'numeric'}
+                    placeholder={useRecovery ? 'XXXXX-XXXXX' : '123456'}
+                    onChange={(e) => setCode(e.target.value)} required />
+                </div>
+                <Button type="submit" className="w-full" disabled={busy}>
+                  {busy ? 'Verifying…' : 'Verify'}
+                </Button>
+                <div className="flex justify-between text-xs">
+                  <button type="button" className="text-muted-foreground hover:text-foreground"
+                    onClick={() => { setUseRecovery((v) => !v); setCode(''); setError(null); }}>
+                    {useRecovery ? 'Use authenticator app' : 'Use a recovery code'}
+                  </button>
+                  <button type="button" className="text-muted-foreground hover:text-foreground" onClick={restart}>
+                    Back to sign-in
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={submit} className="space-y-4">
+                <div>
+                  <Label htmlFor="email">Email</Label>
+                  <Input id="email" type="email" autoComplete="username" value={email}
+                    onChange={(e) => setEmail(e.target.value)} required />
+                </div>
+                <div>
+                  <Label htmlFor="password">Password</Label>
+                  <Input id="password" type="password" autoComplete="current-password" value={password}
+                    onChange={(e) => setPassword(e.target.value)} required />
+                </div>
+                <Button type="submit" className="w-full" disabled={busy}>
+                  {busy ? 'Signing in…' : 'Sign in'}
+                </Button>
+              </form>
+            )}
 
-            {providers.length > 0 && (
+            {!mfaStep && providers.length > 0 && (
               <>
                 <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
                   <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />

@@ -9,6 +9,13 @@ export class LoginDto {
   password!: string;
 }
 
+export class LoginTotpDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(32)
+  code!: string;
+}
+
 export class SetupDto {
   @IsEmail()
   email!: string;

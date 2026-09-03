@@ -6,6 +6,12 @@ declare module 'express-session' {
     userId?: string;
     /** Transient state for an in-flight SSO auth-code flow. */
     sso?: { providerId: string; state: string; nonce: string; codeVerifier: string };
+    /**
+     * Half-authenticated state between a correct password and TOTP verification.
+     * The session has NO `userId` while this is set, so SessionAuthGuard treats it
+     * as unauthenticated — protected routes stay unreachable until the second factor.
+     */
+    pendingMfa?: { userId: string; expiresAt: number; attempts: number };
   }
 }
 

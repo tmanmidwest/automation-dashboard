@@ -86,4 +86,20 @@ export class UsersController {
     });
     return res;
   }
+
+  /** Reset a user's two-factor auth (lockout recovery). Only audited if MFA was on. */
+  @Delete('users/:id/mfa')
+  @RequirePermissions('users:write')
+  async resetMfa(@Param('id') id: string, @CurrentUser() actor: SessionUser) {
+    const res = await this.users.clearMfa(id);
+    if (res.wasEnabled) {
+      await this.audit.record({
+        actorId: actor.id,
+        actorEmail: actor.email,
+        action: 'auth.mfa_admin_reset',
+        target: id,
+      });
+    }
+    return { ok: true as const };
+  }
 }

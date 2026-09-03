@@ -51,10 +51,18 @@ export class McpServerFactory {
       run: (args: z.infer<z.ZodObject<A>>) => Promise<unknown>,
     ) => {
       const handler = async (args: unknown) => {
-        void this.logging.info('mcp', `tool: ${name}`, { user: user.email });
         try {
           const data = await run((args ?? {}) as z.infer<z.ZodObject<A>>);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+          const text = JSON.stringify(data, null, 2);
+          // Record what Cerebro actually returned, so we can tell server-side output
+          // apart from client-side truncation (e.g. a small local model showing fewer rows).
+          const count = Array.isArray(data) ? data.length : undefined;
+          void this.logging.info(
+            'mcp',
+            `tool: ${name}${count !== undefined ? ` → ${count} items` : ''} (${text.length} bytes)`,
+            { user: user.email, items: count, bytes: text.length },
+          );
+          return { content: [{ type: 'text' as const, text }] };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           void this.logging.warn('mcp', `tool ${name} failed: ${message}`, { user: user.email });

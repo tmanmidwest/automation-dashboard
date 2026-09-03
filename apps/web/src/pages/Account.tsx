@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { MfaSettings } from '@/components/MfaSettings';
 
 export function Account() {
   const { user } = useAuth();
@@ -109,6 +110,8 @@ export function Account() {
           )}
         </CardContent>
       </Card>
+
+      <MfaSettings isSso={isSso} />
     </>
   );
 }

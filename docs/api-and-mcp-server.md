@@ -310,8 +310,10 @@ Logs UI, and stdout). Built to debug gateway/OAuth integration:
   "JWT failed verification (external-IdP token won't work here)" for foreign JWTs. The guard
   logs the rejected `METHOD /path`; a no-credential request is `debug` (normal discovery probe).
 - **MCP activity** (`context: 'mcp'`, info): the controller logs each JSON-RPC `request: <method>`
-  with the caller; the factory logs `tool: <name>` / `action: <name>` / `action refused (no
-  confirm)` per call. (Action tools also write the audit trail as before.)
+  with the caller; the factory logs `tool: <name> → <N> items (<bytes> bytes)` on success (so you
+  can tell what Cerebro *returned* apart from client-side truncation — a small local model showing
+  fewer rows than Cerebro sent), plus `action: <name>` / `action refused (no confirm)` per call.
+  (Action tools also write the audit trail as before.)
 - Never logs token secrets — only the public prefix, credential *type*, and reason.
 
 Note for external gateways (Saviynt, etc.): Cerebro accepts **only its own** credentials

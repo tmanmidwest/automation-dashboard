@@ -19,6 +19,7 @@ export class UsersService {
       roleSlug: u.role.slug,
       roleName: u.role.name,
       disabled: u.disabled,
+      mfaEnabled: !!u.totpEnabledAt,
       lastLoginAt: u.lastLoginAt,
       createdAt: u.createdAt,
     }));
@@ -78,6 +79,20 @@ export class UsersService {
     if (!user) throw new NotFoundException('User not found.');
     await this.prisma.user.update({ where: { id: userId }, data: { disabled } });
     return { ok: true };
+  }
+
+  /**
+   * Admin escape hatch for a user locked out of their second factor: clear TOTP and
+   * wipe recovery codes. The account falls back to single-factor login until they
+   * re-enroll. Returns whether MFA had actually been enabled (for the audit meta).
+   */
+  async clearMfa(userId: string): Promise<{ ok: true; wasEnabled: boolean }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found.');
+    const wasEnabled = !!user.totpEnabledAt;
+    await this.prisma.user.update({ where: { id: userId }, data: { totpSecret: null, totpEnabledAt: null } });
+    await this.prisma.userRecoveryCode.deleteMany({ where: { userId } });
+    return { ok: true, wasEnabled };
   }
 
   /** Permanently delete a user. Cascades their linked SSO identities (revoking access). */

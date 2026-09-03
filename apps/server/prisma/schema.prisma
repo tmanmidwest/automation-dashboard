@@ -34,6 +34,12 @@ model User {
   passwordHash String?
   /// How the account was created: 'local' or 'oidc' (informational).
   authProvider String    @default("local")
+  /// AES-256-GCM ciphertext (CryptoService) of the TOTP shared secret. Null = no TOTP set up.
+  totpSecret    String?
+  /// Set when TOTP enrollment is confirmed; null while pending or disabled. Enforcement key.
+  totpEnabledAt DateTime?
+  /// Single-use TOTP recovery codes (bcrypt-hashed).
+  recoveryCodes UserRecoveryCode[]
   disabled     Boolean   @default(false)
   role         Role      @relation(fields: [roleId], references: [id])
   roleId       String
@@ -50,6 +56,19 @@ model User {
   updatedAt    DateTime  @updatedAt
 
   @@index([roleId])
+}
+
+/// One single-use TOTP recovery code. Only the bcrypt hash is stored; consumed codes are
+/// kept (consumedAt set) for the audit trail until the user regenerates the set.
+model UserRecoveryCode {
+  id         String    @id @default(cuid())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  codeHash   String
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
 }
 
 /// A configured single-sign-on provider. Multiple can exist, each independently

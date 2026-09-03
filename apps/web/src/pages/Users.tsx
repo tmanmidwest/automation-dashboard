@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { UserPlus, Trash2 } from 'lucide-react';
+import { UserPlus, Trash2, ShieldOff } from 'lucide-react';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -17,6 +17,7 @@ interface UserRow {
   roleSlug: string;
   roleName: string;
   disabled: boolean;
+  mfaEnabled: boolean;
   lastLoginAt: string | null;
 }
 interface Role { slug: string; name: string }
@@ -53,6 +54,15 @@ export function Users() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to delete user');
+    }
+  }
+  async function resetMfa(u: UserRow) {
+    if (!confirm(`Reset two-factor authentication for ${u.email}? They'll sign in with just their password until they re-enroll.`)) return;
+    try {
+      await api.delete(`/api/users/${u.id}/mfa`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to reset MFA');
     }
   }
   async function create(e: React.FormEvent) {
@@ -147,6 +157,7 @@ export function Users() {
                 <th className="px-4 py-3 font-medium">User</th>
                 <th className="px-4 py-3 font-medium">Auth</th>
                 <th className="px-4 py-3 font-medium">Role</th>
+                <th className="px-4 py-3 font-medium">2FA</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 {writable && <th className="px-4 py-3" />}
               </tr>
@@ -173,6 +184,11 @@ export function Users() {
                     )}
                   </td>
                   <td className="px-4 py-3">
+                    {u.mfaEnabled
+                      ? <span className="text-emerald-400">On</span>
+                      : <span className="text-muted-foreground">Off</span>}
+                  </td>
+                  <td className="px-4 py-3">
                     {u.disabled
                       ? <span className="text-destructive">Disabled</span>
                       : <span className="text-emerald-400">Active</span>}
@@ -181,6 +197,11 @@ export function Users() {
                     <td className="px-4 py-3 text-right">
                       {u.id !== me?.id && (
                         <div className="inline-flex items-center gap-1">
+                          {u.mfaEnabled && (
+                            <Button variant="ghost" size="icon" onClick={() => resetMfa(u)} aria-label="Reset two-factor authentication" title="Reset 2FA">
+                              <ShieldOff className="h-4 w-4 text-amber-400" />
+                            </Button>
+                          )}
                           <Button variant="ghost" size="sm" onClick={() => toggleDisabled(u)}>
                             {u.disabled ? 'Enable' : 'Disable'}
                           </Button>
