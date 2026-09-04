@@ -19,6 +19,11 @@ export interface MetricThresholdDef {
 export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'cost', metricKey: 'costMtd', alertKey: 'cost.threshold', label: 'Monthly cost' },
   { id: 'storage', metricKey: 'repoSizeGb', alertKey: 'storage.threshold', label: 'Repository size' },
+  // Home Assistant health (counts from the connector's /api/states overview).
+  { id: 'haUnavailable', metricKey: 'entitiesUnavailable', alertKey: 'ha.unavailable', label: 'Unavailable entities' },
+  { id: 'haBatteries', metricKey: 'batteriesLow', alertKey: 'ha.batteries_low', label: 'Low batteries' },
+  { id: 'haUpdates', metricKey: 'updatesAvailable', alertKey: 'ha.updates', label: 'Updates available' },
+  { id: 'haAutomationsOff', metricKey: 'automationsOff', alertKey: 'ha.automations_off', label: 'Automations off' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {

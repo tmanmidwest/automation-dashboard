@@ -25,6 +25,10 @@ interface ConnAlert {
 const THRESHOLD_DEFS = [
   { id: 'cost', metricKey: 'costMtd', alertKey: 'cost.threshold', label: 'Monthly cost' },
   { id: 'storage', metricKey: 'repoSizeGb', alertKey: 'storage.threshold', label: 'Storage size' },
+  { id: 'haUnavailable', metricKey: 'entitiesUnavailable', alertKey: 'ha.unavailable', label: 'Unavailable entities' },
+  { id: 'haBatteries', metricKey: 'batteriesLow', alertKey: 'ha.batteries_low', label: 'Low batteries' },
+  { id: 'haUpdates', metricKey: 'updatesAvailable', alertKey: 'ha.updates', label: 'Updates available' },
+  { id: 'haAutomationsOff', metricKey: 'automationsOff', alertKey: 'ha.automations_off', label: 'Automations off' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 
