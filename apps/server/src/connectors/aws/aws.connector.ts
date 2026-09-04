@@ -474,19 +474,15 @@ export class AwsConnector implements Connector {
       // Confirm EC2 access too, so the test reflects the permissions the connector actually uses.
       await api.describeInstances();
 
-      // Probe Cost Explorer so the user knows whether the spend tile will work. This is
-      // one billable (~$0.01) call, made only on an explicit Test. On success it primes
-      // the cost cache so the spend tile appears immediately.
-      let costStatus: string;
-      try {
-        const summary = await api.getCostSummary();
-        this.costCache.set(auth.accessKeyId, { at: Date.now(), data: summary });
-        costStatus = `available — ${summary.currency} ${summary.mtd.toFixed(2)} MTD`;
-      } catch (err) {
-        const m = err instanceof Error ? err.message : 'error';
-        costStatus = `unavailable — enable Cost Explorer + grant ce:GetCostAndUsage/ce:GetCostForecast (${m})`;
-        ctx.log('warn', `AWS Cost Explorer probe failed: ${m}`);
-      }
+      // Report whether the spend tile will work — but read the 24h cost cache rather than
+      // making a fresh billable Cost Explorer call. testConnection also runs on the
+      // every-minute connection-health cron, so a raw getCostSummary() here billed
+      // ~$0.01 × 3 every minute (~$43/day). cachedCost() collapses that to one CE fetch
+      // per day; the "Refresh billing" action still forces a live number on demand.
+      const summary = await this.cachedCost(ctx, api, auth.accessKeyId);
+      const costStatus = summary
+        ? `available — ${summary.currency} ${summary.mtd.toFixed(2)} MTD`
+        : 'unavailable — enable Cost Explorer + grant ce:GetCostAndUsage/ce:GetCostForecast';
 
       ctx.log('info', `Connected to AWS account ${id.account ?? '?'} as ${id.arn ?? '?'}. Cost Explorer ${costStatus}.`);
       return {
