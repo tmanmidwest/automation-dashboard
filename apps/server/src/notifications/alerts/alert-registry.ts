@@ -166,6 +166,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'ha.integrations',
+    label: 'Degraded integrations over threshold',
+    description: "The number of Home Assistant integrations that failed to set up crossed the limit set on its page.",
+    category: 'Home Assistant',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
   // ── Monitors ─────────────────────────────────────────────
   {
     key: 'monitor.down',

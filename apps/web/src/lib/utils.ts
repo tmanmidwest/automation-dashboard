@@ -9,14 +9,17 @@ export function cn(...inputs: ClassValue[]) {
 // Shared across the connector detail table and the resources overview so a status
 // looks the same everywhere. Covers connector lifecycle states (Proxmox/AWS) and
 // Home Assistant entity states (on/off/unavailable/locked/heat/…).
-const STATUS_BAD = new Set(['unavailable', 'unknown', 'error', 'failed', 'fault', 'offline', 'unhealthy', 'disconnected']);
+const STATUS_BAD = new Set([
+  'unavailable', 'unknown', 'error', 'failed', 'fault', 'offline', 'unhealthy', 'disconnected',
+  'setup_error', 'migration_error', 'failed_unload', // Home Assistant integration failures
+]);
 const STATUS_GOOD = new Set([
   'running', 'active', 'enabled', 'on', 'online', 'available', 'connected', 'ok',
-  'home', 'playing', 'locked', 'heat', 'cool', 'heat_cool', 'auto',
+  'home', 'playing', 'locked', 'heat', 'cool', 'heat_cool', 'auto', 'loaded',
 ]);
 const STATUS_IDLE = new Set([
   'stopped', 'disabled', 'off', 'idle', 'standby', 'paused', 'closed',
-  'not_home', 'away', 'docked', 'unlocked',
+  'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
 ]);
 
 /** Tailwind classes for a resource status badge, by status string. */

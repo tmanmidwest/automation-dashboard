@@ -183,12 +183,29 @@ metric). The user sets a per-connector threshold on the connector's **Alerts** c
 re-arms when it drops back under. No connector code changed — `overview` already emits the
 metrics. Recommended starting thresholds: unavailable ≥ 1, low batteries ≥ 1.
 
-**Phase 4 — Live (WebSocket).** Subscribe to `state_changed` for a live-updating radar
-instead of polling `/api/states`, matching the "live radar dashboard" you already have.
-Optional: entity history sparklines in the detail drawer via `/api/history`.
+**Phase 4 — WebSocket.** Split into increments since the pieces differ a lot in weight:
 
-Later / optional: Zigbee/Z-Wave mesh health (LQI/last-seen) if using ZHA/Z-Wave JS;
-Supervisor/add-on health + updates (HA OS only); an interactive HA log/terminal console.
+- **4a — Integration health. ← DONE (built & verified 2026-09-03).** Added `ha-ws.ts`: an
+  authenticated request/response WebSocket client (`HaWsConn` + `withHaWs`) doing the
+  `auth_required`→`auth`→`auth_ok` handshake, then id-matched commands. New `integration`
+  resource kind sourced from `config_entries/get` (title/domain/state/reason), a **Reload**
+  action (`config_entries/reload`), an `integrationsDegraded` overview metric (setup_error /
+  setup_retry / migration_error / failed_unload — cached 2 min so the every-minute poll
+  doesn't reconnect the WS each time; best-effort so a WS hiccup never fails the overview),
+  and a matching `ha.integrations` threshold alert. Integration states also got badge colors
+  (loaded → green, setup_error/failed_unload → red).
+- **4b — Area/room grouping. ← DONE (built & verified 2026-09-03).** `fetchEntityAreaMap`
+  resolves entity → area name via the three registries (`config/area_registry/list`,
+  `config/device_registry/list`, `config/entity_registry/list`) — an entity's own `area_id`,
+  else its device's `area_id`. Entities get an `area` tag (cached 10 min, best-effort so a
+  restricted token just omits areas). No frontend change: the generic tag machinery gives an
+  area chip, a "Tag: area" filter, and "Group by tag: area" for free.
+- **4c — Live radar.** Hold a persistent per-instance WS, subscribe to `state_changed`, and
+  push updates to the browser (SSE or the console-relay pattern) instead of polling
+  `/api/states` — the heaviest, most infra-touching piece.
+
+Later / optional: HA Core restart (`homeassistant.restart` REST service); entity history
+sparklines via `/api/history`; Zigbee/Z-Wave mesh health; Supervisor/add-on health.
 
 ---
 

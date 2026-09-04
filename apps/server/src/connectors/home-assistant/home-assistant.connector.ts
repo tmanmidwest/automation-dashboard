@@ -13,12 +13,16 @@ import type {
   TestConnectionResult,
 } from '@cerebro/shared';
 import { HaApi, HaAuth, HaState } from './ha-api';
+import { withHaWs, fetchEntityAreaMap, HaConfigEntry } from './ha-ws';
 
 /** Battery percentage at or below which an entity counts as "low" in the health overview. */
 const LOW_BATTERY_PCT = 20;
 
 /** States that mean an entity is effectively dead / not reporting. */
 const DEAD_STATES = new Set(['unavailable', 'unknown']);
+
+/** Config-entry states that mean an integration failed to set up / is unhealthy. */
+const DEGRADED_ENTRY_STATES = new Set(['setup_error', 'setup_retry', 'migration_error', 'failed_unload']);
 
 /**
  * Maps a (kind, actionId) to the underlying Home Assistant service name. The service's
@@ -120,9 +124,17 @@ const KINDS: ConnectorResourceKind[] = [
       { id: 'stop', label: 'Stop', mutating: true, showWhenStatus: ['on'] },
     ],
   },
+  {
+    id: 'integration',
+    label: 'Integrations',
+    deletable: false,
+    // Not an entity domain — sourced from config_entries over the WebSocket API.
+    actions: [{ id: 'reload', label: 'Reload', mutating: true, confirm: 'Reload this integration?' }],
+  },
 ];
 
-const KIND_IDS = new Set(KINDS.map((k) => k.id));
+/** Entity domains we surface (everything except the WebSocket-sourced 'integration' kind). */
+const ENTITY_DOMAINS = new Set(KINDS.map((k) => k.id).filter((id) => id !== 'integration'));
 
 function numOrUndef(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
@@ -172,12 +184,22 @@ function batteryPct(s: HaState): number | null {
   return null;
 }
 
+/** How long a connector instance's config-entries snapshot is reused before a fresh WS fetch. */
+const CONFIG_ENTRIES_TTL_MS = 120_000;
+/** The area/device/entity registries change rarely — cache the entity→area map longer. */
+const AREA_MAP_TTL_MS = 600_000;
+
 export class HomeAssistantConnector implements Connector {
+  /** Per-instance cache of config entries so the every-minute overview poll doesn't reconnect the WS each time. */
+  private readonly ceCache = new Map<string, { at: number; entries: HaConfigEntry[] }>();
+  /** Per-instance cache of entity_id → area (room) name. */
+  private readonly areaCache = new Map<string, { at: number; map: Map<string, string> }>();
+
   manifest: ConnectorManifest = {
     id: 'home-assistant',
     name: 'Home Assistant',
-    description: 'Monitor and control a Home Assistant instance — entity health plus lights, switches, locks, covers, climate, media, automations, and scenes.',
-    version: '0.2.0',
+    description: 'Monitor and control a Home Assistant instance — entity health, integrations, plus lights, switches, locks, covers, climate, media, automations, and scenes.',
+    version: '0.4.0',
     icon: 'home-assistant',
     configFields: [
       {
@@ -277,7 +299,7 @@ export class HomeAssistantConnector implements Connector {
         { label: 'Long-lived access tokens', url: 'https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token' },
       ],
       notes:
-        'Integration setup-failure counts and room/area grouping require the Home Assistant WebSocket API and are planned for a later phase.',
+        'The Integrations tab, integration health, and room/area tags use the Home Assistant WebSocket API. Entities are tagged with their area (room) so you can filter or group by it — assign areas in Home Assistant for this to populate.',
     },
   };
 
@@ -289,6 +311,51 @@ export class HomeAssistantConnector implements Connector {
       // Default ON for HA (unlike Proxmox) — most instances have a real cert.
       verifyTls: c.verifyTls !== false && c.verifyTls !== 'false',
     };
+  }
+
+  private cacheKey(ctx: ConnectorContext): string {
+    return ctx.instanceId ?? String(ctx.config.baseUrl ?? '');
+  }
+
+  /** Fetch config entries over the WebSocket API (one authenticated connection). */
+  private async fetchConfigEntries(ctx: ConnectorContext): Promise<HaConfigEntry[]> {
+    const entries = await withHaWs(this.authFrom(ctx), (conn) =>
+      conn.command<HaConfigEntry[]>({ type: 'config_entries/get' }),
+    );
+    this.ceCache.set(this.cacheKey(ctx), { at: Date.now(), entries });
+    return entries;
+  }
+
+  /** Config entries, reused from the short-lived cache when fresh (keeps the overview poll cheap). */
+  private async configEntriesCached(ctx: ConnectorContext): Promise<HaConfigEntry[]> {
+    const c = this.ceCache.get(this.cacheKey(ctx));
+    if (c && Date.now() - c.at < CONFIG_ENTRIES_TTL_MS) return c.entries;
+    return this.fetchConfigEntries(ctx);
+  }
+
+  /**
+   * entity_id → area name, cached (registries change rarely). Best-effort: if the
+   * WebSocket/registry fetch fails (e.g. a restricted token), return an empty map so
+   * the entity list still renders — just without area tags.
+   */
+  private async areaMapCached(ctx: ConnectorContext): Promise<Map<string, string>> {
+    const key = this.cacheKey(ctx);
+    const c = this.areaCache.get(key);
+    if (c && Date.now() - c.at < AREA_MAP_TTL_MS) return c.map;
+    try {
+      const map = await fetchEntityAreaMap(this.authFrom(ctx));
+      this.areaCache.set(key, { at: Date.now(), map });
+      return map;
+    } catch (err) {
+      ctx.log('debug', `Home Assistant area registry unavailable: ${err instanceof Error ? err.message : err}`);
+      return new Map();
+    }
+  }
+
+  invalidateCache(ctx: ConnectorContext): void {
+    const key = this.cacheKey(ctx);
+    this.ceCache.delete(key);
+    this.areaCache.delete(key);
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
@@ -311,6 +378,22 @@ export class HomeAssistantConnector implements Connector {
     resourceId: string,
     actionId: string,
   ): Promise<{ ok: boolean; message: string }> {
+    // Integrations aren't entities — reload goes over the WebSocket API.
+    if (kind === 'integration') {
+      if (actionId !== 'reload') return { ok: false, message: `Unsupported action "${actionId}" for integration.` };
+      try {
+        await withHaWs(this.authFrom(ctx), (conn) =>
+          conn.command({ type: 'config_entries/reload', entry_id: resourceId }),
+        );
+        this.invalidateCache(ctx);
+        ctx.log('info', `Home Assistant reloaded integration ${resourceId}.`);
+        return { ok: true, message: `Reload requested for integration ${resourceId}.` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Reload failed.';
+        ctx.log('error', `Home Assistant reload of ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
     const service = SERVICE_MAP[kind]?.[actionId];
     if (!service) return { ok: false, message: `Unsupported action "${actionId}" for ${kind}.` };
     const api = new HaApi(this.authFrom(ctx));
@@ -410,12 +493,35 @@ export class HomeAssistantConnector implements Connector {
   }
 
   async listResources(ctx: ConnectorContext, kind: string): Promise<ConnectorResource[]> {
+    if (kind === 'integration') {
+      const entries = await this.fetchConfigEntries(ctx); // user-initiated → fetch fresh (and refresh cache)
+      return entries
+        .slice()
+        .sort((a, b) => (a.title || a.domain).localeCompare(b.title || b.domain))
+        .map((e) => this.toIntegrationResource(e));
+    }
     const api = new HaApi(this.authFrom(ctx));
-    const all = await api.states();
+    const [all, areaByEntity] = await Promise.all([api.states(), this.areaMapCached(ctx)]);
     return all
       .filter((s) => domainOf(s.entity_id) === kind)
       .sort((a, b) => this.nameOf(a).localeCompare(this.nameOf(b)))
-      .map((s) => this.toResource(kind, s));
+      .map((s) => this.toResource(kind, s, areaByEntity));
+  }
+
+  private toIntegrationResource(e: HaConfigEntry): ConnectorResource {
+    return {
+      id: e.entry_id,
+      kind: 'integration',
+      name: e.title || e.domain,
+      status: e.state,
+      details: {
+        domain: e.domain,
+        source: e.source ?? null,
+        disabled: e.disabled_by ? `by ${e.disabled_by}` : null,
+        reason: e.reason ?? null,
+      },
+      tags: { domain: e.domain },
+    };
   }
 
   private nameOf(s: HaState): string {
@@ -423,7 +529,7 @@ export class HomeAssistantConnector implements Connector {
     return typeof fn === 'string' && fn ? fn : s.entity_id;
   }
 
-  private toResource(kind: string, s: HaState): ConnectorResource {
+  private toResource(kind: string, s: HaState, areaByEntity?: Map<string, string>): ConnectorResource {
     const a = s.attributes ?? {};
     const details: Record<string, string | number | boolean | null> = {};
 
@@ -446,9 +552,12 @@ export class HomeAssistantConnector implements Connector {
     const bat = batteryPct(s);
     if (bat != null) details.battery = `${bat}%`;
     if (a.device_class) details.class = String(a.device_class);
+    const area = areaByEntity?.get(s.entity_id);
+    if (area) details.area = area;
     details.changed = rel(s.last_changed);
 
     const tags: Record<string, string> = {};
+    if (area) tags.area = area;
     if (a.device_class) tags.class = String(a.device_class);
 
     return {
@@ -462,6 +571,21 @@ export class HomeAssistantConnector implements Connector {
   }
 
   async describeResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<ConnectorResourceDetail> {
+    if (kind === 'integration') {
+      const entries = await this.configEntriesCached(ctx);
+      const e = entries.find((x) => x.entry_id === resourceId);
+      if (!e) throw new Error(`Integration ${resourceId} not found.`);
+      const items: ConnectorDetailItem[] = [
+        { label: 'Title', value: e.title || '—' },
+        { label: 'Domain', value: e.domain, variant: 'mono' },
+        { label: 'State', value: e.state, variant: 'status' },
+        { label: 'Setup source', value: e.source ?? '—' },
+        { label: 'Disabled', value: e.disabled_by ? `by ${e.disabled_by}` : 'No' },
+        { label: 'Reason', value: e.reason ?? '—' },
+        { label: 'Entry ID', value: e.entry_id, variant: 'mono' },
+      ];
+      return { id: e.entry_id, kind, name: e.title || e.domain, status: e.state, groups: [{ title: 'General', items }] };
+    }
     const api = new HaApi(this.authFrom(ctx));
     const all = await api.states();
     const s = all.find((e) => e.entity_id === resourceId);
@@ -493,7 +617,7 @@ export class HomeAssistantConnector implements Connector {
 
     // Only count entities that belong to a domain we surface, so the numbers line up
     // with what the user can actually browse in the tabs.
-    const managed = all.filter((s) => KIND_IDS.has(domainOf(s.entity_id)));
+    const managed = all.filter((s) => ENTITY_DOMAINS.has(domainOf(s.entity_id)));
 
     const unavailable = managed.filter((s) => DEAD_STATES.has(s.state)).length;
     const batteriesLow = all.filter((s) => {
@@ -511,6 +635,16 @@ export class HomeAssistantConnector implements Connector {
       { key: 'updatesAvailable', label: 'Updates available', value: updatesAvailable },
       { key: 'automationsOff', label: 'Automations off', value: automationsOff },
     ];
+
+    // Integration health via the WebSocket API — best-effort and cached, so a WS
+    // hiccup never fails the overview (the REST-based metrics above still show).
+    try {
+      const entries = await this.configEntriesCached(ctx);
+      const degraded = entries.filter((e) => DEGRADED_ENTRY_STATES.has(e.state)).length;
+      metrics.push({ key: 'integrationsDegraded', label: 'Integrations degraded', value: degraded });
+    } catch (err) {
+      ctx.log('debug', `Home Assistant integration health unavailable: ${err instanceof Error ? err.message : err}`);
+    }
 
     // Surface the problems first: unavailable entities, then a sample of the rest.
     const guests = managed

@@ -29,6 +29,7 @@ const THRESHOLD_DEFS = [
   { id: 'haBatteries', metricKey: 'batteriesLow', alertKey: 'ha.batteries_low', label: 'Low batteries' },
   { id: 'haUpdates', metricKey: 'updatesAvailable', alertKey: 'ha.updates', label: 'Updates available' },
   { id: 'haAutomationsOff', metricKey: 'automationsOff', alertKey: 'ha.automations_off', label: 'Automations off' },
+  { id: 'haIntegrations', metricKey: 'integrationsDegraded', alertKey: 'ha.integrations', label: 'Degraded integrations' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 
