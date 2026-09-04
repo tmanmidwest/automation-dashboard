@@ -5,15 +5,11 @@ import type { ConnectorInstanceSummary, ConnectorResource, ConnectorNode, Connec
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
-import { cn } from '@/lib/utils';
+import { cn, statusBadgeColor } from '@/lib/utils';
 
 interface Group { connector: ConnectorInstanceSummary; resources: ConnectorResource[]; nodes: ConnectorNode[] }
 
-function statusColor(status?: string) {
-  if (status === 'running' || status === 'online') return 'text-emerald-400 bg-emerald-500/15';
-  if (status === 'stopped' || status === 'offline') return 'text-muted-foreground bg-muted';
-  return 'text-amber-400 bg-amber-500/15';
-}
+const statusColor = statusBadgeColor;
 function fmtBytes(n?: number) {
   if (n == null) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let v = n, i = 0;

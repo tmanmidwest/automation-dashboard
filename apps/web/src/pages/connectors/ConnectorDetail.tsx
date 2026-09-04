@@ -14,7 +14,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet } from '@/components/ui/sheet';
-import { cn, timeAgo, formatMoney, shortDateTime } from '@/lib/utils';
+import { cn, timeAgo, formatMoney, shortDateTime, statusBadgeColor } from '@/lib/utils';
 
 /** Preset background refresh intervals offered per connector. */
 const REFRESH_PRESETS: { label: string; value: number }[] = [
@@ -33,11 +33,7 @@ function fmtMetric(m: OverviewMetric): string {
   return m.unit ? `${m.value} ${m.unit}` : String(m.value);
 }
 
-function statusColor(status?: string) {
-  if (status === 'running' || status === 'active' || status === 'enabled') return 'text-emerald-400 bg-emerald-500/15';
-  if (status === 'stopped' || status === 'disabled') return 'text-muted-foreground bg-muted';
-  return 'text-amber-400 bg-amber-500/15';
-}
+const statusColor = statusBadgeColor;
 
 export function ConnectorDetail() {
   const { id } = useParams();
