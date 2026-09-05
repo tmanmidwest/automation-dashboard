@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, ChevronRight } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, ChevronRight, RefreshCw } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary, MonitorStatus } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
+import { Button } from '@/components/ui/button';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
 
 function useCountUp(target: number, ms = 700) {
@@ -55,20 +56,43 @@ function monitorColor(status: MonitorStatus): string {
 
 const SEGMENTS = 20;
 
+/**
+ * Semantic direction of a meter:
+ *  - `load`   — higher is worse (CPU, RAM, disk, temp, spend)
+ *  - `health` — higher is better (systems online, monitors up)
+ *  - `neutral`— no good/bad reading (e.g. active vs idle signals)
+ */
+type Polarity = 'load' | 'health' | 'neutral';
+
+const GREEN = 'hsl(160 84% 55%)';
+const AMBER = 'hsl(38 92% 55%)';
+const RED = 'hsl(var(--destructive))';
+const CYAN = 'hsl(var(--accent))';
+
+/** Traffic-light colour for a value, respecting the metric's polarity. */
+function toneColor(pct: number, polarity: Polarity): string {
+  if (polarity === 'neutral') return CYAN;
+  const sev = polarity === 'load'
+    ? (pct > 85 ? 2 : pct > 70 ? 1 : 0)   // higher = worse
+    : (pct >= 90 ? 0 : pct >= 60 ? 1 : 2); // higher = better
+  return sev === 2 ? RED : sev === 1 ? AMBER : GREEN;
+}
+
 /** LCARS segmented readout — the functional replacement for the radar. */
-function Meter({ name, pct }: { name: string; pct: number }) {
+function Meter({ name, pct, polarity = 'load' }: { name: string; pct: number; polarity?: Polarity }) {
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
   const on = Math.round((clamped / 100) * SEGMENTS);
-  const level = clamped > 85 ? 'crit' : clamped > 65 ? 'warn' : 'ok';
+  const col = toneColor(clamped, polarity);
   return (
     <div className="lcars-meter">
       <span className="lcars-meter__name">{name}</span>
       <div className="lcars-track">
         {Array.from({ length: SEGMENTS }, (_, i) => (
-          <span key={i} className="lcars-seg" data-on={i < on} data-level={level} />
+          <span key={i} className="flex-1 rounded-[2px]"
+            style={{ background: i < on ? col : 'hsl(var(--secondary))', opacity: i < on ? 1 : 0.28 }} />
         ))}
       </div>
-      <span className="lcars-meter__val">{clamped}%</span>
+      <span className="lcars-meter__val" style={{ color: col }}>{clamped}%</span>
     </div>
   );
 }
@@ -152,12 +176,12 @@ export function Dashboard() {
   const [userCount, setUserCount] = useState(0);
   const startedRef = useRef(Date.now());
   const lastPollRef = useRef(Date.now());
+  const [refreshing, setRefreshing] = useState(false);
   const [, tick] = useState(0);
 
-  useEffect(() => {
-    api.get<VersionInfo>('/api/version').then(setVersion).catch(() => {});
-    api.get<Array<unknown>>('/api/users').then((u) => setUserCount(u.length)).catch(() => {});
-    const poll = () => {
+  // Core telemetry (connectors + activity) — the fast 5s loop.
+  const pollCore = useCallback(async () => {
+    await Promise.all([
       api.get<DashboardOverview>('/api/connectors/overview').then((data) => {
         lastPollRef.current = Date.now();
         setOverview((prev) => {
@@ -168,23 +192,43 @@ export function Dashboard() {
           }
           return data;
         });
-      }).catch(() => {});
-      api.get<AuditLogEntry[]>('/api/logs/audit?limit=14').then(setAudit).catch(() => {});
-    };
-    poll();
-    const t = setInterval(() => { poll(); tick((x) => x + 1); }, 5000);
-    const clock = setInterval(() => tick((x) => x + 1), 1000);
-    return () => { clearInterval(t); clearInterval(clock); };
+      }).catch(() => {}),
+      api.get<AuditLogEntry[]>('/api/logs/audit?limit=14').then(setAudit).catch(() => {}),
+    ]);
   }, []);
 
-  // Uptime monitors — polled on their own cadence (the list endpoint aggregates history).
+  // Uptime monitors — their own slower 10s loop (the list endpoint aggregates history).
+  const loadMonitors = useCallback(async () => {
+    if (!canMonitors) return;
+    await api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
+  }, [canMonitors]);
+
+  // Manual "Refresh" — pulls connectors, activity and monitors at once.
+  const refreshAll = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([pollCore(), loadMonitors()]);
+    } finally {
+      // Keep the spin visible briefly even on a fast response, so the tap registers.
+      setTimeout(() => setRefreshing(false), 350);
+    }
+  }, [pollCore, loadMonitors]);
+
+  useEffect(() => {
+    api.get<VersionInfo>('/api/version').then(setVersion).catch(() => {});
+    api.get<Array<unknown>>('/api/users').then((u) => setUserCount(u.length)).catch(() => {});
+    pollCore();
+    const t = setInterval(() => { pollCore(); tick((x) => x + 1); }, 5000);
+    const clock = setInterval(() => tick((x) => x + 1), 1000);
+    return () => { clearInterval(t); clearInterval(clock); };
+  }, [pollCore]);
+
   useEffect(() => {
     if (!canMonitors) return;
-    const load = () => api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
-    load();
-    const t = setInterval(load, 15000);
+    loadMonitors();
+    const t = setInterval(loadMonitors, 10000);
     return () => clearInterval(t);
-  }, [canMonitors]);
+  }, [canMonitors, loadMonitors]);
 
   const monUp = monitors?.filter((m) => m.status === 'up').length ?? 0;
   const monDown = monitors?.filter((m) => m.status === 'down') ?? [];
@@ -220,15 +264,15 @@ export function Dashboard() {
   const ops = useCountUp(userCount);
 
   // System readout meters — all derived from real telemetry.
-  const readout: { name: string; pct: number }[] = [
-    { name: 'Cluster CPU', pct: metric('cpuPct') },
-    { name: 'Cluster RAM', pct: metric('memPct') },
-    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0 },
-    { name: 'Signals Active', pct: guests.length ? (runningGuests / guests.length) * 100 : 0 },
+  const readout: { name: string; pct: number; polarity: Polarity }[] = [
+    { name: 'Cluster CPU', pct: metric('cpuPct'), polarity: 'load' },
+    { name: 'Cluster RAM', pct: metric('memPct'), polarity: 'load' },
+    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0, polarity: 'health' },
+    { name: 'Signals Active', pct: guests.length ? (runningGuests / guests.length) * 100 : 0, polarity: 'neutral' },
   ];
   if (monitors && monitors.length > 0) {
     const denom = monitors.length - monPaused;
-    readout.push({ name: 'Monitors Up', pct: denom ? (monUp / denom) * 100 : 100 });
+    readout.push({ name: 'Monitors Up', pct: denom ? (monUp / denom) * 100 : 100, polarity: 'health' });
   }
 
   return (
@@ -244,6 +288,17 @@ export function Dashboard() {
             Welcome back, {user?.displayName?.split(' ')[0] ?? 'Operator'}
           </h1>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-auto mt-1"
+          onClick={() => refreshAll()}
+          disabled={refreshing}
+          aria-label="Refresh telemetry now"
+        >
+          <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+          Refresh
+        </Button>
       </div>
 
       {/* System readout + live signals */}
@@ -255,7 +310,7 @@ export function Dashboard() {
           className={cn(offline.length > 0 && 'border-amber-500/40')}
         >
           <div className="py-1">
-            {readout.map((r) => <Meter key={r.name} name={r.name} pct={r.pct} />)}
+            {readout.map((r) => <Meter key={r.name} name={r.name} pct={r.pct} polarity={r.polarity} />)}
           </div>
           <div className="mt-3 pt-3 border-t border-border/50 grid grid-cols-3 gap-2 text-center">
             <div>

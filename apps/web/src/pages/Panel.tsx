@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Server, Boxes, Activity, HeartPulse, Radio, Play, Pause, LogOut, ChevronRight, ShieldAlert, ShieldCheck,
+  Server, Boxes, Activity, HeartPulse, Radio, Play, Pause, LogOut, ChevronRight, ShieldAlert, ShieldCheck, RefreshCw,
 } from 'lucide-react';
 import type { DashboardOverview, MonitorSummary, MonitorStatus, AuditLogEntry, VersionInfo } from '@cerebro/shared';
 import { api } from '@/lib/api';
@@ -40,26 +40,44 @@ function rank(s: MonitorStatus): number {
 }
 
 const SEGMENTS = 24;
+
+/**
+ * Semantic direction of a meter:
+ *  - `load`   — higher is worse (CPU, RAM, disk, temp, spend)
+ *  - `health` — higher is better (systems online, monitors up)
+ *  - `neutral`— no good/bad reading (e.g. active vs idle signals)
+ */
+type Polarity = 'load' | 'health' | 'neutral';
+
+const GREEN = 'hsl(160 84% 55%)';
+const AMBER = 'hsl(38 92% 55%)';
+const RED = 'hsl(var(--destructive))';
+const CYAN = 'hsl(var(--accent))';
+
+/** Traffic-light colour for a value, respecting the metric's polarity. */
+function toneColor(pct: number, polarity: Polarity): string {
+  if (polarity === 'neutral') return CYAN;
+  const sev = polarity === 'load'
+    ? (pct > 85 ? 2 : pct > 70 ? 1 : 0)   // higher = worse
+    : (pct >= 90 ? 0 : pct >= 60 ? 1 : 2); // higher = better
+  return sev === 2 ? RED : sev === 1 ? AMBER : GREEN;
+}
+
 /** Large glanceable readout meter for the kiosk. */
-function BigMeter({ name, pct }: { name: string; pct: number }) {
+function BigMeter({ name, pct, polarity = 'load' }: { name: string; pct: number; polarity?: Polarity }) {
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
   const on = Math.round((clamped / 100) * SEGMENTS);
-  const level = clamped > 85 ? 'crit' : clamped > 65 ? 'warn' : 'ok';
+  const col = toneColor(clamped, polarity);
   return (
     <div className="grid grid-cols-[minmax(150px,220px)_1fr_84px] items-center gap-4">
       <span className="font-lcars text-xl text-muted-foreground">{name}</span>
       <div className="h-6 rounded-lg bg-muted flex gap-[3px] p-[3px] overflow-hidden">
         {Array.from({ length: SEGMENTS }, (_, i) => (
-          <span key={i} className="flex-1 rounded-[2px]" data-on={i < on} data-level={level}
-            style={{
-              background: i < on
-                ? level === 'crit' ? 'hsl(var(--destructive))' : level === 'warn' ? 'hsl(38 92% 55%)' : 'hsl(var(--secondary))'
-                : 'hsl(var(--secondary))',
-              opacity: i < on ? 1 : 0.28,
-            }} />
+          <span key={i} className="flex-1 rounded-[2px]"
+            style={{ background: i < on ? col : 'hsl(var(--secondary))', opacity: i < on ? 1 : 0.28 }} />
         ))}
       </div>
-      <span className="font-lcars text-2xl font-semibold tabular-nums text-right">{clamped}%</span>
+      <span className="font-lcars text-2xl font-semibold tabular-nums text-right" style={{ color: col }}>{clamped}%</span>
     </div>
   );
 }
@@ -85,20 +103,49 @@ export function Panel() {
   const [now, setNow] = useState(() => new Date());
   const [view, setView] = useState<ViewId>('ops');
   const [auto, setAuto] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const lastPollRef = useRef(Date.now());
 
-  // Data polling (mirrors the dashboard cadence).
+  // Core telemetry (connectors + activity) — the fast 5s loop.
+  const pollCore = useCallback(async () => {
+    await Promise.all([
+      api.get<DashboardOverview>('/api/connectors/overview').then((d) => { lastPollRef.current = Date.now(); setOverview(d); }).catch(() => {}),
+      api.get<AuditLogEntry[]>('/api/logs/audit?limit=20').then(setAudit).catch(() => {}),
+    ]);
+  }, []);
+
+  // Monitors — their own slower 10s loop.
+  const loadMonitors = useCallback(async () => {
+    if (!canMonitors) return;
+    await api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
+  }, [canMonitors]);
+
+  // Manual "Refresh now" — pulls everything at once.
+  const refreshAll = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([pollCore(), loadMonitors()]);
+    } finally {
+      // Keep the spin visible briefly even on a fast response, so the tap registers.
+      setTimeout(() => setRefreshing(false), 350);
+    }
+  }, [pollCore, loadMonitors]);
+
+  // Fast loop: connectors + activity every 5s.
   useEffect(() => {
     api.get<VersionInfo>('/api/version').then(setVersion).catch(() => {});
-    const poll = () => {
-      api.get<DashboardOverview>('/api/connectors/overview').then((d) => { lastPollRef.current = Date.now(); setOverview(d); }).catch(() => {});
-      api.get<AuditLogEntry[]>('/api/logs/audit?limit=20').then(setAudit).catch(() => {});
-      if (canMonitors) api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
-    };
-    poll();
-    const t = setInterval(poll, 5000);
+    pollCore();
+    const t = setInterval(pollCore, 5000);
     return () => clearInterval(t);
-  }, [canMonitors]);
+  }, [pollCore]);
+
+  // Slow loop: monitors every 10s.
+  useEffect(() => {
+    if (!canMonitors) return;
+    loadMonitors();
+    const t = setInterval(loadMonitors, 10000);
+    return () => clearInterval(t);
+  }, [canMonitors, loadMonitors]);
 
   // Clock.
   useEffect(() => {
@@ -132,13 +179,13 @@ export function Panel() {
   const monPaused = monitors?.filter((m) => m.status === 'paused').length ?? 0;
   const monDenom = monitors ? monitors.length - monPaused : 0;
 
-  const readout: { name: string; pct: number }[] = [
-    { name: 'Cluster CPU', pct: metric('cpuPct') },
-    { name: 'Cluster RAM', pct: metric('memPct') },
-    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0 },
-    { name: 'Signals Active', pct: guests.length ? (running / guests.length) * 100 : 0 },
+  const readout: { name: string; pct: number; polarity: Polarity }[] = [
+    { name: 'Cluster CPU', pct: metric('cpuPct'), polarity: 'load' },
+    { name: 'Cluster RAM', pct: metric('memPct'), polarity: 'load' },
+    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0, polarity: 'health' },
+    { name: 'Signals Active', pct: guests.length ? (running / guests.length) * 100 : 0, polarity: 'neutral' },
   ];
-  if (monitors && monitors.length > 0) readout.push({ name: 'Monitors Up', pct: monDenom ? (monUp / monDenom) * 100 : 100 });
+  if (monitors && monitors.length > 0) readout.push({ name: 'Monitors Up', pct: monDenom ? (monUp / monDenom) * 100 : 100, polarity: 'health' });
 
   const activeTitle = VIEWS.find((v) => v.id === view)?.label ?? 'Ops';
 
@@ -156,6 +203,16 @@ export function Panel() {
               <span className={cn('h-2 w-2 rounded-full', stale ? 'bg-destructive animate-pulse' : 'bg-emerald-400 animate-pulse')} />
               {stale ? 'SIGNAL LOST' : `${connOk}/${connTotal} LINKED`}
             </span>
+            <button
+              onClick={() => refreshAll()}
+              disabled={refreshing}
+              className="lcars-chip inline-flex items-center gap-2 h-9 hover:brightness-125 disabled:opacity-70 transition"
+              title="Refresh now"
+              aria-label="Refresh telemetry now"
+            >
+              <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+              <span className="hidden md:inline">Refresh</span>
+            </button>
             <span className="lcars-chip tabular-nums text-base">{now.toLocaleTimeString('en-GB')}</span>
           </div>
         </div>
@@ -211,7 +268,7 @@ export function Panel() {
                 </div>
                 <div className="flex-1 rounded-xl border border-border/50 bg-card/60 p-6 flex flex-col justify-center gap-4">
                   <div className="font-lcars text-sm tracking-[0.16em] text-muted-foreground mb-1">System Readout</div>
-                  {readout.map((r) => <BigMeter key={r.name} name={r.name} pct={r.pct} />)}
+                  {readout.map((r) => <BigMeter key={r.name} name={r.name} pct={r.pct} polarity={r.polarity} />)}
                 </div>
               </div>
             )}
