@@ -32,12 +32,27 @@ function uptimeSince(iso?: string): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
-/** Colour a signal dot by what it actually is — provider + resource kind. */
+/** Colour a signal ICON by what it actually is — provider + resource kind. */
 function guestColor(kind: string): string {
   if (kind === 'ec2') return 'hsl(32 95% 56%)';       // AWS EC2 — amber
   if (kind === 'lxc') return 'hsl(var(--accent))';     // Proxmox container — teal
   if (kind === 'qemu') return 'hsl(var(--primary))';   // Proxmox VM — cyan
   return 'hsl(var(--accent) / 0.7)';
+}
+
+/** Compute resources whose "running/stopped" state is meaningful for the "active" ratio. */
+const COMPUTE_KINDS = new Set(['qemu', 'lxc', 'ec2']);
+
+/** Reduce any connector's status string to up / down / idle for the status DOT. */
+function signalState(status: string): 'up' | 'down' | 'idle' {
+  const s = status.toLowerCase();
+  if (['running', 'on', 'active', 'available', 'in-use', 'enabled', 'playing', 'home', 'online', 'up', 'ok', 'success', 'backed up', 'healthy'].includes(s)) return 'up';
+  if (['error', 'failed', 'down', 'unavailable', 'unreachable', 'critical', 'stopped-error'].includes(s)) return 'down';
+  return 'idle'; // stopped, off, paused, snapshot, pending, unknown, …
+}
+function signalDotColor(status: string): string {
+  const t = signalState(status);
+  return t === 'up' ? 'hsl(160 84% 55%)' : t === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground) / 0.5)';
 }
 
 /** Where tapping a live signal takes you (its kind's overview scope). */
@@ -253,8 +268,11 @@ export function Dashboard() {
   const offline = sources.filter((s) => !s.ok);
   const secsSinceScan = Math.floor((Date.now() - lastPollRef.current) / 1000);
   const stale = secsSinceScan > 15;
-  const runningGuests = guests.filter((g) => g.status === 'running').length;
-  const idleGuests = guests.length - runningGuests;
+  // "Signals active" only makes sense for compute (VMs/containers/instances) — not
+  // backup snapshots, HA entities, or AWS services, which also live in `guests`.
+  const computeGuests = guests.filter((g) => COMPUTE_KINDS.has(g.kind));
+  const runningGuests = computeGuests.filter((g) => g.status === 'running').length;
+  const idleGuests = computeGuests.length - runningGuests;
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
 
@@ -268,7 +286,7 @@ export function Dashboard() {
     { name: 'Cluster CPU', pct: metric('cpuPct'), polarity: 'load' },
     { name: 'Cluster RAM', pct: metric('memPct'), polarity: 'load' },
     { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0, polarity: 'health' },
-    { name: 'Signals Active', pct: guests.length ? (runningGuests / guests.length) * 100 : 0, polarity: 'neutral' },
+    { name: 'Signals Active', pct: computeGuests.length ? (runningGuests / computeGuests.length) * 100 : 0, polarity: 'neutral' },
   ];
   if (monitors && monitors.length > 0) {
     const denom = monitors.length - monPaused;
@@ -328,12 +346,12 @@ export function Dashboard() {
           </div>
         </Panel>
 
-        <Panel title="Live Signals" to="/connectors" tag={<span className="tabular-nums">{guests.length}</span>}>
-          {guests.length === 0 ? (
+        <Panel title="Live Signals" to="/connectors" tag={<span className="tabular-nums">{computeGuests.length}</span>}>
+          {computeGuests.length === 0 ? (
             <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">No signals detected.</div>
           ) : (
             <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
-              {guests.map((g, i) => (
+              {computeGuests.map((g, i) => (
                 <Link
                   key={i}
                   to={guestTo(g.kind)}
@@ -341,9 +359,11 @@ export function Dashboard() {
                 >
                   <span
                     className="h-2.5 w-2.5 rounded-full shrink-0"
-                    style={g.status === 'running'
-                      ? { background: guestColor(g.kind), boxShadow: `0 0 6px ${guestColor(g.kind)}` }
-                      : { background: 'hsl(var(--muted-foreground) / 0.5)' }}
+                    title={g.status}
+                    style={{
+                      background: signalDotColor(g.status),
+                      boxShadow: signalState(g.status) === 'up' ? `0 0 6px ${signalDotColor(g.status)}` : undefined,
+                    }}
                   />
                   {g.kind === 'lxc'
                     ? <Boxes className="h-4 w-4 shrink-0" style={{ color: guestColor(g.kind) }} />

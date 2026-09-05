@@ -24,6 +24,21 @@ function guestColor(kind: string): string {
   if (kind === 'qemu') return 'hsl(var(--primary))';
   return 'hsl(var(--accent) / 0.7)';
 }
+
+/** Compute resources whose running/stopped state is meaningful for the "active" ratio. */
+const COMPUTE_KINDS = new Set(['qemu', 'lxc', 'ec2']);
+
+/** Reduce any connector's status string to up / down / idle for the status dot. */
+function signalState(status: string): 'up' | 'down' | 'idle' {
+  const s = status.toLowerCase();
+  if (['running', 'on', 'active', 'available', 'in-use', 'enabled', 'playing', 'home', 'online', 'up', 'ok', 'success', 'backed up', 'healthy'].includes(s)) return 'up';
+  if (['error', 'failed', 'down', 'unavailable', 'unreachable', 'critical', 'stopped-error'].includes(s)) return 'down';
+  return 'idle';
+}
+function signalDotColor(status: string): string {
+  const t = signalState(status);
+  return t === 'up' ? 'hsl(160 84% 55%)' : t === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground) / 0.5)';
+}
 function guestTo(kind: string): string {
   if (kind === 'qemu') return '/overview/vm';
   if (kind === 'lxc') return '/overview/container';
@@ -168,7 +183,8 @@ export function Panel() {
 
   const metric = (k: string) => overview?.metrics.find((m) => m.key === k)?.value ?? 0;
   const guests = overview?.guests ?? [];
-  const running = guests.filter((g) => g.status === 'running').length;
+  const computeGuests = guests.filter((g) => COMPUTE_KINDS.has(g.kind));
+  const running = computeGuests.filter((g) => g.status === 'running').length;
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
   const offline = (overview?.sources ?? []).filter((s) => !s.ok);
@@ -183,7 +199,7 @@ export function Panel() {
     { name: 'Cluster CPU', pct: metric('cpuPct'), polarity: 'load' },
     { name: 'Cluster RAM', pct: metric('memPct'), polarity: 'load' },
     { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0, polarity: 'health' },
-    { name: 'Signals Active', pct: guests.length ? (running / guests.length) * 100 : 0, polarity: 'neutral' },
+    { name: 'Signals Active', pct: computeGuests.length ? (running / computeGuests.length) * 100 : 0, polarity: 'neutral' },
   ];
   if (monitors && monitors.length > 0) readout.push({ name: 'Monitors Up', pct: monDenom ? (monUp / monDenom) * 100 : 100, polarity: 'health' });
 
@@ -275,15 +291,15 @@ export function Panel() {
 
             {/* ── SIGNALS ── */}
             {view === 'signals' && (
-              guests.length === 0
+              computeGuests.length === 0
                 ? <Empty label="No signals detected" />
                 : <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
-                    {guests.map((g, i) => (
-                      <Link key={i} to={guestTo(g.kind)}
+                    {computeGuests.map((g, i) => (
+                      <Link key={i} to={guestTo(g.kind)} title={g.status}
                         className="rounded-xl border border-border/60 bg-card/70 p-4 flex items-center gap-3 hover:border-primary/50 transition-colors"
-                        style={{ borderLeft: `5px solid ${g.status === 'running' ? guestColor(g.kind) : 'hsl(var(--muted-foreground)/0.4)'}` }}>
+                        style={{ borderLeft: `5px solid ${signalDotColor(g.status)}` }}>
                         <span className="h-3 w-3 rounded-full shrink-0"
-                          style={g.status === 'running' ? { background: guestColor(g.kind), boxShadow: `0 0 8px ${guestColor(g.kind)}` } : { background: 'hsl(var(--muted-foreground)/0.5)' }} />
+                          style={{ background: signalDotColor(g.status), boxShadow: signalState(g.status) === 'up' ? `0 0 8px ${signalDotColor(g.status)}` : undefined }} />
                         {g.kind === 'lxc' ? <Boxes className="h-5 w-5 shrink-0" style={{ color: guestColor(g.kind) }} /> : <Server className="h-5 w-5 shrink-0" style={{ color: guestColor(g.kind) }} />}
                         <div className="min-w-0">
                           <div className="font-lcars text-lg truncate">{g.name}</div>
