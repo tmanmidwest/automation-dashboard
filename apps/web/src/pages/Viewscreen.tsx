@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Plus, Pencil, Trash2, Maximize2, X, VideoOff, RefreshCw, Play, Square, ImageIcon } from 'lucide-react';
+import { Camera, Plus, Pencil, Trash2, Maximize2, X, VideoOff, RefreshCw, Play, Square, ImageIcon, GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
 import type { ConnectorInstanceSummary, ConnectorResource, ViewscreenCamera, ViewscreenConfig } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -75,6 +75,7 @@ function CameraFeed({
       key={bust}
       src={streamUrl(instanceId, entityId, feed, bust)}
       alt={alt}
+      draggable={false}
       className={cn('h-full w-full object-cover bg-black', className)}
       onError={() => setErrored(true)}
     />
@@ -85,17 +86,38 @@ function CameraFeed({
 function CameraTile({
   camera,
   canEdit,
+  isOver,
+  canMoveUp,
+  canMoveDown,
   onExpand,
   onEdit,
   onRemove,
+  onMoveUp,
+  onMoveDown,
+  onDragStart,
+  onDragEnterTile,
+  onDropTile,
+  onDragEndTile,
 }: {
   camera: ViewscreenCamera;
   canEdit: boolean;
+  isOver: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onExpand: () => void;
   onEdit: () => void;
   onRemove: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onDragStart: () => void;
+  onDragEnterTile: () => void;
+  onDropTile: () => void;
+  onDragEndTile: () => void;
 }) {
   const [view, setView] = useState<FeedView>(() => initialView(camera.mode));
+  // Native drag only arms while the pointer starts on the grip handle — so dragging
+  // never fights with the feed, the play/stop button, or the edit controls.
+  const [armed, setArmed] = useState(false);
 
   // If the saved default changes (after an edit), reset to it.
   useEffect(() => { setView(initialView(camera.mode)); }, [camera.mode, camera.id]);
@@ -103,7 +125,18 @@ function CameraTile({
   const badge = view === 'off' ? 'Idle' : view === 'snapshot' ? 'Still' : 'Live';
 
   return (
-    <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div
+      className={cn(
+        'group relative overflow-hidden rounded-xl border border-border/60 bg-card transition-shadow',
+        isOver && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
+      )}
+      draggable={canEdit && armed}
+      onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(); }}
+      onDragEnter={(e) => { if (canEdit) { e.preventDefault(); onDragEnterTile(); } }}
+      onDragOver={(e) => { if (canEdit) e.preventDefault(); }}
+      onDrop={(e) => { if (canEdit) { e.preventDefault(); onDropTile(); } }}
+      onDragEnd={() => { setArmed(false); onDragEndTile(); }}
+    >
       <div className="relative aspect-video">
         {view === 'off' ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-black/70">
@@ -131,6 +164,28 @@ function CameraTile({
         {/* hover controls */}
         <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1.5 p-2 opacity-0 transition-opacity group-hover:opacity-100">
           <div className="flex items-center gap-1.5">
+            {canEdit && (
+              <>
+                <span
+                  className="grid h-8 w-8 cursor-grab place-items-center rounded-md bg-secondary text-secondary-foreground active:cursor-grabbing"
+                  title="Drag to reorder"
+                  aria-label="Drag to reorder"
+                  onMouseDown={() => setArmed(true)}
+                  onMouseUp={() => setArmed(false)}
+                >
+                  <GripVertical className="h-4 w-4" />
+                </span>
+                {/* Touch-friendly reordering: move this tile earlier/later in the order. */}
+                <Button variant="secondary" size="icon" className="h-8 w-8" title="Move earlier"
+                  disabled={!canMoveUp} onClick={onMoveUp} aria-label="Move earlier">
+                  <ChevronUp className="h-4 w-4" />
+                </Button>
+                <Button variant="secondary" size="icon" className="h-8 w-8" title="Move later"
+                  disabled={!canMoveDown} onClick={onMoveDown} aria-label="Move later">
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </>
+            )}
             {view === 'off' ? (
               <Button variant="secondary" size="icon" className="h-8 w-8" title="Go live" onClick={() => setView('live')}>
                 <Play className="h-4 w-4" />
@@ -171,6 +226,8 @@ export function Viewscreen() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ViewscreenCamera | null>(null);
   const [expanded, setExpanded] = useState<ViewscreenCamera | null>(null);
+  const dragId = useRef<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<ViewscreenConfig>('/api/settings/viewscreen')
@@ -202,6 +259,33 @@ export function Viewscreen() {
   const setColumns = useCallback((columns: number) => {
     if (!config) return;
     void persist({ ...config, columns });
+  }, [config, persist]);
+
+  /** Nudge a tile one step earlier (delta -1) or later (delta +1) in the order. */
+  const moveBy = useCallback((id: string, delta: number) => {
+    if (!config) return;
+    const from = config.cameras.findIndex((c) => c.id === id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= config.cameras.length) return;
+    const cameras = [...config.cameras];
+    const [moved] = cameras.splice(from, 1);
+    cameras.splice(to, 0, moved);
+    void persist({ ...config, cameras });
+  }, [config, persist]);
+
+  /** Move the dragged tile to the position of the tile it was dropped on, then persist. */
+  const dropOnto = useCallback((targetId: string) => {
+    const fromId = dragId.current;
+    dragId.current = null;
+    setOverId(null);
+    if (!config || !fromId || fromId === targetId) return;
+    const from = config.cameras.findIndex((c) => c.id === fromId);
+    const to = config.cameras.findIndex((c) => c.id === targetId);
+    if (from < 0 || to < 0) return;
+    const cameras = [...config.cameras];
+    const [moved] = cameras.splice(from, 1);
+    cameras.splice(to, 0, moved);
+    void persist({ ...config, cameras });
   }, [config, persist]);
 
   const cols = config?.columns ?? 3;
@@ -261,14 +345,23 @@ export function Viewscreen() {
           className="grid gap-3 [grid-template-columns:repeat(1,minmax(0,1fr))] sm:[grid-template-columns:repeat(2,minmax(0,1fr))] lg:[grid-template-columns:repeat(var(--vs-cols),minmax(0,1fr))]"
           style={{ ['--vs-cols' as string]: String(cols) }}
         >
-          {cameras.map((cam) => (
+          {cameras.map((cam, i) => (
             <CameraTile
               key={cam.id}
               camera={cam}
               canEdit={canEdit}
+              isOver={overId === cam.id && dragId.current !== cam.id}
+              canMoveUp={i > 0}
+              canMoveDown={i < cameras.length - 1}
               onExpand={() => setExpanded(cam)}
               onEdit={() => { setEditing(cam); setEditorOpen(true); }}
               onRemove={() => removeCamera(cam.id)}
+              onMoveUp={() => moveBy(cam.id, -1)}
+              onMoveDown={() => moveBy(cam.id, 1)}
+              onDragStart={() => { dragId.current = cam.id; }}
+              onDragEnterTile={() => setOverId(cam.id)}
+              onDropTile={() => dropOnto(cam.id)}
+              onDragEndTile={() => { dragId.current = null; setOverId(null); }}
             />
           ))}
         </div>
