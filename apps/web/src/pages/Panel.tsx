@@ -39,6 +39,10 @@ function signalDotColor(status: string): string {
   const t = signalState(status);
   return t === 'up' ? 'hsl(160 84% 55%)' : t === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground) / 0.5)';
 }
+/** List order: problems first (down, then idle/stopped), running last. */
+function signalRank(status: string): number {
+  return { down: 0, idle: 1, up: 2 }[signalState(status)] ?? 1;
+}
 function guestTo(kind: string): string {
   if (kind === 'qemu') return '/overview/vm';
   if (kind === 'lxc') return '/overview/container';
@@ -294,7 +298,7 @@ export function Panel() {
               computeGuests.length === 0
                 ? <Empty label="No signals detected" />
                 : <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
-                    {computeGuests.map((g, i) => (
+                    {[...computeGuests].sort((a, b) => signalRank(a.status) - signalRank(b.status)).map((g, i) => (
                       <Link key={i} to={guestTo(g.kind)} title={g.status}
                         className="rounded-xl border border-border/60 bg-card/70 p-4 flex items-center gap-3 hover:border-primary/50 transition-colors"
                         style={{ borderLeft: `5px solid ${signalDotColor(g.status)}` }}>

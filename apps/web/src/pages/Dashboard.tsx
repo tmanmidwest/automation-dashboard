@@ -54,6 +54,10 @@ function signalDotColor(status: string): string {
   const t = signalState(status);
   return t === 'up' ? 'hsl(160 84% 55%)' : t === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground) / 0.5)';
 }
+/** List order: problems first (down, then idle/stopped), running last — so a non-100% state shows at the top without scrolling. */
+function signalRank(status: string): number {
+  return { down: 0, idle: 1, up: 2 }[signalState(status)] ?? 1;
+}
 
 /** Where tapping a live signal takes you (its kind's overview scope). */
 function guestTo(kind: string): string {
@@ -351,7 +355,7 @@ export function Dashboard() {
             <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">No signals detected.</div>
           ) : (
             <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
-              {computeGuests.map((g, i) => (
+              {[...computeGuests].sort((a, b) => signalRank(a.status) - signalRank(b.status)).map((g, i) => (
                 <Link
                   key={i}
                   to={guestTo(g.kind)}
