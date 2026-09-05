@@ -15,7 +15,7 @@ class CameraDto {
   @IsString() instanceId!: string;
   @IsString() entityId!: string;
   @IsString() name!: string;
-  @IsIn(['mjpeg', 'snapshot']) mode!: 'mjpeg' | 'snapshot';
+  @IsIn(['mjpeg', 'snapshot', 'manual']) mode!: 'mjpeg' | 'snapshot' | 'manual';
 }
 
 class ViewscreenConfigDto {

@@ -193,8 +193,14 @@ export interface ViewscreenCamera {
   entityId: string;
   /** Display name shown on the tile. */
   name: string;
-  /** 'mjpeg' = live motion-JPEG stream; 'snapshot' = periodically-refreshed still. */
-  mode: 'mjpeg' | 'snapshot';
+  /**
+   * Default behavior when the tile loads:
+   *  - 'mjpeg'    — live motion-JPEG stream, starts immediately
+   *  - 'snapshot' — a still that refreshes every few seconds, starts immediately
+   *  - 'manual'   — nothing loads until you press "Go Live" (for solar/battery cameras)
+   * A tile can always be started or stopped on demand regardless of this default.
+   */
+  mode: 'mjpeg' | 'snapshot' | 'manual';
 }
 
 /** The persisted Viewscreen layout (global; stored under the `viewscreen.cameras` setting). */

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Plus, Pencil, Trash2, Maximize2, X, VideoOff, RefreshCw } from 'lucide-react';
+import { Camera, Plus, Pencil, Trash2, Maximize2, X, VideoOff, RefreshCw, Play, Square, ImageIcon } from 'lucide-react';
 import type { ConnectorInstanceSummary, ConnectorResource, ViewscreenCamera, ViewscreenConfig } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -10,9 +10,20 @@ import { Label } from '@/components/ui/label';
 import { Dialog } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
+/** What a tile is actively showing right now (independent of its saved default). */
+type FeedView = 'off' | 'live' | 'snapshot';
+
+/** Map a saved camera mode to the view a tile starts in. */
+function initialView(mode: ViewscreenCamera['mode']): FeedView {
+  if (mode === 'manual') return 'off';
+  if (mode === 'snapshot') return 'snapshot';
+  return 'live';
+}
+
 /** Build the same-origin proxy URL for a camera feed (carries the session cookie). */
-function streamUrl(c: Pick<ViewscreenCamera, 'instanceId' | 'entityId' | 'mode'>, bust?: number): string {
-  const base = `/api/connectors/instances/${c.instanceId}/resources/camera/${encodeURIComponent(c.entityId)}/stream?mode=${c.mode}`;
+function streamUrl(instanceId: string, entityId: string, feed: 'live' | 'snapshot', bust?: number): string {
+  const mode = feed === 'snapshot' ? 'snapshot' : 'mjpeg';
+  const base = `/api/connectors/instances/${instanceId}/resources/camera/${encodeURIComponent(entityId)}/stream?mode=${mode}`;
   return bust ? `${base}&_t=${bust}` : base;
 }
 
@@ -20,25 +31,32 @@ const nativeSelect =
   'flex h-10 w-full rounded-md border border-input bg-background/60 px-3 py-2 text-sm ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50';
 
-/** One camera feed. MJPEG streams continuously; snapshot mode refreshes a still on an interval. */
-function CameraFeed({ camera, className }: { camera: ViewscreenCamera; className?: string }) {
+/** One active camera feed. Live holds one open MJPEG connection; snapshot refreshes a still every 5s. */
+function CameraFeed({
+  instanceId,
+  entityId,
+  feed,
+  alt,
+  className,
+}: {
+  instanceId: string;
+  entityId: string;
+  feed: 'live' | 'snapshot';
+  alt: string;
+  className?: string;
+}) {
   const [bust, setBust] = useState(() => Date.now());
   const [errored, setErrored] = useState(false);
 
-  // Snapshot mode: poll a fresh still every 5s. MJPEG holds one open connection.
   useEffect(() => {
-    if (camera.mode !== 'snapshot') return;
+    if (feed !== 'snapshot') return;
     const t = setInterval(() => setBust(Date.now()), 5000);
     return () => clearInterval(t);
-  }, [camera.mode, camera.id]);
+  }, [feed, instanceId, entityId]);
 
-  // On error, retry after a short delay (HA/camera may be briefly unreachable).
   useEffect(() => {
     if (!errored) return;
-    const t = setTimeout(() => {
-      setErrored(false);
-      setBust(Date.now());
-    }, 4000);
+    const t = setTimeout(() => { setErrored(false); setBust(Date.now()); }, 4000);
     return () => clearTimeout(t);
   }, [errored]);
 
@@ -55,11 +73,92 @@ function CameraFeed({ camera, className }: { camera: ViewscreenCamera; className
   return (
     <img
       key={bust}
-      src={streamUrl(camera, bust)}
-      alt={camera.name}
+      src={streamUrl(instanceId, entityId, feed, bust)}
+      alt={alt}
       className={cn('h-full w-full object-cover bg-black', className)}
       onError={() => setErrored(true)}
     />
+  );
+}
+
+/** A single wall tile: owns its live/snapshot/off state so feeds start only on demand. */
+function CameraTile({
+  camera,
+  canEdit,
+  onExpand,
+  onEdit,
+  onRemove,
+}: {
+  camera: ViewscreenCamera;
+  canEdit: boolean;
+  onExpand: () => void;
+  onEdit: () => void;
+  onRemove: () => void;
+}) {
+  const [view, setView] = useState<FeedView>(() => initialView(camera.mode));
+
+  // If the saved default changes (after an edit), reset to it.
+  useEffect(() => { setView(initialView(camera.mode)); }, [camera.mode, camera.id]);
+
+  const badge = view === 'off' ? 'Idle' : view === 'snapshot' ? 'Still' : 'Live';
+
+  return (
+    <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-card">
+      <div className="relative aspect-video">
+        {view === 'off' ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-black/70">
+            <Camera className="h-8 w-8 text-muted-foreground" />
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => setView('live')}>
+                <Play className="h-4 w-4" /> Go Live
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => setView('snapshot')}>
+                <ImageIcon className="h-4 w-4" /> Snapshot
+              </Button>
+            </div>
+            <span className="text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">on-demand</span>
+          </div>
+        ) : (
+          <CameraFeed instanceId={camera.instanceId} entityId={camera.entityId} feed={view} alt={camera.name} />
+        )}
+
+        {/* top gradient + label */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/70 to-transparent p-2.5">
+          <span className="font-lcars text-sm tracking-wide text-white drop-shadow">{camera.name}</span>
+          <span className="rounded-full bg-black/50 px-2 py-0.5 text-[0.6rem] uppercase tracking-[0.14em] text-white/80">{badge}</span>
+        </div>
+
+        {/* hover controls */}
+        <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1.5 p-2 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex items-center gap-1.5">
+            {view === 'off' ? (
+              <Button variant="secondary" size="icon" className="h-8 w-8" title="Go live" onClick={() => setView('live')}>
+                <Play className="h-4 w-4" />
+              </Button>
+            ) : (
+              <Button variant="secondary" size="icon" className="h-8 w-8" title="Stop" onClick={() => setView('off')}>
+                <Square className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button variant="secondary" size="icon" className="h-8 w-8" title="Expand" onClick={onExpand}>
+              <Maximize2 className="h-4 w-4" />
+            </Button>
+            {canEdit && (
+              <>
+                <Button variant="secondary" size="icon" className="h-8 w-8" title="Edit" onClick={onEdit}>
+                  <Pencil className="h-4 w-4" />
+                </Button>
+                <Button variant="destructive" size="icon" className="h-8 w-8" title="Remove" onClick={onRemove}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -163,39 +262,14 @@ export function Viewscreen() {
           style={{ ['--vs-cols' as string]: String(cols) }}
         >
           {cameras.map((cam) => (
-            <div
+            <CameraTile
               key={cam.id}
-              className="group relative overflow-hidden rounded-xl border border-border/60 bg-card"
-            >
-              <div className="relative aspect-video">
-                <CameraFeed camera={cam} />
-                {/* top gradient + label */}
-                <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/70 to-transparent p-2.5">
-                  <span className="font-lcars text-sm tracking-wide text-white drop-shadow">{cam.name}</span>
-                  <span className="rounded-full bg-black/50 px-2 py-0.5 text-[0.6rem] uppercase tracking-[0.14em] text-white/80">
-                    {cam.mode === 'snapshot' ? 'Still' : 'Live'}
-                  </span>
-                </div>
-                {/* hover controls */}
-                <div className="absolute inset-x-0 bottom-0 flex items-center justify-end gap-1.5 p-2 opacity-0 transition-opacity group-hover:opacity-100">
-                  <Button variant="secondary" size="icon" className="h-8 w-8" title="Expand" onClick={() => setExpanded(cam)}>
-                    <Maximize2 className="h-4 w-4" />
-                  </Button>
-                  {canEdit && (
-                    <>
-                      <Button variant="secondary" size="icon" className="h-8 w-8" title="Edit"
-                        onClick={() => { setEditing(cam); setEditorOpen(true); }}>
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button variant="destructive" size="icon" className="h-8 w-8" title="Remove"
-                        onClick={() => removeCamera(cam.id)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
+              camera={cam}
+              canEdit={canEdit}
+              onExpand={() => setExpanded(cam)}
+              onEdit={() => { setEditing(cam); setEditorOpen(true); }}
+              onRemove={() => removeCamera(cam.id)}
+            />
           ))}
         </div>
       )}
@@ -218,7 +292,8 @@ export function Viewscreen() {
               </Button>
             </div>
             <div className="aspect-video overflow-hidden rounded-xl border border-border/60">
-              <CameraFeed camera={expanded} />
+              {/* Expanding is an explicit "show me now" — go live regardless of the tile's default. */}
+              <CameraFeed instanceId={expanded.instanceId} entityId={expanded.entityId} feed="live" alt={expanded.name} />
             </div>
           </div>
         </div>
@@ -242,11 +317,10 @@ function CameraEditor({
   const [cameras, setCameras] = useState<ConnectorResource[] | null>(null);
   const [entityId, setEntityId] = useState(initial?.entityId ?? '');
   const [name, setName] = useState(initial?.name ?? '');
-  const [mode, setMode] = useState<'mjpeg' | 'snapshot'>(initial?.mode ?? 'mjpeg');
+  const [mode, setMode] = useState<ViewscreenCamera['mode']>(initial?.mode ?? 'mjpeg');
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const nameTouched = useRef(!!initial);
 
-  // Home Assistant instances are the ones that expose camera entities.
   useEffect(() => {
     api.get<ConnectorInstanceSummary[]>('/api/connectors/instances')
       .then((list) => {
@@ -257,7 +331,6 @@ function CameraEditor({
       .catch((e) => setLoadErr(e?.message ?? 'Failed to load connectors.'));
   }, [initial]);
 
-  // Load camera entities whenever the chosen instance changes.
   useEffect(() => {
     if (!instanceId) { setCameras(null); return; }
     setCameras(null);
@@ -267,7 +340,6 @@ function CameraEditor({
       .catch((e) => setLoadErr(e?.message ?? 'Failed to load cameras.'));
   }, [instanceId]);
 
-  // Default the tile name from the chosen camera until the user edits it.
   useEffect(() => {
     if (nameTouched.current || !entityId || !cameras) return;
     const found = cameras.find((c) => c.id === entityId);
@@ -351,14 +423,15 @@ function CameraEditor({
         </div>
 
         <div className="space-y-1.5">
-          <Label>Feed type</Label>
-          <select className={nativeSelect} value={mode} onChange={(e) => setMode(e.target.value as 'mjpeg' | 'snapshot')}>
-            <option value="mjpeg">Live (MJPEG stream)</option>
-            <option value="snapshot">Snapshot (refreshes every 5s — lighter)</option>
+          <Label>Default feed</Label>
+          <select className={nativeSelect} value={mode} onChange={(e) => setMode(e.target.value as ViewscreenCamera['mode'])}>
+            <option value="mjpeg">Live stream — starts automatically</option>
+            <option value="snapshot">Snapshot — still, refreshes every 5s</option>
+            <option value="manual">On-demand — nothing until you press Go Live</option>
           </select>
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <RefreshCw className="h-3 w-3" />
-            Live is smoothest; snapshot uses far less bandwidth for many tiles.
+            Use On-demand for solar/battery cameras so they only stream when you ask. You can start or stop any tile from its controls.
           </p>
         </div>
       </div>
