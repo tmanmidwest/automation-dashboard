@@ -5,7 +5,7 @@ import { LoggingService } from '../logging/logging.service';
 import { ConnectorRegistry } from './connector-registry.service';
 import { JobService } from './job.service';
 import type {
-  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget, ConnectorNode,
+  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget, ConnectorStreamTarget, ConnectorNode,
   DashboardOverview, OverviewMetric, OverviewGuest, OverviewSource,
 } from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
@@ -457,6 +457,24 @@ export class ConnectorInstanceService {
       return await connector.openConsole(ctx, kind, resourceId, mode);
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to open the console.');
+    }
+  }
+
+  /**
+   * Resolve a media-stream proxy target (e.g. a camera feed) for a resource. The
+   * controller GETs this upstream URL with its headers and pipes the bytes back to
+   * the browser, so upstream credentials never reach the client.
+   */
+  async streamTarget(id: string, kind: string, resourceId: string, mode: string): Promise<ConnectorStreamTarget> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.openStream) throw new BadRequestException('This connector does not support media streams.');
+    const ctx = await this.buildContext(instance);
+    try {
+      return await connector.openStream(ctx, kind, resourceId, mode);
+    } catch (err) {
+      throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to open the stream.');
     }
   }
 }

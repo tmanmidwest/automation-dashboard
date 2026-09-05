@@ -127,6 +127,29 @@ export interface ConnectorConsoleTarget {
   initMessage?: string;
 }
 
+/**
+ * Where the core should proxy a media/stream request for a resource (e.g. a
+ * camera feed), and how to authenticate upstream. The core issues a GET to
+ * `url` with `headers` and pipes the bytes straight to the browser — so an
+ * <img>/<video> can point at a same-origin Cerebro endpoint and never see the
+ * upstream credentials. Same idea as ConnectorConsoleTarget, over plain HTTP.
+ */
+export interface ConnectorStreamTarget {
+  /** Upstream URL the core GETs and pipes back. */
+  url: string;
+  /** Headers for the upstream request (e.g. Authorization). Kept server-side. */
+  headers?: Record<string, string>;
+  /** Verify the upstream TLS certificate. */
+  rejectUnauthorized?: boolean;
+  /**
+   * How the browser should render it: 'mjpeg' and 'snapshot' go in an <img>,
+   * 'hls' is an m3u8 playlist for a video player. A hint for the client only.
+   */
+  format: 'mjpeg' | 'snapshot' | 'hls';
+  /** Content-Type to send when the upstream response omits one. */
+  contentType?: string;
+}
+
 /** A collection nested under a resource (e.g. a VM's snapshots). */
 export interface ConnectorSubResourceKind {
   /** e.g. "snapshot" */
@@ -347,6 +370,18 @@ export interface Connector {
     resourceId: string,
     mode: 'vnc' | 'serial',
   ): Promise<ConnectorConsoleTarget>;
+  /**
+   * Optional: resolve a media stream (e.g. a camera feed) for a resource. The
+   * core GETs the returned target and pipes the bytes to the browser, so the
+   * upstream credentials never reach the client. `mode` is a connector-specific
+   * variant selector (e.g. 'mjpeg' | 'snapshot').
+   */
+  openStream?(
+    ctx: ConnectorContext,
+    kind: string,
+    resourceId: string,
+    mode: string,
+  ): Promise<ConnectorStreamTarget>;
   /**
    * Optional: stream live resource updates. Calls `onUpdate` with a normalized
    * resource (its `kind` set) whenever one changes upstream. Resolves to an

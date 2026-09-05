@@ -8,6 +8,7 @@ import { Consent } from '@/pages/Consent';
 import { Setup } from '@/pages/Setup';
 import { Dashboard } from '@/pages/Dashboard';
 import { Panel } from '@/pages/Panel';
+import { Viewscreen } from '@/pages/Viewscreen';
 import { Account } from '@/pages/Account';
 import { OverviewResources } from '@/pages/OverviewResources';
 import { ConnectorsList } from '@/pages/connectors/ConnectorsList';
@@ -79,6 +80,7 @@ function Router() {
 
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/panel" element={<ProtectedBare><Panel /></ProtectedBare>} />
+      <Route path="/viewscreen" element={<Protected><RequirePerm perm="connectors:read"><Viewscreen /></RequirePerm></Protected>} />
       <Route path="/overview/:kind" element={<Protected><RequirePerm perm="connectors:read"><OverviewResources /></RequirePerm></Protected>} />
       <Route path="/connectors" element={<Protected><RequirePerm perm="connectors:read"><ConnectorsList /></RequirePerm></Protected>} />
       <Route path="/connectors/new/:connectorId" element={<Protected><RequirePerm perm="connectors:write"><ConnectorSetup /></RequirePerm></Protected>} />

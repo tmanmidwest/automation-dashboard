@@ -10,9 +10,14 @@ import {
   Post,
   Put,
   Query,
+  Res,
   Sse,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
+import type { Response } from 'express';
+import * as http from 'http';
+import * as https from 'https';
+import { URL } from 'url';
 import type { ConnectorResource } from '@cerebro/shared';
 import { IsBoolean, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 import type { ConnectorJobStatus } from '@cerebro/shared';
@@ -232,6 +237,60 @@ export class ConnectorsController {
       meta: { ok: result.ok },
     });
     return result;
+  }
+
+  /**
+   * Proxy a resource's media stream (e.g. a camera feed) to the browser. The
+   * connector resolves an upstream target; we GET it with its credentials and
+   * pipe the bytes back. Because this is a same-origin GET, an <img>/<video>
+   * carries the session cookie automatically and the upstream token stays here.
+   * `mode` selects the variant (e.g. 'mjpeg' | 'snapshot').
+   */
+  @Get('instances/:id/resources/:kind/:resourceId/stream')
+  @RequirePermissions('connectors:read')
+  async stream(
+    @Param('id') id: string,
+    @Param('kind') kind: string,
+    @Param('resourceId') resourceId: string,
+    @Query('mode') mode: string | undefined,
+    @Res() res: Response,
+  ) {
+    const target = await this.instances.streamTarget(id, kind, resourceId, mode || 'mjpeg');
+    const url = new URL(target.url);
+    const isHttps = url.protocol === 'https:';
+    const lib = isHttps ? https : http;
+
+    const upstream = lib.request(
+      {
+        method: 'GET',
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: url.pathname + url.search,
+        headers: target.headers,
+        rejectUnauthorized: isHttps ? target.rejectUnauthorized : undefined,
+        timeout: 30000,
+      },
+      (up) => {
+        const status = up.statusCode ?? 502;
+        if (status >= 400) {
+          res.status(status).end();
+          up.resume(); // drain
+          return;
+        }
+        const ct = up.headers['content-type'] || target.contentType;
+        if (ct) res.setHeader('Content-Type', ct);
+        res.setHeader('Cache-Control', 'no-store');
+        up.pipe(res);
+      },
+    );
+    upstream.on('timeout', () => upstream.destroy(new Error('Upstream stream timed out.')));
+    upstream.on('error', () => {
+      if (!res.headersSent) res.status(502).end();
+      else res.end();
+    });
+    // Tear down the upstream when the browser disconnects (closes the <img>/tab).
+    res.on('close', () => upstream.destroy());
+    upstream.end();
   }
 
   // ── Operations, dynamic options & jobs (Phase B) ──

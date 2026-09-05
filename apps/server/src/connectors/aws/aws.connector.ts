@@ -1240,14 +1240,6 @@ export class AwsConnector implements Connector {
       { key: 'vmsTotal', label: 'VMs total', value: instances.length },
     ];
 
-    // Best-effort EKS cluster count (omit if no eks:* permissions).
-    try {
-      const clusters = await api.listEksClusterNames();
-      if (clusters.length) metrics.push({ key: 'eksClusters', label: 'EKS clusters', value: clusters.length });
-    } catch {
-      /* eks not permitted / unavailable — omit */
-    }
-
     // Best-effort resource counts across services (each omitted if not permitted).
     // Run in parallel so the overview stays fast. Waste signals (unassociated EIP,
     // unattached EBS) only surface when > 0.

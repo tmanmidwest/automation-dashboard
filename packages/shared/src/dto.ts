@@ -182,3 +182,24 @@ export interface OAuthGrantSummary {
   /** Count of the user's currently-active (non-revoked, unexpired) refresh tokens for this client. */
   activeTokenCount: number;
 }
+
+/** One camera tile on the Viewscreen: a connector instance + entity, with how to render it. */
+export interface ViewscreenCamera {
+  /** Stable client-generated id for this tile (so tiles can be reordered/edited). */
+  id: string;
+  /** The connector instance the camera lives on (e.g. a Home Assistant instance). */
+  instanceId: string;
+  /** The connector's resource id for the camera (e.g. an HA entity id like camera.front_door). */
+  entityId: string;
+  /** Display name shown on the tile. */
+  name: string;
+  /** 'mjpeg' = live motion-JPEG stream; 'snapshot' = periodically-refreshed still. */
+  mode: 'mjpeg' | 'snapshot';
+}
+
+/** The persisted Viewscreen layout (global; stored under the `viewscreen.cameras` setting). */
+export interface ViewscreenConfig {
+  cameras: ViewscreenCamera[];
+  /** Grid columns on wide screens (1–6). */
+  columns?: number;
+}

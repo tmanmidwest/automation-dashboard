@@ -8,6 +8,7 @@ import type {
   ConnectorDetailGroup,
   ConnectorDetailItem,
   ConnectorOverview,
+  ConnectorStreamTarget,
   OperationResult,
   OperationProgress,
   TestConnectionResult,
@@ -37,6 +38,12 @@ const SERVICE_MAP: Record<string, Record<string, string>> = {
   automation: { enable: 'turn_on', disable: 'turn_off', trigger: 'trigger' },
   scene: { activate: 'turn_on' },
   script: { run: 'turn_on', stop: 'turn_off' },
+  camera: {
+    turn_on: 'turn_on',
+    turn_off: 'turn_off',
+    enable_motion: 'enable_motion_detection',
+    disable_motion: 'disable_motion_detection',
+  },
 };
 
 /**
@@ -87,6 +94,19 @@ const KINDS: ConnectorResourceKind[] = [
   },
   { id: 'sensor', label: 'Sensors', deletable: false, actions: [] },
   { id: 'binary_sensor', label: 'Binary Sensors', deletable: false, actions: [] },
+  {
+    id: 'camera',
+    label: 'Cameras',
+    deletable: false,
+    // Live feeds are viewed on the Viewscreen (see openStream). Camera state ('streaming'/
+    // 'idle'/'recording') doesn't map to on/off, so these controls always show.
+    actions: [
+      { id: 'enable_motion', label: 'Motion on', mutating: true },
+      { id: 'disable_motion', label: 'Motion off', mutating: true },
+      { id: 'turn_on', label: 'On', mutating: true },
+      { id: 'turn_off', label: 'Off', mutating: true },
+    ],
+  },
   {
     id: 'media_player',
     label: 'Media Players',
@@ -198,8 +218,8 @@ export class HomeAssistantConnector implements Connector {
   manifest: ConnectorManifest = {
     id: 'home-assistant',
     name: 'Home Assistant',
-    description: 'Monitor and control a Home Assistant instance — entity health, integrations, plus lights, switches, locks, covers, climate, media, automations, and scenes.',
-    version: '0.5.0',
+    description: 'Monitor and control a Home Assistant instance — entity health, integrations, plus lights, switches, locks, covers, climate, media, automations, scenes, and camera feeds.',
+    version: '0.6.0',
     icon: 'home-assistant',
     live: true,
     configFields: [
@@ -218,6 +238,15 @@ export class HomeAssistantConnector implements Connector {
         secret: true,
         required: true,
         help: 'Home Assistant → your profile → Long-Lived Access Tokens → Create Token.',
+      },
+      {
+        key: 'streamBaseUrl',
+        label: 'Local URL for camera streams (optional)',
+        type: 'url',
+        required: false,
+        placeholder: 'http://192.168.1.50:8123',
+        help:
+          'If set, Viewscreen camera feeds are fetched from this URL instead of the Base URL — so heavy video stays on your LAN instead of routing out through a reverse proxy / Cloudflare tunnel and back. Usually a plain http:// LAN address reachable from the Cerebro server. Leave blank to use the Base URL.',
       },
       {
         key: 'verifyTls',
@@ -300,7 +329,7 @@ export class HomeAssistantConnector implements Connector {
         { label: 'Long-lived access tokens', url: 'https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token' },
       ],
       notes:
-        'The Integrations tab, integration health, and room/area tags use the Home Assistant WebSocket API. Entities are tagged with their area (room) so you can filter or group by it — assign areas in Home Assistant for this to populate.',
+        'The Integrations tab, integration health, and room/area tags use the Home Assistant WebSocket API. Entities are tagged with their area (room) so you can filter or group by it — assign areas in Home Assistant for this to populate. Camera feeds appear on the Viewscreen; set the optional "Local URL for camera streams" to keep video traffic on your LAN.',
     },
   };
 
@@ -549,6 +578,11 @@ export class HomeAssistantConnector implements Connector {
     if (kind === 'media_player' && a.media_title) {
       details.playing = String(a.media_title);
     }
+    if (kind === 'camera') {
+      if (a.brand) details.brand = String(a.brand);
+      if (a.model_name) details.model = String(a.model_name);
+      if (a.motion_detection != null) details.motion = a.motion_detection ? 'on' : 'off';
+    }
 
     const bat = batteryPct(s);
     if (bat != null) details.battery = `${bat}%`;
@@ -568,6 +602,32 @@ export class HomeAssistantConnector implements Connector {
       status: s.state,
       details,
       tags: Object.keys(tags).length ? tags : undefined,
+    };
+  }
+
+  /**
+   * Resolve a camera feed to a proxy target. The core GETs this (adding the Bearer
+   * token server-side) and pipes the bytes to the browser's <img>, so the HA token
+   * never reaches the client. `mode: 'snapshot'` → a single still; otherwise the
+   * multipart MJPEG stream. Both are standard Home Assistant camera_proxy endpoints,
+   * so this works for Reolink and Frigate cameras alike.
+   */
+  async openStream(ctx: ConnectorContext, kind: string, resourceId: string, mode: string): Promise<ConnectorStreamTarget> {
+    if (kind !== 'camera') throw new Error(`Streaming is not supported for ${kind}.`);
+    const auth = this.authFrom(ctx);
+    // Prefer the optional LAN URL for the heavy video bytes; fall back to the API base URL.
+    const streamBase = strOrUndef(ctx.config.streamBaseUrl) ?? auth.baseUrl;
+    const base = streamBase.replace(/\/$/, '');
+    const entity = encodeURIComponent(resourceId);
+    const snapshot = mode === 'snapshot';
+    const path = snapshot ? `/api/camera_proxy/${entity}` : `/api/camera_proxy_stream/${entity}`;
+    return {
+      url: `${base}${path}`,
+      headers: { Authorization: `Bearer ${auth.token}` },
+      // Only meaningful for https; a plain http:// LAN URL ignores it (see the controller proxy).
+      rejectUnauthorized: auth.verifyTls,
+      format: snapshot ? 'snapshot' : 'mjpeg',
+      contentType: snapshot ? 'image/jpeg' : undefined,
     };
   }
 

@@ -9,6 +9,7 @@ import {
   Info,
   LogOut,
   MonitorPlay,
+  Video,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -26,12 +27,13 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, code: '01-000' },
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
-  { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '03-256' },
-  { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '04-378' },
-  { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read', code: '05-512' },
-  { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read', code: '06-640' },
-  { to: '/about', label: 'About', icon: Info, code: '07-777' },
-  { to: '/panel', label: 'Panel', icon: MonitorPlay, code: '08-KSK' },
+  { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
+  { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
+  { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '05-378' },
+  { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read', code: '06-512' },
+  { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read', code: '07-640' },
+  { to: '/about', label: 'About', icon: Info, code: '08-777' },
+  { to: '/panel', label: 'Panel', icon: MonitorPlay, code: '09-KSK' },
 ];
 
 /**
