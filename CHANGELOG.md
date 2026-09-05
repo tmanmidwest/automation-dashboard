@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Cloudflare connector
+- **Cloudflare connector** (v0.6.0): monitor and manage a Cloudflare account from the UI,
+  authenticated with a single **scoped API token** (encrypted at rest — never the legacy
+  Global API Key). The account id is auto-detected for single-account tokens. The Cloudflare
+  API is free (no per-call cost); the connector keeps the every-minute health poll cheap by
+  caching per-zone and GraphQL data behind short TTLs.
+- **12 resource kinds**: Cloudflare Tunnels, DNS zones, DNS records, SSL certificates,
+  Zero Trust Access apps, service tokens, and WARP devices, WAF firewall rules, Workers,
+  Pages projects, R2 buckets, and load balancers.
+- **Management actions & forms**: add / edit / delete DNS records and toggle their proxy
+  (orange cloud); purge cache (everything or specific URLs); set a zone's security level
+  (including "I'm Under Attack!") and development mode; enable / disable WAF firewall rules;
+  retry a Pages deployment; and delete tunnels. Editing features degrade gracefully — a token
+  missing a scope fails that action with a clear message while read-only views keep working.
+- **Health overview + alerts**: dashboard tiles for tunnels down, paused zones, expiring
+  certificates and service tokens, and (plan-permitting) 24h requests / bandwidth / threats.
+  A new **Cloudflare** alert category raises email alerts when tunnels-down, zones-paused,
+  certs-expiring, tokens-expiring, or threats cross a per-connector threshold — wired into
+  the generic threshold monitor, so they show only on Cloudflare connectors.
+- Traffic tiles use Cloudflare's **GraphQL Analytics** API; everything else uses REST v4.
+  No new frontend beyond the connector icon, a few status-badge colors, and the alert mirror —
+  the generic manifest-driven UI renders all tabs, forms, and drawers.
+
 ### Added — Interactive console (Phase D)
 - **noVNC (graphical) console** and **serial console** (xterm.js) for running VMs and
   containers — pick either from the guest's detail drawer. The serial console is handy

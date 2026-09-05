@@ -12,14 +12,20 @@ export function cn(...inputs: ClassValue[]) {
 const STATUS_BAD = new Set([
   'unavailable', 'unknown', 'error', 'failed', 'fault', 'offline', 'unhealthy', 'disconnected',
   'setup_error', 'migration_error', 'failed_unload', // Home Assistant integration failures
+  'down', 'degraded', 'expired', 'deactivated', // Cloudflare tunnel/zone/cert failures
+  'failure', // Cloudflare Pages deploy failed
 ]);
 const STATUS_GOOD = new Set([
   'running', 'active', 'enabled', 'on', 'online', 'available', 'connected', 'ok',
   'home', 'playing', 'locked', 'heat', 'cool', 'heat_cool', 'auto', 'loaded',
+  'healthy', 'proxied', // Cloudflare tunnel healthy / proxied DNS record
+  'deployed', 'success', // Cloudflare Workers deployed / Pages deploy succeeded
 ]);
 const STATUS_IDLE = new Set([
   'stopped', 'disabled', 'off', 'idle', 'standby', 'paused', 'closed',
   'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
+  'inactive', 'dns_only', 'deleted', // Cloudflare inactive tunnel / unproxied DNS record / revoked device
+  'canceled', // Cloudflare Pages deploy canceled
 ]);
 
 /** Tailwind classes for a resource status badge, by status string. */

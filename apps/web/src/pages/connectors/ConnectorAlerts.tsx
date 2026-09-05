@@ -30,6 +30,11 @@ const THRESHOLD_DEFS = [
   { id: 'haUpdates', metricKey: 'updatesAvailable', alertKey: 'ha.updates', label: 'Updates available' },
   { id: 'haAutomationsOff', metricKey: 'automationsOff', alertKey: 'ha.automations_off', label: 'Automations off' },
   { id: 'haIntegrations', metricKey: 'integrationsDegraded', alertKey: 'ha.integrations', label: 'Degraded integrations' },
+  { id: 'cfTunnelsDown', metricKey: 'tunnelsDown', alertKey: 'cloudflare.tunnels_down', label: 'Tunnels down' },
+  { id: 'cfZonesPaused', metricKey: 'zonesPaused', alertKey: 'cloudflare.zones_paused', label: 'Zones paused' },
+  { id: 'cfCertsExpiring', metricKey: 'certsExpiringSoon', alertKey: 'cloudflare.certs_expiring', label: 'Certificates expiring' },
+  { id: 'cfTokensExpiring', metricKey: 'tokensExpiringSoon', alertKey: 'cloudflare.tokens_expiring', label: 'Service tokens expiring' },
+  { id: 'cfThreats', metricKey: 'threats24h', alertKey: 'cloudflare.threats', label: 'Threats (24h)' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 
