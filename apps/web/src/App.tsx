@@ -7,6 +7,7 @@ import { Login } from '@/pages/Login';
 import { Consent } from '@/pages/Consent';
 import { Setup } from '@/pages/Setup';
 import { Dashboard } from '@/pages/Dashboard';
+import { Panel } from '@/pages/Panel';
 import { Account } from '@/pages/Account';
 import { OverviewResources } from '@/pages/OverviewResources';
 import { ConnectorsList } from '@/pages/connectors/ConnectorsList';
@@ -49,6 +50,16 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>;
 }
 
+/** Authenticated, but rendered fullscreen without the AppShell chrome (kiosk). */
+function ProtectedBare({ children }: { children: React.ReactNode }) {
+  const { user, loading, needsSetup } = useAuth();
+  const location = useLocation();
+  if (loading) return <FullscreenBrand />;
+  if (needsSetup) return <Navigate to="/setup" replace />;
+  if (!user) return <Navigate to={`/login`} state={{ from: location }} replace />;
+  return <>{children}</>;
+}
+
 function Gate({ children }: { children: React.ReactNode }) {
   // For /login and /setup: redirect away if already resolved.
   const { user, loading, needsSetup } = useAuth();
@@ -67,6 +78,7 @@ function Router() {
       <Route path="/consent" element={<Consent />} />
 
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
+      <Route path="/panel" element={<ProtectedBare><Panel /></ProtectedBare>} />
       <Route path="/overview/:kind" element={<Protected><RequirePerm perm="connectors:read"><OverviewResources /></RequirePerm></Protected>} />
       <Route path="/connectors" element={<Protected><RequirePerm perm="connectors:read"><ConnectorsList /></RequirePerm></Protected>} />
       <Route path="/connectors/new/:connectorId" element={<Protected><RequirePerm perm="connectors:write"><ConnectorSetup /></RequirePerm></Protected>} />

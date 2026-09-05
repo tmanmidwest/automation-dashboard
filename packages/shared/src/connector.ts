@@ -76,6 +76,11 @@ export interface ConnectorManifest {
   operations?: ConnectorOperation[];
   /** Connector-specific reference material for the setup screen. */
   help?: ConnectorHelp;
+  /**
+   * True if this connector can push live resource updates (see Connector.subscribeLive).
+   * The UI opens a live stream and updates rows in place instead of only polling.
+   */
+  live?: boolean;
 }
 
 export interface ConnectorResourceKind {
@@ -342,6 +347,15 @@ export interface Connector {
     resourceId: string,
     mode: 'vnc' | 'serial',
   ): Promise<ConnectorConsoleTarget>;
+  /**
+   * Optional: stream live resource updates. Calls `onUpdate` with a normalized
+   * resource (its `kind` set) whenever one changes upstream. Resolves to an
+   * unsubscribe function the core calls when the client disconnects.
+   */
+  subscribeLive?(
+    ctx: ConnectorContext,
+    onUpdate: (resource: ConnectorResource) => void,
+  ): Promise<() => void>;
   /** Optional: resolve dynamic dropdown options for an operation form field. */
   resolveOptions?(
     ctx: ConnectorContext,

@@ -3,12 +3,11 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { PublicIdentityProvider } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
-import { Brand } from '@/components/Brand';
+import { AuthFrame } from '@/components/AuthFrame';
 import { ProviderIcon } from '@/components/ProviderIcon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent } from '@/components/ui/card';
 
 export function Login() {
   const { refresh } = useAuth();
@@ -81,14 +80,8 @@ export function Login() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center cerebro-aurora p-4">
-      <div className="w-full max-w-sm">
-        <div className="flex justify-center mb-6">
-          <Brand className="scale-125" />
-        </div>
-        <Card className="backdrop-blur bg-card/80">
-          <CardContent className="pt-6">
-            <h1 className="text-xl font-semibold mb-1">{mfaStep ? 'Two-factor authentication' : 'Welcome back'}</h1>
+    <AuthFrame eyebrow={mfaStep ? 'Two-Factor' : 'Secure Access'} className="max-w-md">
+            <h1 className="font-lcars text-2xl font-semibold mb-1">{mfaStep ? 'Two-factor authentication' : 'Welcome back'}</h1>
             <p className="text-sm text-muted-foreground mb-5">
               {mfaStep
                 ? useRecovery
@@ -159,9 +152,6 @@ export function Login() {
                 </div>
               </>
             )}
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+    </AuthFrame>
   );
 }

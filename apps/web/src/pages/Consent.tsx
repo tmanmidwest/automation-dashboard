@@ -7,9 +7,8 @@ import type { Permission } from '@cerebro/shared';
  *  inlined because the web only imports types from the (CJS-built) shared package. */
 const isWriteScope = (s: Permission): boolean => !s.endsWith(':read');
 import { api, ApiError } from '@/lib/api';
-import { Brand } from '@/components/Brand';
+import { AuthFrame } from '@/components/AuthFrame';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 
 interface ConsentInfo {
   clientId: string;
@@ -74,11 +73,7 @@ export function Consent() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center cerebro-aurora p-4">
-      <div className="w-full max-w-md">
-        <div className="flex justify-center mb-6"><Brand className="scale-125" /></div>
-        <Card className="backdrop-blur bg-card/80">
-          <CardContent className="pt-6">
+    <AuthFrame eyebrow="Authorize">
             {error && (
               <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">
                 {error}
@@ -126,9 +121,6 @@ export function Consent() {
                 <p className="mt-3 text-xs text-muted-foreground text-center">You can revoke this later in Settings.</p>
               </>
             )}
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+    </AuthFrame>
   );
 }

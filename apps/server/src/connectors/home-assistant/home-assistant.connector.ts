@@ -13,7 +13,7 @@ import type {
   TestConnectionResult,
 } from '@cerebro/shared';
 import { HaApi, HaAuth, HaState } from './ha-api';
-import { withHaWs, fetchEntityAreaMap, HaConfigEntry } from './ha-ws';
+import { withHaWs, HaWsConn, fetchEntityAreaMap, HaConfigEntry } from './ha-ws';
 
 /** Battery percentage at or below which an entity counts as "low" in the health overview. */
 const LOW_BATTERY_PCT = 20;
@@ -199,8 +199,9 @@ export class HomeAssistantConnector implements Connector {
     id: 'home-assistant',
     name: 'Home Assistant',
     description: 'Monitor and control a Home Assistant instance — entity health, integrations, plus lights, switches, locks, covers, climate, media, automations, and scenes.',
-    version: '0.4.0',
+    version: '0.5.0',
     icon: 'home-assistant',
+    live: true,
     configFields: [
       {
         key: 'baseUrl',
@@ -654,5 +655,42 @@ export class HomeAssistantConnector implements Connector {
       .map((s) => ({ name: this.nameOf(s), kind: domainOf(s.entity_id), status: s.state, node: '' }));
 
     return { metrics, guests };
+  }
+
+  /**
+   * Stream live entity updates over a persistent WebSocket subscribed to
+   * `state_changed`. Each changed entity is normalized (with area tags) and pushed
+   * to `onUpdate`. Returns an unsubscribe that closes the socket.
+   */
+  async subscribeLive(ctx: ConnectorContext, onUpdate: (resource: ConnectorResource) => void): Promise<() => void> {
+    const conn = new HaWsConn(this.authFrom(ctx));
+    await conn.connect();
+
+    // Best-effort area map so live rows carry the same room tags as the polled list.
+    let areaMap = new Map<string, string>();
+    try {
+      areaMap = await this.areaMapCached(ctx);
+    } catch {
+      /* areas optional */
+    }
+
+    conn.onEvent = (event) => {
+      // state_changed events are shaped { event_type, data: { entity_id, old_state, new_state } }.
+      const ns = (event as { data?: { new_state?: HaState | null } } | undefined)?.data?.new_state;
+      if (!ns || !ns.entity_id) return; // entity removed or malformed — skip
+      const kind = domainOf(ns.entity_id);
+      if (!ENTITY_DOMAINS.has(kind)) return; // only the entity kinds we surface as tabs
+      try {
+        onUpdate(this.toResource(kind, ns, areaMap));
+      } catch (err) {
+        ctx.log('debug', `Home Assistant live update skipped: ${err instanceof Error ? err.message : err}`);
+      }
+    };
+    conn.onClose = () => ctx.log('info', 'Home Assistant live stream closed by the server.');
+
+    await conn.subscribe('state_changed');
+    conn.startKeepAlive();
+    ctx.log('info', 'Home Assistant live stream subscribed to state_changed.');
+    return () => conn.close();
   }
 }

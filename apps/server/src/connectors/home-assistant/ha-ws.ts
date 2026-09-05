@@ -41,7 +41,13 @@ export class HaWsConn {
   private ws!: WebSocket;
   private nextId = 1;
   private ready = false;
+  private keepAlive?: ReturnType<typeof setInterval>;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
+
+  /** Called for each subscription event (see subscribe). */
+  onEvent?: (event: unknown) => void;
+  /** Called once if the socket closes after it was connected (upstream drop). */
+  onClose?: () => void;
 
   constructor(private readonly auth: HaAuth) {}
 
@@ -84,6 +90,10 @@ export class HaWsConn {
           ws.close();
           return;
         }
+        if (msg.type === 'event') {
+          this.onEvent?.((msg as { event?: unknown }).event);
+          return;
+        }
         if (msg.type === 'result' && typeof msg.id === 'number') {
           const p = this.pending.get(msg.id);
           if (!p) return;
@@ -91,16 +101,35 @@ export class HaWsConn {
           if (msg.success) p.resolve(msg.result);
           else p.reject(new HaWsError(msg.error?.message || 'Home Assistant rejected the request.'));
         }
+        // 'pong' and anything else are ignored.
       });
       ws.on('error', (err: NodeJS.ErrnoException) => {
         finish(() => reject(new HaWsError(mapWsError(err))));
         this.failAll(new HaWsError(mapWsError(err)));
       });
       ws.on('close', () => {
+        const wasReady = this.ready;
         finish(() => reject(new HaWsError('The Home Assistant WebSocket closed before authenticating.')));
         this.failAll(new HaWsError('WebSocket closed.'));
+        if (wasReady) this.onClose?.();
       });
     });
+  }
+
+  /** Subscribe to an event type (e.g. 'state_changed'); events arrive via onEvent. */
+  async subscribe(eventType: string): Promise<void> {
+    await this.command({ type: 'subscribe_events', event_type: eventType });
+  }
+
+  /** Send periodic pings so idle proxies/NAT don't drop a long-lived subscription. */
+  startKeepAlive(ms = 30_000): void {
+    this.keepAlive = setInterval(() => {
+      try {
+        this.ws.send(JSON.stringify({ type: 'ping', id: this.nextId++ }));
+      } catch {
+        /* socket gone; close handler will fire */
+      }
+    }, ms);
   }
 
   /** Send a command and resolve with its `result`. */
@@ -127,6 +156,8 @@ export class HaWsConn {
   }
 
   close(): void {
+    if (this.keepAlive) clearInterval(this.keepAlive);
+    this.onClose = undefined; // deliberate close — don't fire the drop callback
     try {
       this.ws?.close();
     } catch {

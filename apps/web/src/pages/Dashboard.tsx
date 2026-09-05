@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Radar, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge } from 'lucide-react';
-import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary } from '@cerebro/shared';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, ChevronRight } from 'lucide-react';
+import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary, MonitorStatus } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
-import { Brand } from '@/components/Brand';
-import { MonitorRadar } from '@/components/MonitorRadar';
 
 function useCountUp(target: number, ms = 700) {
   const [n, setN] = useState(0);
@@ -33,9 +31,7 @@ function uptimeSince(iso?: string): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
-const SWEEP_SECONDS = 3.6; // must match .cb-sweep / .cb-spin duration in index.css
-
-/** Colour a blip by what it actually is — provider + resource kind. */
+/** Colour a signal dot by what it actually is — provider + resource kind. */
 function guestColor(kind: string): string {
   if (kind === 'ec2') return 'hsl(32 95% 56%)';       // AWS EC2 — amber
   if (kind === 'lxc') return 'hsl(var(--accent))';     // Proxmox container — teal
@@ -43,125 +39,76 @@ function guestColor(kind: string): string {
   return 'hsl(var(--accent) / 0.7)';
 }
 
-/** Short provider tag from a resource kind, for the sector rim label. */
-function providerTag(kind: string): string {
-  if (kind === 'ec2') return 'AWS';
-  if (kind === 'qemu' || kind === 'lxc') return 'PROXMOX';
-  return 'SYS';
+/** Where tapping a live signal takes you (its kind's overview scope). */
+function guestTo(kind: string): string {
+  if (kind === 'qemu') return '/overview/vm';
+  if (kind === 'lxc') return '/overview/container';
+  return '/connectors';
 }
 
-interface Blip { g: OverviewGuest; i: number; x: number; y: number; aDeg: number }
+function monitorColor(status: MonitorStatus): string {
+  if (status === 'up') return 'hsl(160 84% 55%)';
+  if (status === 'down') return 'hsl(var(--destructive))';
+  if (status === 'pending') return 'hsl(43 96% 56%)';
+  return 'hsl(var(--muted-foreground) / 0.6)';
+}
 
-function RadarScope({ guests, hovered, onHover }: { guests: OverviewGuest[]; hovered: number | null; onHover: (i: number | null) => void }) {
-  // Group the real systems by connector so each provider owns an angular wedge
-  // of the scope — AWS clusters in one arc, Proxmox in another — instead of a
-  // meaningless scatter. Original indices are preserved for hover-sync with the
-  // "Live signals" list.
-  const items = guests.slice(0, 30).map((g, i) => ({ g, i }));
-  const order: string[] = [];
-  const byConn = new Map<string, { g: OverviewGuest; i: number }[]>();
-  for (const it of items) {
-    const key = it.g.connector || 'system';
-    if (!byConn.has(key)) { byConn.set(key, []); order.push(key); }
-    byConn.get(key)!.push(it);
-  }
-  const C = order.length || 1;
+const SEGMENTS = 20;
 
-  const blips: Blip[] = [];
-  const sectors: { conn: string; tag: string; midDeg: number; startDeg: number }[] = [];
-  order.forEach((conn, ci) => {
-    const arr = byConn.get(conn)!;
-    const secStart = -90 + ci * (360 / C);
-    const secWidth = 360 / C;
-    const pad = Math.min(14, secWidth * 0.1);
-    const aStart = secStart + pad;
-    const aEnd = secStart + secWidth - pad;
-    sectors.push({ conn, tag: providerTag(arr[0]?.g.kind ?? ''), midDeg: secStart + secWidth / 2, startDeg: secStart });
-    const n = arr.length;
-    arr.forEach((it, j) => {
-      const frac = n > 1 ? j / (n - 1) : 0.5;
-      const aDeg = C === 1 ? aStart + (j / Math.max(1, n)) * (aEnd - aStart) : aStart + frac * (aEnd - aStart);
-      const radius = 46 + ((j % 4) * 22) + (Math.floor(j / 4) % 2) * 11; // stagger so they don't sit on one arc
-      const a = (aDeg * Math.PI) / 180;
-      blips.push({ g: it.g, i: it.i, x: 150 + Math.cos(a) * radius, y: 150 + Math.sin(a) * radius, aDeg });
-    });
-  });
-
+/** LCARS segmented readout — the functional replacement for the radar. */
+function Meter({ name, pct }: { name: string; pct: number }) {
+  const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+  const on = Math.round((clamped / 100) * SEGMENTS);
+  const level = clamped > 85 ? 'crit' : clamped > 65 ? 'warn' : 'ok';
   return (
-    <div className="relative h-[300px] w-[300px]">
-      <div className="absolute inset-2 rounded-full cb-sweep"
-        style={{ WebkitMaskImage: 'radial-gradient(circle, black 68%, transparent 69%)', maskImage: 'radial-gradient(circle, black 68%, transparent 69%)' }} />
-      <svg viewBox="0 0 300 300" className="absolute inset-0">
-        {[142, 104, 66, 28].map((r) => <circle key={r} cx="150" cy="150" r={r} fill="none" stroke="hsl(var(--accent) / 0.22)" strokeWidth="1" />)}
-        <line x1="8" y1="150" x2="292" y2="150" stroke="hsl(var(--accent) / 0.14)" strokeWidth="1" />
-        <line x1="150" y1="8" x2="150" y2="292" stroke="hsl(var(--accent) / 0.14)" strokeWidth="1" />
-
-        {/* Spokes + rim labels delineate each connector's wedge. */}
-        {C > 1 && sectors.map((s) => {
-          const a = (s.startDeg * Math.PI) / 180;
-          return <line key={`spoke-${s.conn}`} x1="150" y1="150" x2={150 + Math.cos(a) * 142} y2={150 + Math.sin(a) * 142} stroke="hsl(var(--accent) / 0.12)" strokeWidth="1" strokeDasharray="2 4" />;
-        })}
-        {sectors.map((s) => {
-          const a = (s.midDeg * Math.PI) / 180;
-          const lx = 150 + Math.cos(a) * 128;
-          const ly = 150 + Math.sin(a) * 128;
-          return (
-            <text key={`lbl-${s.conn}`} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
-              className="fill-muted-foreground" style={{ fontSize: 8, letterSpacing: '0.12em', opacity: 0.75 }}>
-              {s.tag}
-            </text>
-          );
-        })}
-
-        <g className="cb-spin" style={{ transformOrigin: 'center' }}>
-          <line x1="150" y1="150" x2="150" y2="10" stroke="hsl(var(--accent))" strokeWidth="1.5" style={{ filter: 'drop-shadow(0 0 4px hsl(var(--accent)/0.8))' }} />
-        </g>
-
-        {blips.map(({ g, i, x, y, aDeg }) => {
-          const on = g.status === 'running';
-          const hot = hovered === i;
-          const color = guestColor(g.kind);
-          const isContainer = g.kind === 'lxc';
-          // Ping in phase with the sweep: fire as the sweep line passes this angle.
-          const delay = ((((aDeg + 90) % 360) + 360) % 360) / 360 * SWEEP_SECONDS;
-          const r = hot ? 6 : on ? 4.5 : 3;
-          const glow = on || hot ? `drop-shadow(0 0 6px ${color})` : undefined;
-          return (
-            <g key={i} onMouseEnter={() => onHover(i)} onMouseLeave={() => onHover(null)} style={{ cursor: 'pointer' }}>
-              {hot && <circle cx={x} cy={y} r="10" fill="none" stroke={color} strokeWidth="1" opacity="0.8" />}
-              {isContainer ? (
-                <rect x={x - r} y={y - r} width={r * 2} height={r * 2} rx={1.5} fill={on ? color : 'transparent'} stroke={color} strokeWidth={on ? 0 : 1.4}
-                  className={on && !hot ? 'cb-ping' : ''} style={{ animationDelay: `${delay}s`, filter: glow, transformBox: 'fill-box', transformOrigin: 'center' }}>
-                  <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
-                </rect>
-              ) : (
-                <circle cx={x} cy={y} r={r} fill={on ? color : 'transparent'} stroke={color} strokeWidth={on ? 0 : 1.4}
-                  className={on && !hot ? 'cb-ping' : ''} style={{ animationDelay: `${delay}s`, filter: glow }}>
-                  <title>{g.name} · {g.kind} · {g.node} · {g.status}</title>
-                </circle>
-              )}
-            </g>
-          );
-        })}
-        <circle cx="150" cy="150" r="4" fill="hsl(var(--accent))" style={{ filter: 'drop-shadow(0 0 6px hsl(var(--accent)))' }} />
-      </svg>
+    <div className="lcars-meter">
+      <span className="lcars-meter__name">{name}</span>
+      <div className="lcars-track">
+        {Array.from({ length: SEGMENTS }, (_, i) => (
+          <span key={i} className="lcars-seg" data-on={i < on} data-level={level} />
+        ))}
+      </div>
+      <span className="lcars-meter__val">{clamped}%</span>
     </div>
   );
 }
 
-function HudBox({ pos, children }: { pos: string; children: React.ReactNode }) {
-  return <div className={cn('absolute z-10 hidden md:block font-mono text-[11px] uppercase tracking-[0.18em] leading-relaxed', pos)}>{children}</div>;
+/** Card shell with the LCARS accent header. */
+function Panel({ title, tag, to, accent = 'secondary', children, className }: {
+  title: string;
+  tag?: React.ReactNode;
+  to?: string;
+  accent?: 'primary' | 'secondary' | 'accent';
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const bar = accent === 'primary' ? 'hsl(var(--primary))' : accent === 'accent' ? 'hsl(var(--accent))' : 'hsl(var(--secondary))';
+  return (
+    <div className={cn('rounded-xl border border-border/60 bg-card/70 backdrop-blur p-4', className)}>
+      <div className="flex items-center gap-2.5 mb-3">
+        <span className="h-4 w-2.5 rounded-sm" style={{ background: bar }} aria-hidden />
+        <h3 className="font-lcars text-sm font-semibold text-muted-foreground tracking-[0.12em]">{title}</h3>
+        {tag && <span className="ml-auto font-lcars text-xs text-muted-foreground tracking-wide">{tag}</span>}
+        {to && !tag && (
+          <Link to={to} className="ml-auto font-lcars text-xs text-muted-foreground hover:text-foreground tracking-wide">
+            View all ›
+          </Link>
+        )}
+      </div>
+      {children}
+    </div>
+  );
 }
 
 function StatTile({ icon: Icon, label, value, sub, to }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; sub?: string; to?: string }) {
   const inner = (
     <>
-      <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-primary to-accent" />
+      <div className="absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-primary to-accent" />
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</span>
+        <span className="font-lcars text-xs tracking-[0.14em] text-muted-foreground">{label}</span>
         <Icon className="h-4 w-4 text-accent/70" />
       </div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="mt-2 font-lcars text-3xl font-semibold tabular-nums">{value}</div>
       {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
     </>
   );
@@ -178,10 +125,10 @@ function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{
   const inner = (
     <>
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">{label}</span>
+        <span className="font-lcars text-xs tracking-[0.14em] text-muted-foreground">{label}</span>
         <Icon className="h-4 w-4 text-accent/70" />
       </div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums">{pct}%</div>
+      <div className="mt-2 font-lcars text-3xl font-semibold tabular-nums">{pct}%</div>
       <div className="mt-2 h-1.5 w-full rounded-full bg-muted overflow-hidden">
         <div className={cn('h-full rounded-full transition-all duration-700', color)} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
@@ -203,7 +150,6 @@ export function Dashboard() {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [audit, setAudit] = useState<AuditLogEntry[]>([]);
   const [userCount, setUserCount] = useState(0);
-  const [hovered, setHovered] = useState<number | null>(null);
   const startedRef = useRef(Date.now());
   const lastPollRef = useRef(Date.now());
   const [, tick] = useState(0);
@@ -265,103 +211,124 @@ export function Dashboard() {
   const stale = secsSinceScan > 15;
   const runningGuests = guests.filter((g) => g.status === 'running').length;
   const idleGuests = guests.length - runningGuests;
-  const alert = offline.length > 0 || stale;
+  const connOk = overview?.connectors.ok ?? 0;
+  const connTotal = overview?.connectors.total ?? 0;
 
   const vms = useCountUp(metric('vmsRunning'));
   const cts = useCountUp(metric('ctsRunning'));
   const nodes = useCountUp(metric('nodes'));
-  const linked = useCountUp(overview?.connectors.total ?? 0);
   const ops = useCountUp(userCount);
+
+  // System readout meters — all derived from real telemetry.
+  const readout: { name: string; pct: number }[] = [
+    { name: 'Cluster CPU', pct: metric('cpuPct') },
+    { name: 'Cluster RAM', pct: metric('memPct') },
+    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0 },
+    { name: 'Signals Active', pct: guests.length ? (runningGuests / guests.length) * 100 : 0 },
+  ];
+  if (monitors && monitors.length > 0) {
+    const denom = monitors.length - monPaused;
+    readout.push({ name: 'Monitors Up', pct: denom ? (monUp / denom) * 100 : 100 });
+  }
 
   return (
     <div className="animate-fade-in space-y-4">
-      <div>
-        <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.3em] text-accent/80">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Scanning · {overview?.connectors.ok ?? 0}/{overview?.connectors.total ?? 0} systems linked
+      <div className="flex items-start gap-3">
+        <span className="lcars-accentbar mt-2" aria-hidden />
+        <div>
+          <div className="flex items-center gap-2 font-lcars text-xs tracking-[0.24em] text-accent/80">
+            <span className={cn('h-1.5 w-1.5 rounded-full', stale ? 'bg-destructive animate-pulse' : 'bg-emerald-400 animate-pulse')} />
+            {stale ? 'Signal lost' : 'Scanning'} · {connOk}/{connTotal} systems linked
+          </div>
+          <h1 className="font-lcars text-3xl font-semibold leading-none mt-1">
+            Welcome back, {user?.displayName?.split(' ')[0] ?? 'Operator'}
+          </h1>
         </div>
-        <h1 className="text-2xl font-bold tracking-tight mt-1">
-          Welcome back, <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{user?.displayName?.split(' ')[0] ?? 'Operator'}</span>
-        </h1>
       </div>
 
-      {/* Radar + live signals */}
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <div className={cn('relative overflow-hidden rounded-2xl border cerebro-aurora transition-colors', alert ? 'border-amber-500/40' : 'border-border/60')}>
-          <div className="absolute inset-0 pointer-events-none opacity-[0.12] cb-gridfloor" />
-          {alert && <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle at 50% 55%, transparent 45%, hsl(var(--destructive) / 0.10))' }} />}
-
-          {/* Cerebro logo, top-centre — always visible on the radar even with the nav collapsed. */}
-          <Brand className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none" />
-
-          <HudBox pos="top-4 left-5">
-            <div className="text-muted-foreground/70">Systems online</div>
-            <div className={cn('text-sm', offline.length ? 'text-amber-400' : 'text-emerald-400')}>
-              {overview?.connectors.ok ?? 0}/{overview?.connectors.total ?? 0}
+      {/* System readout + live signals */}
+      <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
+        <Panel
+          title="System Readout"
+          accent="accent"
+          tag={stale ? 'signal lost' : `${secsSinceScan}s ago`}
+          className={cn(offline.length > 0 && 'border-amber-500/40')}
+        >
+          <div className="py-1">
+            {readout.map((r) => <Meter key={r.name} name={r.name} pct={r.pct} />)}
+          </div>
+          <div className="mt-3 pt-3 border-t border-border/50 grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="font-lcars text-2xl font-semibold text-emerald-400 tabular-nums">{runningGuests}</div>
+              <div className="text-[11px] text-muted-foreground">active</div>
             </div>
-          </HudBox>
-
-          <HudBox pos="top-4 right-5 text-right">
-            <div className="text-muted-foreground/70">Last scan</div>
-            {stale ? <div className="text-destructive animate-pulse">Signal lost</div> : <div className="text-accent/90">{secsSinceScan}s ago</div>}
-          </HudBox>
-
-          <HudBox pos="bottom-4 left-5">
-            {offline.length > 0 ? (
-              <div className="space-y-0.5">
-                {offline.slice(0, 3).map((s) => (
-                  <div key={s.name} className="text-destructive flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-pulse" /> {s.name} · unreachable
-                  </div>
-                ))}
-                {offline.length > 3 && <div className="text-destructive/70">+{offline.length - 3} more</div>}
-              </div>
-            ) : (
-              <div className="text-emerald-400 flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> All systems nominal</div>
-            )}
-          </HudBox>
-
-          <HudBox pos="bottom-4 right-5 text-right">
-            <div className="text-muted-foreground/70">Signals</div>
-            <div className="text-primary">{runningGuests} active</div>
-            {idleGuests > 0 && <div className="text-amber-400/80">{idleGuests} idle</div>}
-          </HudBox>
-
-          <div className="relative grid place-items-center py-6 min-h-[340px]">
-            <RadarScope guests={guests} hovered={hovered} onHover={setHovered} />
+            <div>
+              <div className="font-lcars text-2xl font-semibold text-amber-400 tabular-nums">{idleGuests}</div>
+              <div className="text-[11px] text-muted-foreground">idle</div>
+            </div>
+            <div>
+              <div className={cn('font-lcars text-2xl font-semibold tabular-nums', offline.length ? 'text-destructive' : 'text-emerald-400')}>{offline.length}</div>
+              <div className="text-[11px] text-muted-foreground">offline</div>
+            </div>
           </div>
-        </div>
+        </Panel>
 
-        <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur p-4 flex flex-col">
-          <div className="flex items-center gap-2 mb-3">
-            <Radar className="h-4 w-4 text-accent" />
-            <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">Live signals</span>
-            <span className="ml-auto text-xs text-muted-foreground">{guests.length}</span>
-          </div>
+        <Panel title="Live Signals" to="/connectors" tag={<span className="tabular-nums">{guests.length}</span>}>
           {guests.length === 0 ? (
-            <div className="flex-1 grid place-items-center text-center text-sm text-muted-foreground py-8">No signals detected.</div>
+            <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">No signals detected.</div>
           ) : (
-            <div className="space-y-1 overflow-y-auto max-h-[280px] pr-1">
+            <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
               {guests.map((g, i) => (
-                <div key={i} onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}
-                  className={cn('flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors', hovered === i ? 'bg-muted/60' : 'hover:bg-muted/40')}>
-                  <span className="h-2 w-2 rounded-full shrink-0"
+                <Link
+                  key={i}
+                  to={guestTo(g.kind)}
+                  className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
+                >
+                  <span
+                    className="h-2.5 w-2.5 rounded-full shrink-0"
                     style={g.status === 'running'
                       ? { background: guestColor(g.kind), boxShadow: `0 0 6px ${guestColor(g.kind)}` }
-                      : { background: 'hsl(var(--muted-foreground) / 0.5)' }} />
+                      : { background: 'hsl(var(--muted-foreground) / 0.5)' }}
+                  />
                   {g.kind === 'lxc'
-                    ? <Boxes className="h-3.5 w-3.5 shrink-0" style={{ color: guestColor(g.kind) }} />
-                    : <Server className="h-3.5 w-3.5 shrink-0" style={{ color: guestColor(g.kind) }} />}
+                    ? <Boxes className="h-4 w-4 shrink-0" style={{ color: guestColor(g.kind) }} />
+                    : <Server className="h-4 w-4 shrink-0" style={{ color: guestColor(g.kind) }} />}
                   <span className="text-sm truncate">{g.name}</span>
-                  <span className="ml-auto text-[10px] font-mono uppercase tracking-wider text-muted-foreground shrink-0">{g.node}</span>
-                </div>
+                  <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">{g.node}</span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
+                </Link>
               ))}
             </div>
           )}
-        </div>
+        </Panel>
       </div>
 
-      {/* Monitor radar — its own scope so monitor status never competes with the connector blips */}
-      {monitors && monitors.length > 0 && <MonitorRadar monitors={monitors} />}
+      {/* Uptime monitors — clickable list */}
+      {monitors && monitors.length > 0 && (
+        <Panel title="Monitors" to="/monitors" tag={<span className="tabular-nums">{monUp}/{monitors.length - monPaused} up</span>} accent="primary">
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {[...monitors].sort((a, b) => rank(a.status) - rank(b.status)).map((m) => (
+              <Link
+                key={m.id}
+                to={`/monitors/${m.id}`}
+                className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
+              >
+                <span
+                  className="h-2.5 w-2.5 rotate-45 shrink-0"
+                  style={m.status === 'paused'
+                    ? { border: `1px solid ${monitorColor(m.status)}` }
+                    : { background: monitorColor(m.status), boxShadow: m.status !== 'pending' ? `0 0 6px ${monitorColor(m.status)}` : undefined }}
+                />
+                <span className={cn('text-sm truncate', m.status === 'down' && 'text-destructive')}>{m.name}</span>
+                <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
+                  {m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status}
+                </span>
+                <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
+              </Link>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {/* Telemetry tiles */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
@@ -373,10 +340,10 @@ export function Dashboard() {
         <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
       </div>
 
-      {/* Uptime monitors — shown once at least one monitor exists */}
+      {/* Uptime monitor summary tiles */}
       {monitors && monitors.length > 0 && (
         <div>
-          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+          <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <HeartPulse className="h-3.5 w-3.5 text-accent" /> Monitors
           </div>
           <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
@@ -408,9 +375,9 @@ export function Dashboard() {
       {/* Cloud spend — its own row so it doesn't crowd the telemetry tiles */}
       {costMtd && (
         <div>
-          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+          <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <DollarSign className="h-3.5 w-3.5 text-accent" /> Cloud spend
-            {costMtd.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60">as of {shortDateTime(costMtd.asOf)}</span>}
+            {costMtd.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60 font-sans">as of {shortDateTime(costMtd.asOf)}</span>}
           </div>
           <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
             {costLast && (
@@ -427,9 +394,9 @@ export function Dashboard() {
       {/* Backups — Backblaze B2, shown only when a backup connector is configured */}
       {hasBackblaze && (
         <div>
-          <div className="flex items-center gap-2 mb-2 text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+          <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <Archive className="h-3.5 w-3.5 text-accent" /> Backups
-            {b2LastOk?.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60">as of {shortDateTime(b2LastOk.asOf)}</span>}
+            {b2LastOk?.asOf && <span className="ml-auto normal-case tracking-normal text-muted-foreground/60 font-sans">as of {shortDateTime(b2LastOk.asOf)}</span>}
           </div>
           <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
             <StatTile
@@ -454,14 +421,8 @@ export function Dashboard() {
       )}
 
       {/* Activity feed */}
-      <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border/60">
-          <Activity className="h-4 w-4 text-accent" />
-          <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-muted-foreground">Activity feed</span>
-          <UsersIcon className="h-3.5 w-3.5 text-muted-foreground ml-auto" />
-          <span className="text-xs text-muted-foreground">{ops} operators</span>
-        </div>
-        <div className="p-2 font-mono text-xs max-h-[240px] overflow-y-auto">
+      <Panel title="Activity Feed" tag={<span className="flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" /> {ops} operators</span>}>
+        <div className="font-mono text-xs max-h-[240px] overflow-y-auto -mx-1">
           {audit.length === 0 ? (
             <div className="text-center text-muted-foreground py-6">No recent activity.</div>
           ) : (
@@ -474,7 +435,16 @@ export function Dashboard() {
             ))
           )}
         </div>
+      </Panel>
+
+      <div className="flex items-center justify-center gap-2 pt-1 text-[11px] font-lcars tracking-[0.2em] text-muted-foreground/50">
+        <Radio className="h-3 w-3" /> Cerebro Core · LCARS
       </div>
     </div>
   );
+}
+
+/** Down first, then pending, up, paused. */
+function rank(s: MonitorStatus): number {
+  return { down: 0, pending: 1, up: 2, paused: 3 }[s] ?? 4;
 }

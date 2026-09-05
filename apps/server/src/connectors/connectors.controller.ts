@@ -3,13 +3,17 @@ import {
   Controller,
   Delete,
   Get,
+  MessageEvent,
   NotFoundException,
   Param,
   Patch,
   Post,
   Put,
   Query,
+  Sse,
 } from '@nestjs/common';
+import { Observable } from 'rxjs';
+import type { ConnectorResource } from '@cerebro/shared';
 import { IsBoolean, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 import type { ConnectorJobStatus } from '@cerebro/shared';
 import type {
@@ -330,5 +334,31 @@ export class ConnectorsController {
       meta: { actionId, ok: result.ok },
     });
     return result;
+  }
+
+  /**
+   * Server-Sent Events stream of live resource updates for connectors that support it
+   * (see Connector.subscribeLive). One upstream subscription per open client; closing
+   * the EventSource tears it down.
+   */
+  @Sse('instances/:id/live')
+  @RequirePermissions('connectors:read')
+  live(@Param('id') id: string): Observable<MessageEvent> {
+    return new Observable<MessageEvent>((subscriber) => {
+      let unsubscribe: (() => void) | undefined;
+      let closed = false;
+      this.instances
+        .subscribeLive(id, (resource: ConnectorResource) => subscriber.next({ data: resource }))
+        .then((unsub) => {
+          if (closed) unsub(); // client already disconnected during setup
+          else unsubscribe = unsub;
+        })
+        .catch((err) => subscriber.error(err));
+      // Teardown when the client disconnects: close the upstream subscription.
+      return () => {
+        closed = true;
+        unsubscribe?.();
+      };
+    });
   }
 }

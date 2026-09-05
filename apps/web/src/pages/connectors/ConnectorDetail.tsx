@@ -157,6 +157,31 @@ export function ConnectorDetail() {
     return () => { alive = false; clearInterval(t); };
   }, [id, inst?.enabled, loadResources]);
 
+  // Live updates (SSE) for connectors that push them (e.g. Home Assistant). One stream
+  // for all kinds; we merge only the rows belonging to the tab currently in view. A ref
+  // keeps the current kind current without reopening the stream on every tab switch.
+  const kindRef = useRef(kind);
+  kindRef.current = kind;
+  useEffect(() => {
+    if (!manifest?.live || !inst?.enabled) return;
+    const es = new EventSource(`/api/connectors/instances/${id}/live`);
+    es.onmessage = (ev) => {
+      let r: ConnectorResource;
+      try { r = JSON.parse(ev.data) as ConnectorResource; } catch { return; }
+      if (r.kind !== kindRef.current) return;
+      setResources((list) => {
+        const idx = list.findIndex((x) => x.id === r.id);
+        if (idx === -1) return [...list, r];
+        const next = list.slice();
+        next[idx] = r;
+        return next;
+      });
+      setSyncedAt(new Date().toISOString());
+    };
+    es.onerror = () => { /* EventSource reconnects on its own */ };
+    return () => es.close();
+  }, [id, manifest?.live, inst?.enabled]);
+
   /** Start a long operation (e.g. a backup) in the background — no dialog; progress shows in the banner. */
   async function startBackground(op: ConnectorOperation) {
     setMsg(null);
@@ -410,7 +435,7 @@ export function ConnectorDetail() {
       </Link>
       <PageHeader
         title={inst.name}
-        description={`${inst.connectorName} · Last sync ${timeAgo(syncedAt)}`}
+        description={`${inst.connectorName} · Last sync ${timeAgo(syncedAt)}${manifest?.live && inst.enabled ? ' · Live' : ''}`}
         actions={
           <div className="flex items-center gap-2">
             {canWrite && <Button variant="ghost" size="sm" onClick={test}><PlugZap className="h-4 w-4" /> Test</Button>}

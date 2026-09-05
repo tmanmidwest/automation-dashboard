@@ -2,11 +2,10 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
-import { Brand } from '@/components/Brand';
+import { AuthFrame } from '@/components/AuthFrame';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent } from '@/components/ui/card';
 
 export function Setup() {
   const { refresh } = useAuth();
@@ -42,17 +41,10 @@ export function Setup() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center cerebro-aurora p-4">
-      <div className="w-full max-w-md">
-        <div className="flex justify-center mb-6">
-          <Brand className="scale-125" />
-        </div>
-        <Card className="backdrop-blur bg-card/80">
-          <CardContent className="pt-6">
+    <AuthFrame eyebrow="First-Run Setup">
             <div className="mb-5">
-              <span className="text-xs font-medium uppercase tracking-wider text-primary">First-run setup</span>
-              <h1 className="text-xl font-semibold mt-1">Create your administrator</h1>
-              <p className="text-sm text-muted-foreground">
+              <h1 className="font-lcars text-2xl font-semibold">Create your administrator</h1>
+              <p className="text-sm text-muted-foreground mt-1">
                 This account gets full control of Cerebro. You can add more users later.
               </p>
             </div>
@@ -87,9 +79,6 @@ export function Setup() {
                 {busy ? 'Creating…' : 'Create administrator & sign in'}
               </Button>
             </form>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+    </AuthFrame>
   );
 }

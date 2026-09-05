@@ -200,9 +200,16 @@ metrics. Recommended starting thresholds: unavailable ≥ 1, low batteries ≥ 1
   else its device's `area_id`. Entities get an `area` tag (cached 10 min, best-effort so a
   restricted token just omits areas). No frontend change: the generic tag machinery gives an
   area chip, a "Tag: area" filter, and "Group by tag: area" for free.
-- **4c — Live radar.** Hold a persistent per-instance WS, subscribe to `state_changed`, and
-  push updates to the browser (SSE or the console-relay pattern) instead of polling
-  `/api/states` — the heaviest, most infra-touching piece.
+- **4c — Live updates. ← DONE (built & verified 2026-09-03).** On-demand SSE rather than an
+  always-on manager: while a client views the connector page it opens an `EventSource` to
+  `GET /api/connectors/instances/:id/live`; the server holds **one** WebSocket to HA
+  subscribed to `state_changed` (with keepalive pings), normalizes each changed entity to a
+  `ConnectorResource` (area tags included), and pushes it over SSE. Closing the page tears the
+  WebSocket down (verified: upstream subscribers return to 0). New contract bits:
+  `ConnectorManifest.live` + optional `Connector.subscribeLive(ctx, onUpdate) → unsubscribe`;
+  `HaWsConn` gained event delivery + keepalive. The connector-detail page merges updates into
+  the current tab's rows in place (status flips, action buttons re-gate) and shows a "Live"
+  marker — no polling of `/api/states` needed while watching.
 
 Later / optional: HA Core restart (`homeassistant.restart` REST service); entity history
 sparklines via `/api/history`; Zigbee/Z-Wave mesh health; Supervisor/add-on health.

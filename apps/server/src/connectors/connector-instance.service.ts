@@ -175,6 +175,23 @@ export class ConnectorInstanceService {
     return this.connectorFor(instance).performAction(ctx, kind, resourceId, actionId);
   }
 
+  /**
+   * Subscribe to live resource updates for a connector that supports it. Returns an
+   * unsubscribe the caller invokes when done (e.g. the SSE client disconnected).
+   */
+  async subscribeLive(id: string, onUpdate: (resource: ConnectorResource) => void): Promise<() => void> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.subscribeLive) throw new BadRequestException('This connector does not support live updates.');
+    const ctx = await this.buildContext(instance);
+    try {
+      return await connector.subscribeLive(ctx, onUpdate);
+    } catch (err) {
+      throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to open the live stream.');
+    }
+  }
+
   async describeResource(id: string, kind: string, resourceId: string) {
     const instance = await this.get(id);
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');

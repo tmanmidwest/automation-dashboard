@@ -8,6 +8,7 @@ import {
   Settings,
   Info,
   LogOut,
+  MonitorPlay,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -19,21 +20,23 @@ interface NavItem {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   perm?: Permission;
+  code: string;
 }
 
 const NAV: NavItem[] = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read' },
-  { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read' },
-  { to: '/users', label: 'Users', icon: Users, perm: 'users:read' },
-  { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read' },
-  { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read' },
-  { to: '/about', label: 'About', icon: Info },
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard, code: '01-000' },
+  { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
+  { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '03-256' },
+  { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '04-378' },
+  { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read', code: '05-512' },
+  { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read', code: '06-640' },
+  { to: '/about', label: 'About', icon: Info, code: '07-777' },
+  { to: '/panel', label: 'Panel', icon: MonitorPlay, code: '08-KSK' },
 ];
 
 /**
- * The navigation body, shared by the desktop sidebar and the mobile drawer.
- * When `collapsed`, links render as an icon-only rail. `onNavigate` fires on
+ * The LCARS pill nav, shared by the desktop rail and the mobile drawer.
+ * When `collapsed`, pills render as an icon-only rail. `onNavigate` fires on
  * any link click (used to close the mobile drawer).
  */
 export function SidebarNav({
@@ -48,8 +51,8 @@ export function SidebarNav({
   const items = NAV.filter((i) => !i.perm || can(i.perm));
 
   return (
-    <>
-      <nav className="flex-1 p-3 space-y-1">
+    <div className="flex flex-col gap-1.5 h-full min-h-0">
+      <nav className="flex-1 flex flex-col gap-1.5 overflow-y-auto pr-0.5">
         {items.map((item) => (
           <NavLink
             key={item.to}
@@ -57,26 +60,47 @@ export function SidebarNav({
             end={item.to === '/'}
             onClick={onNavigate}
             title={collapsed ? item.label : undefined}
-            className={({ isActive }) =>
-              cn(
-                'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                collapsed && 'justify-center px-0',
-                isActive
-                  ? 'bg-primary/15 text-primary shadow-[inset_2px_0_0_hsl(var(--primary))]'
-                  : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-white/5',
-              )
-            }
+            className={cn('lcars-pill relative', collapsed && 'lcars-pill--collapsed')}
           >
-            <item.icon className="h-4 w-4 shrink-0" />
-            {!collapsed && item.label}
+            {({ isActive }) => (
+              <>
+                {/* data-active drives the LCARS active fill; NavLink's render-prop gives us isActive */}
+                <span
+                  aria-hidden
+                  className="absolute inset-0 rounded-[inherit] pointer-events-none"
+                  data-active={isActive}
+                  style={isActive ? { background: 'hsl(var(--primary))' } : undefined}
+                />
+                <item.icon className={cn('h-5 w-5 shrink-0 relative z-10', isActive && 'text-[hsl(222_47%_8%)]')} />
+                {!collapsed && (
+                  <span className={cn('relative z-10 flex-1 truncate', isActive && 'text-[hsl(222_47%_8%)]')}>
+                    {item.label}
+                  </span>
+                )}
+                {!collapsed && (
+                  <span
+                    className={cn(
+                      'relative z-10 text-[0.6rem] tracking-wider tabular-nums opacity-55',
+                      isActive && 'text-[hsl(222_47%_8%)]',
+                    )}
+                  >
+                    {item.code}
+                  </span>
+                )}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
 
-      <div className="p-3 border-t border-border/60">
+      {/* Account + sign out cap */}
+      <div className="flex flex-col gap-1.5">
         {!collapsed && (
-          <NavLink to="/account" onClick={onNavigate}
-            className="block px-3 py-2 mb-1 rounded-md hover:bg-white/5 transition-colors">
+          <NavLink
+            to="/account"
+            onClick={onNavigate}
+            className="rounded-[0_18px_18px_0] bg-card border border-border/60 px-4 py-2 hover:bg-muted/60 transition-colors"
+          >
             <p className="text-sm font-medium truncate">{user?.displayName}</p>
             <p className="text-xs text-muted-foreground truncate">{user?.roleName} · account</p>
           </NavLink>
@@ -96,6 +120,6 @@ export function SidebarNav({
           {!collapsed && 'Sign out'}
         </Button>
       </div>
-    </>
+    </div>
   );
 }

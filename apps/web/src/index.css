@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -101,10 +101,140 @@
   animation: cb-grid 6s linear infinite;
 }
 
+/* Kiosk (/panel) auto-cycle progress bar. */
+@keyframes cb-kiosk-progress { from { width: 0%; } to { width: 100%; } }
+
 /* Subtle animated Cerebro backdrop for auth screens. */
 .cerebro-aurora {
   background:
     radial-gradient(60% 50% at 20% 10%, hsl(var(--secondary) / 0.35), transparent 60%),
     radial-gradient(50% 50% at 85% 20%, hsl(var(--primary) / 0.28), transparent 55%),
     radial-gradient(60% 60% at 50% 100%, hsl(var(--accent) / 0.18), transparent 60%);
+}
+
+/* ============================================================
+   LCARS theme layer
+   The "Cerebro LCARS" look: the classic elbow frame, pill nav,
+   and segmented readouts — built on the existing Cerebro tokens
+   so blues/reds carry over. `.font-lcars` is the condensed Antonio
+   chrome face; content text stays Inter.
+   ============================================================ */
+@layer components {
+  .font-lcars {
+    font-family: 'Antonio', 'Arial Narrow', ui-sans-serif, system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* Elbow header: brand block curving into the status sweep. */
+  .lcars-elbow {
+    background: hsl(var(--primary));
+    color: hsl(222 47% 8%);
+    border-top-left-radius: 3rem;
+  }
+  .lcars-sweep {
+    background: linear-gradient(90deg, hsl(var(--secondary)), hsl(var(--secondary) / 0.6));
+    color: hsl(210 40% 96%);
+    border-top-right-radius: 1.1rem;
+  }
+  .lcars-chip {
+    background: hsl(var(--background));
+    color: hsl(var(--accent));
+    border-radius: 9999px;
+    padding: 0.2rem 0.7rem;
+    font-family: 'Antonio', sans-serif;
+    letter-spacing: 0.08em;
+    font-size: 0.72rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  /* Pill nav buttons — flat inner edge, rounded outer end (touch-sized). */
+  .lcars-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-height: 52px;
+    padding: 0 1rem;
+    border-radius: 0 26px 26px 0;
+    background: hsl(var(--secondary));
+    color: hsl(210 40% 96%);
+    font-family: 'Antonio', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 1.15rem;
+    transition: filter 0.12s, transform 0.12s, background 0.12s;
+  }
+  .lcars-pill:hover { filter: brightness(1.14); }
+  .lcars-pill:active { transform: translateX(2px); }
+  .lcars-pill[data-active='true'] {
+    background: hsl(var(--primary));
+    color: hsl(222 47% 8%);
+  }
+  .lcars-pill--collapsed { justify-content: center; padding: 0; border-radius: 0 20px 20px 0; }
+
+  /* The LCARS "accent bar" that heads a page or card. */
+  .lcars-accentbar {
+    width: 2.6rem;
+    height: 0.62rem;
+    border-radius: 5px;
+    background: hsl(var(--primary));
+    flex: 0 0 auto;
+  }
+
+  /* Segmented readout meter — the functional replacement for the radar. */
+  .lcars-meter {
+    display: grid;
+    grid-template-columns: minmax(84px, 130px) 1fr 54px;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.5rem 0;
+  }
+  .lcars-meter__name {
+    font-family: 'Antonio', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.9rem;
+    color: hsl(var(--muted-foreground));
+  }
+  .lcars-track {
+    height: 16px;
+    background: hsl(var(--muted));
+    border-radius: 8px;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    overflow: hidden;
+  }
+  .lcars-seg {
+    flex: 1;
+    background: hsl(var(--secondary));
+    border-radius: 2px;
+    opacity: 0.3;
+  }
+  .lcars-seg[data-on='true'] { opacity: 1; }
+  .lcars-seg[data-level='warn'][data-on='true'] { background: hsl(38 92% 55%); }
+  .lcars-seg[data-level='crit'][data-on='true'] { background: hsl(var(--destructive)); }
+  .lcars-meter__val {
+    text-align: right;
+    font-family: 'Antonio', sans-serif;
+    font-size: 1.05rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Color-capped list row (clickable). */
+  .lcars-row {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    min-height: 56px;
+    padding: 0.7rem 0.9rem;
+    background: hsl(var(--muted) / 0.4);
+    border: 1px solid hsl(var(--border));
+    border-left: 4px solid hsl(var(--muted-foreground) / 0.6);
+    border-radius: 8px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .lcars-row:hover { background: hsl(var(--muted) / 0.75); }
 }
