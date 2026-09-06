@@ -1,4 +1,4 @@
-import { Server, Cloud, CloudCog, Building2, Archive, House, Puzzle, Container, Wifi } from 'lucide-react';
+import { Server, Cloud, CloudCog, Building2, Archive, House, Puzzle, Container } from 'lucide-react';
 
 /** Maps a connector manifest icon key to a glyph. */
 export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; className?: string }) {
@@ -17,8 +17,6 @@ export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; 
       return <CloudCog className={className} />;
     case 'docker':
       return <Container className={className} />;
-    case 'unifi':
-      return <Wifi className={className} />;
     default:
       return <Puzzle className={className} />;
   }

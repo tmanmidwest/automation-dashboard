@@ -1,10 +1,13 @@
 # UniFi connector
 
-> **Status: DESIGN — not built (2026-09-06).** The plan. Follows the same shape as the Proxmox /
-> AWS / Cloudflare / Docker connectors: a typed API behind a `Connector`, controller objects
-> normalized into resource kinds, a health-oriented `overview`, and (later) device actions +
-> alerts. Field names in the newer Integration API should be verified against the live controller
-> as Phase 1 is built — the API is young and a few shapes may differ.
+> **Status: SHELVED (2026-09-06).** Phase 1 was built and deployed, but **the Cerebro host cannot
+> reach the UDM's management interface** (`192.168.10.1:443`) — a `curl` from the host times out
+> too, so it's a network-path issue (cross-VLAN access to the gateway management interface is
+> blocked, or Cerebro sits on a subnet with no route to it), not a code problem. The connector code
+> was **removed** to keep the build clean; this design + the client are the starting point when the
+> networking is sorted (allow the Cerebro host → `192.168.10.1:443` in UniFi, or run Cerebro on the
+> UDM's subnet). The Integration-API approach below is sound; field names still need live
+> verification. Original plan follows.
 
 A connector for a UniFi network (UDM / Cloud Gateway / UNAS-hosting controller): see every
 **device** (gateway, switches, APs) with its status, uptime, and firmware; **clients** on the
