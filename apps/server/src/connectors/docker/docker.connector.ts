@@ -152,6 +152,17 @@ const OPERATIONS: ConnectorOperation[] = [
     fields: REDEPLOY_OPTS_FIELDS,
   },
   {
+    id: 'rollback-stack',
+    label: 'Roll back to previous',
+    description: 'Redeploy the version that was running before the last deploy (compose + environment).',
+    scope: 'resource',
+    kind: STACK_KIND,
+    icon: 'history',
+    submitLabel: 'Roll back',
+    background: true,
+    fields: [],
+  },
+  {
     id: 'stop-stack',
     label: 'Stop (compose down)',
     description: 'Run "docker compose down" — stops and removes the stack\'s containers (named volumes are kept).',
@@ -274,14 +285,16 @@ function cpuPercent(s: DockerContainerStats): number | null {
   return Math.round(((cpuDelta / sysDelta) * cpus * 100) * 10) / 10;
 }
 
-/** A short, human port summary, e.g. "8080→80/tcp". */
+/** A short, human port summary, e.g. "8080→80/tcp". Deduped — Docker lists each
+ *  published port once per IP family (IPv4 + IPv6). */
 function portSummary(c: DockerContainer): string | null {
-  const mapped = (c.Ports ?? []).filter((p) => p.PublicPort);
-  if (mapped.length === 0) return null;
-  return mapped
-    .slice(0, 4)
-    .map((p) => `${p.PublicPort}→${p.PrivatePort}/${p.Type ?? 'tcp'}`)
-    .join(', ');
+  const seen = new Set<string>();
+  for (const p of c.Ports ?? []) {
+    if (!p.PublicPort) continue;
+    seen.add(`${p.PublicPort}→${p.PrivatePort}/${p.Type ?? 'tcp'}`);
+  }
+  if (seen.size === 0) return null;
+  return [...seen].slice(0, 6).join(', ');
 }
 
 export class DockerConnector implements Connector {
@@ -591,6 +604,14 @@ export class DockerConnector implements Connector {
         onProgress(`Redeploying stack "${_resourceId}"…`);
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose, stored.env ?? '', optsFrom(values));
       }
+      if (operationId === 'rollback-stack') {
+        const instanceId = ctx.instanceId;
+        if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
+        const prev = await this.stacks.previousRevision(instanceId, _resourceId);
+        if (!prev) return { ok: false, message: 'No previous version to roll back to — this stack has only one stored version.' };
+        onProgress(`Rolling back "${_resourceId}" to the previous version…`);
+        return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, prev.compose, prev.env ?? '');
+      }
 
       if (operationId === 'pull-image') {
         const image = str(values.image);
@@ -644,6 +665,9 @@ export class DockerConnector implements Connector {
       // Merge in Cerebro-managed stacks that aren't currently running, so a
       // stopped stack still shows and can be redeployed/edited.
       const stored = ctx.instanceId ? await this.stacks.list(ctx.instanceId).catch(() => []) : [];
+      const versionCounts: Record<string, number> = ctx.instanceId
+        ? await this.stacks.revisionCounts(ctx.instanceId).catch(() => ({}))
+        : {};
       const runningNames = new Set(running.map((r) => r.id));
       for (const s of stored) {
         if (runningNames.has(s.name)) continue;
@@ -656,6 +680,7 @@ export class DockerConnector implements Connector {
             containers: 0,
             running: 0,
             managed: true,
+            versions: versionCounts[s.name] ?? 0,
             last_deploy: s.lastDeployedAt ? rel(s.lastDeployedAt.toISOString()) : null,
           },
           tags: { status: s.lastStatus === 'success' ? 'stopped' : s.lastStatus, managed: 'cerebro' },
@@ -1030,7 +1055,7 @@ export class DockerConnector implements Connector {
       `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body;
     ctx.log('info', `Docker exec shell opened for ${resourceId.slice(0, 12)}.`);
-    return { url: '', type: 'docker-exec', raw: { ...conn, request, framing: 'raw' } };
+    return { url: '', type: 'docker-exec', raw: { ...conn, request, framing: 'raw', execId } };
   }
 
   /** Prefill the edit-stack form with the stored compose. */

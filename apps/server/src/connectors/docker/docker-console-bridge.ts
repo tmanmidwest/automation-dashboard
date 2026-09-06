@@ -74,9 +74,21 @@ export function bridgeDockerRaw(client: WebSocket, raw: RawConsoleUpstream, logg
     }
   }
 
-  // Browser → container (keystrokes). Ignored for read-only log viewers.
-  client.on('message', (data: Buffer) => {
+  // Browser → container. Binary frames are keystrokes; text frames are out-of-band
+  // control messages (terminal resize). Ignored for read-only log viewers.
+  client.on('message', (data: Buffer, isBinary: boolean) => {
     if (raw.readOnly || closed) return;
+    if (!isBinary && raw.execId) {
+      try {
+        const msg = JSON.parse(data.toString('utf8')) as { resize?: { cols?: number; rows?: number } };
+        if (msg.resize?.cols && msg.resize?.rows) {
+          resizeExec(raw, msg.resize.cols, msg.resize.rows, logger);
+          return;
+        }
+      } catch {
+        /* not a control message — fall through and treat as input */
+      }
+    }
     if (!socket.destroyed) socket.write(data);
   });
 
@@ -84,6 +96,22 @@ export function bridgeDockerRaw(client: WebSocket, raw: RawConsoleUpstream, logg
   client.on('error', cleanup);
   socket.on('close', cleanup);
   socket.on('error', (err) => { logger.warn(`Docker console bridge socket error: ${err.message}`); cleanup(); });
+}
+
+/** Tell Docker the exec's new terminal size (POST /exec/<id>/resize). Best-effort. */
+function resizeExec(raw: RawConsoleUpstream, cols: number, rows: number, logger: Logger): void {
+  if (!raw.execId) return;
+  const path = `/exec/${encodeURIComponent(raw.execId)}/resize?h=${Math.max(1, rows | 0)}&w=${Math.max(1, cols | 0)}`;
+  const req = `POST ${path} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n`;
+  const socket = openSocket(raw);
+  const done = () => { try { socket.destroy(); } catch { /* ignore */ } };
+  const onReady = () => { try { socket.write(req); } catch { /* ignore */ } };
+  if (raw.tls) socket.once('secureConnect', onReady);
+  else socket.once('connect', onReady);
+  // The response is short; close once it arrives (or on error). Fire-and-forget.
+  socket.once('data', done);
+  socket.once('error', (err) => { logger.debug(`exec resize failed: ${err.message}`); done(); });
+  setTimeout(done, 5000);
 }
 
 function openSocket(raw: RawConsoleUpstream): net.Socket {

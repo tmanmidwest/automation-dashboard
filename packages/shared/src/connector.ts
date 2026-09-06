@@ -153,6 +153,12 @@ export interface RawConsoleUpstream {
   framing: 'raw' | 'docker-multiplexed';
   /** Ignore client→upstream bytes (read-only log viewers). */
   readOnly?: boolean;
+  /**
+   * Docker exec id. When set, the relay treats text frames from the browser as
+   * out-of-band control messages (e.g. `{"resize":{"cols","rows"}}` → a
+   * POST /exec/<id>/resize) and only binary frames as keystrokes.
+   */
+  execId?: string;
 }
 
 /**

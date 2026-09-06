@@ -112,6 +112,7 @@ export class DockerStackService {
         return { ok: false, message: out || `docker compose exited ${up.code}.` };
       }
       await this.record(instanceId, project, 'success', out);
+      await this.recordRevision(instanceId, project, compose, env);
       return { ok: true, message: `Deployed "${project}".${out ? `\n${out}` : ''}` };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Deploy failed.';
@@ -133,6 +134,49 @@ export class DockerStackService {
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : 'Stop failed.' };
     }
+  }
+
+  /** How many past versions to keep per stack. */
+  private static readonly MAX_REVISIONS = 10;
+
+  /** Snapshot a deployed version and prune old ones. Best-effort. */
+  private async recordRevision(instanceId: string, project: string, compose: string, env: string): Promise<void> {
+    try {
+      await this.prisma.dockerStackRevision.create({
+        data: { connectorInstanceId: instanceId, name: project, compose, env: env || null },
+      });
+      const old = await this.prisma.dockerStackRevision.findMany({
+        where: { connectorInstanceId: instanceId, name: project },
+        orderBy: { createdAt: 'desc' },
+        skip: DockerStackService.MAX_REVISIONS,
+        select: { id: true },
+      });
+      if (old.length) {
+        await this.prisma.dockerStackRevision.deleteMany({ where: { id: { in: old.map((r) => r.id) } } });
+      }
+    } catch {
+      /* history is best-effort */
+    }
+  }
+
+  /** The version deployed before the current one (for one-step rollback), or null. */
+  async previousRevision(instanceId: string, name: string) {
+    const recent = await this.prisma.dockerStackRevision.findMany({
+      where: { connectorInstanceId: instanceId, name: projectName(name) },
+      orderBy: { createdAt: 'desc' },
+      take: 2,
+    });
+    return recent[1] ?? null;
+  }
+
+  /** Revision count per stack for this connector (for the "N versions" hint). */
+  async revisionCounts(instanceId: string): Promise<Record<string, number>> {
+    const rows = await this.prisma.dockerStackRevision.groupBy({
+      by: ['name'],
+      where: { connectorInstanceId: instanceId },
+      _count: { _all: true },
+    });
+    return Object.fromEntries(rows.map((r) => [r.name, r._count._all]));
   }
 
   private record(instanceId: string, project: string, status: string, message: string) {

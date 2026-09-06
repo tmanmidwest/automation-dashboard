@@ -286,6 +286,20 @@ model DockerStack {
   @@index([connectorInstanceId])
 }
 
+/// A point-in-time snapshot of a managed stack's compose + env, written on each
+/// successful deploy so a stack can be rolled back. Pruned to the last N.
+model DockerStackRevision {
+  id                  String   @id @default(cuid())
+  connectorInstanceId String
+  /// Compose project name (matches DockerStack.name).
+  name                String
+  compose             String
+  env                 String?
+  createdAt           DateTime @default(now())
+
+  @@index([connectorInstanceId, name, createdAt])
+}
+
 /// An installed connector instance (e.g. a specific Proxmox server).
 model ConnectorInstance {
   id           String   @id @default(cuid())

@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created outside Cerebro — by acting on its containers via the Engine API (matched by the
   Compose project label; no compose file or SSH needed). Compose editing still applies only to
   stacks Cerebro stores; deploying an existing stack's compose here "adopts" it for full management.
+- **Deploy history + rollback**: each successful stack deploy is snapshotted (compose + env, last
+  10 kept), and a **Roll back to previous** action redeploys the version that ran before the last
+  change. Managed stacks show a version count.
+- **Interactive shell resize**: the in-browser `exec` terminal now resizes with the window
+  (wired to `POST /exec/{id}/resize`), so `vim`/`htop`/wide output render correctly instead of
+  being stuck at 80×24.
 
 - **Stack environment (`.env`) + deploy options**: a Compose stack now has an **Environment**
   editor (`KEY=value` lines) written to a `.env` beside the compose for `${VAR}` interpolation,
@@ -55,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operation forms with a multi-line field (e.g. a stack's compose / `.env` editor) now render a
   large, resizable, monospaced text box in a wider dialog (Tab inserts spaces for YAML), instead
   of a cramped 3-line box; command output is shown with line breaks preserved.
+- Docker container port lists no longer show each mapping twice (Docker reports an IPv4 and IPv6
+  binding per published port) — deduped to one entry each.
 - **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
   vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
   compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is

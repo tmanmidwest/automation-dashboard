@@ -164,17 +164,25 @@ function startRawTerminal(
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   const dec = new TextDecoder();
+  const enc = new TextEncoder();
 
-  ws.onopen = () => { setStatus('connected'); fit.fit(); if (!readOnly) term.focus(); };
+  // Resize is out-of-band: a text control frame (keystrokes go as binary).
+  const sendResize = () => {
+    if (!readOnly && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+    }
+  };
+
+  ws.onopen = () => { setStatus('connected'); fit.fit(); if (!readOnly) { term.focus(); sendResize(); } };
   ws.onmessage = (ev) => term.write(typeof ev.data === 'string' ? ev.data : dec.decode(ev.data as ArrayBuffer));
   ws.onclose = () => setStatus('disconnected');
   ws.onerror = () => setError(readOnly ? 'The log stream was closed.' : 'The shell connection was closed.');
 
   const onData = readOnly
     ? null
-    : term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+    : term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); }); // binary = keystrokes
 
-  const ro = new ResizeObserver(() => fit.fit());
+  const ro = new ResizeObserver(() => { fit.fit(); sendResize(); });
   ro.observe(target);
 
   cleanups.push(() => {
