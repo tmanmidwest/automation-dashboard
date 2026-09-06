@@ -1,16 +1,27 @@
 # Docker connector (a Portainer replacement)
 
-> **Status: DESIGN — not built (2026-09-06).** This document is the plan. It follows the same
-> shape as the Proxmox / AWS / Cloudflare / Home Assistant connectors: a typed API behind a
-> `Connector`, host/container objects normalized into resource kinds, mutating endpoints mapped
-> to actions/operations, a health-oriented `overview`, live updates via `subscribeLive`, and an
-> interactive shell via the existing console relay.
+> **Status: BUILT — connector v0.2.0, all five phases (2026-09-06).** Phase 1 is deployed and
+> live-connected (a real Docker 29.1.3 host); Phases 2–5 are built and smoke-tested, awaiting
+> deploy (per the repo's edit-only workflow — the user commits, builds, and deploys). This
+> document now describes **what was built**; where reality diverged from the original plan it
+> says so inline, and the phase table below records the shape. It follows the Proxmox / AWS /
+> Cloudflare / Home Assistant connectors: a typed API behind a `Connector`, host/container
+> objects normalized into resource kinds, mutating endpoints mapped to actions/operations, a
+> health-oriented `overview`, live updates via `subscribeLive`, and an interactive shell.
 
-A connector that lets Cerebro monitor and manage one or more Docker hosts — the goal is to
-replace Portainer for day-to-day use: see every stack and container, watch host resources,
-restart / recreate / prune, tail logs, and `exec` into a container. Full **stack deploy/edit**
-(the true Portainer end-game) is scoped honestly at the end, because that is where the Docker
-Engine API stops and a host-side helper begins.
+A connector that lets Cerebro monitor and manage one or more Docker hosts — replacing Portainer
+for day-to-day use: see every stack and container, watch host resources, start/stop/restart/
+prune, tail logs, `exec` into a container, and deploy Compose stacks. Full **stack deploy** (the
+Portainer end-game) is where the Docker Engine API stops, so it runs the host's own
+`docker compose` over SSH — see Phase 5.
+
+> **Two decisions that changed during the build:**
+> - **No pinned API version.** The plan pinned `/v1.43`; a Docker 26+/29 daemon rejects that
+>   (minimum 1.44), and pinning any fixed version breaks a mixed fleet the other way. The client
+>   calls the API **unversioned**, so each daemon uses its own maximum supported version.
+> - **Phase 5 uses SSH, not option C.** The plan led with "store-only + delegate later"; the user
+>   chose the **host-side helper** for full Compose fidelity, implemented as SSH running the
+>   host's own `docker compose` (no agent image, no compose reimplementation).
 
 ```
   ┌──────────────┐   GET /containers/json, /images/json, /info, /system/df   ┌────────────┐
