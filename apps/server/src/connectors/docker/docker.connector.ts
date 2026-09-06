@@ -781,7 +781,8 @@ export class DockerConnector implements Connector {
 
     if (kind === STACK_KIND) {
       const containers = await api.listContainers(true);
-      const running = this.stacksFromContainers(containers);
+      const updates = await this.updatesByContainerId(api, containers).catch(() => new Map<string, boolean | null>());
+      const running = this.stacksFromContainers(containers, updates);
       // Merge in Cerebro-managed stacks that aren't currently running, so a
       // stopped stack still shows and can be redeployed/edited.
       const stored = ctx.instanceId ? await this.stacks.list(ctx.instanceId).catch(() => []) : [];
@@ -937,7 +938,7 @@ export class DockerConnector implements Connector {
   }
 
   /** Roll a container list up into one resource per Compose project. */
-  private stacksFromContainers(containers: DockerContainer[]): ConnectorResource[] {
+  private stacksFromContainers(containers: DockerContainer[], updates?: Map<string, boolean | null>): ConnectorResource[] {
     const byProject = new Map<string, DockerContainer[]>();
     for (const c of containers) {
       const project = c.Labels?.[COMPOSE_PROJECT] ?? 'ungrouped';
@@ -951,6 +952,7 @@ export class DockerConnector implements Connector {
       const total = members.length;
       const unhealthy = members.filter((m) => healthFromStatus(m.Status) === 'unhealthy').length;
       const status = unhealthy > 0 ? 'unhealthy' : running === 0 ? 'stopped' : running < total ? 'degraded' : 'running';
+      const outdated = updates ? members.filter((m) => m.Id && updates.get(m.Id) === true).length : 0;
       out.push({
         id: project,
         kind: STACK_KIND,
@@ -962,8 +964,10 @@ export class DockerConnector implements Connector {
           stopped: total - running,
           unhealthy,
           services: new Set(members.map((m) => m.Labels?.[COMPOSE_SERVICE]).filter(Boolean)).size || total,
+          updates: outdated,
         },
-        tags: { status },
+        // Surface an "updates" chip on the row when a member's image is outdated.
+        tags: { status, ...(outdated > 0 ? { updates: `${outdated} update${outdated === 1 ? '' : 's'}` } : {}) },
       });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -1151,9 +1155,20 @@ export class DockerConnector implements Connector {
     const status = members.length === 0 ? (stored?.lastStatus === 'success' ? 'stopped' : stored?.lastStatus ?? 'stopped')
       : unhealthy > 0 ? 'unhealthy' : running === 0 ? 'stopped' : running < members.length ? 'degraded' : 'running';
 
+    const updates = await this.updatesByContainerId(api, members).catch(() => new Map<string, boolean | null>());
+    const outdated = members.filter((m) => m.Id && updates.get(m.Id) === true).length;
+    const checkable = members.filter((m) => m.Id && updates.get(m.Id) != null).length;
+
     const general: ConnectorDetailItem[] = [
       { label: 'Status', value: status, variant: 'status' },
       { label: 'Containers', value: `${running}/${members.length} running` },
+      {
+        label: 'Image updates',
+        value: outdated > 0 ? `${outdated} update${outdated === 1 ? '' : 's'} available`
+          : checkable > 0 ? 'All up to date'
+          : 'Unknown',
+        variant: outdated > 0 ? 'status' : 'default',
+      },
       { label: 'Managed by Cerebro', value: stored ? 'Yes' : 'No — lifecycle only' },
     ];
     if (stored) {
@@ -1172,7 +1187,12 @@ export class DockerConnector implements Connector {
           .sort((a, b) => cleanContainerName(a.Names).localeCompare(cleanContainerName(b.Names)))
           .map((m) => ({
             label: cleanContainerName(m.Names),
-            value: [m.Image, portSummary(m), healthFromStatus(m.Status) === 'unhealthy' ? 'unhealthy' : m.State].filter(Boolean).join(' · '),
+            value: [
+              m.Image,
+              portSummary(m),
+              healthFromStatus(m.Status) === 'unhealthy' ? 'unhealthy' : m.State,
+              m.Id && updates.get(m.Id) === true ? 'update available' : '',
+            ].filter(Boolean).join(' · '),
             variant: 'mono' as const,
           })),
       });
@@ -1347,6 +1367,33 @@ export class DockerConnector implements Connector {
    * Reads the cache and kicks off background refreshes for stale entries — the
    * count populates over a few polls and never blocks on registry latency.
    */
+  /**
+   * Per-container image-update state (containerId → true/false/null-unknown), reusing the same
+   * cached registry-digest comparison as the overview count. Non-blocking: unknown entries kick off
+   * a background refresh. Used to surface "update available" on stacks and their member containers.
+   */
+  private async updatesByContainerId(api: DockerApi, containers: DockerContainer[]): Promise<Map<string, boolean | null>> {
+    const out = new Map<string, boolean | null>();
+    let images: Awaited<ReturnType<DockerApi['listImages']>>;
+    try {
+      images = await api.listImages();
+    } catch {
+      return out;
+    }
+    const digestByImageId = new Map<string, string | null>();
+    for (const im of images) digestByImageId.set(im.Id, DockerConnector.localDigest(im.RepoDigests));
+    for (const c of containers) {
+      if (c.State !== 'running' || !c.Image || !c.ImageID || !c.Id) continue;
+      const local = digestByImageId.get(c.ImageID);
+      if (!local) { out.set(c.Id, null); continue; } // locally-built / no registry digest → unknown
+      const key = `${c.Image}@@${local}`;
+      const cached = this.updateCache.get(key);
+      if (!cached || Date.now() - cached.at > UPDATE_TTL_MS) void this.refreshUpdate(key, c.Image, local);
+      out.set(c.Id, cached?.hasUpdate ?? null);
+    }
+    return out;
+  }
+
   private async countUpdates(api: DockerApi, containers: DockerContainer[]): Promise<number> {
     let images: Awaited<ReturnType<DockerApi['listImages']>>;
     try {
