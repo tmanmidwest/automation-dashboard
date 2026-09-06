@@ -15,6 +15,7 @@ import { AwsConnector } from './aws/aws.connector';
 import { HomeAssistantConnector } from './home-assistant/home-assistant.connector';
 import { CloudflareConnector } from './cloudflare/cloudflare.connector';
 import { DockerConnector } from './docker/docker.connector';
+import { DockerStackService } from './docker/docker-stack.service';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
 import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
@@ -27,6 +28,7 @@ import { VmNameService } from './backblaze/vm-name.service';
   providers: [
     ConnectorRegistry, ConnectorInstanceService, ConnectionMonitorService, ResourceMonitorService, MetricThresholdMonitorService, JobService, ConsoleService,
     BackupRunService, BackupSchedulerService, BackupStateService, VmNameService,
+    DockerStackService,
   ],
   exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService],
 })
@@ -36,6 +38,7 @@ export class ConnectorsModule implements OnModuleInit {
     private readonly backupRuns: BackupRunService,
     private readonly backupState: BackupStateService,
     private readonly vmNames: VmNameService,
+    private readonly dockerStacks: DockerStackService,
   ) {}
 
   /** Register the built-in connectors with the extension host. */
@@ -44,7 +47,7 @@ export class ConnectorsModule implements OnModuleInit {
     this.registry.register(new AwsConnector());
     this.registry.register(new HomeAssistantConnector());
     this.registry.register(new CloudflareConnector());
-    this.registry.register(new DockerConnector());
+    this.registry.register(new DockerConnector(this.dockerStacks));
     // The Backblaze connector reads restore history, a durable state mirror, and VM names.
     this.registry.register(new BackblazeConnector(this.backupRuns, this.backupState, this.vmNames));
   }

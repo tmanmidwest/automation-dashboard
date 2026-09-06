@@ -263,6 +263,27 @@ model SecretMeta {
   @@index([owningConnectorId])
 }
 
+/// A compose stack Cerebro manages on a Docker host (Phase 5). Cerebro is the
+/// versioned store for the compose file; deploys run via SSH `docker compose`.
+model DockerStack {
+  id                  String   @id @default(cuid())
+  /// The Docker ConnectorInstance this stack belongs to.
+  connectorInstanceId String
+  /// Compose project name (lowercased, unique per connector).
+  name                String
+  /// The compose YAML (the source of truth Cerebro stores/edits).
+  compose             String
+  /// Outcome of the last deploy: never | success | error.
+  lastStatus          String   @default("never")
+  lastMessage         String?
+  lastDeployedAt      DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([connectorInstanceId, name])
+  @@index([connectorInstanceId])
+}
+
 /// An installed connector instance (e.g. a specific Proxmox server).
 model ConnectorInstance {
   id           String   @id @default(cuid())

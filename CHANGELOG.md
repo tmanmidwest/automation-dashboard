@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Health alerts**: a new **Docker** alert category on the threshold monitor — alert when
   unhealthy containers, stopped containers, or Docker disk usage cross a per-connector limit.
   (Host-unreachable is already covered by the baseline connection monitor.)
+- **Compose stacks**: deploy and manage Compose stacks from Cerebro. Cerebro is the versioned
+  store for each stack's compose file and runs the host's own `docker compose` over **SSH** —
+  no agent, full Compose fidelity. **Deploy** (create/update), **Edit & redeploy**, **Redeploy**,
+  and **Stop (compose down)** operations on the Stacks tab; managed stacks show even when stopped.
+  SSH host/user/key (key in the vault) are optional connector settings — leave them blank to keep
+  a connector monitor/manage-only.
 - **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
   vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
   compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is

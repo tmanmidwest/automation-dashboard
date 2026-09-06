@@ -26,6 +26,8 @@ import {
   type DockerContainerStats,
   type DockerEvent,
 } from './docker-api';
+import { DockerStackService, projectName, type StackDeployTarget } from './docker-stack.service';
+import type { SshConfig } from './docker-ssh';
 
 const HOST_KIND = 'docker_host';
 const STACK_KIND = 'stack';
@@ -47,7 +49,7 @@ const KINDS: ConnectorResourceKind[] = [
   {
     id: STACK_KIND,
     label: 'Stacks',
-    deletable: false,
+    deletable: true,
     actions: [],
     subResources: [{ id: CONTAINER_KIND, label: 'Containers', labelSingular: 'Container' }],
   },
@@ -79,7 +81,65 @@ const pruneConfirmField = (what: string) => ({
   required: true,
 });
 
+const COMPOSE_FIELD = {
+  key: 'compose',
+  label: 'docker-compose.yml',
+  type: 'textarea' as const,
+  required: true,
+  placeholder: 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n    restart: unless-stopped',
+  help: 'Standard Compose. Cerebro writes this to the host and runs "docker compose up -d".',
+};
+
 const OPERATIONS: ConnectorOperation[] = [
+  {
+    id: 'deploy-stack',
+    label: 'Deploy stack',
+    description: 'Create or update a Compose stack. Cerebro stores it and runs "docker compose up -d" on the host over SSH.',
+    scope: 'create',
+    kind: STACK_KIND,
+    icon: 'rocket',
+    submitLabel: 'Deploy',
+    background: true,
+    fields: [
+      { key: 'name', label: 'Stack name', type: 'text', required: true, placeholder: 'my-app', help: 'Compose project name (lowercased).' },
+      COMPOSE_FIELD,
+    ],
+  },
+  {
+    id: 'edit-stack',
+    label: 'Edit & redeploy',
+    description: 'Edit this stack\'s compose and redeploy it.',
+    scope: 'resource',
+    kind: STACK_KIND,
+    icon: 'pencil',
+    submitLabel: 'Save & deploy',
+    background: true,
+    prefill: true,
+    fields: [COMPOSE_FIELD],
+  },
+  {
+    id: 'redeploy-stack',
+    label: 'Redeploy',
+    description: 'Re-run "docker compose up -d" with the stored compose (pulls changed images, recreates as needed).',
+    scope: 'resource',
+    kind: STACK_KIND,
+    icon: 'refresh-cw',
+    submitLabel: 'Redeploy',
+    background: true,
+    fields: [],
+  },
+  {
+    id: 'stop-stack',
+    label: 'Stop (compose down)',
+    description: 'Run "docker compose down" — stops and removes the stack\'s containers (named volumes are kept).',
+    scope: 'resource',
+    kind: STACK_KIND,
+    icon: 'ban',
+    intent: 'destructive',
+    submitLabel: 'Stop stack',
+    background: true,
+    fields: [],
+  },
   {
     id: 'pull-image',
     label: 'Pull image',
@@ -202,6 +262,9 @@ function portSummary(c: DockerContainer): string | null {
 }
 
 export class DockerConnector implements Connector {
+  /** Injected so stack deploys (Phase 5) can store compose + run SSH. */
+  constructor(private readonly stacks: DockerStackService) {}
+
   manifest: ConnectorManifest = {
     id: 'docker',
     name: 'Docker',
@@ -247,6 +310,33 @@ export class DockerConnector implements Connector {
         type: 'boolean',
         required: false,
         help: 'Development only — do not use against a real host.',
+      },
+      // ── Stack management over SSH (optional; Phase 5) ──
+      {
+        key: 'sshHost',
+        label: 'SSH host (for stack deploys)',
+        type: 'text',
+        required: false,
+        placeholder: 'same host as the Docker endpoint',
+        help: 'To deploy compose stacks, Cerebro runs the host\'s own "docker compose" over SSH. Leave the SSH fields blank to keep this connector monitor/manage-only.',
+      },
+      { key: 'sshPort', label: 'SSH port', type: 'number', required: false, placeholder: '22' },
+      { key: 'sshUser', label: 'SSH user', type: 'text', required: false, placeholder: 'a user in the docker group' },
+      {
+        key: 'sshPrivateKey',
+        label: 'SSH private key (PEM)',
+        type: 'textarea',
+        secret: true,
+        required: false,
+        help: 'Key for the SSH user, stored encrypted in the secrets vault. The user must be able to run "docker compose".',
+      },
+      {
+        key: 'stacksDir',
+        label: 'Stacks directory on host',
+        type: 'text',
+        required: false,
+        placeholder: '/opt/cerebro-stacks',
+        help: 'Where Cerebro writes each stack\'s compose file on the host.',
       },
     ],
     resourceKinds: KINDS,
@@ -296,6 +386,22 @@ export class DockerConnector implements Connector {
       insecureSkipVerify: bool(ctx.config.insecureSkipVerify),
     };
     return new DockerApi(auth);
+  }
+
+  /** Build the SSH deploy target from config, or throw a clear message if unset. */
+  private sshTargetFrom(ctx: ConnectorContext): StackDeployTarget {
+    const host = str(ctx.config.sshHost);
+    const key = str(ctx.config.sshPrivateKey);
+    if (!host || !key) {
+      throw new Error('Stack deploys need SSH configured — set the SSH host, user, and private key on this connector.');
+    }
+    const ssh: SshConfig = {
+      host,
+      port: Number(ctx.config.sshPort) || 22,
+      username: str(ctx.config.sshUser) || 'root',
+      privateKey: key,
+    };
+    return { ssh, stacksDir: str(ctx.config.stacksDir) || '/opt/cerebro-stacks' };
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
@@ -351,6 +457,19 @@ export class DockerConnector implements Connector {
   async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
     const api = this.apiFrom(ctx);
     try {
+      if (kind === STACK_KIND) {
+        // Compose down (best-effort) then forget the stored stack.
+        if (ctx.instanceId) {
+          try {
+            await this.stacks.down(this.sshTargetFrom(ctx), ctx.instanceId, resourceId);
+          } catch (err) {
+            ctx.log('debug', `Stack down before delete failed: ${err instanceof Error ? err.message : err}`);
+          }
+          await this.stacks.remove(ctx.instanceId, resourceId);
+        }
+        ctx.log('info', `Docker removed managed stack ${resourceId}.`);
+        return { ok: true, message: `Stack "${resourceId}" removed.` };
+      }
       switch (kind) {
         case CONTAINER_KIND: await api.removeContainer(resourceId); break;
         case IMAGE_KIND: await api.removeImage(resourceId); break;
@@ -377,6 +496,34 @@ export class DockerConnector implements Connector {
   ): Promise<OperationResult> {
     const api = this.apiFrom(ctx);
     try {
+      // ── Stack operations (Phase 5, over SSH) ──
+      if (operationId === 'deploy-stack' || operationId === 'edit-stack') {
+        const instanceId = ctx.instanceId;
+        if (!instanceId) return { ok: false, message: 'Missing connector instance.' };
+        const name = operationId === 'deploy-stack' ? str(values.name) : (_resourceId ?? '');
+        const compose = str(values.compose);
+        if (!name) return { ok: false, message: 'A stack name is required.' };
+        if (!compose) return { ok: false, message: 'The compose file is empty.' };
+        const target = this.sshTargetFrom(ctx);
+        onProgress(`Deploying stack "${projectName(name)}" over SSH…`);
+        const res = await this.stacks.deploy(target, instanceId, name, compose);
+        ctx.log(res.ok ? 'info' : 'error', `Docker stack deploy "${projectName(name)}": ${res.message}`);
+        return res;
+      }
+      if (operationId === 'redeploy-stack' || operationId === 'stop-stack') {
+        const instanceId = ctx.instanceId;
+        if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
+        const target = this.sshTargetFrom(ctx);
+        if (operationId === 'stop-stack') {
+          onProgress(`Stopping stack "${_resourceId}"…`);
+          return await this.stacks.down(target, instanceId, _resourceId);
+        }
+        const stored = await this.stacks.get(instanceId, _resourceId);
+        if (!stored) return { ok: false, message: 'No stored compose for this stack — use "Deploy stack" first.' };
+        onProgress(`Redeploying stack "${_resourceId}"…`);
+        return await this.stacks.deploy(target, instanceId, _resourceId, stored.compose);
+      }
+
       if (operationId === 'pull-image') {
         const image = str(values.image);
         if (!image) return { ok: false, message: 'An image name is required.' };
@@ -425,7 +572,28 @@ export class DockerConnector implements Connector {
 
     if (kind === STACK_KIND) {
       const containers = await api.listContainers(true);
-      return this.stacksFromContainers(containers);
+      const running = this.stacksFromContainers(containers);
+      // Merge in Cerebro-managed stacks that aren't currently running, so a
+      // stopped stack still shows and can be redeployed/edited.
+      const stored = ctx.instanceId ? await this.stacks.list(ctx.instanceId).catch(() => []) : [];
+      const runningNames = new Set(running.map((r) => r.id));
+      for (const s of stored) {
+        if (runningNames.has(s.name)) continue;
+        running.push({
+          id: s.name,
+          kind: STACK_KIND,
+          name: s.name,
+          status: s.lastStatus === 'success' ? 'stopped' : s.lastStatus, // 'stopped' | 'error' | 'never'
+          details: {
+            containers: 0,
+            running: 0,
+            managed: true,
+            last_deploy: s.lastDeployedAt ? rel(s.lastDeployedAt.toISOString()) : null,
+          },
+          tags: { status: s.lastStatus === 'success' ? 'stopped' : s.lastStatus, managed: 'cerebro' },
+        });
+      }
+      return running.sort((a, b) => a.name.localeCompare(b.name));
     }
 
     if (kind === IMAGE_KIND) {
@@ -795,6 +963,19 @@ export class DockerConnector implements Connector {
       body;
     ctx.log('info', `Docker exec shell opened for ${resourceId.slice(0, 12)}.`);
     return { url: '', type: 'docker-exec', raw: { ...conn, request, framing: 'raw' } };
+  }
+
+  /** Prefill the edit-stack form with the stored compose. */
+  async operationDefaults(
+    ctx: ConnectorContext,
+    operationId: string,
+    resourceId: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    if (operationId === 'edit-stack' && resourceId && ctx.instanceId) {
+      const stored = await this.stacks.get(ctx.instanceId, resourceId);
+      if (stored) return { compose: stored.compose };
+    }
+    return {};
   }
 
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
