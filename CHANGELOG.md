@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applying, with the full `docker compose` output shown in the result.
 
 ### Fixed
+- Editing a field in a connector operation form (notably the Docker stack compose / `.env` editor)
+  is no longer interrupted by background refreshes — live updates and the active-job poll now pause
+  while a form dialog is open, so text selection and typing aren't disrupted every few seconds.
 - Operation forms with a multi-line field (e.g. a stack's compose / `.env` editor) now render a
   large, resizable, monospaced text box in a wider dialog (Tab inserts spaces for YAML), instead
   of a cramped 3-line box; command output is shown with line breaks preserved.

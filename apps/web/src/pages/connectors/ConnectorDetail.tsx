@@ -135,11 +135,18 @@ export function ConnectorDetail() {
   useEffect(() => { setTagFilters([]); setAddKey(''); }, [kind]);
 
   // Poll for background operations (backups/prunes) running on this instance.
+  // While a form dialog is open, pause the background polling/live churn so frequent
+  // re-renders can't interrupt selection or typing in a field (e.g. the compose editor).
+  const dialogOpen = !!(activeOp || resourceOp || subDialog);
+  const dialogOpenRef = useRef(false);
+  dialogOpenRef.current = dialogOpen;
+
   const prevActiveRef = useRef(0);
   useEffect(() => {
     if (!inst?.enabled) return;
     let alive = true;
     const poll = async () => {
+      if (dialogOpenRef.current) return; // a form is open — don't churn the tree
       try {
         const jobs = await api.get<ConnectorJobStatus[]>(`/api/connectors/instances/${id}/active-jobs`);
         if (!alive) return;
@@ -166,6 +173,7 @@ export function ConnectorDetail() {
     if (!manifest?.live || !inst?.enabled) return;
     const es = new EventSource(`/api/connectors/instances/${id}/live`);
     es.onmessage = (ev) => {
+      if (dialogOpenRef.current) return; // a form is open — don't churn the tree
       let r: ConnectorResource;
       try { r = JSON.parse(ev.data) as ConnectorResource; } catch { return; }
       if (r.kind !== kindRef.current) return;
