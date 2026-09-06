@@ -241,8 +241,9 @@ export interface ConnectorResource {
 export interface ConnectorDetailItem {
   label: string;
   value: string;
-  /** Optional hint so the UI can style, e.g. 'status', 'mono'. */
-  variant?: 'default' | 'mono' | 'status';
+  /** Optional hint so the UI can style, e.g. 'status', 'mono'. 'link' renders
+   *  `value` as an external link (its href). */
+  variant?: 'default' | 'mono' | 'status' | 'link';
 }
 
 export interface ConnectorDetailGroup {

@@ -95,10 +95,15 @@ export interface DockerContainerInspect {
     StartedAt?: string;
     Health?: { Status?: string; FailingStreak?: number };
   };
-  Config?: { Image?: string; Env?: string[]; Labels?: Record<string, string>; Tty?: boolean };
+  Config?: { Image?: string; Env?: string[]; Cmd?: string[]; Labels?: Record<string, string>; Tty?: boolean };
+  Path?: string;
+  Args?: string[];
   Image?: string;
   Mounts?: { Type?: string; Source?: string; Destination?: string; RW?: boolean; Name?: string }[];
-  NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+  NetworkSettings?: {
+    Networks?: Record<string, { IPAddress?: string }>;
+    Ports?: Record<string, { HostIp?: string; HostPort?: string }[] | null>;
+  };
 }
 
 export interface DockerContainerStats {

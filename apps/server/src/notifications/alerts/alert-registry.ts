@@ -293,6 +293,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'docker.restart_loop',
+    label: 'Restarting containers over threshold',
+    description: 'The number of containers stuck restarting (a crash loop) crossed the limit set on its page.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
 
   // ── Secrets vault ────────────────────────────────────────
   {

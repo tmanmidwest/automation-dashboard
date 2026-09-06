@@ -38,6 +38,7 @@ const THRESHOLD_DEFS = [
   { id: 'dockerUnhealthy', metricKey: 'containersUnhealthy', alertKey: 'docker.unhealthy', label: 'Unhealthy containers' },
   { id: 'dockerStopped', metricKey: 'containersStopped', alertKey: 'docker.stopped', label: 'Stopped containers' },
   { id: 'dockerDisk', metricKey: 'diskUsedGb', alertKey: 'docker.disk_high', label: 'Docker disk used' },
+  { id: 'dockerRestarting', metricKey: 'containersRestarting', alertKey: 'docker.restart_loop', label: 'Restarting containers' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 

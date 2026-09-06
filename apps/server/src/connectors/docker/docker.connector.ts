@@ -888,18 +888,42 @@ export class DockerConnector implements Connector {
       const inspect = await api.inspectContainer(resourceId);
       const health = inspect.State?.Health?.Status;
       const name = (inspect.Name ?? '').replace(/^\//, '');
+      const command =
+        inspect.Config?.Cmd?.length ? inspect.Config.Cmd.join(' ')
+          : [inspect.Path, ...(inspect.Args ?? [])].filter(Boolean).join(' ');
       const general: ConnectorDetailItem[] = [
         { label: 'Name', value: name || shortId(inspect.Id) },
         { label: 'State', value: inspect.State?.Status ?? '—', variant: 'status' },
         ...(health ? [{ label: 'Health', value: health, variant: 'status' as const }] : []),
         { label: 'Image', value: inspect.Config?.Image ?? '—', variant: 'mono' },
+        ...(command ? [{ label: 'Command', value: command, variant: 'mono' as const }] : []),
         { label: 'Restart count', value: String(inspect.RestartCount ?? 0) },
         { label: 'Started', value: rel(inspect.State?.StartedAt) ?? '—' },
+        { label: 'Created', value: rel(inspect.Created) ?? '—' },
         { label: 'Stack', value: inspect.Config?.Labels?.[COMPOSE_PROJECT] ?? '—' },
         { label: 'Service', value: inspect.Config?.Labels?.[COMPOSE_SERVICE] ?? '—' },
         { label: 'Container ID', value: shortId(inspect.Id), variant: 'mono' },
       ];
       const groups: ConnectorDetailGroup[] = [{ title: 'General', items: general }];
+
+      // Published ports — as clickable links to the host when one can be derived.
+      const host = browsableHost(ctx.config);
+      const portItems: ConnectorDetailItem[] = [];
+      const seenPort = new Set<string>();
+      for (const [cport, bindings] of Object.entries(inspect.NetworkSettings?.Ports ?? {})) {
+        for (const b of bindings ?? []) {
+          if (!b.HostPort) continue;
+          const key = `${b.HostPort}:${cport}`;
+          if (seenPort.has(key)) continue;
+          seenPort.add(key);
+          portItems.push(
+            host
+              ? { label: cport, value: `http://${host}:${b.HostPort}`, variant: 'link' }
+              : { label: cport, value: `:${b.HostPort}`, variant: 'mono' },
+          );
+        }
+      }
+      if (portItems.length) groups.push({ title: 'Published ports', items: portItems });
 
       // One-shot resource sample (on-demand only — never on the list view).
       try {
@@ -943,6 +967,15 @@ export class DockerConnector implements Connector {
         variant: 'mono' as const,
       }));
       if (netItems.length) groups.push({ title: 'Networks', items: netItems });
+
+      // Environment — secret-looking values masked (best-effort, by key name).
+      const envItems: ConnectorDetailItem[] = (inspect.Config?.Env ?? []).slice(0, 40).map((e) => {
+        const eq = e.indexOf('=');
+        const k = eq >= 0 ? e.slice(0, eq) : e;
+        const v = eq >= 0 ? e.slice(eq + 1) : '';
+        return { label: k, value: SECRETISH.test(k) ? '••••••••' : v || '—', variant: 'mono' as const };
+      });
+      if (envItems.length) groups.push({ title: 'Environment', items: envItems });
 
       return {
         id: inspect.Id,
@@ -1115,11 +1148,13 @@ export class DockerConnector implements Connector {
     const running = containers.filter((c) => c.State === 'running').length;
     const stopped = containers.filter((c) => STOPPED_STATES.has(c.State ?? '')).length;
     const unhealthy = containers.filter((c) => healthFromStatus(c.Status) === 'unhealthy').length;
+    const restarting = containers.filter((c) => c.State === 'restarting').length;
 
     const metrics: OverviewMetric[] = [
       { key: 'containersRunning', label: 'Running', value: running },
       { key: 'containersStopped', label: 'Stopped', value: stopped },
       { key: 'containersUnhealthy', label: 'Unhealthy', value: unhealthy },
+      { key: 'containersRestarting', label: 'Restarting', value: restarting },
       { key: 'imagesTotal', label: 'Images', value: info.Images ?? 0 },
     ];
     if (df) metrics.push({ key: 'diskUsedGb', label: 'Disk used', value: bytesToGb(diskUsed(df)), unit: 'GB' });
@@ -1204,6 +1239,19 @@ function diskUsed(df: NonNullable<Awaited<ReturnType<DockerApi['df']>>>): number
 
 function shortId(id: string): string {
   return id.replace(/^sha256:/, '').slice(0, 12);
+}
+
+/** Env var names whose values we mask in the detail view. */
+const SECRETISH = /pass|secret|token|key|pwd|cred|auth/i;
+
+/** Best-effort host the browser can reach a published port on: the SSH host, else
+ *  the endpoint host (tcp/http/https). Null for a local unix socket. */
+function browsableHost(config: Record<string, unknown>): string | null {
+  const ssh = str(config.sshHost);
+  if (ssh) return ssh;
+  const ep = str(config.endpoint) ?? '';
+  const m = ep.match(/^(?:tcp|https?):\/\/([^:/]+)/i);
+  return m ? m[1] : null;
 }
 
 function str(v: unknown): string | undefined {

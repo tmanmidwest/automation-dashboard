@@ -804,7 +804,11 @@ export function ConnectorDetail() {
                     <div key={i} className="flex justify-between gap-4 py-1.5 text-sm">
                       <dt className="text-muted-foreground shrink-0">{it.label}</dt>
                       <dd className={cn('text-right break-all', it.variant === 'mono' && 'font-mono text-xs',
-                        it.variant === 'status' && 'capitalize')}>{it.value}</dd>
+                        it.variant === 'status' && 'capitalize')}>
+                        {it.variant === 'link'
+                          ? <a href={it.value} target="_blank" rel="noreferrer" className="text-accent hover:underline font-mono text-xs">{it.value}</a>
+                          : it.value}
+                      </dd>
                     </div>
                   ))}
                 </dl>

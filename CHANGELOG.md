@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interactive shell resize**: the in-browser `exec` terminal now resizes with the window
   (wired to `POST /exec/{id}/resize`), so `vim`/`htop`/wide output render correctly instead of
   being stuck at 80×24.
+- **Richer container detail**: the container drawer now shows the command, created time, a scrubbed
+  **Environment** section (secret-looking values masked), and **published ports as clickable links**
+  to the host (when one can be derived from the SSH/endpoint host).
+- **Restart-loop alert**: a new Docker alert fires when the number of containers stuck restarting
+  (a crash loop) crosses a per-connector threshold.
 
 - **Stack environment (`.env`) + deploy options**: a Compose stack now has an **Environment**
   editor (`KEY=value` lines) written to a `.env` beside the compose for `${VAR}` interpolation,
