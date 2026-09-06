@@ -56,22 +56,28 @@ the config form:
 > unix-socket mode (`unix:///var/run/docker.sock`) is also supported for the host Cerebro itself
 > runs on, but the primary use case is **many remote hosts**, so mTLS is the default.
 
-### Config fields (`manifest.configFields`)
+### Config fields (`manifest.configFields`, as built)
 
 | Field | Secret? | Notes |
 | --- | --- | --- |
-| `endpoint` | no | e.g. `tcp://nas.local:2376`, `http://dockerproxy:2375`, or `unix:///var/run/docker.sock` |
-| `transport` | no | `mtls` \| `socket-proxy` \| `unix` (drives which fields below are shown) |
+| `endpoint` | no | e.g. `tcp://nas.local:2376`, `http://dockerproxy:2375`, or `unix:///var/run/docker.sock` — the scheme selects the transport |
 | `tlsCaCert` | no | PEM — verify the daemon (mTLS) |
 | `tlsClientCert` | no | PEM — client identity (mTLS) |
 | `tlsClientKey` | **yes** | PEM private key — vault-encrypted |
 | `insecureSkipVerify` | no | dev only; default false |
+| `sshHost` / `sshPort` / `sshUser` | no | Phase 5 stack deploys — the SSH host running `docker compose` (optional) |
+| `sshPrivateKey` | **yes** | PEM key for the SSH user — vault-encrypted |
+| `stacksDir` | no | where Cerebro writes compose files on the host (default `/opt/cerebro-stacks`) |
+
+> The transport is **inferred from the endpoint scheme** (unix / http / tcp+https), not a separate
+> `transport` field. All SSH fields are optional — blank keeps the connector monitor/manage-only.
 
 ## Design decision — dependency-free Engine API client
 
-Built against the **Docker Engine API** (documented, versioned — pin `/v1.43/…`) with a
-dependency-free HTTPS client in the Proxmox/HA/Cloudflare style (Node `https`/`http` with a
-client-cert `Agent` for mTLS, or a Unix-socket agent for the local case). No `dockerode` SDK —
+Built against the **Docker Engine API**, called **unversioned** (each daemon uses its own maximum
+supported version — see the decision note above), with a dependency-free HTTPS client in the
+Proxmox/HA/Cloudflare style (Node `https`/`http` with a client-cert `Agent` for mTLS, a Unix-socket
+agent for the local case, or plain HTTP to a socket-proxy). No `dockerode` SDK —
 the surface we need is a couple dozen endpoints, and the existing connectors set the precedent
 for a hand-rolled typed client + a friendly `DockerApiError`.
 
@@ -124,79 +130,98 @@ production immediately.
 **Deliverable:** a live read-only Portainer dashboard across every host. `testConnection` =
 `GET /info` (cheap, one call).
 
-## Phase 2 — Manage (Engine API actions + operations)
+## Phase 2 — Manage (Engine API actions + operations) — BUILT
 
-Map the daemon's mutating endpoints onto the existing action/operation machinery. Every one is
+Maps the daemon's mutating endpoints onto the existing action/operation machinery. Every one is
 audited (they flow through the connector action path → the timeline).
 
 - **Container actions** (`ConnectorAction[]` on the `container` kind): `start`, `stop`,
-  `restart`, `pause`, `unpause`, `kill`, `remove` (with `confirm`).
-- **Operations** (forms): **pull image** (`fromImage` + tag → streamed to a `JobService` job so
-  progress shows in the running-jobs banner), **prune** (images / volumes / networks / build
-  cache, with a scope dropdown), **recreate container** (stop → remove → run with the same
-  config from inspect — the safe 80% of "redeploy").
-- **`deleteResource`** for image / volume / network, guarded when in use.
-- Gate all of this behind `connectors:action` (already the permission for mutating a connector),
-  and behind the **socket-proxy `POST=1`** flag if that transport is chosen.
+  `restart`, `pause`, `unpause`, `kill` — each with `showWhenStatus` so only valid actions
+  appear. **Remove** is the generic delete control (`deletable: true`).
+- **Operations** (forms): **pull image** (streamed to a `JobService` job so progress shows in the
+  running-jobs banner), and **four prune operations** (dangling images / stopped containers /
+  unused volumes / unused networks) — each a separate op with a **required confirm checkbox** so
+  it never runs on a stray click (simpler and safer than one scope dropdown).
+- **`deleteResource`** for container (force), image (force), volume (**not** forced — an in-use
+  volume returns a clear 409 instead of data loss), and network.
+- Gated behind `connectors:action`; over the socket-proxy this needs **`POST=1`** (and the delete
+  paths need a proxy that permits `DELETE`, else use the TLS transport).
 
-**Deliverable:** restart/recreate/prune/pull from Cerebro — replaces ~80% of daily Portainer use
+> **Diverged from the plan:** **recreate container** was deferred — recreating faithfully from
+> `inspect` (ports, mounts, networks, restart policy) is fiddly and risky; Phase 5's stack
+> redeploy covers "redeploy" properly instead.
+
+**Deliverable:** restart/kill/prune/pull/remove from Cerebro — replaces most daily Portainer use
 with **zero agent**.
 
-## Phase 3 — Live, logs, and shell (existing relays)
+## Phase 3 — Live, logs, and shell — BUILT
 
-- **`subscribeLive`** subscribes to `GET /events` (filtered to container/health events) and calls
-  `onUpdate` with the re-normalized container whenever one starts, dies, or changes health. Reuses
-  the exact contract built for Home Assistant — container rows update in place, and these events
-  also feed the **timeline** live tail.
-- **Log tail**: `GET /containers/:id/logs?follow=1` is a chunked HTTP stream (with Docker's 8-byte
-  multiplexing header when no TTY). Surface it over SSE, like the timeline, on the container detail
-  page. Requires a small **demux** of the stdout/stderr framing.
-- **Interactive shell (`exec`)**: `openConsole(kind:'container', mode:'shell')` returns a
-  `ConnectorConsoleTarget{ type:'terminal' }`. The browser already has the terminal client from the
-  Proxmox serial console.
-  - ⚠️ **The one real wrinkle.** Docker's exec attach is **not** a WebSocket — `POST /exec/:id/start`
-    **hijacks** the HTTP connection into a raw bidirectional byte stream. The current console relay
-    is a WebSocket↔WebSocket proxy, so exec needs a small **hijack↔WebSocket bridge** in the relay
-    (create the exec with `AttachStdin/Stdout/Stderr`, `Tty:true`, start it, then pipe the hijacked
-    socket to the browser WebSocket). This is an additive relay mode, not a rewrite — the byte-pump
-    and the browser terminal are unchanged; only the upstream dial differs. Resize via
-    `POST /exec/:id/resize`.
+- **`subscribeLive`** subscribes to `GET /events` (filtered to `type=container`) and maps each
+  event **directly** to a normalized container resource — no per-event API round-trip — pushing it
+  via `onUpdate`. Reuses the Home Assistant `live` contract; container rows update in place and
+  feed the **timeline** live tail. Auto-reconnects 5 s after a stream drop.
+- **Log tail** and **interactive `exec` shell**, both reached from a container's detail page
+  (**Logs** and **Shell** buttons; Shell only when running).
 
-**Deliverable:** watch containers flip live, tail logs, and drop into a shell — parity with the
-things people actually open Portainer for.
+> **How the exec wrinkle was solved.** Docker's exec attach **hijacks** the HTTP connection and
+> logs is a chunked stream — neither is a WebSocket, which is all the console relay spoke. Rather
+> than teach the generic relay Docker's HTTP, the console contract gained an optional
+> **`raw` upstream** on `ConnectorConsoleTarget` (`type: 'docker-exec' | 'docker-logs'`), and a
+> self-contained bridge (`docker/docker-console-bridge.ts`) opens its own socket to the daemon,
+> sends the raw HTTP request, skips the response headers, then pipes bytes — **demuxing** Docker's
+> 8-byte stdout/stderr frame headers for non-TTY logs. The console relay gained **one additive
+> branch** (`if (target.raw) …`); the VNC/serial WebSocket path is untouched. The browser reuses
+> the existing xterm terminal, with a new raw-byte mode (Docker exec sends raw keystrokes, not
+> Proxmox's `0:len:` framing).
+>
+> **Limitation:** no live TTY resize yet — the exec runs at Docker's default 80×24. Live resize
+> needs a mid-session `POST /exec/:id/resize`; deferred.
+>
+> **Socket-proxy note:** exec needs `EXEC=1` + `POST=1` on the proxy; logs works read-only with
+> just `CONTAINERS=1`. The TLS transport does it all with no toggles.
 
-## Phase 4 — Health alerts (reuse the metric-threshold monitor)
+**Deliverable:** watch containers flip live, tail logs, and drop into a shell.
+
+## Phase 4 — Health alerts (metric-threshold monitor) — BUILT
 
 A new **Docker** alert category wired into the generic threshold monitor (same pattern as
-Cloudflare/HA): `docker.container_unhealthy`, `docker.container_died` (an expected-running
-container is stopped), `docker.host_disk_high` (`/system/df` past a % of a configured ceiling),
-`docker.host_unreachable`. Per-connector thresholds; alerts appear in the timeline via
-`NotificationLog`.
+Cloudflare/HA), three per-connector thresholds:
 
-## Phase 5 — The end game: stacks (deploy / edit / launch)
+- `docker.unhealthy` — unhealthy-container count over the limit (default on).
+- `docker.stopped` — stopped-container count over the limit (default off; stopped is often
+  intentional).
+- `docker.disk_high` — `/system/df` disk-used GB over the limit (default on).
 
-This is where the Engine API stops. **Docker's API has no compose endpoints** — `docker compose`
-is a client-side tool that translates YAML into many container/network/volume API calls. So
-launching or editing a *stack* means one of:
+Alerts appear in the timeline via `NotificationLog`.
 
-- **(A) Host-side compose runner** — a tiny per-host helper (an agent, or SSH to run
-  `docker compose up -d` against a Cerebro-managed compose file). This is what Portainer's agent
-  does. Most capable; requires deploying something on each host, and a decision Cerebro has so far
-  avoided.
-- **(B) Reimplement compose over the API** — translate a compose file into the individual
-  create/connect/start calls ourselves. No agent, but it re-derives Portainer's stack engine
-  (dependency ordering, networks, volumes, healthcheck waits, `depends_on`) — a large, bug-prone
-  surface.
-- **(C) Stack *storage* + host apply** — Cerebro stores/edits the compose files (git-style
-  versioning in a new table) and Phase-2 recreate handles single-service changes, but full
-  multi-service `up` still calls out to (A). A pragmatic middle path: **own the compose files and
-  the diff, delegate the apply.**
+> **Diverged from the plan:** the plan listed `container_died` and `host_unreachable`. `host_
+> unreachable` was dropped — the baseline connection monitor already alerts when any connector
+> goes unreachable. `container_died` folds into the `docker.stopped` count.
 
-**Recommendation:** ship Phases 1–4 first (they need only mTLS/socket-proxy and replace most of
-Portainer). Treat Phase 5 as a separate, explicit decision — lead with **(C)**: let Cerebro be the
-system of record for stack definitions and single-service updates, and add the host-side runner
-**(A)** only when full multi-service deploy is worth an agent. Reassess **(B)** only if "no agent,
-ever" becomes a hard requirement.
+## Phase 5 — Stacks (deploy / edit) — BUILT (host-side helper over SSH)
+
+The Engine API has **no compose endpoints**, so the plan laid out three options: (A) a host-side
+`docker compose` runner, (B) reimplement compose over the API, (C) store-only + delegate. **The
+user chose (A)** — full Compose fidelity — implemented as **SSH running the host's own
+`docker compose`**, which needs no custom agent image (it reuses the compose CLI already on the
+host).
+
+What was built:
+- **Cerebro is the versioned store** for each stack's compose (`DockerStack` table, migration
+  `0010`). Deploys write the compose to `<stacksDir>/<project>/docker-compose.yml` on the host and
+  run `docker compose -p <project> -f … up -d` over SSH (`ssh2`; key in the secrets vault).
+- **Operations on the `stack` kind:** `deploy-stack` (name + compose textarea, create), `edit-
+  stack` (prefilled with the stored compose via `operationDefaults`, resource), `redeploy-stack`,
+  and `stop-stack` (`compose down`). Delete = down + forget the stored stack.
+- **`listResources('stack')` merges** running stacks (grouped from containers by the
+  `com.docker.compose.project` label) with Cerebro-stored stacks that aren't currently running, so
+  a stopped managed stack still shows and can be redeployed.
+- SSH host/user/key/dir are **optional** connector settings — blank keeps a connector
+  monitor/manage-only. No new frontend (reuses the operation dialog's textarea + prefill).
+
+> **Caveats:** needs `docker compose` v2 on the host and an SSH user in the `docker` group; a
+> deploy runs arbitrary compose (RCE by design — gated by `connectors:action`, key vaulted, every
+> open audited); SSH host keys are **not pinned** (homelab default).
 
 ## Host system metrics — how far the API gets us
 
@@ -209,29 +234,42 @@ more than `/info` + `/system/df` deliver.
 
 ---
 
-## Files touched (when built)
+## Files touched (as built)
 
 | File | Change |
 | --- | --- |
-| `apps/server/src/connectors/docker/docker.connector.ts` (new) | manifest + `Connector` impl |
-| `apps/server/src/connectors/docker/docker-api.ts` (new) | typed Engine API client (mTLS / socket / unix agents) |
-| `apps/server/src/connectors/connector-registry.service.ts` | register the connector |
-| `apps/server/src/connectors/console-relay.ts` | additive **hijack↔WebSocket** exec bridge (Phase 3) |
-| `apps/server/src/notifications/alerts/alert-registry.ts` | Docker alert category (Phase 4) |
-| `packages/shared/src/connector.ts` | broaden `openConsole` mode to include `'shell'` |
-| web: connector icon + a container detail/logs pane | mostly reuses generic resource views |
+| `apps/server/src/connectors/docker/docker.connector.ts` (new) | manifest + `Connector` impl (all phases) |
+| `apps/server/src/connectors/docker/docker-api.ts` (new) | typed Engine API client (unix / socket-proxy / mTLS); events, exec-create, prune, pull-stream; unversioned paths + `POST=1`-aware 403 messages |
+| `apps/server/src/connectors/docker/docker-console-bridge.ts` (new) | raw exec-hijack + logs-demux ↔ WebSocket bridge (Phase 3) |
+| `apps/server/src/connectors/docker/docker-ssh.ts` (new) | `ssh2` command runner (Phase 5) |
+| `apps/server/src/connectors/docker/docker-stack.service.ts` (new) | Prisma-backed compose store + SSH `docker compose` deploy/down (Phase 5) |
+| `apps/server/src/connectors/console-relay.ts` | one additive `if (target.raw)` branch → `bridgeDockerRaw` (Phase 3) |
+| `apps/server/src/connectors/connectors.module.ts` | register `DockerConnector` + provide `DockerStackService` |
+| `apps/server/src/connectors/connector-instance.service.ts`, `connectors.controller.ts` | widen `openConsole` mode to `'shell' \| 'logs'`, pass it through |
+| `apps/server/src/connectors/proxmox/proxmox.connector.ts` | widen `openConsole` mode signature (contract change) |
+| `apps/server/src/notifications/alerts/alert-registry.ts`, `metric-thresholds.ts` | Docker alert category + threshold defs (Phase 4) |
+| `packages/shared/src/connector.ts` | `openConsole` mode `+'shell'\|'logs'`; `ConnectorConsoleTarget.type` `+'docker-exec'\|'docker-logs'` + `raw?: RawConsoleUpstream` |
+| `apps/server/prisma/schema.prisma` (+ migration `0010_docker_stack`) | `DockerStack` model |
+| `apps/server/package.json` | add `ssh2` |
+| web: `ConnectorIcon.tsx`, `Console.tsx` (raw terminal + log viewer), `ConnectorDetail.tsx` (Shell/Logs buttons), `ConnectorAlerts.tsx` (Docker threshold mirror) | the only frontend changes — the rest is generic |
 
-## Open questions
+## Resolved decisions (were open questions)
 
-1. **Transport default per environment** — mTLS is the default; should a fresh install nudge
-   toward the socket-proxy for anything not on the same host? (Lean: yes, document proxy-first for
-   exposed hosts.)
-2. **Stats on the list view** — one `stats` call per container is too expensive to poll for a big
-   host. Detail-page-only, or an opt-in "live stats" mode on the list? (Lean: detail-only + a
-   manual "sample all" button.)
-3. **Exec security** — an in-browser root shell to any container is powerful. Gate behind
-   `connectors:action`, audit every `openConsole`, and consider a per-connector "allow shell"
-   toggle (default off) like the console relay's existing model.
-4. **Phase 5 agent** — is a per-host helper acceptable for full stack deploy, or is "no agent"
-   a hard line that pushes us to option (C)-only? This is the single decision that scopes the end
-   game.
+1. **Transport** — mTLS is the documented default; the socket-proxy compose is offered as a
+   copy-paste sample on the setup screen for anything not on the same host. Plaintext `2375` is
+   refused without an explicit override.
+2. **Stats on the list view** — detail-page-only (one `stats` sample, fetched lazily); never on
+   the list, to keep big hosts cheap.
+3. **Exec security** — resolved as **always available to `connectors:action`** (the user's call),
+   every open audited. No per-connector "allow shell" toggle was added; the socket-proxy `EXEC`
+   flag is the coarse gate for proxy transports.
+4. **Phase 5 helper** — the user accepted a **host-side helper (SSH `docker compose`)** for full
+   fidelity over the agentless-but-partial reimplementation.
+
+## Still open / future
+
+- **Live TTY resize** for the exec shell (`POST /exec/:id/resize`).
+- **Full host telemetry** (CPU load / non-Docker disk) — needs a node-exporter-style source; the
+  connector reports only `/info` + `/system/df` today.
+- **Stack drift / diff** — Cerebro stores the compose it deployed but doesn't yet diff it against
+  what's actually running.
