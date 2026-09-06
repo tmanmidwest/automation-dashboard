@@ -214,6 +214,9 @@ export class DockerApi {
   listImages(): Promise<DockerImage[]> {
     return this.get<DockerImage[]>('/images/json');
   }
+  inspectImage(id: string): Promise<{ RepoDigests?: string[]; Id?: string }> {
+    return this.get<{ RepoDigests?: string[]; Id?: string }>(`/images/${encodeURIComponent(id)}/json`);
+  }
   async listVolumes(): Promise<DockerVolume[]> {
     const res = await this.get<{ Volumes?: DockerVolume[] }>('/volumes');
     return res.Volumes ?? [];

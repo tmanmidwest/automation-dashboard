@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the host (when one can be derived from the SSH/endpoint host).
 - **Restart-loop alert**: a new Docker alert fires when the number of containers stuck restarting
   (a crash loop) crosses a per-connector threshold.
+- **Image-update detection**: Cerebro checks each running container's image against its registry
+  (Docker Hub, GHCR, lscr.io, … via anonymous pull tokens) and flags when a newer version is
+  available — shown per container, counted in the overview, and alertable per connector. Results
+  are cached (6 h) and refreshed in the background, so registry rate limits are never a concern.
+  Apply updates with the existing redeploy "Pull newer images" option.
 
 - **Stack environment (`.env`) + deploy options**: a Compose stack now has an **Environment**
   editor (`KEY=value` lines) written to a `.env` beside the compose for `${VAR}` interpolation,

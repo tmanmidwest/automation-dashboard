@@ -36,6 +36,7 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'dockerStopped', metricKey: 'containersStopped', alertKey: 'docker.stopped', label: 'Stopped containers' },
   { id: 'dockerDisk', metricKey: 'diskUsedGb', alertKey: 'docker.disk_high', label: 'Docker disk used' },
   { id: 'dockerRestarting', metricKey: 'containersRestarting', alertKey: 'docker.restart_loop', label: 'Restarting containers' },
+  { id: 'dockerUpdates', metricKey: 'updatesAvailable', alertKey: 'docker.updates_available', label: 'Image updates available' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {

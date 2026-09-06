@@ -303,6 +303,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'docker.updates_available',
+    label: 'Image updates available over threshold',
+    description: 'The number of running images with a newer version in their registry crossed the limit set on its page.',
+    category: 'Docker',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
 
   // ── Secrets vault ────────────────────────────────────────
   {

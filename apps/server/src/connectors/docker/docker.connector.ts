@@ -28,6 +28,7 @@ import {
 } from './docker-api';
 import { DockerStackService, projectName, type StackDeployTarget } from './docker-stack.service';
 import type { SshConfig } from './docker-ssh';
+import { remoteDigest } from './docker-registry';
 
 const HOST_KIND = 'docker_host';
 const STACK_KIND = 'stack';
@@ -297,9 +298,39 @@ function portSummary(c: DockerContainer): string | null {
   return [...seen].slice(0, 6).join(', ');
 }
 
+/** How long an image's "update available" result is cached before re-checking the registry. */
+const UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
+
 export class DockerConnector implements Connector {
   /** Injected so stack deploys (Phase 5) can store compose + run SSH. */
   constructor(private readonly stacks: DockerStackService) {}
+
+  /** Image-update cache, keyed by `${ref}@@${localDigest}`. hasUpdate null = unknown/unchecked. */
+  private readonly updateCache = new Map<string, { at: number; hasUpdate: boolean | null }>();
+  private readonly updateInFlight = new Set<string>();
+
+  /** Background registry check comparing the running image digest to the tag's current digest. */
+  private async refreshUpdate(key: string, ref: string, localDigest: string): Promise<void> {
+    if (this.updateInFlight.has(key)) return;
+    this.updateInFlight.add(key);
+    try {
+      const remote = await remoteDigest(ref);
+      this.updateCache.set(key, { at: Date.now(), hasUpdate: remote ? remote !== localDigest : null });
+    } catch {
+      this.updateCache.set(key, { at: Date.now(), hasUpdate: null });
+    } finally {
+      this.updateInFlight.delete(key);
+    }
+  }
+
+  /** Local (pulled) digest of an image from its RepoDigests, or null if none (locally built). */
+  private static localDigest(repoDigests: string[] | undefined): string | null {
+    for (const rd of repoDigests ?? []) {
+      const at = rd.indexOf('@');
+      if (at >= 0) return rd.slice(at + 1);
+    }
+    return null;
+  }
 
   manifest: ConnectorManifest = {
     id: 'docker',
@@ -906,6 +937,25 @@ export class DockerConnector implements Connector {
       ];
       const groups: ConnectorDetailGroup[] = [{ title: 'General', items: general }];
 
+      // Image update status (from the cached registry check; kicks a refresh if stale).
+      try {
+        const img = inspect.Image ? await api.inspectImage(inspect.Image) : null;
+        const local = DockerConnector.localDigest(img?.RepoDigests);
+        const ref = inspect.Config?.Image;
+        if (local && ref) {
+          const key = `${ref}@@${local}`;
+          const cached = this.updateCache.get(key);
+          if (!cached || Date.now() - cached.at > UPDATE_TTL_MS) void this.refreshUpdate(key, ref, local);
+          const value = !cached ? 'checking…'
+            : cached.hasUpdate === true ? 'Newer image available'
+            : cached.hasUpdate === false ? 'Up to date'
+            : 'Unknown';
+          general.push({ label: 'Image update', value, variant: cached?.hasUpdate ? 'status' : 'default' });
+        }
+      } catch {
+        /* best-effort */
+      }
+
       // Published ports — as clickable links to the host when one can be derived.
       const host = browsableHost(ctx.config);
       const portItems: ConnectorDetailItem[] = [];
@@ -1137,6 +1187,37 @@ export class DockerConnector implements Connector {
     return { ok: true, message: `Stack ${past} — ${targets.length} container${targets.length !== 1 ? 's' : ''}.` };
   }
 
+  /**
+   * How many distinct running images have a newer version in their registry.
+   * Reads the cache and kicks off background refreshes for stale entries — the
+   * count populates over a few polls and never blocks on registry latency.
+   */
+  private async countUpdates(api: DockerApi, containers: DockerContainer[]): Promise<number> {
+    let images: Awaited<ReturnType<DockerApi['listImages']>>;
+    try {
+      images = await api.listImages();
+    } catch {
+      return 0;
+    }
+    const digestByImageId = new Map<string, string | null>();
+    for (const im of images) digestByImageId.set(im.Id, DockerConnector.localDigest(im.RepoDigests));
+
+    let count = 0;
+    const seen = new Set<string>();
+    for (const c of containers) {
+      if (c.State !== 'running' || !c.Image || !c.ImageID) continue;
+      const local = digestByImageId.get(c.ImageID);
+      if (!local) continue; // locally-built / no registry digest → can't check
+      const key = `${c.Image}@@${local}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const cached = this.updateCache.get(key);
+      if (!cached || Date.now() - cached.at > UPDATE_TTL_MS) void this.refreshUpdate(key, c.Image, local);
+      if (cached?.hasUpdate) count++;
+    }
+    return count;
+  }
+
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const api = this.apiFrom(ctx);
     const [info, containers, df] = await Promise.all([
@@ -1157,6 +1238,10 @@ export class DockerConnector implements Connector {
       { key: 'containersRestarting', label: 'Restarting', value: restarting },
       { key: 'imagesTotal', label: 'Images', value: info.Images ?? 0 },
     ];
+    // Image updates available — heavily cached + background-refreshed (registry calls
+    // are rate-limited, so never block the overview on them).
+    metrics.push({ key: 'updatesAvailable', label: 'Updates', value: await this.countUpdates(api, containers) });
+
     if (df) metrics.push({ key: 'diskUsedGb', label: 'Disk used', value: bytesToGb(diskUsed(df)), unit: 'GB' });
     if (info.MemTotal) metrics.push({ key: 'memTotalGb', label: 'Host RAM', value: bytesToGb(info.MemTotal), unit: 'GB' });
     if (info.NCPU) metrics.push({ key: 'hostCpus', label: 'Host CPUs', value: info.NCPU });
