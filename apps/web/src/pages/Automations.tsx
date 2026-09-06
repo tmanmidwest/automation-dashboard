@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, Play, Pencil, Zap } from 'lucide-react';
 import type {
   AutomationRule, AutomationRuleInput, AutomationRun,
-  ConnectorInstanceSummary, ConnectorManifest, RuleAction, RuleCondition, RuleTrigger,
+  ConnectorInstanceSummary, ConnectorManifest, MonitorSummary, RuleAction, RuleCondition, RuleTrigger,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -21,6 +21,8 @@ const EVENT_KINDS: { id: string; label: string }[] = [
 ];
 const EVENT_SEVERITIES = ['info', 'success', 'warning', 'critical'];
 const COND_SEVERITIES = ['info', 'warning', 'critical'];
+const THRESHOLD_OPS = ['>', '>=', '<', '<=', '==', '!='];
+const MONITOR_STATES = ['up', 'down', 'paused'];
 const RUN_COLOR: Record<string, string> = {
   success: 'text-emerald-400', partial: 'text-amber-400', error: 'text-destructive', skipped: 'text-muted-foreground',
 };
@@ -44,6 +46,7 @@ export function Automations() {
   const [rules, setRules] = useState<AutomationRule[] | null>(null);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [connectors, setConnectors] = useState<ConnectorInstanceSummary[]>([]);
+  const [monitors, setMonitors] = useState<MonitorSummary[]>([]);
   const [manifests, setManifests] = useState<Record<string, ConnectorManifest>>({});
   const [err, setErr] = useState<string | null>(null);
 
@@ -53,12 +56,13 @@ export function Automations() {
 
   async function load() {
     try {
-      const [r, ru, c] = await Promise.all([
+      const [r, ru, c, m] = await Promise.all([
         api.get<AutomationRule[]>('/api/automations'),
         api.get<AutomationRun[]>('/api/automations/runs?limit=50'),
         api.get<ConnectorInstanceSummary[]>('/api/connectors/instances').catch(() => []),
+        api.get<MonitorSummary[]>('/api/monitors').catch(() => []),
       ]);
-      setRules(r); setRuns(ru); setConnectors(c);
+      setRules(r); setRuns(ru); setConnectors(c); setMonitors(m);
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to load'); }
   }
   useEffect(() => { load(); }, []);
@@ -75,7 +79,7 @@ export function Automations() {
     setForm({ name: r.name, enabled: r.enabled, trigger: r.trigger, conditions: r.conditions, actions: r.actions, cooldownSec: r.cooldownSec });
     setEditing(r); setErr(null);
     // Warm manifests for any connector actions.
-    for (const a of r.actions) if (a.type !== 'notify') void loadManifest(connectors.find((c) => c.id === a.instanceId)?.connectorId ?? '');
+    for (const a of r.actions) if (a.type === 'connector_action' || a.type === 'connector_operation') void loadManifest(connectors.find((c) => c.id === a.instanceId)?.connectorId ?? '');
   }
 
   async function save() {
@@ -175,7 +179,7 @@ export function Automations() {
           <Button onClick={save} disabled={busy || !form.name.trim() || (form.actions ?? []).length === 0}>{busy ? 'Saving…' : 'Save rule'}</Button>
         </>}>
         {err && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
-        <RuleEditor form={form} setForm={setForm} connectors={connectors} manifests={manifests} loadManifest={loadManifest} />
+        <RuleEditor form={form} setForm={setForm} connectors={connectors} monitors={monitors} manifests={manifests} loadManifest={loadManifest} />
       </Dialog>
     </>
   );
@@ -183,10 +187,11 @@ export function Automations() {
 
 // ── Rule editor ───────────────────────────────────────────────────
 
-function RuleEditor({ form, setForm, connectors, manifests, loadManifest }: {
+function RuleEditor({ form, setForm, connectors, monitors, manifests, loadManifest }: {
   form: AutomationRuleInput;
   setForm: (f: AutomationRuleInput) => void;
   connectors: ConnectorInstanceSummary[];
+  monitors: MonitorSummary[];
   manifests: Record<string, ConnectorManifest>;
   loadManifest: (connectorId: string) => Promise<ConnectorManifest | null>;
 }) {
@@ -245,6 +250,27 @@ function RuleEditor({ form, setForm, connectors, manifests, loadManifest }: {
                 <Input placeholder="e.g. unhealthy, down, failed" value={(form.trigger as Extract<RuleTrigger, { type: 'event' }>).textContains ?? ''}
                   onChange={(e) => set({ trigger: { ...(form.trigger as object), type: 'event', textContains: e.target.value } as RuleTrigger })} /></div>
             </div>
+            <div>
+              <Label>Debounce <span className="text-muted-foreground font-normal">(optional — suppress flapping)</span></Label>
+              {(() => {
+                const et = form.trigger as Extract<RuleTrigger, { type: 'event' }>;
+                const occ = et.occurrences;
+                const setOcc = (o: { count: number; windowSec: number } | undefined) =>
+                  set({ trigger: { ...(form.trigger as object), type: 'event', occurrences: o } as RuleTrigger });
+                return occ ? (
+                  <div className="flex items-center gap-2 mt-1 text-sm">
+                    <span className="text-muted-foreground">Fire only after</span>
+                    <Input type="number" min={2} className="w-20" value={occ.count} onChange={(e) => setOcc({ ...occ, count: Number(e.target.value) })} />
+                    <span className="text-muted-foreground">matches within</span>
+                    <Input type="number" min={1} className="w-24" value={occ.windowSec} onChange={(e) => setOcc({ ...occ, windowSec: Number(e.target.value) })} />
+                    <span className="text-muted-foreground">sec</span>
+                    <Button type="button" variant="ghost" size="icon" onClick={() => setOcc(undefined)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                  </div>
+                ) : (
+                  <div className="mt-1"><Button type="button" variant="outline" size="sm" onClick={() => setOcc({ count: 3, windowSec: 300 })}>+ Require repeated matches</Button></div>
+                );
+              })()}
+            </div>
           </div>
         ) : (
           <div><Label>Cron (min hour day month weekday)</Label>
@@ -258,9 +284,11 @@ function RuleEditor({ form, setForm, connectors, manifests, loadManifest }: {
       <section>
         <div className="flex items-center justify-between mb-2">
           <p className="text-xs uppercase tracking-wider text-muted-foreground">If (conditions, all must hold)</p>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1 justify-end">
             <Button type="button" variant="outline" size="sm" onClick={() => set({ conditions: [...conditions, { type: 'time_window', start: '22:00', end: '06:00' }] })}>+ Time window</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => set({ conditions: [...conditions, { type: 'severity_at_least', severity: 'warning' }] })}>+ Min severity</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ conditions: [...conditions, { type: 'meta_threshold', path: '', op: '>', value: 0 }] })}>+ Meta threshold</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ conditions: [...conditions, { type: 'monitor_state', monitorId: '', state: 'down' }] })}>+ Monitor state</Button>
           </div>
         </div>
         {conditions.length === 0 ? <p className="text-xs text-muted-foreground">No conditions — the trigger alone fires the rule.</p> : (
@@ -272,10 +300,27 @@ function RuleEditor({ form, setForm, connectors, manifests, loadManifest }: {
                     <Input className="w-24" value={c.start} onChange={(e) => updateCond(conditions, i, { ...c, start: e.target.value }, set)} />
                     <span className="text-sm text-muted-foreground">and</span>
                     <Input className="w-24" value={c.end} onChange={(e) => updateCond(conditions, i, { ...c, end: e.target.value }, set)} /></>
-                ) : (
+                ) : c.type === 'severity_at_least' ? (
                   <><span className="text-sm text-muted-foreground">Severity at least</span>
                     <select className={selectCls + ' w-32'} value={c.severity} onChange={(e) => updateCond(conditions, i, { ...c, severity: e.target.value as 'info' | 'warning' | 'critical' }, set)}>
                       {COND_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select></>
+                ) : c.type === 'meta_threshold' ? (
+                  <><span className="text-sm text-muted-foreground">meta</span>
+                    <Input className="w-40 font-mono" placeholder="cpu.usage" value={c.path} onChange={(e) => updateCond(conditions, i, { ...c, path: e.target.value }, set)} />
+                    <select className={selectCls + ' w-20'} value={c.op} onChange={(e) => updateCond(conditions, i, { ...c, op: e.target.value as typeof c.op }, set)}>
+                      {THRESHOLD_OPS.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                    <Input className="w-28" placeholder="value" value={String(c.value)} onChange={(e) => { const n = Number(e.target.value); updateCond(conditions, i, { ...c, value: e.target.value !== '' && Number.isFinite(n) ? n : e.target.value }, set); }} /></>
+                ) : (
+                  <><span className="text-sm text-muted-foreground">Monitor</span>
+                    <select className={selectCls + ' w-44'} value={c.monitorId} onChange={(e) => updateCond(conditions, i, { ...c, monitorId: e.target.value }, set)}>
+                      <option value="">Select monitor…</option>
+                      {monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    </select>
+                    <span className="text-sm text-muted-foreground">is</span>
+                    <select className={selectCls + ' w-28'} value={c.state} onChange={(e) => updateCond(conditions, i, { ...c, state: e.target.value as 'up' | 'down' | 'paused' }, set)}>
+                      {MONITOR_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select></>
                 )}
                 <Button type="button" variant="ghost" size="icon" className="ml-auto" onClick={() => set({ conditions: conditions.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
@@ -289,16 +334,19 @@ function RuleEditor({ form, setForm, connectors, manifests, loadManifest }: {
       <section>
         <div className="flex items-center justify-between mb-2">
           <p className="text-xs uppercase tracking-wider text-muted-foreground">Do (actions, in order)</p>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1 justify-end">
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'notify', title: '', severity: 'warning' }] })}>+ Notify</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'connector_action', instanceId: '', kind: '', resourceId: '', actionId: '' }] })}>+ Connector action</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'connector_operation', instanceId: '', operationId: '' }] })}>+ Operation</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'pause_monitor', monitorId: '' }] })}>+ Pause monitor</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'resume_monitor', monitorId: '' }] })}>+ Resume monitor</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'webhook', url: '', method: 'POST', body: '' }] })}>+ Webhook</Button>
           </div>
         </div>
         {actions.length === 0 ? <p className="text-xs text-destructive">Add at least one action.</p> : (
           <div className="space-y-2">
             {actions.map((a, i) => (
-              <ActionRow key={i} action={a} connectors={connectors} manifests={manifests} loadManifest={loadManifest}
+              <ActionRow key={i} action={a} connectors={connectors} monitors={monitors} manifests={manifests} loadManifest={loadManifest}
                 onChange={(na) => set({ actions: actions.map((x, j) => (j === i ? na : x)) })}
                 onRemove={() => set({ actions: actions.filter((_, j) => j !== i) })} />
             ))}
@@ -313,21 +361,25 @@ function updateCond(conditions: RuleCondition[], i: number, next: RuleCondition,
   set({ conditions: conditions.map((c, j) => (j === i ? next : c)) });
 }
 
-function ActionRow({ action, connectors, manifests, loadManifest, onChange, onRemove }: {
-  action: RuleAction; connectors: ConnectorInstanceSummary[]; manifests: Record<string, ConnectorManifest>;
+const ACTION_LABEL: Record<RuleAction['type'], string> = {
+  notify: 'Notify', connector_action: 'Connector action', connector_operation: 'Connector operation',
+  pause_monitor: 'Pause monitor', resume_monitor: 'Resume monitor', webhook: 'Webhook',
+};
+
+function ActionRow({ action, connectors, monitors, manifests, loadManifest, onChange, onRemove }: {
+  action: RuleAction; connectors: ConnectorInstanceSummary[]; monitors: MonitorSummary[]; manifests: Record<string, ConnectorManifest>;
   loadManifest: (connectorId: string) => Promise<ConnectorManifest | null>;
   onChange: (a: RuleAction) => void; onRemove: () => void;
 }) {
-  const connectorId = action.type !== 'notify' ? connectors.find((c) => c.id === action.instanceId)?.connectorId : undefined;
+  const isConnector = action.type === 'connector_action' || action.type === 'connector_operation';
+  const connectorId = isConnector ? connectors.find((c) => c.id === action.instanceId)?.connectorId : undefined;
   const manifest = connectorId ? manifests[connectorId] : undefined;
   useEffect(() => { if (connectorId) void loadManifest(connectorId); }, [connectorId, loadManifest]);
 
   return (
     <div className="rounded-md border border-border p-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-wide text-primary">
-          {action.type === 'notify' ? 'Notify' : action.type === 'connector_action' ? 'Connector action' : 'Connector operation'}
-        </span>
+        <span className="text-xs font-semibold uppercase tracking-wide text-primary">{ACTION_LABEL[action.type]}</span>
         <Button type="button" variant="ghost" size="icon" onClick={onRemove}><Trash2 className="h-4 w-4 text-destructive" /></Button>
       </div>
       {action.type === 'notify' && (
@@ -336,7 +388,7 @@ function ActionRow({ action, connectors, manifests, loadManifest, onChange, onRe
           <Input placeholder="Body (optional)" value={action.body ?? ''} onChange={(e) => onChange({ ...action, body: e.target.value })} />
         </div>
       )}
-      {action.type !== 'notify' && (
+      {isConnector && (
         <div className="grid grid-cols-2 gap-2">
           <select className={selectCls} value={action.instanceId}
             onChange={(e) => onChange({ ...action, instanceId: e.target.value })}>
@@ -355,13 +407,36 @@ function ActionRow({ action, connectors, manifests, loadManifest, onChange, onRe
               </select>
               <Input placeholder="Resource id (copy from the resource list)" value={action.resourceId} onChange={(e) => onChange({ ...action, resourceId: e.target.value })} />
             </>
-          ) : (
+          ) : action.type === 'connector_operation' ? (
             <>
               <select className={selectCls} value={action.operationId} onChange={(e) => onChange({ ...action, operationId: e.target.value })}>
                 <option value="">Operation…</option>
                 {(manifest?.operations ?? []).map((op) => <option key={op.id} value={op.id}>{op.label}</option>)}
               </select>
               <Input placeholder="Resource id (for resource-scoped ops)" value={action.resourceId ?? ''} onChange={(e) => onChange({ ...action, resourceId: e.target.value })} />
+            </>
+          ) : null}
+        </div>
+      )}
+      {(action.type === 'pause_monitor' || action.type === 'resume_monitor') && (
+        <select className={selectCls} value={action.monitorId} onChange={(e) => onChange({ ...action, monitorId: e.target.value })}>
+          <option value="">Select monitor…</option>
+          {monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+        </select>
+      )}
+      {action.type === 'webhook' && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-[6rem_1fr] gap-2">
+            <select className={selectCls + ' !mt-0'} value={action.method ?? 'POST'} onChange={(e) => onChange({ ...action, method: e.target.value as 'GET' | 'POST' })}>
+              <option value="POST">POST</option><option value="GET">GET</option>
+            </select>
+            <Input placeholder="https://hooks.example.com/…" value={action.url} onChange={(e) => onChange({ ...action, url: e.target.value })} />
+          </div>
+          {(action.method ?? 'POST') === 'POST' && (
+            <>
+              <textarea className="w-full min-h-[5rem] rounded-md border border-input bg-background/60 p-2 text-sm font-mono resize-y"
+                placeholder={'{"text": "{{title}} ({{severity}})"}'} value={action.body ?? ''} onChange={(e) => onChange({ ...action, body: e.target.value })} spellCheck={false} />
+              <p className="text-xs text-muted-foreground">Tokens: <code>{'{{title}}'}</code> <code>{'{{severity}}'}</code> <code>{'{{source}}'}</code> <code>{'{{detail}}'}</code> <code>{'{{kind}}'}</code> <code>{'{{ruleName}}'}</code></p>
             </>
           )}
         </div>

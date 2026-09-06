@@ -7,6 +7,7 @@ import { AuditService } from '../logging/audit.service';
 import { TimelineBus } from '../timeline/timeline-bus';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
+import { MonitorsService } from '../monitors/monitors.service';
 import type {
   AutomationRule,
   AutomationRuleInput,
@@ -33,6 +34,8 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
   private cache: AutomationRule[] = [];
   /** ruleId → last fired epoch ms (cooldown guard). */
   private readonly lastFired = new Map<string, number>();
+  /** ruleId → recent match epoch ms (occurrences/debounce window). */
+  private readonly recentMatches = new Map<string, number[]>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -41,6 +44,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     private readonly bus: TimelineBus,
     private readonly notifications: NotificationsService,
     private readonly instances: ConnectorInstanceService,
+    private readonly monitors: MonitorsService,
   ) {}
 
   async onModuleInit() {
@@ -151,8 +155,10 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     for (const rule of this.cache) {
       if (rule.trigger.type !== 'event') continue;
       if (!matchesEvent(rule.trigger, event)) continue;
-      if (!conditionsHold(rule.conditions, event.severity)) continue;
-      void this.fire(rule, describeEvent(event), false);
+      if (!(await this.holds(rule.conditions, event))) continue;
+      // Debounce: require `count` matches within `windowSec` before firing.
+      if (!this.occurrencesReached(rule.id, rule.trigger.occurrences)) continue;
+      void this.fire(rule, describeEvent(event), false, event);
     }
   }
 
@@ -161,13 +167,26 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     for (const rule of this.cache) {
       if (rule.trigger.type !== 'schedule') continue;
-      if (!conditionsHold(rule.conditions, 'info')) continue;
+      if (!(await this.holds(rule.conditions, syntheticEvent()))) continue;
       if (matchCron(rule.trigger.cron, now)) void this.fire(rule, `Schedule ${rule.trigger.cron}`, false);
     }
   }
 
+  /** Track match timestamps; return true once `count` land within `windowSec`. No qualifier = always true. */
+  private occurrencesReached(ruleId: string, occ?: { count: number; windowSec: number }): boolean {
+    if (!occ || occ.count <= 1 || occ.windowSec <= 0) return true;
+    const now = Date.now();
+    const cutoff = now - occ.windowSec * 1000;
+    const hits = (this.recentMatches.get(ruleId) ?? []).filter((t) => t >= cutoff);
+    hits.push(now);
+    this.recentMatches.set(ruleId, hits);
+    if (hits.length < occ.count) return false;
+    this.recentMatches.set(ruleId, []); // reset so the next burst starts fresh
+    return true;
+  }
+
   /** Execute a rule's actions (honouring cooldown unless forced), record the run. */
-  private async fire(rule: AutomationRule, triggerDesc: string, forced: boolean): Promise<{ status: string; message: string }> {
+  private async fire(rule: AutomationRule, triggerDesc: string, forced: boolean, event?: TimelineEvent): Promise<{ status: string; message: string }> {
     if (!forced) {
       const last = this.lastFired.get(rule.id) ?? 0;
       if (Date.now() - last < rule.cooldownSec * 1000) return { status: 'skipped', message: 'cooldown' };
@@ -177,7 +196,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     const results: { ok: boolean; msg: string }[] = [];
     for (const action of rule.actions) {
       try {
-        results.push({ ok: true, msg: await this.runAction(action) });
+        results.push({ ok: true, msg: await this.runAction(action, rule, event) });
       } catch (err) {
         results.push({ ok: false, msg: err instanceof Error ? err.message : 'action failed' });
       }
@@ -199,7 +218,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     return { status, message };
   }
 
-  private async runAction(action: RuleAction): Promise<string> {
+  private async runAction(action: RuleAction, rule: AutomationRule, event?: TimelineEvent): Promise<string> {
     switch (action.type) {
       case 'notify':
         await this.notifications.dispatchAlert('automation.notify', {
@@ -217,6 +236,26 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
         const jobId = await this.instances.startOperation(action.instanceId, action.operationId, action.resourceId, action.values ?? {});
         return `operation ${action.operationId} (job ${jobId.slice(0, 8)})`;
       }
+      case 'pause_monitor': {
+        const m = await this.monitors.setEnabled(action.monitorId, false);
+        return `paused monitor ${m.name}`;
+      }
+      case 'resume_monitor': {
+        const m = await this.monitors.setEnabled(action.monitorId, true);
+        return `resumed monitor ${m.name}`;
+      }
+      case 'webhook': {
+        const method = action.method ?? 'POST';
+        const body = method === 'POST' ? renderTemplate(action.body ?? '', rule, event) : undefined;
+        const res = await fetch(action.url, {
+          method,
+          headers: body ? { 'Content-Type': 'application/json' } : undefined,
+          body,
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) throw new Error(`webhook ${res.status}`);
+        return `webhook ${method} ${res.status}`;
+      }
       default:
         throw new Error('unknown action type');
     }
@@ -225,6 +264,24 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
   private record(ctx: ActorCtx | undefined, action: string, target: string) {
     if (!ctx?.actorId && !ctx?.actorEmail) return Promise.resolve();
     return this.audit.record({ actorId: ctx.actorId, actorEmail: ctx.actorEmail, action, target }).catch(() => {});
+  }
+
+  /** Evaluate all conditions against the event (AND). Some conditions query live state, so this is async. */
+  private async holds(conditions: RuleCondition[], event: TimelineEvent): Promise<boolean> {
+    for (const c of conditions) {
+      if (c.type === 'severity_at_least') {
+        if ((SEV_RANK[event.severity] ?? 0) < (SEV_RANK[c.severity] ?? 0)) return false;
+      } else if (c.type === 'time_window') {
+        if (!inTimeWindow(c.start, c.end)) return false;
+      } else if (c.type === 'meta_threshold') {
+        if (!metaThresholdHolds(c, event.meta)) return false;
+      } else if (c.type === 'monitor_state') {
+        const m = await this.prisma.monitor.findUnique({ where: { id: c.monitorId }, select: { status: true } }).catch(() => null);
+        const actual = m?.status === 'paused' ? 'paused' : m?.status === 'up' ? 'up' : m?.status === 'down' ? 'down' : null;
+        if (actual !== c.state) return false;
+      }
+    }
+    return true;
   }
 }
 
@@ -243,15 +300,45 @@ function matchesEvent(t: Extract<RuleTrigger, { type: 'event' }>, e: TimelineEve
   return true;
 }
 
-function conditionsHold(conditions: RuleCondition[], eventSeverity: string): boolean {
-  for (const c of conditions) {
-    if (c.type === 'severity_at_least') {
-      if ((SEV_RANK[eventSeverity] ?? 0) < (SEV_RANK[c.severity] ?? 0)) return false;
-    } else if (c.type === 'time_window') {
-      if (!inTimeWindow(c.start, c.end)) return false;
-    }
+/** A minimal event stand-in for schedule-triggered condition checks (no real event). */
+function syntheticEvent(): TimelineEvent {
+  return { id: 'schedule', ts: new Date().toISOString(), kind: 'audit', severity: 'info', title: 'schedule', meta: {} };
+}
+
+/** Read a dotted path (e.g. "cpu.usage") out of an object. */
+function getPath(obj: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((acc, key) => (acc && typeof acc === 'object' ? (acc as Record<string, unknown>)[key] : undefined), obj);
+}
+
+/** Compare a value from event.meta against the threshold. Missing value → condition fails. */
+function metaThresholdHolds(c: { path: string; op: string; value: number | string }, meta: Record<string, unknown> | null | undefined): boolean {
+  const raw = getPath(meta ?? {}, c.path);
+  if (raw == null) return false;
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  const target = typeof c.value === 'number' ? c.value : Number(c.value);
+  const numeric = Number.isFinite(num) && Number.isFinite(target);
+  switch (c.op) {
+    case '>': return numeric && num > target;
+    case '>=': return numeric && num >= target;
+    case '<': return numeric && num < target;
+    case '<=': return numeric && num <= target;
+    case '==': return numeric ? num === target : String(raw) === String(c.value);
+    case '!=': return numeric ? num !== target : String(raw) !== String(c.value);
+    default: return false;
   }
-  return true;
+}
+
+/** Fill {{token}} placeholders in a webhook body from the rule + triggering event. */
+function renderTemplate(tpl: string, rule: AutomationRule, event?: TimelineEvent): string {
+  const tokens: Record<string, string> = {
+    ruleName: rule.name,
+    title: event?.title ?? '',
+    detail: event?.detail ?? '',
+    severity: event?.severity ?? '',
+    source: event?.source ?? '',
+    kind: event?.kind ?? '',
+  };
+  return tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => tokens[k] ?? '');
 }
 
 /** True if the current server-local time is within [start,end] (HH:MM), wrapping past midnight. */

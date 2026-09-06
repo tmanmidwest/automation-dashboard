@@ -68,6 +68,12 @@ function validate(body: AutomationRuleInput) {
   if (!body?.name?.trim()) throw new BadRequestException('A name is required.');
   validateTrigger(body.trigger);
   if (!Array.isArray(body.actions) || body.actions.length === 0) throw new BadRequestException('At least one action is required.');
+  for (const a of body.actions) {
+    if ((a.type === 'pause_monitor' || a.type === 'resume_monitor') && !a.monitorId) throw new BadRequestException('Select a monitor for the pause/resume action.');
+    if (a.type === 'webhook' && !/^https?:\/\//i.test(a.url ?? '')) throw new BadRequestException('The webhook action needs an http(s) URL.');
+    if (a.type === 'connector_action' && (!a.instanceId || !a.kind || !a.actionId)) throw new BadRequestException('The connector action needs a connector, kind and action.');
+    if (a.type === 'connector_operation' && (!a.instanceId || !a.operationId)) throw new BadRequestException('The connector operation needs a connector and operation.');
+  }
 }
 
 function validateTrigger(trigger: AutomationRuleInput['trigger']) {

@@ -3,6 +3,12 @@
 
 export type AutomationSeverity = 'info' | 'warning' | 'critical';
 
+/** Debounce/flap qualifier: fire only after `count` matching events within `windowSec`. */
+export interface RuleOccurrences {
+  count: number;
+  windowSec: number;
+}
+
 /** The "when": an event on the timeline bus, or a schedule. */
 export type RuleTrigger =
   | {
@@ -15,19 +21,34 @@ export type RuleTrigger =
       source?: string;
       /** Case-insensitive substring match against the event title/detail. */
       textContains?: string;
+      /** Debounce: only fire once `count` matching events arrive within `windowSec` (flap suppression). */
+      occurrences?: RuleOccurrences;
     }
   | { type: 'schedule'; cron: string };
+
+/** Comparison operators for a meta_threshold condition. */
+export type ThresholdOp = '>' | '>=' | '<' | '<=' | '==' | '!=';
 
 /** The "if": all conditions must hold (AND). */
 export type RuleCondition =
   | { type: 'time_window'; start: string; end: string } // "HH:MM".."HH:MM", server-local; wraps past midnight
-  | { type: 'severity_at_least'; severity: AutomationSeverity };
+  | { type: 'severity_at_least'; severity: AutomationSeverity }
+  /** Compare a value pulled from the event's `meta` (dotted path) against a number/string. */
+  | { type: 'meta_threshold'; path: string; op: ThresholdOp; value: number | string }
+  /** Cross-check: a named monitor is currently in this state (up | down | paused). */
+  | { type: 'monitor_state'; monitorId: string; state: 'up' | 'down' | 'paused' };
 
 /** The "do": actions run in order. */
 export type RuleAction =
   | { type: 'notify'; title: string; body?: string; severity?: AutomationSeverity }
   | { type: 'connector_action'; instanceId: string; kind: string; resourceId: string; actionId: string }
-  | { type: 'connector_operation'; instanceId: string; operationId: string; resourceId?: string; values?: Record<string, unknown> };
+  | { type: 'connector_operation'; instanceId: string; operationId: string; resourceId?: string; values?: Record<string, unknown> }
+  /** Pause a monitor (stop probing). */
+  | { type: 'pause_monitor'; monitorId: string }
+  /** Resume a paused monitor. */
+  | { type: 'resume_monitor'; monitorId: string }
+  /** POST/GET an outbound webhook. `body` supports {{title}} {{severity}} {{source}} {{detail}} {{kind}} {{ruleName}} tokens. */
+  | { type: 'webhook'; url: string; method?: 'GET' | 'POST'; body?: string };
 
 export interface AutomationRule {
   id: string;

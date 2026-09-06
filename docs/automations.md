@@ -120,11 +120,29 @@ A `/automations` screen: list rules (enabled toggle, last fired), a builder (tri
 conditions → action rows, with connector/kind/resource/action dropdowns reusing the existing
 options endpoints), and a run history. Nav entry + route.
 
-## Phase 3 — Richer triggers/conditions/actions
+## Phase 3 — Richer triggers/conditions/actions ✅ built
 
-- More conditions (a value threshold from an event's `meta`, an "only if resource X is also down"
-  cross-check), more actions (pause/resume monitor, run an MCP tool, webhook), and a **debounce /
-  "for N minutes"** trigger qualifier (fire only if the condition holds continuously).
+Shipped:
+
+- **Conditions**
+  - `meta_threshold` — pull a value from the event's `meta` by dotted path (e.g. `cpu.usage`) and
+    compare with `> >= < <= == !=` against a number or string. Missing value ⇒ condition fails.
+  - `monitor_state` — cross-check: a named monitor is currently `up | down | paused` (reads
+    `Monitor.status`). Works for both event and schedule triggers.
+- **Actions**
+  - `pause_monitor` / `resume_monitor` — via `MonitorsService.setEnabled` (flips status + scheduler).
+  - `webhook` — outbound `POST`/`GET` to any http(s) URL, 10s timeout. `POST` body supports
+    `{{title}} {{severity}} {{source}} {{detail}} {{kind}} {{ruleName}}` tokens rendered from the
+    triggering event (good for Slack/Discord/generic hooks).
+- **Trigger qualifier — debounce/flap suppression**: an event trigger can require `count` matching
+  events within `windowSec` before it fires (per-rule sliding window in memory; resets after firing).
+  Replaces the vaguer "for N minutes" idea with a concrete, testable "N occurrences in M seconds".
+
+Engine notes: condition evaluation is now async (`holds()`) because `monitor_state` queries live
+state; the triggering `TimelineEvent` is threaded into `fire → runAction` for webhook templating.
+`AutomationsModule` now imports `MonitorsModule`. Controller validates the new actions (monitor id
+required; webhook needs an http(s) URL). Not yet built: run-an-MCP-tool action (connector
+action/operation already cover "do something on a connector").
 
 ## Files touched (Phase 1)
 
