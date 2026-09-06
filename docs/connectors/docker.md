@@ -267,10 +267,28 @@ more than `/info` + `/system/df` deliver.
 4. **Phase 5 helper** — the user accepted a **host-side helper (SSH `docker compose`)** for full
    fidelity over the agentless-but-partial reimplementation.
 
+## Post-Phase-5 additions (built)
+
+- **Live TTY resize** for the exec shell — the web terminal sends `{resize:{cols,rows}}` control
+  frames (FitAddon) and the bridge issues `POST /exec/:id/resize`.
+- **Host telemetry over SSH** — CPU load (1-min load + load %), memory used %, and root-fs disk used %.
+  The Engine API can't see these, so `DockerConnector.hostMetrics` reads `/proc/loadavg`, `/proc/meminfo`,
+  and `df -Pk /` over the existing SSH transport (only when SSH is configured), cached 15s and
+  background-refreshed so the overview never blocks. Surfaced as `hostLoadPct` / `hostMemUsedPct` /
+  `hostRootDiskPct` metrics and wired to threshold alerts `docker.host_disk` / `docker.host_mem` /
+  `docker.host_load`.
+- **Stack drift check** — `stack-check-drift` operation (managed stacks): compares the compose on the
+  host vs. Cerebro's stored copy, and expected services (`compose config --services`) vs. what's
+  actually up (`compose ps`), reporting missing / not-running / orphan services. `DockerStackService.checkDrift`.
+- **Container recreate** — `recreate-container` operation: inspects the container, optionally pulls a
+  newer image, renames the old one aside, creates a new one from the same Config/HostConfig (+ networks),
+  swaps them, and removes the old — rolling back on failure. `DockerApi.recreateContainer`. Best for
+  standalone containers; compose-managed ones should use a stack redeploy.
+
 ## Still open / future
 
-- **Live TTY resize** for the exec shell (`POST /exec/:id/resize`).
-- **Full host telemetry** (CPU load / non-Docker disk) — needs a node-exporter-style source; the
-  connector reports only `/info` + `/system/df` today.
-- **Stack drift / diff** — Cerebro stores the compose it deployed but doesn't yet diff it against
-  what's actually running.
+- **Multi-network static-IP recreate** — recreate reconnects extra named networks with their aliases,
+  but a container pinned to a fixed IP on several networks may need a manual recreate (the old one still
+  holds the IP until removed).
+- **Drift auto-check** — drift is on-demand today; a periodic check that raises an alert on drift would
+  close the loop (pairs well with the automations engine).

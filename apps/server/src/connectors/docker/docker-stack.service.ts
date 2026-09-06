@@ -121,6 +121,58 @@ export class DockerStackService {
     }
   }
 
+  /**
+   * Compare a managed stack against reality: does the compose file on the host
+   * still match what Cerebro stored, and are all expected services present and
+   * running? Returns a human-readable report. Read-only — runs nothing that
+   * changes state.
+   */
+  async checkDrift(target: StackDeployTarget, instanceId: string, name: string): Promise<StackRunResult> {
+    const project = projectName(name);
+    const stored = await this.get(instanceId, name);
+    if (!stored) return { ok: false, message: "This stack isn't managed by Cerebro — no stored compose to compare against." };
+
+    const file = `${trimSlash(target.stacksDir)}/${project}/docker-compose.yml`;
+    const lines: string[] = [];
+    let drift = false;
+
+    try {
+      // 1) File drift — the compose on the host vs. the version Cerebro deployed.
+      const read = await runSsh(target.ssh, `cat '${file}' 2>/dev/null || true`);
+      const hostFile = read.stdout;
+      if (!hostFile.trim()) {
+        lines.push(`⚠ No compose file found on the host at ${file}.`); drift = true;
+      } else if (normalizeCompose(hostFile) !== normalizeCompose(stored.compose)) {
+        lines.push('⚠ The compose file on the host DIFFERS from the version Cerebro stored (edited out of band?).'); drift = true;
+      } else {
+        lines.push("✓ Compose file on the host matches Cerebro's stored version.");
+      }
+
+      // 2) Runtime drift — expected services vs. what's actually up.
+      const [svc, ps] = await Promise.all([
+        runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' config --services 2>/dev/null || true`),
+        runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' ps -a --format json 2>/dev/null || true`),
+      ]);
+      const expected = svc.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const running = parseComposePs(ps.stdout);
+      const stateByService = new Map(running.map((r) => [r.Service, r.State]));
+      if (expected.length) {
+        const missing = expected.filter((s) => !stateByService.has(s));
+        const notRunning = expected.filter((s) => stateByService.has(s) && stateByService.get(s) !== 'running');
+        const extra = running.filter((r) => r.Service && !expected.includes(r.Service)).map((r) => r.Service);
+        lines.push(`Services: ${expected.length} expected, ${stateByService.size} present.`);
+        if (missing.length) { lines.push(`⚠ Missing (no container): ${missing.join(', ')}`); drift = true; }
+        if (notRunning.length) { lines.push(`⚠ Not running: ${notRunning.map((s) => `${s} (${stateByService.get(s)})`).join(', ')}`); drift = true; }
+        if (extra.length) { lines.push(`⚠ Orphan containers not in the compose: ${[...new Set(extra)].join(', ')}`); drift = true; }
+        if (!missing.length && !notRunning.length && !extra.length) lines.push('✓ All expected services are present and running.');
+      }
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Drift check failed.' };
+    }
+
+    return { ok: true, message: `${drift ? 'DRIFT DETECTED' : 'IN SYNC'}\n\n${lines.join('\n')}` };
+  }
+
   /** `docker compose down` for a stored stack. */
   async down(target: StackDeployTarget, instanceId: string, name: string): Promise<StackRunResult> {
     const project = projectName(name);
@@ -210,6 +262,38 @@ export function projectName(name: string): string {
 
 function trimSlash(p: string): string {
   return (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
+}
+
+/** Normalize compose text for a stable comparison: strip trailing spaces + blank-line noise. */
+function normalizeCompose(s: string): string {
+  return (s || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((l) => l.replace(/\s+$/, ''))
+    .join('\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+/** Parse `docker compose ps --format json` — v2 emits either a JSON array or one object per line. */
+function parseComposePs(out: string): { Service: string; State: string }[] {
+  const text = (out || '').trim();
+  if (!text) return [];
+  const pick = (o: Record<string, unknown>) => ({ Service: String(o.Service ?? ''), State: String(o.State ?? '').toLowerCase() });
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map(pick);
+    return [pick(parsed)];
+  } catch {
+    // NDJSON: one JSON object per line.
+    const rows: { Service: string; State: string }[] = [];
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t) continue;
+      try { rows.push(pick(JSON.parse(t))); } catch { /* skip non-JSON noise */ }
+    }
+    return rows;
+  }
 }
 
 function tail(s: string, max = 400): string {

@@ -313,6 +313,36 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'docker.host_disk',
+    label: 'Host root disk usage over threshold',
+    description: 'The host root filesystem (/) usage percentage crossed the limit set on its page. Requires SSH configured.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'docker.host_mem',
+    label: 'Host memory usage over threshold',
+    description: 'The host memory usage percentage crossed the limit set on its page. Requires SSH configured.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'docker.host_load',
+    label: 'Host CPU load over threshold',
+    description: 'The host CPU load (1-min load average as a percent of cores) crossed the limit set on its page. Requires SSH configured.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
 
   // ── Automations ──────────────────────────────────────────
   {

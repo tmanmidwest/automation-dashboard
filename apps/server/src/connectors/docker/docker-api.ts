@@ -106,6 +106,20 @@ export interface DockerContainerInspect {
   };
 }
 
+/** A network endpoint as it appears in inspect (runtime IP fields are dropped before reuse). */
+export interface RawEndpoint {
+  Aliases?: string[] | null;
+  IPAMConfig?: { IPv4Address?: string; IPv6Address?: string } | null;
+}
+/** The complete inspect payload recreate needs (Config/HostConfig kept opaque and passed through). */
+export interface RawInspect {
+  Name?: string;
+  State?: { Running?: boolean };
+  Config?: Record<string, unknown> & { Image?: string };
+  HostConfig?: Record<string, unknown> & { NetworkMode?: string };
+  NetworkSettings?: { Networks?: Record<string, RawEndpoint> };
+}
+
 export interface DockerContainerStats {
   cpu_stats?: DockerCpuStats;
   precpu_stats?: DockerCpuStats;
@@ -248,6 +262,80 @@ export class DockerApi {
   /** Force-remove a container (stops it first if running). */
   removeContainer(id: string): Promise<void> {
     return this.request<void>('DELETE', `/containers/${encodeURIComponent(id)}?force=1`);
+  }
+  renameContainer(id: string, name: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/rename?name=${encodeURIComponent(name)}`);
+  }
+  async createContainer(name: string, body: Record<string, unknown>): Promise<string> {
+    const res = await this.requestJson<{ Id?: string }>('POST', `/containers/create?name=${encodeURIComponent(name)}`, body);
+    if (!res?.Id) throw new DockerApiError('Docker did not return a new container id.');
+    return res.Id;
+  }
+  connectNetwork(networkId: string, containerId: string, endpointConfig: Record<string, unknown>): Promise<void> {
+    return this.requestJson<void>('POST', `/networks/${encodeURIComponent(networkId)}/connect`, { Container: containerId, EndpointConfig: endpointConfig });
+  }
+  /** Full untyped inspect — recreate needs the complete Config/HostConfig the trimmed type omits. */
+  inspectContainerFull(id: string): Promise<RawInspect> {
+    return this.request<RawInspect>('GET', `/containers/${encodeURIComponent(id)}/json`);
+  }
+
+  /**
+   * Recreate a container from its own live config (Portainer-style): inspect →
+   * rename the old one aside → create a new one with the same Config/HostConfig
+   * (+ networks) → swap them running → remove the old. Optionally pulls a newer
+   * image first. Rolls back on any failure. Best for standalone containers;
+   * compose-managed ones are better recreated via a stack redeploy.
+   */
+  async recreateContainer(id: string, opts: { pull?: boolean } = {}): Promise<{ id: string; message: string }> {
+    const info = await this.inspectContainerFull(id);
+    const name = (info.Name ?? '').replace(/^\//, '');
+    const image = info.Config?.Image;
+    if (!name || !image) throw new DockerApiError('Could not read the container name/image to recreate.');
+    const wasRunning = !!info.State?.Running;
+
+    if (opts.pull) await this.pullImage(image, () => { /* progress is surfaced by the caller */ });
+
+    const networks = info.NetworkSettings?.Networks ?? {};
+    const netNames = Object.keys(networks);
+    const mode = typeof info.HostConfig?.NetworkMode === 'string' ? info.HostConfig.NetworkMode : '';
+    // The primary named network to attach at create; host/none/default/bridge are handled by HostConfig.
+    const skipExplicit = new Set(['host', 'none', 'default', 'bridge', '']);
+    const primary = networks[mode] ? mode : netNames.find((n) => !skipExplicit.has(n)) ?? '';
+
+    const sanitizeEndpoint = (ep: RawEndpoint | undefined): Record<string, unknown> => {
+      const out: Record<string, unknown> = {};
+      const aliases = (ep?.Aliases ?? []).filter((a) => a && !id.startsWith(a));
+      if (aliases.length) out.Aliases = aliases;
+      if (ep?.IPAMConfig && (ep.IPAMConfig.IPv4Address || ep.IPAMConfig.IPv6Address)) out.IPAMConfig = ep.IPAMConfig;
+      return out;
+    };
+
+    const body: Record<string, unknown> = { ...(info.Config ?? {}), HostConfig: info.HostConfig ?? {} };
+    if (primary && !skipExplicit.has(primary)) {
+      body.NetworkingConfig = { EndpointsConfig: { [primary]: sanitizeEndpoint(networks[primary]) } };
+    }
+
+    const tmpName = `${name}-cerebro-old-${Date.now().toString(36)}`;
+    await this.renameContainer(id, tmpName);
+    let newId: string | undefined;
+    try {
+      newId = await this.createContainer(name, body);
+      // Reconnect any additional named networks the container was on.
+      for (const n of netNames) {
+        if (n === primary || skipExplicit.has(n)) continue;
+        await this.connectNetwork(n, newId, sanitizeEndpoint(networks[n])).catch(() => { /* best-effort */ });
+      }
+      // Free the old container's ports/resources before starting the new one.
+      if (wasRunning) { await this.stopContainer(tmpName).catch(() => { /* may already be stopped */ }); await this.startContainer(newId); }
+      await this.removeContainer(tmpName);
+      return { id: newId, message: `Recreated "${name}"${opts.pull ? ' with the latest image' : ''}.` };
+    } catch (err) {
+      // Roll back: drop the half-built new container and restore the old one.
+      if (newId) await this.removeContainer(newId).catch(() => { /* ignore */ });
+      await this.renameContainer(tmpName, name).catch(() => { /* ignore */ });
+      if (wasRunning) await this.startContainer(name).catch(() => { /* ignore */ });
+      throw new DockerApiError(`Recreate failed and was rolled back: ${err instanceof Error ? err.message : 'error'}`);
+    }
   }
   /** Remove an image (force untags even if referenced by stopped containers). */
   removeImage(id: string): Promise<void> {

@@ -28,7 +28,7 @@ import {
   type DockerEvent,
 } from './docker-api';
 import { DockerStackService, projectName, type StackDeployTarget } from './docker-stack.service';
-import type { SshConfig } from './docker-ssh';
+import { runSsh, type SshConfig } from './docker-ssh';
 import { remoteDigest } from './docker-registry';
 
 const HOST_KIND = 'docker_host';
@@ -165,6 +165,17 @@ const OPERATIONS: ConnectorOperation[] = [
     fields: [],
   },
   {
+    id: 'stack-check-drift',
+    label: 'Check drift',
+    description: "Compare the stored compose and expected services against what's actually running on the host.",
+    scope: 'resource',
+    kind: STACK_KIND,
+    icon: 'search',
+    submitLabel: 'Check drift',
+    background: true,
+    fields: [],
+  },
+  {
     id: 'stop-stack',
     label: 'Stop (compose down)',
     description: 'Run "docker compose down" — stops and removes the stack\'s containers (named volumes are kept).',
@@ -199,6 +210,21 @@ const OPERATIONS: ConnectorOperation[] = [
     intent: 'destructive',
     submitLabel: 'Prune',
     fields: [pruneConfirmField('dangling images')],
+  },
+  {
+    id: 'recreate-container',
+    label: 'Recreate',
+    description: 'Stop and recreate this container from its current configuration — optionally pulling a newer image first. Best for updating a standalone container (compose stacks: use redeploy).',
+    scope: 'resource',
+    kind: CONTAINER_KIND,
+    icon: 'refresh-cw',
+    intent: 'destructive',
+    submitLabel: 'Recreate',
+    background: true,
+    fields: [
+      { key: 'pullLatest', label: 'Pull the latest image first', type: 'boolean' as const, required: false, default: true },
+      { key: 'confirm', label: 'Yes, recreate this container', type: 'boolean' as const, required: true },
+    ],
   },
   {
     id: 'prune-containers',
@@ -301,6 +327,8 @@ function portSummary(c: DockerContainer): string | null {
 
 /** How long an image's "update available" result is cached before re-checking the registry. */
 const UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
+/** How long host telemetry (over SSH) is cached before re-reading /proc. */
+const HOST_TTL_MS = 15 * 1000;
 
 export class DockerConnector implements Connector {
   /** Injected so stack deploys (Phase 5) can store compose + run SSH. */
@@ -309,6 +337,10 @@ export class DockerConnector implements Connector {
   /** Image-update cache, keyed by `${ref}@@${localDigest}`. hasUpdate null = unknown/unchecked. */
   private readonly updateCache = new Map<string, { at: number; hasUpdate: boolean | null }>();
   private readonly updateInFlight = new Set<string>();
+
+  /** Host telemetry cache (keyed by instance id), collected over SSH and refreshed in the background. */
+  private readonly hostCache = new Map<string, { at: number; metrics: OverviewMetric[] }>();
+  private readonly hostInFlight = new Set<string>();
 
   /** Background registry check comparing the running image digest to the tag's current digest. */
   private async refreshUpdate(key: string, ref: string, localDigest: string): Promise<void> {
@@ -321,6 +353,43 @@ export class DockerConnector implements Connector {
       this.updateCache.set(key, { at: Date.now(), hasUpdate: null });
     } finally {
       this.updateInFlight.delete(key);
+    }
+  }
+
+  /**
+   * Host CPU load / memory / root-disk metrics — the Engine API can't provide
+   * these, so we read /proc + df over SSH (when SSH is configured). Cached and
+   * refreshed in the background so the overview never blocks on SSH. Returns [] when
+   * SSH isn't configured or hasn't been read yet.
+   */
+  private hostMetrics(ctx: ConnectorContext): OverviewMetric[] {
+    const key = ctx.instanceId ?? '';
+    const hasSsh = !!str(ctx.config.sshHost) && (!!str(ctx.config.sshPrivateKey) || !!str(ctx.config.sshPassword));
+    if (!key || !hasSsh) return [];
+    const cached = this.hostCache.get(key);
+    if (!cached || Date.now() - cached.at > HOST_TTL_MS) void this.refreshHost(key, ctx);
+    return cached?.metrics ?? [];
+  }
+
+  /** Background SSH read of host telemetry. Best-effort — failures leave the last good value. */
+  private async refreshHost(key: string, ctx: ConnectorContext): Promise<void> {
+    if (this.hostInFlight.has(key)) return;
+    this.hostInFlight.add(key);
+    try {
+      const target = this.sshTargetFrom(ctx);
+      // One round-trip; each value is prefixed so parsing is order-independent.
+      const cmd =
+        `printf 'L='; awk '{print $1}' /proc/loadavg; ` +
+        `printf 'C='; nproc; ` +
+        `printf 'M='; awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{print t","a}' /proc/meminfo; ` +
+        `printf 'D='; df -Pk / | awk 'NR==2{print $2","$3}'`;
+      const res = await runSsh(target.ssh, cmd, undefined, 15000);
+      const metrics = parseHostStats(res.stdout);
+      if (metrics.length) this.hostCache.set(key, { at: Date.now(), metrics });
+    } catch {
+      /* host telemetry is best-effort; keep any prior value */
+    } finally {
+      this.hostInFlight.delete(key);
     }
   }
 
@@ -643,6 +712,22 @@ export class DockerConnector implements Connector {
         if (!prev) return { ok: false, message: 'No previous version to roll back to — this stack has only one stored version.' };
         onProgress(`Rolling back "${_resourceId}" to the previous version…`);
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, prev.compose, prev.env ?? '');
+      }
+
+      if (operationId === 'stack-check-drift') {
+        const instanceId = ctx.instanceId;
+        if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
+        onProgress(`Checking "${_resourceId}" for drift…`);
+        return await this.stacks.checkDrift(this.sshTargetFrom(ctx), instanceId, _resourceId);
+      }
+
+      if (operationId === 'recreate-container') {
+        if (!_resourceId) return { ok: false, message: 'Missing container reference.' };
+        if (values.confirm !== true) return { ok: false, message: 'Please confirm before recreating.' };
+        onProgress(bool(values.pullLatest) ? 'Pulling the latest image and recreating…' : 'Recreating container…');
+        const res = await api.recreateContainer(_resourceId, { pull: bool(values.pullLatest) });
+        ctx.log('info', `Docker recreated container ${_resourceId}.`);
+        return { ok: true, message: res.message };
       }
 
       if (operationId === 'pull-image') {
@@ -1313,6 +1398,9 @@ export class DockerConnector implements Connector {
     if (info.MemTotal) metrics.push({ key: 'memTotalGb', label: 'Host RAM', value: bytesToGb(info.MemTotal), unit: 'GB' });
     if (info.NCPU) metrics.push({ key: 'hostCpus', label: 'Host CPUs', value: info.NCPU });
 
+    // Host telemetry over SSH (CPU load, memory, root-fs disk) — the Engine API can't see these.
+    metrics.push(...this.hostMetrics(ctx));
+
     // Guests: unhealthy/stopped first so problems surface at the top of the list.
     const guests = containers
       .slice()
@@ -1391,6 +1479,30 @@ function diskUsed(df: NonNullable<Awaited<ReturnType<DockerApi['df']>>>): number
 
 function shortId(id: string): string {
   return id.replace(/^sha256:/, '').slice(0, 12);
+}
+
+/**
+ * Parse the prefixed host-telemetry output (see refreshHost) into overview metrics:
+ * load average + load %, memory used %, and root-fs disk used %.
+ */
+function parseHostStats(out: string): OverviewMetric[] {
+  const get = (p: string) => new RegExp(`^${p}=(.*)$`, 'm').exec(out || '')?.[1]?.trim();
+  const load1 = Number(get('L'));
+  const cpus = Number(get('C'));
+  const [memTotal, memAvail] = (get('M') ?? '').split(',').map(Number);
+  const [diskTotal, diskUsed] = (get('D') ?? '').split(',').map(Number);
+
+  const metrics: OverviewMetric[] = [];
+  if (Number.isFinite(load1)) metrics.push({ key: 'hostLoad1', label: 'Host load', value: round(load1, 2) });
+  if (Number.isFinite(load1) && cpus > 0) metrics.push({ key: 'hostLoadPct', label: 'CPU load', value: round((load1 / cpus) * 100, 0), unit: '%' });
+  if (memTotal > 0 && Number.isFinite(memAvail)) metrics.push({ key: 'hostMemUsedPct', label: 'Host memory', value: round(((memTotal - memAvail) / memTotal) * 100, 0), unit: '%' });
+  if (diskTotal > 0 && Number.isFinite(diskUsed)) metrics.push({ key: 'hostRootDiskPct', label: 'Root disk', value: round((diskUsed / diskTotal) * 100, 0), unit: '%' });
+  return metrics;
+}
+
+function round(n: number, dp: number): number {
+  const f = 10 ** dp;
+  return Math.round(n * f) / f;
 }
 
 /** Env var names whose values we mask in the detail view. */

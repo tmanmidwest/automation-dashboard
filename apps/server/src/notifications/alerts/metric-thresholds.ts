@@ -37,6 +37,9 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'dockerDisk', metricKey: 'diskUsedGb', alertKey: 'docker.disk_high', label: 'Docker disk used' },
   { id: 'dockerRestarting', metricKey: 'containersRestarting', alertKey: 'docker.restart_loop', label: 'Restarting containers' },
   { id: 'dockerUpdates', metricKey: 'updatesAvailable', alertKey: 'docker.updates_available', label: 'Image updates available' },
+  { id: 'dockerHostDisk', metricKey: 'hostRootDiskPct', alertKey: 'docker.host_disk', label: 'Host root disk used' },
+  { id: 'dockerHostMem', metricKey: 'hostMemUsedPct', alertKey: 'docker.host_mem', label: 'Host memory used' },
+  { id: 'dockerHostLoad', metricKey: 'hostLoadPct', alertKey: 'docker.host_load', label: 'Host CPU load' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {
