@@ -20,8 +20,12 @@ export interface DockerAuth {
   insecureAllowPlaintext?: boolean;
 }
 
-/** Pinned Engine API version — the daemon accepts a versioned path prefix. */
-const API_VERSION = 'v1.43';
+// We deliberately do NOT pin an Engine API version in the request path. A fixed
+// prefix like /v1.43 breaks both ways across a mixed fleet: a new daemon (Docker
+// 26+) rejects it as "too old", and an old daemon rejects a newer pin as "too
+// new". Calling the endpoints unversioned makes each daemon use its own maximum
+// supported version, which every daemon accepts. Our reads use optional fields,
+// so version drift is safe. See docs/connectors/docker.md.
 const TIMEOUT_MS = 20000;
 
 export class DockerApiError extends Error {
@@ -220,7 +224,8 @@ export class DockerApi {
   }
 
   private request<T>(method: string, path: string): Promise<T> {
-    const fullPath = `/${API_VERSION}${path}`;
+    // Unversioned path → the daemon uses its own max supported API version.
+    const fullPath = path;
     const t = this.transport;
 
     const options: http.RequestOptions = {
