@@ -1,5 +1,6 @@
 import type {
   Connector,
+  ConnectorConsoleTarget,
   ConnectorContext,
   ConnectorDetailGroup,
   ConnectorDetailItem,
@@ -13,6 +14,7 @@ import type {
   OperationProgress,
   OperationResult,
   OverviewMetric,
+  RawConsoleUpstream,
   TestConnectionResult,
 } from '@cerebro/shared';
 import {
@@ -22,6 +24,7 @@ import {
   healthFromStatus,
   type DockerAuth,
   type DockerContainerStats,
+  type DockerEvent,
 } from './docker-api';
 
 const HOST_KIND = 'docker_host';
@@ -53,6 +56,7 @@ const KINDS: ConnectorResourceKind[] = [
     label: 'Containers',
     category: 'container',
     deletable: true,
+    console: true,
     actions: [
       { id: 'start', label: 'Start', mutating: true, showWhenStatus: STOPPED_LIKE },
       { id: 'stop', label: 'Stop', mutating: true, showWhenStatus: RUNNING_LIKE },
@@ -247,6 +251,7 @@ export class DockerConnector implements Connector {
     ],
     resourceKinds: KINDS,
     operations: OPERATIONS,
+    live: true,
     help: {
       overview:
         'Monitor and manage one Docker host: every stack (grouped by Compose project) and container with its state and health, ' +
@@ -719,6 +724,79 @@ export class DockerConnector implements Connector {
     }
   }
 
+  /**
+   * Live container updates via the Docker /events stream. Maps each event to a
+   * normalized container resource and pushes it — no per-event API round-trip.
+   * Runs in the background and reconnects if the stream drops; the returned
+   * function tears it down when the client disconnects.
+   */
+  async subscribeLive(ctx: ConnectorContext, onUpdate: (resource: ConnectorResource) => void): Promise<() => void> {
+    const api = this.apiFrom(ctx);
+    const controller = new AbortController();
+
+    const run = () => {
+      api
+        .watchContainerEvents((e) => {
+          const r = eventToResource(e);
+          if (r) onUpdate(r);
+        }, controller.signal)
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          ctx.log('debug', `Docker event stream ended (${err instanceof Error ? err.message : err}); reconnecting in 5s.`);
+          setTimeout(() => {
+            if (!controller.signal.aborted) run();
+          }, 5000);
+        });
+    };
+    run();
+    ctx.log('info', 'Docker live event stream subscribed.');
+
+    return () => controller.abort();
+  }
+
+  /**
+   * Open an interactive shell (mode 'shell'/'serial') or a live log stream
+   * (mode 'logs') into a container. Returns a raw upstream the core's console
+   * relay bridges to the browser terminal. See docs/connectors/docker.md.
+   */
+  async openConsole(
+    ctx: ConnectorContext,
+    kind: string,
+    resourceId: string,
+    mode: 'vnc' | 'serial' | 'shell' | 'logs',
+  ): Promise<ConnectorConsoleTarget> {
+    if (kind !== CONTAINER_KIND) throw new Error('Only containers have a console.');
+    const api = this.apiFrom(ctx);
+    const conn = api.connectionDescriptor();
+
+    if (mode === 'logs') {
+      const inspect = await api.inspectContainer(resourceId).catch(() => null);
+      // A TTY container's logs are a raw stream; otherwise they carry Docker's frame headers.
+      const framing: RawConsoleUpstream['framing'] = inspect?.Config?.Tty ? 'raw' : 'docker-multiplexed';
+      const request =
+        `GET /containers/${encodeURIComponent(resourceId)}/logs?follow=1&stdout=1&stderr=1&tail=500 HTTP/1.1\r\n` +
+        `Host: docker\r\n\r\n`;
+      ctx.log('info', `Docker logs stream opened for ${resourceId.slice(0, 12)}.`);
+      return { url: '', type: 'docker-logs', raw: { ...conn, request, framing, readOnly: true } };
+    }
+
+    // Interactive shell (default). Prefer bash, fall back to sh.
+    const execId = await api.createExec(resourceId, [
+      '/bin/sh',
+      '-c',
+      '[ -x /bin/bash ] && exec /bin/bash || exec /bin/sh',
+    ]);
+    const body = JSON.stringify({ Detach: false, Tty: true });
+    const request =
+      `POST /exec/${execId}/start HTTP/1.1\r\n` +
+      `Host: docker\r\n` +
+      `Content-Type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` +
+      body;
+    ctx.log('info', `Docker exec shell opened for ${resourceId.slice(0, 12)}.`);
+    return { url: '', type: 'docker-exec', raw: { ...conn, request, framing: 'raw' } };
+  }
+
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const api = this.apiFrom(ctx);
     const [info, containers, df] = await Promise.all([
@@ -755,6 +833,50 @@ export class DockerConnector implements Connector {
 
     return { metrics, guests };
   }
+}
+
+/** Map a container event to the resource state it implies. Returns null for events we ignore. */
+function eventToResource(e: DockerEvent): ConnectorResource | null {
+  const id = e.Actor?.ID || e.id;
+  if (!id) return null;
+  const action = (e.Action || e.status || '').toLowerCase();
+  const attrs = e.Actor?.Attributes ?? {};
+  const name = attrs.name || id.slice(0, 12);
+
+  // Derive the new state from the action; skip actions that don't change lifecycle state.
+  let status: string;
+  if (action.startsWith('health_status')) {
+    status = action.includes('unhealthy') ? 'unhealthy' : 'running';
+  } else {
+    switch (action) {
+      case 'start':
+      case 'unpause':
+      case 'restart': status = 'running'; break;
+      case 'die':
+      case 'stop':
+      case 'kill': status = 'exited'; break;
+      case 'pause': status = 'paused'; break;
+      case 'create': status = 'created'; break;
+      case 'destroy': status = 'removed'; break;
+      default: return null; // exec_*, attach, top, etc. — not a state change
+    }
+  }
+
+  const project = attrs[COMPOSE_PROJECT];
+  const service = attrs[COMPOSE_SERVICE];
+  return {
+    id,
+    kind: CONTAINER_KIND,
+    name,
+    status,
+    details: {
+      state: status,
+      image: attrs.image ?? null,
+      stack: project ?? null,
+      service: service ?? null,
+    },
+    tags: { state: status, ...(project ? { stack: project } : {}) },
+  };
 }
 
 /** Sort weight so unhealthy > stopped > everything else floats to the top of the guest list. */

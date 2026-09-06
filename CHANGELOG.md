@@ -19,12 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   images, volumes, and networks; **pull an image** (streamed progress via a background job); and
   **prune** dangling images, stopped containers, unused volumes, and networks (each behind an
   explicit confirm). All actions are audited and appear in the timeline.
+- **Live + logs + shell**: container rows update live from the Docker event stream (no polling
+  lag); a **Logs** view tails a container's output; and a **Shell** opens an interactive
+  `exec` terminal (bash/sh) right in the browser. Opening a shell or log stream is audited.
 - **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
   vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
   compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is
   refused without an explicit override. The API is called unversioned, so it works across Docker
   daemon versions (no fixed API-version pin).
-- Logs and `exec` are the next phase.
 
 ## [0.2.0] — 2026-09-06
 ### Added — Secrets vault

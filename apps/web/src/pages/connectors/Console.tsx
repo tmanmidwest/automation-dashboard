@@ -11,15 +11,18 @@ import { cn } from '@/lib/utils';
 
 interface ConsoleResponse {
   token: string;
-  type: 'vnc' | 'terminal';
+  type: 'vnc' | 'terminal' | 'docker-exec' | 'docker-logs';
   password?: string;
   wsPath: string;
 }
 
+const MODE_LABEL: Record<string, string> = { vnc: 'VNC', serial: 'Serial', shell: 'Shell', logs: 'Logs' };
+
 export function Console() {
   const { id, kind, resourceId } = useParams();
   const [params] = useSearchParams();
-  const mode = params.get('mode') === 'serial' ? 'serial' : 'vnc';
+  const mode = params.get('mode') ?? 'vnc';
+  const isTerminalMode = mode !== 'vnc';
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -39,6 +42,8 @@ export function Console() {
 
         if (res.type === 'terminal') {
           startTerminal(url, screenRef.current, cleanups, setStatus, setError);
+        } else if (res.type === 'docker-exec' || res.type === 'docker-logs') {
+          startRawTerminal(url, screenRef.current, cleanups, setStatus, setError, res.type === 'docker-logs');
         } else {
           const rfb = new RFB(screenRef.current, url, { credentials: { password: res.password } });
           applyDisplayMode(rfb, displayMode);
@@ -79,7 +84,7 @@ export function Console() {
           <ArrowLeft className="h-4 w-4" /> Back to connector
         </Link>
         <div className="flex items-center gap-2 text-sm">
-          <span className="text-xs uppercase tracking-wider text-muted-foreground mr-1">{mode === 'serial' ? 'Serial' : 'VNC'}</span>
+          <span className="text-xs uppercase tracking-wider text-muted-foreground mr-1">{MODE_LABEL[mode] ?? 'Console'}</span>
           <span className={cn('inline-flex items-center gap-1.5',
             status === 'connected' ? 'text-emerald-400' : status === 'connecting' ? 'text-amber-400' : 'text-muted-foreground')}>
             <span className={cn('h-2 w-2 rounded-full',
@@ -119,7 +124,7 @@ export function Console() {
             <Loader2 className="h-6 w-6 animate-spin" />
           </div>
         )}
-        <div ref={screenRef} className={cn('w-full h-full', mode === 'serial' && 'p-2')} />
+        <div ref={screenRef} className={cn('w-full h-full', isTerminalMode && 'p-2')} />
       </div>
     </div>
   );
@@ -129,6 +134,55 @@ export function Console() {
 function applyDisplayMode(rfb: RFB, m: 'resize' | 'fit' | 'actual') {
   rfb.resizeSession = m === 'resize';
   rfb.scaleViewport = m === 'fit';
+}
+
+/**
+ * Raw byte terminal for Docker exec (interactive) and logs (read-only). Unlike
+ * the Proxmox serial console, keystrokes and output are raw bytes — no framing.
+ */
+function startRawTerminal(
+  url: string,
+  target: HTMLElement,
+  cleanups: Array<() => void>,
+  setStatus: (s: 'connecting' | 'connected' | 'disconnected') => void,
+  setError: (e: string | null) => void,
+  readOnly: boolean,
+) {
+  const term = new Terminal({
+    cursorBlink: !readOnly,
+    disableStdin: readOnly,
+    fontSize: 14,
+    fontFamily: 'ui-monospace, monospace',
+    theme: { background: '#000000' },
+    convertEol: readOnly, // logs: treat bare \n as CRLF so lines don't stair-step
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(target);
+  fit.fit();
+
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  const dec = new TextDecoder();
+
+  ws.onopen = () => { setStatus('connected'); fit.fit(); if (!readOnly) term.focus(); };
+  ws.onmessage = (ev) => term.write(typeof ev.data === 'string' ? ev.data : dec.decode(ev.data as ArrayBuffer));
+  ws.onclose = () => setStatus('disconnected');
+  ws.onerror = () => setError(readOnly ? 'The log stream was closed.' : 'The shell connection was closed.');
+
+  const onData = readOnly
+    ? null
+    : term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+
+  const ro = new ResizeObserver(() => fit.fit());
+  ro.observe(target);
+
+  cleanups.push(() => {
+    onData?.dispose();
+    ro.disconnect();
+    try { ws.close(); } catch { /* ignore */ }
+    term.dispose();
+  });
 }
 
 /** Serial console over Proxmox's termproxy protocol (xterm.js). */

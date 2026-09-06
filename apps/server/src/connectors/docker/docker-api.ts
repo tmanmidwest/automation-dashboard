@@ -95,7 +95,7 @@ export interface DockerContainerInspect {
     StartedAt?: string;
     Health?: { Status?: string; FailingStreak?: number };
   };
-  Config?: { Image?: string; Env?: string[]; Labels?: Record<string, string> };
+  Config?: { Image?: string; Env?: string[]; Labels?: Record<string, string>; Tty?: boolean };
   Image?: string;
   Mounts?: { Type?: string; Source?: string; Destination?: string; RW?: boolean; Name?: string }[];
   NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
@@ -267,6 +267,17 @@ export class DockerApi {
     return this.request<DockerPruneResult>('POST', '/networks/prune');
   }
 
+  /**
+   * Watch the container event stream (an endless NDJSON HTTP response), invoking
+   * onEvent per event until the AbortSignal fires or the connection drops. The
+   * returned promise resolves/rejects only when the stream ends — callers run it
+   * in the background and reconnect. See docs/connectors/docker.md.
+   */
+  watchContainerEvents(onEvent: (e: DockerEvent) => void, signal: AbortSignal): Promise<void> {
+    const filters = encodeURIComponent(JSON.stringify({ type: ['container'] }));
+    return this.streamJsonLines('GET', `/events?filters=${filters}`, (obj) => onEvent(obj as DockerEvent), signal);
+  }
+
   /** Pull an image, reporting each Docker progress line via onProgress. Cancelable. */
   async pullImage(imageRef: string, onProgress: (line: string) => void, signal?: AbortSignal): Promise<void> {
     const { name, tag } = splitImageRef(imageRef);
@@ -277,21 +288,66 @@ export class DockerApi {
     }, signal);
   }
 
+  /** Create an exec instance (a TTY shell) in a container; returns its id. */
+  async createExec(containerId: string, cmd: string[]): Promise<string> {
+    const res = await this.requestJson<{ Id?: string }>('POST', `/containers/${encodeURIComponent(containerId)}/exec`, {
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      Cmd: cmd,
+    });
+    if (!res?.Id) throw new DockerApiError('Docker did not return an exec id.');
+    return res.Id;
+  }
+
+  /**
+   * The low-level connection facts the console bridge needs to open its own
+   * socket to the daemon (the bridge speaks raw HTTP hijack, not this client).
+   */
+  connectionDescriptor(): { socketPath?: string; host?: string; port?: number; tls?: { ca?: string; cert?: string; key?: string; rejectUnauthorized: boolean } } {
+    const t = this.transport;
+    if (t.kind === 'unix') return { socketPath: t.socketPath };
+    if (t.kind === 'https') {
+      return {
+        host: t.hostname,
+        port: t.port,
+        tls: {
+          ca: this.auth.tlsCaCert || undefined,
+          cert: this.auth.tlsClientCert || undefined,
+          key: this.auth.tlsClientKey || undefined,
+          rejectUnauthorized: !this.auth.insecureSkipVerify,
+        },
+      };
+    }
+    return { host: t.hostname, port: t.port };
+  }
+
   // ── Transport ───────────────────────────────────────────────────
 
   private get<T>(path: string): Promise<T> {
     return this.request<T>('GET', path);
   }
 
-  private request<T>(method: string, path: string): Promise<T> {
+  /** POST/PUT with a JSON body, returning parsed JSON. */
+  private requestJson<T>(method: string, path: string, body: unknown): Promise<T> {
+    return this.request<T>(method, path, JSON.stringify(body));
+  }
+
+  private request<T>(method: string, path: string, body?: string): Promise<T> {
     // Unversioned path → the daemon uses its own max supported API version.
     const fullPath = path;
     const t = this.transport;
 
+    const headers: Record<string, string> = { Accept: 'application/json', Host: 'docker' };
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(body).toString();
+    }
     const options: http.RequestOptions = {
       method,
       path: fullPath,
-      headers: { Accept: 'application/json', Host: 'docker' },
+      headers,
       timeout: TIMEOUT_MS,
     };
 
@@ -320,17 +376,7 @@ export class DockerApi {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;
           if (status < 200 || status >= 300) {
-            let message = `Docker API returned HTTP ${status}`;
-            try {
-              const j = text ? (JSON.parse(text) as { message?: string }) : undefined;
-              if (j?.message) message = j.message;
-            } catch {
-              if (text) message = `${message}: ${text.slice(0, 200)}`;
-            }
-            if (status === 401 || status === 403) {
-              message = `Docker access denied (HTTP ${status}) — check TLS client cert / socket-proxy permissions. ${message}`;
-            }
-            return reject(new DockerApiError(message, status));
+            return reject(new DockerApiError(httpErrorMessage(status, method, text), status));
           }
           if (!text) return resolve(undefined as T);
           try {
@@ -355,6 +401,7 @@ export class DockerApi {
           reject(new DockerApiError(err.message));
         }
       });
+      if (body !== undefined) req.write(body);
       req.end();
     });
   }
@@ -400,15 +447,7 @@ export class DockerApi {
           const chunks: Buffer[] = [];
           res.on('data', (c) => chunks.push(c));
           res.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf8');
-            let message = `Docker API returned HTTP ${status}`;
-            try {
-              const j = JSON.parse(text) as { message?: string };
-              if (j.message) message = j.message;
-            } catch {
-              /* keep default */
-            }
-            reject(new DockerApiError(message, status));
+            reject(new DockerApiError(httpErrorMessage(status, method, Buffer.concat(chunks).toString('utf8')), status));
           });
           return;
         }
@@ -446,6 +485,16 @@ export class DockerApi {
   }
 }
 
+/** A container event from GET /events (filtered to type=container). */
+export interface DockerEvent {
+  Type?: string; // "container"
+  Action?: string; // start | die | stop | kill | pause | unpause | restart | create | destroy | "health_status: healthy" | ...
+  id?: string; // full container id
+  status?: string; // legacy mirror of Action
+  Actor?: { ID?: string; Attributes?: Record<string, string> };
+  time?: number;
+}
+
 /** Result of a prune endpoint (fields vary; we only read the reclaimed space). */
 export interface DockerPruneResult {
   SpaceReclaimed?: number;
@@ -465,6 +514,43 @@ export function splitImageRef(ref: string): { name: string; tag: string } {
   const lastSlash = trimmed.lastIndexOf('/');
   if (lastColon > lastSlash) return { name: trimmed.slice(0, lastColon), tag: trimmed.slice(lastColon + 1) || 'latest' };
   return { name: trimmed, tag: 'latest' };
+}
+
+/**
+ * Turn a Docker/socket-proxy HTTP error into an actionable message. A 403 with
+ * an HTML "administrative rules" body is the docker-socket-proxy blocking the
+ * method — name the exact fix (POST=1 + the section flag) rather than echoing HTML.
+ */
+function httpErrorMessage(status: number, method: string, text: string): string {
+  const detail = (() => {
+    try {
+      const j = text ? (JSON.parse(text) as { message?: string }) : undefined;
+      return j?.message?.trim() || '';
+    } catch {
+      return ''; // non-JSON (e.g. the proxy's HTML page) — don't echo it
+    }
+  })();
+
+  if (status === 401) {
+    return `Docker authentication failed (401) — check the TLS client certificate and key.${detail ? ` (${detail})` : ''}`;
+  }
+  if (status === 403) {
+    const isWrite = method !== 'GET' && method !== 'HEAD';
+    const proxy = /administrative rules/i.test(text); // docker-socket-proxy's haproxy denial page
+    if (isWrite) {
+      return (
+        `Docker refused this action (403 Forbidden). ` +
+        `${proxy ? 'A docker-socket-proxy is blocking writes' : 'Access is denied'} — on the proxy set ` +
+        `POST=1 (plus the matching section, e.g. VOLUMES=1 / IMAGES=1 / CONTAINERS=1, and EXEC=1 for the shell) ` +
+        `and recreate it, or switch this host to the TLS transport. If you are already on TLS, the client certificate lacks permission.`
+      );
+    }
+    return (
+      `Docker denied this read (403 Forbidden) — ` +
+      `${proxy ? 'enable the matching docker-socket-proxy section flag (e.g. CONTAINERS=1 / VOLUMES=1) and recreate it' : 'check the TLS client certificate'}.`
+    );
+  }
+  return `Docker API returned HTTP ${status}${detail ? `: ${detail}` : text ? `: ${text.slice(0, 200)}` : ''}`;
 }
 
 // ── Small shared helpers used by the connector ────────────────────

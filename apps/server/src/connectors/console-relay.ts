@@ -2,6 +2,7 @@ import type { Server } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Logger } from '@nestjs/common';
 import { ConsoleService } from './console.service';
+import { bridgeDockerRaw } from './docker/docker-console-bridge';
 
 const CONSOLE_PATH = '/api/console/ws';
 const logger = new Logger('ConsoleRelay');
@@ -34,6 +35,13 @@ export function attachConsoleRelay(server: Server, consoleService: ConsoleServic
     }
 
     wss.handleUpgrade(req, socket, head, (client) => {
+      // Raw upstreams (Docker exec/logs) hijack an HTTP stream rather than
+      // speaking WebSocket — bridge those separately. The WebSocket path below
+      // (VNC/serial) is unchanged.
+      if (target.raw) {
+        bridgeDockerRaw(client, target.raw, logger);
+        return;
+      }
       const upstream = new WebSocket(target.url, target.protocols ?? [], {
         headers: target.headers,
         rejectUnauthorized: target.rejectUnauthorized ?? true,

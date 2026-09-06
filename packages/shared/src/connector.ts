@@ -119,12 +119,40 @@ export interface ConnectorConsoleTarget {
   protocols?: string[];
   /** Verify the upstream TLS certificate. */
   rejectUnauthorized?: boolean;
-  /** Console protocol for the browser client. */
-  type: 'vnc' | 'terminal';
+  /**
+   * Console protocol for the browser client. 'vnc'/'terminal' relay to a WebSocket
+   * `url`; 'docker-exec'/'docker-logs' bridge to a raw upstream (see `raw`).
+   */
+  type: 'vnc' | 'terminal' | 'docker-exec' | 'docker-logs';
   /** One-time password handed to the browser client (VNC/RFB auth). */
   password?: string;
   /** Message the relay sends upstream immediately on connect (e.g. terminal auth line). Kept server-side. */
   initMessage?: string;
+  /**
+   * For raw upstreams (e.g. Docker exec/logs, which hijack an HTTP connection
+   * rather than speaking WebSocket): the core opens a socket, sends `request`,
+   * reads past the HTTP response headers, then bridges the byte stream to the
+   * browser WebSocket. Present instead of using `url`.
+   */
+  raw?: RawConsoleUpstream;
+}
+
+/** A raw (non-WebSocket) console upstream the core bridges to the browser. */
+export interface RawConsoleUpstream {
+  /** Unix socket path (local Docker), OR host+port (+tls) for a TCP/TLS daemon. */
+  socketPath?: string;
+  host?: string;
+  port?: number;
+  tls?: { ca?: string; cert?: string; key?: string; rejectUnauthorized?: boolean };
+  /** Raw HTTP request (request line + headers + optional body) sent after connecting. */
+  request: string;
+  /**
+   * 'raw' pipes bytes as-is (an exec TTY). 'docker-multiplexed' strips Docker's
+   * 8-byte stdout/stderr frame headers (logs on a non-TTY container).
+   */
+  framing: 'raw' | 'docker-multiplexed';
+  /** Ignore client→upstream bytes (read-only log viewers). */
+  readOnly?: boolean;
 }
 
 /**
@@ -368,7 +396,7 @@ export interface Connector {
     ctx: ConnectorContext,
     kind: string,
     resourceId: string,
-    mode: 'vnc' | 'serial',
+    mode: 'vnc' | 'serial' | 'shell' | 'logs',
   ): Promise<ConnectorConsoleTarget>;
   /**
    * Optional: resolve a media stream (e.g. a camera feed) for a resource. The

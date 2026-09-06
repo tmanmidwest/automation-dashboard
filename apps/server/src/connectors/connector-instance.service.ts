@@ -447,7 +447,7 @@ export class ConnectorInstanceService {
     return data;
   }
 
-  async openConsole(id: string, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {
+  async openConsole(id: string, kind: string, resourceId: string, mode: 'vnc' | 'serial' | 'shell' | 'logs'): Promise<ConnectorConsoleTarget> {
     const instance = await this.get(id);
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
     const connector = this.connectorFor(instance);

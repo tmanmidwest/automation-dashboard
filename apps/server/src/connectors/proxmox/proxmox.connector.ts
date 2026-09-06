@@ -601,7 +601,7 @@ export class ProxmoxConnector implements Connector {
       }));
   }
 
-  async openConsole(ctx: ConnectorContext, kind: string, resourceId: string, mode: 'vnc' | 'serial'): Promise<ConnectorConsoleTarget> {
+  async openConsole(ctx: ConnectorContext, kind: string, resourceId: string, mode: 'vnc' | 'serial' | 'shell' | 'logs'): Promise<ConnectorConsoleTarget> {
     const type = this.typeForKind(kind);
     const api = new ProxmoxApi(this.authFrom(ctx));
     const vmid = parseInt(resourceId, 10);

@@ -58,7 +58,7 @@ class RunOperationDto {
 class ConsoleDto {
   @IsString() kind!: string;
   @IsString() resourceId!: string;
-  @IsOptional() @IsString() mode?: 'vnc' | 'serial';
+  @IsOptional() @IsString() mode?: 'vnc' | 'serial' | 'shell' | 'logs';
 }
 
 @Controller('api/connectors')
@@ -340,7 +340,8 @@ export class ConnectorsController {
   @Post('instances/:id/console')
   @RequirePermissions('connectors:action')
   async openConsole(@Param('id') id: string, @Body() dto: ConsoleDto, @CurrentUser() user: SessionUser) {
-    const mode = dto.mode === 'serial' ? 'serial' : 'vnc';
+    const allowed = ['vnc', 'serial', 'shell', 'logs'] as const;
+    const mode = (allowed as readonly string[]).includes(dto.mode ?? '') ? (dto.mode as typeof allowed[number]) : 'vnc';
     const target = await this.instances.openConsole(id, dto.kind, dto.resourceId, mode);
     const token = this.consoles.issue(target);
     await this.audit.record({
