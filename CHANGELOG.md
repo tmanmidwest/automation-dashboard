@@ -38,8 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store for each stack's compose file and runs the host's own `docker compose` over **SSH** —
   no agent, full Compose fidelity. **Deploy** (create/update), **Edit & redeploy**, **Redeploy**,
   and **Stop (compose down)** operations on the Stacks tab; managed stacks show even when stopped.
-  SSH host/user/key (key in the vault) are optional connector settings — leave them blank to keep
-  a connector monitor/manage-only.
+  SSH host/user/**password or key** (secret in the vault) are optional connector settings — leave
+  them blank to keep a connector monitor/manage-only.
+- **Stack lifecycle for *any* stack**: **Start / Stop / Restart** a whole stack — including ones
+  created outside Cerebro — by acting on its containers via the Engine API (matched by the
+  Compose project label; no compose file or SSH needed). Compose editing still applies only to
+  stacks Cerebro stores; deploying an existing stack's compose here "adopts" it for full management.
 - **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
   vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
   compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is

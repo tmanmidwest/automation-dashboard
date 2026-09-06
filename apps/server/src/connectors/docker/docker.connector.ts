@@ -50,7 +50,13 @@ const KINDS: ConnectorResourceKind[] = [
     id: STACK_KIND,
     label: 'Stacks',
     deletable: true,
-    actions: [],
+    // Lifecycle actions work on ANY stack (managed or pre-existing) by acting on
+    // its containers via the Engine API — no compose file needed.
+    actions: [
+      { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped', 'degraded'] },
+      { id: 'stop', label: 'Stop', mutating: true, showWhenStatus: RUNNING_LIKE, confirm: 'Stop all containers in this stack?' },
+      { id: 'restart', label: 'Restart', mutating: true, showWhenStatus: RUNNING_LIKE },
+    ],
     subResources: [{ id: CONTAINER_KIND, label: 'Containers', labelSingular: 'Container' }],
   },
   {
@@ -443,8 +449,22 @@ export class DockerConnector implements Connector {
     resourceId: string,
     actionId: string,
   ): Promise<{ ok: boolean; message: string }> {
-    if (kind !== CONTAINER_KIND) return { ok: false, message: `No actions for ${kind}.` };
     const api = this.apiFrom(ctx);
+
+    // Stack lifecycle: act on every container in the compose project (label-based,
+    // so it works for stacks Cerebro didn't create).
+    if (kind === STACK_KIND) {
+      if (!['start', 'stop', 'restart'].includes(actionId)) return { ok: false, message: `Unsupported stack action "${actionId}".` };
+      try {
+        return await this.stackLifecycle(ctx, api, resourceId, actionId as 'start' | 'stop' | 'restart');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Action failed.';
+        ctx.log('error', `Docker stack ${actionId} on ${resourceId} failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+
+    if (kind !== CONTAINER_KIND) return { ok: false, message: `No actions for ${kind}.` };
     try {
       switch (actionId) {
         case 'start': await api.startContainer(resourceId); break;
@@ -468,17 +488,29 @@ export class DockerConnector implements Connector {
     const api = this.apiFrom(ctx);
     try {
       if (kind === STACK_KIND) {
-        // Compose down (best-effort) then forget the stored stack.
-        if (ctx.instanceId) {
+        if (!ctx.instanceId) return { ok: false, message: 'Missing connector instance.' };
+        const stored = await this.stacks.get(ctx.instanceId, resourceId);
+        if (stored) {
+          // Managed: compose down (best-effort) then forget the stored stack.
           try {
             await this.stacks.down(this.sshTargetFrom(ctx), ctx.instanceId, resourceId);
           } catch (err) {
             ctx.log('debug', `Stack down before delete failed: ${err instanceof Error ? err.message : err}`);
           }
           await this.stacks.remove(ctx.instanceId, resourceId);
+          ctx.log('info', `Docker removed managed stack ${resourceId}.`);
+          return { ok: true, message: `Stack "${resourceId}" removed.` };
         }
-        ctx.log('info', `Docker removed managed stack ${resourceId}.`);
-        return { ok: true, message: `Stack "${resourceId}" removed.` };
+        // Unmanaged: force-remove the project's containers via the Engine API.
+        const members = (await api.listContainers(true)).filter(
+          (c) => (c.Labels?.[COMPOSE_PROJECT] ?? 'ungrouped') === resourceId,
+        );
+        if (members.length === 0) return { ok: false, message: `No containers found for stack "${resourceId}".` };
+        const results = await Promise.allSettled(members.map((m) => api.removeContainer(m.Id)));
+        const failed = results.filter((r) => r.status === 'rejected').length;
+        ctx.log('info', `Docker removed unmanaged stack ${resourceId}: ${members.length - failed}/${members.length} containers.`);
+        if (failed) return { ok: false, message: `Removed ${members.length - failed}/${members.length} containers; ${failed} failed.` };
+        return { ok: true, message: `Removed ${members.length} container${members.length !== 1 ? 's' : ''} from "${resourceId}".` };
       }
       switch (kind) {
         case CONTAINER_KIND: await api.removeContainer(resourceId); break;
@@ -520,18 +552,27 @@ export class DockerConnector implements Connector {
         ctx.log(res.ok ? 'info' : 'error', `Docker stack deploy "${projectName(name)}": ${res.message}`);
         return res;
       }
-      if (operationId === 'redeploy-stack' || operationId === 'stop-stack') {
+      if (operationId === 'stop-stack') {
         const instanceId = ctx.instanceId;
         if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
-        const target = this.sshTargetFrom(ctx);
-        if (operationId === 'stop-stack') {
-          onProgress(`Stopping stack "${_resourceId}"…`);
-          return await this.stacks.down(target, instanceId, _resourceId);
-        }
         const stored = await this.stacks.get(instanceId, _resourceId);
-        if (!stored) return { ok: false, message: 'No stored compose for this stack — use "Deploy stack" first.' };
+        if (stored) {
+          onProgress(`Running compose down for "${_resourceId}"…`);
+          return await this.stacks.down(this.sshTargetFrom(ctx), instanceId, _resourceId);
+        }
+        // Existing (unmanaged) stack — no compose file to `down`; stop its containers instead.
+        onProgress(`Stopping containers for "${_resourceId}"…`);
+        return await this.stackLifecycle(ctx, api, _resourceId, 'stop');
+      }
+      if (operationId === 'redeploy-stack') {
+        const instanceId = ctx.instanceId;
+        if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
+        const stored = await this.stacks.get(instanceId, _resourceId);
+        if (!stored) {
+          return { ok: false, message: 'This stack isn\'t managed by Cerebro. Use "Deploy stack" to import its compose, then redeploy.' };
+        }
         onProgress(`Redeploying stack "${_resourceId}"…`);
-        return await this.stacks.deploy(target, instanceId, _resourceId, stored.compose);
+        return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose);
       }
 
       if (operationId === 'pull-image') {
@@ -986,6 +1027,39 @@ export class DockerConnector implements Connector {
       if (stored) return { compose: stored.compose };
     }
     return {};
+  }
+
+  /** Start / stop / restart every container in a compose project (works for any stack). */
+  private async stackLifecycle(
+    ctx: ConnectorContext,
+    api: DockerApi,
+    project: string,
+    action: 'start' | 'stop' | 'restart',
+  ): Promise<{ ok: boolean; message: string }> {
+    const all = await api.listContainers(true);
+    const members = all.filter((c) => (c.Labels?.[COMPOSE_PROJECT] ?? 'ungrouped') === project);
+    if (members.length === 0) return { ok: false, message: `No containers found for stack "${project}".` };
+
+    // Only act on containers that need it (start the stopped, stop the running); restart all.
+    const targets =
+      action === 'stop'
+        ? members.filter((m) => m.State === 'running' || m.State === 'restarting')
+        : action === 'start'
+          ? members.filter((m) => STOPPED_STATES.has(m.State ?? ''))
+          : members;
+    if (targets.length === 0) return { ok: true, message: `Stack "${project}" is already in the desired state.` };
+
+    const run = (id: string) =>
+      action === 'start' ? api.startContainer(id) : action === 'stop' ? api.stopContainer(id) : api.restartContainer(id);
+    const results = await Promise.allSettled(targets.map((m) => run(m.Id)));
+    const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+    const past = action === 'start' ? 'started' : action === 'stop' ? 'stopped' : 'restarted';
+    ctx.log('info', `Docker stack ${action} "${project}": ${targets.length - failed.length}/${targets.length} containers ${past}.`);
+    if (failed.length) {
+      const first = failed[0].reason;
+      return { ok: false, message: `Only ${targets.length - failed.length}/${targets.length} containers ${past}: ${first instanceof Error ? first.message : first}` };
+    }
+    return { ok: true, message: `Stack ${past} — ${targets.length} container${targets.length !== 1 ? 's' : ''}.` };
   }
 
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
