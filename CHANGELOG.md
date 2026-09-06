@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — UniFi connector (Phase 1: monitor)
+- **UniFi connector** (v0.1.0) — monitor a UniFi network via the supported UniFi OS **Integration
+  API** (API-key auth). Lists **devices** (gateway, switches, APs) with status, model, IP/MAC,
+  firmware (+ update-available), and uptime, and **clients** (wired/wireless). Overview tiles:
+  devices total / **offline**, **firmware updates**, clients total / wireless. Sites map to nodes.
+- API key stored in the secrets vault; TLS verification off by default for local self-signed
+  gateways (a toggle re-enables it). Read-only for now — device restart and alerts are next.
+
 ### Added — Shared vault credentials + connector references
 - **Create secrets directly in the vault** (Settings → Secrets Vault → *New secret*) — a shared
   credential (e.g. an SSH password) with a key, label, and category.
