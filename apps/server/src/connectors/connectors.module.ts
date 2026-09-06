@@ -14,6 +14,7 @@ import { ProxmoxConnector } from './proxmox/proxmox.connector';
 import { AwsConnector } from './aws/aws.connector';
 import { HomeAssistantConnector } from './home-assistant/home-assistant.connector';
 import { CloudflareConnector } from './cloudflare/cloudflare.connector';
+import { DockerConnector } from './docker/docker.connector';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
 import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
@@ -43,6 +44,7 @@ export class ConnectorsModule implements OnModuleInit {
     this.registry.register(new AwsConnector());
     this.registry.register(new HomeAssistantConnector());
     this.registry.register(new CloudflareConnector());
+    this.registry.register(new DockerConnector());
     // The Backblaze connector reads restore history, a durable state mirror, and VM names.
     this.registry.register(new BackblazeConnector(this.backupRuns, this.backupState, this.vmNames));
   }
