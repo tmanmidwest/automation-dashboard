@@ -371,10 +371,22 @@ export class ConnectorsController {
 
   @Post('instances/:id/jobs/:jobId/cancel')
   @RequirePermissions('connectors:action')
-  cancelJob(@Param('id') id: string, @Param('jobId') jobId: string): { ok: boolean } {
+  async cancelJob(
+    @Param('id') id: string,
+    @Param('jobId') jobId: string,
+    @CurrentUser() user: SessionUser,
+  ): Promise<{ ok: boolean }> {
     const job = this.instances.getJob(jobId);
     if (!job || job.instanceId !== id) throw new NotFoundException('Job not found.');
-    return { ok: this.instances.cancelJob(id, jobId) };
+    const ok = this.instances.cancelJob(id, jobId);
+    if (ok) {
+      await this.audit.record({
+        actorId: user.id, actorEmail: user.email,
+        action: 'connectors.job_cancelled', target: `${id}/${job.label}`,
+        meta: { jobId },
+      });
+    }
+    return { ok };
   }
 
   @Post('instances/:id/resources/:kind/:resourceId/actions/:actionId')

@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Event timeline ("Ship's Log")
+- **Unified event timeline** at `/timeline` — a single chronological, filterable stream of
+  everything that happens in Cerebro: audit events, warn/error system logs, alert deliveries,
+  connector job outcomes, and monitor up/down transitions. It's a read-model that unions the
+  existing tables (no new source-of-truth), gated by `logs:read`; the who-did-what audit
+  stream additionally requires `audit:read`.
+- **Filters + search**: toggle by kind and severity, full-text search, and infinite "load
+  older" paging via a time cursor. Every row deep-links to its origin (connector / monitor).
+- **Live tail**: new events stream in over Server-Sent Events (`/api/timeline/live`) and
+  surface as a "new events" pill so the list you're reading never jumps.
+- **Wider coverage**: background connector jobs now record their outcome
+  (`connectors.operation_succeeded` / `_failed`) and job cancellations are audited, so both
+  appear in the timeline.
+
 ### Added — Cloudflare connector
 - **Cloudflare connector** (v0.6.0): monitor and manage a Cloudflare account from the UI,
   authenticated with a single **scoped API token** (encrypted at rest — never the legacy

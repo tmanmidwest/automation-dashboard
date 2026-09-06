@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TimelineBus } from '../timeline/timeline-bus';
+import { mapAuditRow } from '../timeline/timeline.mappers';
 
 /**
  * Append-only audit trail: who did what. Distinct from diagnostic app logs.
@@ -7,7 +9,10 @@ import { PrismaService } from '../prisma/prisma.service';
  */
 @Injectable()
 export class AuditService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly bus: TimelineBus,
+  ) {}
 
   async record(entry: {
     actorId?: string | null;
@@ -16,7 +21,7 @@ export class AuditService {
     target?: string | null;
     meta?: Record<string, unknown>;
   }) {
-    await this.prisma.auditLog.create({
+    const row = await this.prisma.auditLog.create({
       data: {
         actorId: entry.actorId ?? null,
         actorEmail: entry.actorEmail ?? null,
@@ -25,6 +30,8 @@ export class AuditService {
         meta: (entry.meta as object) ?? undefined,
       },
     });
+    // Push to the live timeline tail (no-op if nobody is listening).
+    this.bus.publish(mapAuditRow(row));
   }
 
   async query(opts: { limit?: number; before?: Date; actorId?: string }) {

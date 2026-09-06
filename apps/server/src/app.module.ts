@@ -20,6 +20,7 @@ import { VersionModule } from './version/version.module';
 import { SeedModule } from './seed/seed.module';
 import { McpModule } from './mcp/mcp.module';
 import { OAuthModule } from './oauth/oauth.module';
+import { TimelineModule } from './timeline/timeline.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -49,6 +50,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     SeedModule,
     McpModule,
     OAuthModule,
+    TimelineModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

@@ -11,6 +11,8 @@ import type {
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
+import { TimelineBus } from '../timeline/timeline-bus';
+import { mapNotificationRow } from '../timeline/timeline.mappers';
 import { EmailChannel } from './channels/email.channel';
 import { TextbeltChannel } from './channels/textbelt.channel';
 import { SignalChannel } from './channels/signal.channel';
@@ -140,6 +142,7 @@ export class NotificationsService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly logging: LoggingService,
+    private readonly bus: TimelineBus,
     email: EmailChannel,
     textbelt: TextbeltChannel,
     signal: SignalChannel,
@@ -171,6 +174,7 @@ export class NotificationsService {
           detail: p.detail ?? null,
         },
       })
+      .then((row) => this.bus.publish(mapNotificationRow(row)))
       .catch(() => {
         /* history is best-effort */
       });

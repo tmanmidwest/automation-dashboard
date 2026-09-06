@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import type { OperationResult, OperationProgress } from '@cerebro/shared';
 import { LoggingService } from '../logging/logging.service';
+import { AuditService } from '../logging/audit.service';
 
 interface JobRecord {
   id: string;
@@ -27,7 +28,29 @@ export class JobService {
   /** Abort controllers for in-flight jobs, so a user can cancel a long operation. */
   private readonly aborts = new Map<string, AbortController>();
 
-  constructor(private readonly logging: LoggingService) {}
+  constructor(
+    private readonly logging: LoggingService,
+    private readonly audit: AuditService,
+  ) {}
+
+  /**
+   * Record a completed job's outcome to the audit trail so it lands in the
+   * timeline (docs/event-timeline.md). System-attributed — the actor who kicked
+   * the job off is already captured by 'connectors.operation_started'. Cancels
+   * are recorded by the controller instead, so they carry the actor.
+   */
+  private recordOutcome(r: JobRecord) {
+    return this.audit.record({
+      action: r.status === 'success' ? 'connectors.operation_succeeded' : 'connectors.operation_failed',
+      target: `${r.instanceId}/${r.label}`,
+      meta: {
+        jobId: r.id,
+        status: r.status,
+        message: r.message ?? null,
+        durationMs: r.finishedAt && r.startedAt ? r.finishedAt - r.startedAt : null,
+      },
+    });
+  }
 
   start(
     instanceId: string,
@@ -54,12 +77,14 @@ export class JobService {
         record.message = result.message;
         record.createdResourceId = result.createdResourceId;
         record.finishedAt = Date.now();
+        void this.recordOutcome(record);
       })
       .catch((err) => {
         if (record.status !== 'running') return;
         record.status = 'error';
         record.message = err instanceof Error ? err.message : 'Operation failed.';
         record.finishedAt = Date.now();
+        void this.recordOutcome(record);
       })
       .finally(() => { this.aborts.delete(id); this.prune(); });
 

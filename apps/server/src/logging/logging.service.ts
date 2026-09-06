@@ -1,5 +1,7 @@
 import { Injectable, LoggerService as NestLoggerService } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TimelineBus } from '../timeline/timeline-bus';
+import { mapAppLogRow } from '../timeline/timeline.mappers';
 import type { LogLevel } from '@cerebro/shared';
 
 /**
@@ -8,7 +10,10 @@ import type { LogLevel } from '@cerebro/shared';
  */
 @Injectable()
 export class LoggingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly bus: TimelineBus,
+  ) {}
 
   private async write(level: LogLevel, context: string, message: string, meta?: Record<string, unknown>) {
     // stdout first — never lose a log line to a DB hiccup.
@@ -16,9 +21,13 @@ export class LoggingService {
     // eslint-disable-next-line no-console
     console[level === 'debug' ? 'log' : level](line, meta ?? '');
     try {
-      await this.prisma.appLog.create({
+      const row = await this.prisma.appLog.create({
         data: { level, context, message, meta: (meta as object) ?? undefined },
       });
+      // Only warn/error surface in the timeline (matches the query read-model).
+      if (level === 'warn' || level === 'error') {
+        this.bus.publish(mapAppLogRow(row));
+      }
     } catch {
       // Swallow — logging must never crash the request path.
     }

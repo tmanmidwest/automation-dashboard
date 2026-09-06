@@ -3,3 +3,4 @@ export * from './connector';
 export * from './dto';
 export * from './notifications';
 export * from './monitors';
+export * from './timeline';
