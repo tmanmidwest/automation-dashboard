@@ -22,6 +22,7 @@ import { McpModule } from './mcp/mcp.module';
 import { OAuthModule } from './oauth/oauth.module';
 import { TimelineModule } from './timeline/timeline.module';
 import { SecretsModule } from './secrets/secrets.module';
+import { AutomationsModule } from './automations/automations.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -53,6 +54,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     OAuthModule,
     TimelineModule,
     SecretsModule,
+    AutomationsModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

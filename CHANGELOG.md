@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Automations engine (rules)
+- **Automation rules** — *when* something happens, *if* a condition holds, *do* one or more
+  actions, across connectors. Triggers off the timeline event stream (any alert, audit event, job
+  outcome, or warn/error log) or a **schedule** (cron); conditions (time window, minimum severity)
+  refine it; actions **notify**, **run a connector action** (start/stop/restart…), or **run a
+  connector operation** (deploy a stack, run a backup…). Per-rule cooldown + a loop guard keep it
+  safe, every run is recorded and audited, and a **test** endpoint fires a rule on demand. New
+  `automations:read` / `automations:write` permissions (admin only, never a token scope). API at
+  `/api/automations`; a rule-builder UI comes next.
+
 ### Added — Shared vault credentials + connector references
 - **Create secrets directly in the vault** (Settings → Secrets Vault → *New secret*) — a shared
   credential (e.g. an SSH password) with a key, label, and category.

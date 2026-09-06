@@ -18,6 +18,9 @@ export type Permission =
   // Secrets vault (session-only; never a bearer-token scope)
   | 'secrets:read' // list vault metadata
   | 'secrets:write' // set / rotate / delete secrets
+  // Automations (rules engine; session-only — a rule can run infra actions)
+  | 'automations:read'
+  | 'automations:write'
   // Connectors (extension host)
   | 'connectors:read'
   | 'connectors:write' // install / configure / enable
@@ -59,6 +62,8 @@ export const BUILTIN_ROLES = {
       'monitors:write',
       'secrets:read',
       'secrets:write',
+      'automations:read',
+      'automations:write',
     ] as Permission[],
   },
 } as const;

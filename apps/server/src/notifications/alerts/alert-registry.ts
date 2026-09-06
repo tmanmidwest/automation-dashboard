@@ -314,6 +314,18 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: true,
   },
 
+  // ── Automations ──────────────────────────────────────────
+  {
+    key: 'automation.notify',
+    label: 'Automation notification',
+    description: 'A notification sent by an automation rule\'s "notify" action.',
+    category: 'Automations',
+    defaultSeverity: 'info',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+
   // ── Secrets vault ────────────────────────────────────────
   {
     key: 'secret.rotation_due',

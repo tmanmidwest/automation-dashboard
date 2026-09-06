@@ -5,3 +5,4 @@ export * from './notifications';
 export * from './monitors';
 export * from './timeline';
 export * from './secrets';
+export * from './automations';

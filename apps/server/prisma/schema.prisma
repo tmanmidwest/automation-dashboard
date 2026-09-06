@@ -384,6 +384,42 @@ model NotificationLog {
   @@index([status])
 }
 
+// ── Automations (rules engine) ───────────────────────────────
+
+/// A rule: when <trigger> [if <conditions>] do <actions>. See docs/automations.md.
+model AutomationRule {
+  id          String    @id @default(cuid())
+  name        String
+  enabled     Boolean   @default(true)
+  /// RuleTrigger (event | schedule).
+  trigger     Json
+  /// RuleCondition[] — all must hold (AND).
+  conditions  Json      @default("[]")
+  /// RuleAction[] — run in order.
+  actions     Json      @default("[]")
+  /// Don't re-fire within this many seconds (loop/spam guard).
+  cooldownSec Int       @default(60)
+  lastFiredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+/// One execution of a rule (for the run history + audit).
+model AutomationRun {
+  id        String   @id @default(cuid())
+  ruleId    String
+  ruleName  String
+  /// Short description of what fired it.
+  trigger   String
+  /// success | partial | error | skipped
+  status    String
+  message   String?
+  createdAt DateTime @default(now())
+
+  @@index([ruleId, createdAt])
+  @@index([createdAt])
+}
+
 // ── Uptime monitoring ────────────────────────────────────────
 
 /// One probed target (ping / http / tcp / dns). Last-known state is
