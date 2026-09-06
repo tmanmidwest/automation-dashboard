@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Live + logs + shell**: container rows update live from the Docker event stream (no polling
   lag); a **Logs** view tails a container's output; and a **Shell** opens an interactive
   `exec` terminal (bash/sh) right in the browser. Opening a shell or log stream is audited.
+- **Health alerts**: a new **Docker** alert category on the threshold monitor — alert when
+  unhealthy containers, stopped containers, or Docker disk usage cross a per-connector limit.
+  (Host-unreachable is already covered by the baseline connection monitor.)
 - **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
   vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
   compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is

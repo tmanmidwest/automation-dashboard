@@ -262,6 +262,38 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     monitorScoped: true,
   },
 
+  // ── Docker ───────────────────────────────────────────────
+  {
+    key: 'docker.unhealthy',
+    label: 'Unhealthy containers over threshold',
+    description: 'The number of containers reporting an unhealthy healthcheck crossed the limit set on its page.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'docker.stopped',
+    label: 'Stopped containers over threshold',
+    description: 'The number of stopped containers crossed the limit set on its page.',
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'docker.disk_high',
+    label: 'Docker disk usage over threshold',
+    description: "Docker's disk usage (images + containers + volumes + build cache) crossed the GB limit set on its page.",
+    category: 'Docker',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+
   // ── Secrets vault ────────────────────────────────────────
   {
     key: 'secret.rotation_due',

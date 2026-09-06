@@ -35,6 +35,9 @@ const THRESHOLD_DEFS = [
   { id: 'cfCertsExpiring', metricKey: 'certsExpiringSoon', alertKey: 'cloudflare.certs_expiring', label: 'Certificates expiring' },
   { id: 'cfTokensExpiring', metricKey: 'tokensExpiringSoon', alertKey: 'cloudflare.tokens_expiring', label: 'Service tokens expiring' },
   { id: 'cfThreats', metricKey: 'threats24h', alertKey: 'cloudflare.threats', label: 'Threats (24h)' },
+  { id: 'dockerUnhealthy', metricKey: 'containersUnhealthy', alertKey: 'docker.unhealthy', label: 'Unhealthy containers' },
+  { id: 'dockerStopped', metricKey: 'containersStopped', alertKey: 'docker.stopped', label: 'Stopped containers' },
+  { id: 'dockerDisk', metricKey: 'diskUsedGb', alertKey: 'docker.disk_high', label: 'Docker disk used' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 

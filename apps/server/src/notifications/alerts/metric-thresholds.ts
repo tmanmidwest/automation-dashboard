@@ -31,6 +31,10 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'cfCertsExpiring', metricKey: 'certsExpiringSoon', alertKey: 'cloudflare.certs_expiring', label: 'Certificates expiring' },
   { id: 'cfTokensExpiring', metricKey: 'tokensExpiringSoon', alertKey: 'cloudflare.tokens_expiring', label: 'Service tokens expiring' },
   { id: 'cfThreats', metricKey: 'threats24h', alertKey: 'cloudflare.threats', label: 'Threats (24h)' },
+  // Docker health (counts from the connector's overview).
+  { id: 'dockerUnhealthy', metricKey: 'containersUnhealthy', alertKey: 'docker.unhealthy', label: 'Unhealthy containers' },
+  { id: 'dockerStopped', metricKey: 'containersStopped', alertKey: 'docker.stopped', label: 'Stopped containers' },
+  { id: 'dockerDisk', metricKey: 'diskUsedGb', alertKey: 'docker.disk_high', label: 'Docker disk used' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {
