@@ -13,6 +13,16 @@ export interface StackRunResult {
   message: string;
 }
 
+/** `docker compose up` options exposed on redeploy (mirror Portainer's toggles). */
+export interface StackDeployOpts {
+  /** `--pull always` — fetch newer images. */
+  pull?: boolean;
+  /** `--force-recreate` — recreate containers even if config is unchanged. */
+  forceRecreate?: boolean;
+  /** `--remove-orphans` — remove containers for services no longer in the compose. */
+  removeOrphans?: boolean;
+}
+
 /**
  * Cerebro-managed compose stacks (Docker connector Phase 5). Cerebro is the
  * versioned store for each stack's compose file; deploys run the host's own
@@ -36,12 +46,12 @@ export class DockerStackService {
     });
   }
 
-  private saveCompose(instanceId: string, name: string, compose: string) {
+  private saveCompose(instanceId: string, name: string, compose: string, env: string) {
     const project = projectName(name);
     return this.prisma.dockerStack.upsert({
       where: { connectorInstanceId_name: { connectorInstanceId: instanceId, name: project } },
-      update: { compose },
-      create: { connectorInstanceId: instanceId, name: project, compose },
+      update: { compose, env: env || null },
+      create: { connectorInstanceId: instanceId, name: project, compose, env: env || null },
     });
   }
 
@@ -52,32 +62,57 @@ export class DockerStackService {
   }
 
   /**
-   * Write the compose to the host and `docker compose up -d`. Stores the compose
-   * (so it can be edited/redeployed) and records the outcome.
+   * Write the compose (+ optional `.env`) to the host, validate it, then
+   * `docker compose up -d`. Stores compose/env so it can be edited/redeployed,
+   * and records the outcome.
    */
-  async deploy(target: StackDeployTarget, instanceId: string, name: string, compose: string): Promise<StackRunResult> {
+  async deploy(
+    target: StackDeployTarget,
+    instanceId: string,
+    name: string,
+    compose: string,
+    env = '',
+    opts: StackDeployOpts = {},
+  ): Promise<StackRunResult> {
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
     if (!compose.trim()) return { ok: false, message: 'The compose file is empty.' };
 
-    await this.saveCompose(instanceId, name, compose);
+    await this.saveCompose(instanceId, name, compose, env);
     const dir = `${trimSlash(target.stacksDir)}/${project}`;
     const file = `${dir}/docker-compose.yml`;
+    const envFile = `${dir}/.env`;
 
     try {
-      // 1) write the compose file (stdin → cat, so no shell-escaping of contents).
-      const write = await runSsh(target.ssh, `mkdir -p '${dir}' && cat > '${file}'`, compose);
-      if (write.code !== 0) throw new Error(write.stderr.trim() || 'Failed to write the compose file on the host.');
+      // 1) write the compose + .env (stdin → cat, so no shell-escaping of contents).
+      //    Always write .env (even empty) so stale variables don't linger.
+      const w1 = await runSsh(target.ssh, `mkdir -p '${dir}' && cat > '${file}'`, compose);
+      if (w1.code !== 0) throw new Error(w1.stderr.trim() || 'Failed to write the compose file on the host.');
+      const w2 = await runSsh(target.ssh, `cat > '${envFile}'`, env);
+      if (w2.code !== 0) throw new Error(w2.stderr.trim() || 'Failed to write the .env file on the host.');
 
-      // 2) docker compose up -d
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d`);
-      const out = tail(up.stderr || up.stdout);
+      // 2) validate before applying, so a YAML/compose error fails cleanly.
+      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' config -q`);
+      if (cfg.code !== 0) {
+        const detail = tail(cfg.stderr || cfg.stdout, 2000);
+        await this.record(instanceId, project, 'error', detail);
+        return { ok: false, message: `Compose validation failed: ${detail}` };
+      }
+
+      // 3) docker compose up -d [flags]
+      const flags = [
+        opts.pull ? '--pull always' : '',
+        opts.forceRecreate ? '--force-recreate' : '',
+        opts.removeOrphans ? '--remove-orphans' : '',
+      ].filter(Boolean).join(' ');
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d ${flags}`.trim());
+      const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);
         return { ok: false, message: out || `docker compose exited ${up.code}.` };
       }
       await this.record(instanceId, project, 'success', out);
-      return { ok: true, message: `Deployed "${project}".${out ? ` ${out}` : ''}` };
+      return { ok: true, message: `Deployed "${project}".${out ? `\n${out}` : ''}` };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Deploy failed.';
       await this.record(instanceId, project, 'error', message);

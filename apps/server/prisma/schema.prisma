@@ -273,6 +273,8 @@ model DockerStack {
   name                String
   /// The compose YAML (the source of truth Cerebro stores/edits).
   compose             String
+  /// Optional `.env` file contents (KEY=value lines), written beside the compose.
+  env                 String?
   /// Outcome of the last deploy: never | success | error.
   lastStatus          String   @default("never")
   lastMessage         String?

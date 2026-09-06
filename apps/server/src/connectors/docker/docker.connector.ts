@@ -96,6 +96,22 @@ const COMPOSE_FIELD = {
   help: 'Standard Compose. Cerebro writes this to the host and runs "docker compose up -d".',
 };
 
+const ENV_FIELD = {
+  key: 'env',
+  label: 'Environment (.env)',
+  type: 'textarea' as const,
+  required: false,
+  placeholder: 'TZ=America/Chicago\nPUID=1000\nPGID=1000',
+  help: 'Optional KEY=value lines, written to a .env beside the compose — used for ${VAR} interpolation.',
+};
+
+/** Redeploy toggles that map to `docker compose up` flags (Portainer-style). */
+const REDEPLOY_OPTS_FIELDS = [
+  { key: 'pull', label: 'Pull newer images (--pull always)', type: 'boolean' as const, required: false, default: false },
+  { key: 'forceRecreate', label: 'Force recreate containers', type: 'boolean' as const, required: false, default: false },
+  { key: 'removeOrphans', label: 'Remove orphaned containers', type: 'boolean' as const, required: false, default: false },
+];
+
 const OPERATIONS: ConnectorOperation[] = [
   {
     id: 'deploy-stack',
@@ -109,30 +125,31 @@ const OPERATIONS: ConnectorOperation[] = [
     fields: [
       { key: 'name', label: 'Stack name', type: 'text', required: true, placeholder: 'my-app', help: 'Compose project name (lowercased).' },
       COMPOSE_FIELD,
+      ENV_FIELD,
     ],
   },
   {
     id: 'edit-stack',
     label: 'Edit & redeploy',
-    description: 'Edit this stack\'s compose and redeploy it.',
+    description: 'Edit this stack\'s compose and environment, then redeploy it.',
     scope: 'resource',
     kind: STACK_KIND,
     icon: 'pencil',
     submitLabel: 'Save & deploy',
     background: true,
     prefill: true,
-    fields: [COMPOSE_FIELD],
+    fields: [COMPOSE_FIELD, ENV_FIELD, ...REDEPLOY_OPTS_FIELDS],
   },
   {
     id: 'redeploy-stack',
     label: 'Redeploy',
-    description: 'Re-run "docker compose up -d" with the stored compose (pulls changed images, recreates as needed).',
+    description: 'Re-run "docker compose up -d" with the stored compose and environment.',
     scope: 'resource',
     kind: STACK_KIND,
     icon: 'refresh-cw',
     submitLabel: 'Redeploy',
     background: true,
-    fields: [],
+    fields: REDEPLOY_OPTS_FIELDS,
   },
   {
     id: 'stop-stack',
@@ -548,7 +565,7 @@ export class DockerConnector implements Connector {
         if (!compose) return { ok: false, message: 'The compose file is empty.' };
         const target = this.sshTargetFrom(ctx);
         onProgress(`Deploying stack "${projectName(name)}" over SSH…`);
-        const res = await this.stacks.deploy(target, instanceId, name, compose);
+        const res = await this.stacks.deploy(target, instanceId, name, compose, str(values.env) ?? '', optsFrom(values));
         ctx.log(res.ok ? 'info' : 'error', `Docker stack deploy "${projectName(name)}": ${res.message}`);
         return res;
       }
@@ -572,7 +589,7 @@ export class DockerConnector implements Connector {
           return { ok: false, message: 'This stack isn\'t managed by Cerebro. Use "Deploy stack" to import its compose, then redeploy.' };
         }
         onProgress(`Redeploying stack "${_resourceId}"…`);
-        return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose);
+        return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose, stored.env ?? '', optsFrom(values));
       }
 
       if (operationId === 'pull-image') {
@@ -1024,7 +1041,7 @@ export class DockerConnector implements Connector {
   ): Promise<Record<string, unknown>> {
     if (operationId === 'edit-stack' && resourceId && ctx.instanceId) {
       const stored = await this.stacks.get(ctx.instanceId, resourceId);
-      if (stored) return { compose: stored.compose };
+      if (stored) return { compose: stored.compose, env: stored.env ?? '' };
     }
     return {};
   }
@@ -1171,4 +1188,13 @@ function str(v: unknown): string | undefined {
 
 function bool(v: unknown): boolean {
   return v === true || v === 'true' || v === 'on' || v === 1 || v === '1';
+}
+
+/** Extract the `docker compose up` flag toggles from an operation's values. */
+function optsFrom(values: Record<string, unknown>) {
+  return {
+    pull: bool(values.pull),
+    forceRecreate: bool(values.forceRecreate),
+    removeOrphans: bool(values.removeOrphans),
+  };
 }

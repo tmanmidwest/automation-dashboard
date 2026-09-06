@@ -21,6 +21,7 @@ export function Dialog({
   description,
   children,
   footer,
+  size = 'default',
 }: {
   open: boolean;
   onClose: () => void;
@@ -28,6 +29,8 @@ export function Dialog({
   description?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  /** 'lg' widens the dialog for editors (e.g. a compose file). */
+  size?: 'default' | 'lg';
 }) {
   useEffect(() => {
     if (!open) return;
@@ -41,7 +44,7 @@ export function Dialog({
   return (
     <div className="fixed inset-0 z-50 grid place-items-center p-4">
       <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={onClose} aria-hidden />
-      <div className="relative w-full max-w-lg max-h-[90vh] flex gap-1.5 animate-fade-in">
+      <div className={`relative w-full ${size === 'lg' ? 'max-w-3xl' : 'max-w-lg'} max-h-[90vh] flex gap-1.5 animate-fade-in`}>
         <LcarsRail className="w-12" />
         <div className="flex-1 min-w-0 flex flex-col rounded-r-xl border border-border bg-card shadow-2xl overflow-hidden">
           <div className="flex items-start justify-between gap-4 p-5 border-b border-border">

@@ -186,6 +186,7 @@ export function OperationDialog({
 
   return (
     <Dialog open={open} onClose={phase === 'running' ? () => {} : onClose}
+      size={operation.fields.some((f) => f.type === 'textarea') ? 'lg' : 'default'}
       title={operation.label} description={operation.description} footer={footer}>
       {phase === 'form' && (
         <div className="space-y-4">
@@ -222,9 +223,21 @@ export function OperationDialog({
               return (
                 <div key={f.key}>
                   <Label>{f.label}{f.required && <span className="text-primary"> *</span>}</Label>
-                  <textarea rows={3} value={String(values[f.key] ?? '')} placeholder={f.placeholder}
+                  <textarea rows={16} value={String(values[f.key] ?? '')} placeholder={f.placeholder}
                     onChange={(e) => setField(f.key, e.target.value)}
-                    className="flex w-full rounded-md border border-input bg-background/60 px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring font-mono" />
+                    onKeyDown={(e) => {
+                      // Tab inserts two spaces (YAML) instead of moving focus.
+                      if (e.key === 'Tab' && !e.shiftKey) {
+                        e.preventDefault();
+                        const ta = e.currentTarget;
+                        const s = ta.selectionStart, en = ta.selectionEnd;
+                        const cur = String(values[f.key] ?? '');
+                        setField(f.key, cur.slice(0, s) + '  ' + cur.slice(en));
+                        requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = s + 2; });
+                      }
+                    }}
+                    spellCheck={false} autoComplete="off" autoCapitalize="off"
+                    className="mt-1 block w-full min-h-[16rem] max-h-[60vh] resize-y rounded-md border border-input bg-background/60 px-3 py-2 text-sm leading-snug placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring font-mono" />
                   {f.help && <p className="text-xs text-muted-foreground mt-1">{f.help}</p>}
                 </div>
               );
@@ -269,11 +282,11 @@ export function OperationDialog({
             </div>
           </div>
           {phase === 'done' && job && (
-            <div className={cn('flex items-center gap-2 rounded-md border px-3 py-2 text-sm',
+            <div className={cn('flex items-start gap-2 rounded-md border px-3 py-2 text-sm',
               job.status === 'success' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
                                        : 'border-destructive/40 bg-destructive/10 text-destructive')}>
-              {job.status === 'success' ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-              {job.message}
+              {job.status === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" /> : <XCircle className="h-4 w-4 shrink-0 mt-0.5" />}
+              <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-xs max-h-64 overflow-y-auto">{job.message}</span>
             </div>
           )}
         </div>
