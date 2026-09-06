@@ -7,18 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-### Added — Docker connector (Phase 1: monitor)
-- **Docker connector** (v0.1.0) — a read-only view of a Docker host, the first step toward a
-  Portainer replacement. Lists **stacks** (grouped by Compose project), **containers** (state +
-  health), **images**, **volumes**, **networks**, and the **host** itself; drill from a stack
-  into its containers.
+### Added — Docker connector (monitor + manage)
+- **Docker connector** (v0.2.0) — monitor and manage a Docker host, toward a Portainer
+  replacement. Lists **stacks** (grouped by Compose project), **containers** (state + health),
+  **images**, **volumes**, **networks**, and the **host**; drill from a stack into its
+  containers.
 - **Overview tiles**: containers running / stopped / **unhealthy**, image count, disk used
-  (`/system/df`), and host RAM / CPU (`/info`). A container's CPU/memory sample shows on its
-  detail page (fetched on demand, never polled).
-- **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key stored in the
-  secrets vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping, and a local
-  `unix://` socket mode. Plaintext `2375` is refused without an explicit override.
-- Read-only for now — container actions, logs, and `exec` are the next phase.
+  (`/system/df`), host RAM / CPU (`/info`). A container's CPU/memory sample shows on its detail
+  page (fetched on demand, never polled).
+- **Manage**: start / stop / restart / pause / unpause / **kill** and remove containers; remove
+  images, volumes, and networks; **pull an image** (streamed progress via a background job); and
+  **prune** dangling images, stopped containers, unused volumes, and networks (each behind an
+  explicit confirm). All actions are audited and appear in the timeline.
+- **Transport**: mutual **TLS** to `tcp://host:2376` by default (client key in the secrets
+  vault), a **socket-proxy** option (`http://…`) for per-endpoint scoping — with a copy-paste
+  compose snippet on the setup screen — and a local `unix://` socket mode. Plaintext `2375` is
+  refused without an explicit override. The API is called unversioned, so it works across Docker
+  daemon versions (no fixed API-version pin).
+- Logs and `exec` are the next phase.
 
 ## [0.2.0] — 2026-09-06
 ### Added — Secrets vault

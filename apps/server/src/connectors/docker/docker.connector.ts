@@ -5,10 +5,13 @@ import type {
   ConnectorDetailItem,
   ConnectorManifest,
   ConnectorNode,
+  ConnectorOperation,
   ConnectorOverview,
   ConnectorResource,
   ConnectorResourceDetail,
   ConnectorResourceKind,
+  OperationProgress,
+  OperationResult,
   OverviewMetric,
   TestConnectionResult,
 } from '@cerebro/shared';
@@ -31,7 +34,11 @@ const NETWORK_KIND = 'network';
 /** Container states that mean "not running" (drive the overview stopped count). */
 const STOPPED_STATES = new Set(['exited', 'dead', 'created']);
 
-/** Phase 1 is read-only: no actions, nothing deletable yet (that's Phase 2). */
+/** Container statuses that mean "running" for action visibility (status is the State, or 'unhealthy'). */
+const RUNNING_LIKE = ['running', 'restarting', 'unhealthy'];
+const STOPPED_LIKE = ['exited', 'created', 'dead'];
+
+/** Phase 2: container lifecycle actions + deletable/prunable kinds. Host + stacks stay read-only. */
 const KINDS: ConnectorResourceKind[] = [
   { id: HOST_KIND, label: 'Docker Host', deletable: false, actions: [] },
   {
@@ -41,14 +48,115 @@ const KINDS: ConnectorResourceKind[] = [
     actions: [],
     subResources: [{ id: CONTAINER_KIND, label: 'Containers', labelSingular: 'Container' }],
   },
-  { id: CONTAINER_KIND, label: 'Containers', category: 'container', deletable: false, actions: [] },
-  { id: IMAGE_KIND, label: 'Images', deletable: false, actions: [] },
-  { id: VOLUME_KIND, label: 'Volumes', deletable: false, actions: [] },
-  { id: NETWORK_KIND, label: 'Networks', deletable: false, actions: [] },
+  {
+    id: CONTAINER_KIND,
+    label: 'Containers',
+    category: 'container',
+    deletable: true,
+    actions: [
+      { id: 'start', label: 'Start', mutating: true, showWhenStatus: STOPPED_LIKE },
+      { id: 'stop', label: 'Stop', mutating: true, showWhenStatus: RUNNING_LIKE },
+      { id: 'restart', label: 'Restart', mutating: true, showWhenStatus: [...RUNNING_LIKE, 'exited'] },
+      { id: 'pause', label: 'Pause', mutating: true, showWhenStatus: ['running', 'unhealthy'] },
+      { id: 'unpause', label: 'Unpause', mutating: true, showWhenStatus: ['paused'] },
+      { id: 'kill', label: 'Kill', mutating: true, intent: 'destructive', confirm: 'Force-kill this container (SIGKILL)?', showWhenStatus: RUNNING_LIKE },
+    ],
+  },
+  { id: IMAGE_KIND, label: 'Images', deletable: true, actions: [] },
+  { id: VOLUME_KIND, label: 'Volumes', deletable: true, actions: [] },
+  { id: NETWORK_KIND, label: 'Networks', deletable: true, actions: [] },
+];
+
+/** Confirmation field reused by the prune operations so they never run on a stray click. */
+const pruneConfirmField = (what: string) => ({
+  key: 'confirm',
+  label: `Yes, remove all unused ${what}`,
+  type: 'boolean' as const,
+  required: true,
+});
+
+const OPERATIONS: ConnectorOperation[] = [
+  {
+    id: 'pull-image',
+    label: 'Pull image',
+    description: 'Download an image (or a newer version of one) onto this host.',
+    scope: 'create',
+    kind: IMAGE_KIND,
+    icon: 'download',
+    submitLabel: 'Pull',
+    background: true,
+    fields: [
+      { key: 'image', label: 'Image', type: 'text', required: true, placeholder: 'nginx:latest', help: 'repo:tag — e.g. ghcr.io/owner/app:1.2.3. Defaults to :latest.' },
+    ],
+  },
+  {
+    id: 'prune-images',
+    label: 'Prune images',
+    description: 'Remove dangling (untagged) images to reclaim disk.',
+    scope: 'create',
+    kind: IMAGE_KIND,
+    icon: 'trash-2',
+    intent: 'destructive',
+    submitLabel: 'Prune',
+    fields: [pruneConfirmField('dangling images')],
+  },
+  {
+    id: 'prune-containers',
+    label: 'Prune stopped containers',
+    description: 'Remove all stopped containers.',
+    scope: 'create',
+    kind: CONTAINER_KIND,
+    icon: 'trash-2',
+    intent: 'destructive',
+    submitLabel: 'Prune',
+    fields: [pruneConfirmField('stopped containers')],
+  },
+  {
+    id: 'prune-volumes',
+    label: 'Prune volumes',
+    description: 'Remove volumes not used by any container. This deletes their data — be sure.',
+    scope: 'create',
+    kind: VOLUME_KIND,
+    icon: 'trash-2',
+    intent: 'destructive',
+    submitLabel: 'Prune',
+    fields: [pruneConfirmField('volumes (deletes data)')],
+  },
+  {
+    id: 'prune-networks',
+    label: 'Prune networks',
+    description: 'Remove custom networks not used by any container.',
+    scope: 'create',
+    kind: NETWORK_KIND,
+    icon: 'trash-2',
+    intent: 'destructive',
+    submitLabel: 'Prune',
+    fields: [pruneConfirmField('networks')],
+  },
 ];
 
 const COMPOSE_PROJECT = 'com.docker.compose.project';
 const COMPOSE_SERVICE = 'com.docker.compose.service';
+
+/** Copy-paste compose for a scoped socket gateway, shown on the setup screen. */
+const SOCKET_PROXY_COMPOSE = `# Run one per Docker host you want Cerebro to see.
+# Then set the connector endpoint to  http://<this-host>:2375
+services:
+  dockerproxy:
+    image: tecnativa/docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      INFO: 1
+      VERSION: 1
+      CONTAINERS: 1
+      IMAGES: 1
+      VOLUMES: 1
+      NETWORKS: 1
+      POST: 1          # 1 = allow actions (start/stop/restart, pull, prune); 0 = read-only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "2375:2375"    # expose only on a trusted network — this is root-equivalent`;
 
 function bytesToGb(bytes: number): number {
   return Math.round((bytes / 1e9) * 10) / 10;
@@ -94,10 +202,10 @@ export class DockerConnector implements Connector {
     id: 'docker',
     name: 'Docker',
     description:
-      'Monitor Docker hosts: stacks, containers, images, volumes, and networks, plus host resources. ' +
-      'Read-only in this phase — container lifecycle actions, logs, and exec come next.',
+      'Monitor and manage Docker hosts: stacks, containers, images, volumes, and networks, plus host resources. ' +
+      'Start / stop / restart / pause / kill and remove containers, pull images, and prune. Logs and exec come next.',
     icon: 'docker',
-    version: '0.1.0',
+    version: '0.2.0',
     configFields: [
       {
         key: 'endpoint',
@@ -138,20 +246,30 @@ export class DockerConnector implements Connector {
       },
     ],
     resourceKinds: KINDS,
+    operations: OPERATIONS,
     help: {
       overview:
-        'Monitor one Docker host: every stack (grouped by Compose project) and container with its state and health, ' +
-        'plus images, volumes, networks, and host resources (containers running/stopped/unhealthy, image count, disk used, RAM/CPU).',
+        'Monitor and manage one Docker host: every stack (grouped by Compose project) and container with its state and health, ' +
+        'plus images, volumes, networks, and host resources. Start/stop/restart/pause/kill and remove containers, pull images, and prune.',
       setupSteps: [
         'Preferred: expose the daemon over TLS. Generate a CA + server + client certs (see Docker\'s "Protect the Docker daemon socket" guide) and start dockerd with --tlsverify.',
         'Set the endpoint to tcp://your-host:2376 and paste the CA cert, client cert, and client key below.',
-        'Hardened alternative: run tecnativa/docker-socket-proxy on the host (CONTAINERS=1, IMAGES=1, VOLUMES=1, NETWORKS=1, INFO=1) and set the endpoint to http://that-proxy:2375.',
+        'Hardened alternative: run the docker-socket-proxy container below on each host and set the endpoint to http://that-proxy:2375.',
         'Local only: if Cerebro runs on the Docker host itself, mount the socket and use unix:///var/run/docker.sock.',
       ],
       requiredPermissions: [
-        'Read access to /info, /version, /system/df',
-        'Read access to /containers, /images, /volumes, /networks',
-        '(With the socket-proxy, the matching *=1 read flags — keep POST=0 for this read-only phase.)',
+        'Read: /info, /version, /system/df, /containers, /images, /volumes, /networks.',
+        'Manage (this connector\'s actions): POST on /containers/*/{start,stop,restart,pause,kill}, DELETE on containers/images/volumes/networks, POST /images/create and the /*/prune endpoints.',
+        'With the socket-proxy, that means POST=1 plus the section flags below. DELETE (remove/prune) needs a proxy that permits it, or use the TLS transport for full management.',
+      ],
+      codeSamples: [
+        {
+          title: 'docker-socket-proxy (run one per host)',
+          description:
+            'A tiny, read/write-scoped gateway to the Docker socket — no agent, no UI. POST=1 enables the connector\'s actions (start/stop/restart, pull, prune). Set POST=0 to keep the host read-only.',
+          language: 'yaml',
+          code: SOCKET_PROXY_COMPOSE,
+        },
       ],
       referenceLinks: [
         { label: 'Protect the Docker daemon socket (TLS)', url: 'https://docs.docker.com/engine/security/protect-access/' },
@@ -198,10 +316,91 @@ export class DockerConnector implements Connector {
     }
   }
 
-  // Phase 1 is read-only. Container lifecycle actions arrive in Phase 2; until then
-  // no kind declares any action, so this should never be reached.
-  async performAction(): Promise<{ ok: boolean; message: string }> {
-    return { ok: false, message: 'This Docker connector is read-only in this phase.' };
+  async performAction(
+    ctx: ConnectorContext,
+    kind: string,
+    resourceId: string,
+    actionId: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    if (kind !== CONTAINER_KIND) return { ok: false, message: `No actions for ${kind}.` };
+    const api = this.apiFrom(ctx);
+    try {
+      switch (actionId) {
+        case 'start': await api.startContainer(resourceId); break;
+        case 'stop': await api.stopContainer(resourceId); break;
+        case 'restart': await api.restartContainer(resourceId); break;
+        case 'pause': await api.pauseContainer(resourceId); break;
+        case 'unpause': await api.unpauseContainer(resourceId); break;
+        case 'kill': await api.killContainer(resourceId); break;
+        default: return { ok: false, message: `Unsupported action "${actionId}".` };
+      }
+      ctx.log('info', `Docker ${actionId} on container ${resourceId.slice(0, 12)}.`);
+      return { ok: true, message: `Container ${actionId} succeeded.` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Action failed.';
+      ctx.log('error', `Docker ${actionId} on ${resourceId.slice(0, 12)} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
+    const api = this.apiFrom(ctx);
+    try {
+      switch (kind) {
+        case CONTAINER_KIND: await api.removeContainer(resourceId); break;
+        case IMAGE_KIND: await api.removeImage(resourceId); break;
+        case VOLUME_KIND: await api.removeVolume(resourceId); break;
+        case NETWORK_KIND: await api.removeNetwork(resourceId); break;
+        default: return { ok: false, message: `${kind} resources can't be deleted.` };
+      }
+      ctx.log('info', `Docker removed ${kind} ${resourceId.slice(0, 24)}.`);
+      return { ok: true, message: `${kind} removed.` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Delete failed.';
+      ctx.log('error', `Docker delete ${kind} ${resourceId.slice(0, 24)} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  async runOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    _resourceId: string | undefined,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+    signal?: AbortSignal,
+  ): Promise<OperationResult> {
+    const api = this.apiFrom(ctx);
+    try {
+      if (operationId === 'pull-image') {
+        const image = str(values.image);
+        if (!image) return { ok: false, message: 'An image name is required.' };
+        onProgress(`Pulling ${image}…`);
+        await api.pullImage(image, (line) => onProgress(line), signal);
+        ctx.log('info', `Docker pulled image ${image}.`);
+        return { ok: true, message: `Pulled ${image}.` };
+      }
+
+      const prune: Record<string, () => Promise<{ SpaceReclaimed?: number }>> = {
+        'prune-images': () => api.pruneImages(),
+        'prune-containers': () => api.pruneContainers(),
+        'prune-volumes': () => api.pruneVolumes(),
+        'prune-networks': () => api.pruneNetworks(),
+      };
+      if (prune[operationId]) {
+        if (values.confirm !== true) return { ok: false, message: 'Please confirm before pruning.' };
+        const res = await prune[operationId]();
+        const gb = res.SpaceReclaimed ? bytesToGb(res.SpaceReclaimed) : 0;
+        ctx.log('info', `Docker ${operationId} reclaimed ${gb} GB.`);
+        return { ok: true, message: `Prune complete — reclaimed ${gb} GB.` };
+      }
+
+      return { ok: false, message: `Unknown operation "${operationId}".` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Operation failed.';
+      ctx.log('error', `Docker operation ${operationId} failed: ${message}`);
+      return { ok: false, message };
+    }
   }
 
   async listResources(ctx: ConnectorContext, kind: string): Promise<ConnectorResource[]> {

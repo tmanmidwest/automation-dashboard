@@ -217,6 +217,66 @@ export class DockerApi {
     return this.get<DockerNetwork[]>('/networks');
   }
 
+  // ── Container lifecycle (Phase 2) ───────────────────────────────
+
+  startContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/start`);
+  }
+  stopContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/stop`);
+  }
+  restartContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/restart`);
+  }
+  pauseContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/pause`);
+  }
+  unpauseContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/unpause`);
+  }
+  killContainer(id: string): Promise<void> {
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/kill`);
+  }
+  /** Force-remove a container (stops it first if running). */
+  removeContainer(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/containers/${encodeURIComponent(id)}?force=1`);
+  }
+  /** Remove an image (force untags even if referenced by stopped containers). */
+  removeImage(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/images/${encodeURIComponent(id)}?force=1`);
+  }
+  /** Remove a volume — NOT forced, so an in-use volume returns a clear 409 instead of data loss. */
+  removeVolume(name: string): Promise<void> {
+    return this.request<void>('DELETE', `/volumes/${encodeURIComponent(name)}`);
+  }
+  removeNetwork(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/networks/${encodeURIComponent(id)}`);
+  }
+
+  pruneContainers(): Promise<DockerPruneResult> {
+    return this.request<DockerPruneResult>('POST', '/containers/prune');
+  }
+  /** Prune dangling images (default). */
+  pruneImages(): Promise<DockerPruneResult> {
+    return this.request<DockerPruneResult>('POST', '/images/prune');
+  }
+  pruneVolumes(): Promise<DockerPruneResult> {
+    return this.request<DockerPruneResult>('POST', '/volumes/prune');
+  }
+  pruneNetworks(): Promise<DockerPruneResult> {
+    return this.request<DockerPruneResult>('POST', '/networks/prune');
+  }
+
+  /** Pull an image, reporting each Docker progress line via onProgress. Cancelable. */
+  async pullImage(imageRef: string, onProgress: (line: string) => void, signal?: AbortSignal): Promise<void> {
+    const { name, tag } = splitImageRef(imageRef);
+    const path = `/images/create?fromImage=${encodeURIComponent(name)}&tag=${encodeURIComponent(tag)}`;
+    await this.streamJsonLines('POST', path, (obj) => {
+      const o = obj as { status?: string; id?: string; progress?: string };
+      if (o.status) onProgress(`${o.status}${o.id ? ` ${o.id}` : ''}${o.progress ? ` ${o.progress}` : ''}`);
+    }, signal);
+  }
+
   // ── Transport ───────────────────────────────────────────────────
 
   private get<T>(path: string): Promise<T> {
@@ -298,6 +358,113 @@ export class DockerApi {
       req.end();
     });
   }
+
+  /**
+   * Stream a newline-delimited-JSON response (e.g. /images/create), invoking
+   * onObj per object. Rejects if Docker emits an {error} object or the transport
+   * fails. Honors an AbortSignal so a long pull can be cancelled.
+   */
+  private streamJsonLines(
+    method: string,
+    path: string,
+    onObj: (obj: unknown) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const t = this.transport;
+    const options: http.RequestOptions = {
+      method,
+      path,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Host: 'docker' },
+    };
+    let mod: typeof http | typeof https = http;
+    if (t.kind === 'unix') {
+      options.socketPath = t.socketPath;
+    } else {
+      options.hostname = t.hostname;
+      options.port = t.port;
+      if (t.kind === 'https') {
+        mod = https;
+        options.agent = new https.Agent({
+          ca: this.auth.tlsCaCert || undefined,
+          cert: this.auth.tlsClientCert || undefined,
+          key: this.auth.tlsClientKey || undefined,
+          rejectUnauthorized: !this.auth.insecureSkipVerify,
+        });
+      }
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            let message = `Docker API returned HTTP ${status}`;
+            try {
+              const j = JSON.parse(text) as { message?: string };
+              if (j.message) message = j.message;
+            } catch {
+              /* keep default */
+            }
+            reject(new DockerApiError(message, status));
+          });
+          return;
+        }
+        let buffer = '';
+        let failed: DockerApiError | null = null;
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          buffer += chunk;
+          let nl: number;
+          while ((nl = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            try {
+              const obj = JSON.parse(line) as { error?: string; errorDetail?: { message?: string } };
+              if (obj.error || obj.errorDetail?.message) {
+                failed = new DockerApiError(obj.error || obj.errorDetail?.message || 'Image operation failed.');
+                req.destroy();
+                return;
+              }
+              onObj(obj);
+            } catch {
+              /* ignore a partial/non-JSON line */
+            }
+          }
+        });
+        res.on('end', () => (failed ? reject(failed) : resolve()));
+      });
+      if (signal) {
+        signal.addEventListener('abort', () => req.destroy(new DockerApiError('Operation cancelled.')), { once: true });
+      }
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      req.end();
+    });
+  }
+}
+
+/** Result of a prune endpoint (fields vary; we only read the reclaimed space). */
+export interface DockerPruneResult {
+  SpaceReclaimed?: number;
+  ContainersDeleted?: string[] | null;
+  ImagesDeleted?: unknown[] | null;
+  VolumesDeleted?: string[] | null;
+  NetworksDeleted?: string[] | null;
+}
+
+/** Split "repo:tag" (or "repo") into name + tag, defaulting the tag to "latest". */
+export function splitImageRef(ref: string): { name: string; tag: string } {
+  const trimmed = ref.trim();
+  // A digest ("name@sha256:…") or a tag after the last colon that isn't a port.
+  const at = trimmed.indexOf('@');
+  if (at > 0) return { name: trimmed.slice(0, at), tag: trimmed.slice(at + 1) };
+  const lastColon = trimmed.lastIndexOf(':');
+  const lastSlash = trimmed.lastIndexOf('/');
+  if (lastColon > lastSlash) return { name: trimmed.slice(0, lastColon), tag: trimmed.slice(lastColon + 1) || 'latest' };
+  return { name: trimmed, tag: 'latest' };
 }
 
 // ── Small shared helpers used by the connector ────────────────────
