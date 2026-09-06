@@ -49,6 +49,12 @@ export function Secrets() {
   const [form, setForm] = useState<SecretUpsertInput>({});
   const [busy, setBusy] = useState(false);
 
+  // Create-new-secret dialog state.
+  const [creating, setCreating] = useState(false);
+  const [newSecret, setNewSecret] = useState<{ key: string; label: string; category: SecretCategory; value: string }>({
+    key: '', label: '', category: 'manual', value: '',
+  });
+
   async function load() {
     try {
       setSecrets(await api.get<SecretSummary[]>('/api/secrets'));
@@ -94,6 +100,27 @@ export function Secrets() {
     }
   }
 
+  async function submitCreate() {
+    const key = newSecret.key.trim();
+    if (!key || !newSecret.value) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
+        value: newSecret.value,
+        label: newSecret.label.trim() || key,
+        category: newSecret.category,
+      });
+      setCreating(false);
+      setNewSecret({ key: '', label: '', category: 'manual', value: '' });
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to create secret');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove(s: SecretSummary) {
     const warn =
       s.category === 'connector'
@@ -115,9 +142,10 @@ export function Secrets() {
       <PageHeader
         title="Secrets Vault"
         description="Every stored credential, encrypted at rest. Values can be rotated but are never shown."
+        actions={canWrite ? <Button onClick={() => { setNewSecret({ key: '', label: '', category: 'manual', value: '' }); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
       />
 
-      {err && !editing && (
+      {err && !editing && !creating && (
         <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">
           {err}
         </div>
@@ -194,6 +222,58 @@ export function Secrets() {
           );
         })}
       </div>
+
+      {/* New secret dialog */}
+      <Dialog
+        open={creating}
+        onClose={() => setCreating(false)}
+        title="New secret"
+        description="Create a shared credential you can reference from connectors (e.g. an SSH password used across hosts)."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
+            <Button onClick={submitCreate} disabled={busy || !newSecret.key.trim() || !newSecret.value}>
+              {busy ? 'Saving…' : 'Create'}
+            </Button>
+          </>
+        }
+      >
+        {err && (
+          <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>
+        )}
+        <div className="space-y-4">
+          <div>
+            <Label>Key</Label>
+            <Input value={newSecret.key} placeholder="docker-ssh"
+              onChange={(e) => setNewSecret((s) => ({ ...s, key: e.target.value }))} />
+            <p className="mt-1 text-xs text-muted-foreground">A unique id used to reference this secret. Cannot be changed later.</p>
+          </div>
+          <div>
+            <Label>Label</Label>
+            <Input value={newSecret.label} placeholder="Docker host SSH password"
+              onChange={(e) => setNewSecret((s) => ({ ...s, label: e.target.value }))} />
+          </div>
+          <div>
+            <Label>Category</Label>
+            <select
+              value={newSecret.category}
+              onChange={(e) => setNewSecret((s) => ({ ...s, category: e.target.value as SecretCategory }))}
+              className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
+            >
+              <option value="manual">Manual</option>
+              <option value="connector">Connector</option>
+              <option value="notification">Notification</option>
+              <option value="api">API &amp; Auth</option>
+            </select>
+          </div>
+          <div>
+            <Label>Value</Label>
+            <Input type="password" autoComplete="new-password" placeholder="••••••••" value={newSecret.value}
+              onChange={(e) => setNewSecret((s) => ({ ...s, value: e.target.value }))} />
+            <p className="mt-1 text-xs text-muted-foreground">Stored encrypted; never shown again after this.</p>
+          </div>
+        </div>
+      </Dialog>
 
       {/* Edit / rotate dialog */}
       <Dialog

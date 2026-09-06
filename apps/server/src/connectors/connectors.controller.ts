@@ -126,6 +126,7 @@ export class ConnectorsController {
       ...this.summary(inst),
       config: inst.config as Record<string, unknown>,
       secretFieldsSet: await this.instances.secretFieldsSet(inst),
+      secretRefs: this.instances.secretRefs(inst),
     };
   }
 

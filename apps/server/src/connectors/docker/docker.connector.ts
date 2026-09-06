@@ -323,12 +323,20 @@ export class DockerConnector implements Connector {
       { key: 'sshPort', label: 'SSH port', type: 'number', required: false, placeholder: '22' },
       { key: 'sshUser', label: 'SSH user', type: 'text', required: false, placeholder: 'a user in the docker group' },
       {
+        key: 'sshPassword',
+        label: 'SSH password',
+        type: 'password',
+        secret: true,
+        required: false,
+        help: 'Password for the SSH user (vault-encrypted). Provide this OR a private key below.',
+      },
+      {
         key: 'sshPrivateKey',
         label: 'SSH private key (PEM)',
         type: 'textarea',
         secret: true,
         required: false,
-        help: 'Key for the SSH user, stored encrypted in the secrets vault. The user must be able to run "docker compose".',
+        help: 'Alternative to the password — a PEM key for the SSH user (vault-encrypted). The user must be able to run "docker compose".',
       },
       {
         key: 'stacksDir',
@@ -392,14 +400,16 @@ export class DockerConnector implements Connector {
   private sshTargetFrom(ctx: ConnectorContext): StackDeployTarget {
     const host = str(ctx.config.sshHost);
     const key = str(ctx.config.sshPrivateKey);
-    if (!host || !key) {
-      throw new Error('Stack deploys need SSH configured — set the SSH host, user, and private key on this connector.');
+    const password = str(ctx.config.sshPassword);
+    if (!host || (!key && !password)) {
+      throw new Error('Stack deploys need SSH configured — set the SSH host, user, and either a password or a private key on this connector.');
     }
     const ssh: SshConfig = {
       host,
       port: Number(ctx.config.sshPort) || 22,
       username: str(ctx.config.sshUser) || 'root',
       privateKey: key,
+      password,
     };
     return { ssh, stacksDir: str(ctx.config.stacksDir) || '/opt/cerebro-stacks' };
   }

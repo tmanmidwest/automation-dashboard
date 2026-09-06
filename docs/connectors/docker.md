@@ -66,7 +66,8 @@ the config form:
 | `tlsClientKey` | **yes** | PEM private key — vault-encrypted |
 | `insecureSkipVerify` | no | dev only; default false |
 | `sshHost` / `sshPort` / `sshUser` | no | Phase 5 stack deploys — the SSH host running `docker compose` (optional) |
-| `sshPrivateKey` | **yes** | PEM key for the SSH user — vault-encrypted |
+| `sshPassword` | **yes** | password for the SSH user — vault-encrypted (provide this **or** a key) |
+| `sshPrivateKey` | **yes** | PEM key for the SSH user — vault-encrypted (alternative to the password) |
 | `stacksDir` | no | where Cerebro writes compose files on the host (default `/opt/cerebro-stacks`) |
 
 > The transport is **inferred from the endpoint scheme** (unix / http / tcp+https), not a separate

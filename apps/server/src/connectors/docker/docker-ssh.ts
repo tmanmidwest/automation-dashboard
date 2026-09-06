@@ -4,8 +4,10 @@ export interface SshConfig {
   host: string;
   port: number;
   username: string;
-  privateKey: string;
+  /** Provide a private key OR a password. */
+  privateKey?: string;
   passphrase?: string;
+  password?: string;
 }
 
 export interface SshResult {
@@ -47,14 +49,22 @@ export function runSsh(cfg: SshConfig, command: string, stdin?: string, timeoutM
       });
     });
     conn.on('error', (err) => { clearTimeout(timer); finish(() => reject(new Error(friendly(err)))); });
+    // Answer keyboard-interactive prompts with the password (common sshd config).
+    if (cfg.password) {
+      conn.on('keyboard-interactive', (_name, _instr, _lang, _prompts, cb) => cb([cfg.password!]));
+    }
 
     try {
       conn.connect({
         host: cfg.host,
         port: cfg.port,
         username: cfg.username,
-        privateKey: cfg.privateKey,
+        privateKey: cfg.privateKey || undefined,
         passphrase: cfg.passphrase || undefined,
+        password: cfg.password || undefined,
+        // Allow keyboard-interactive too, since many sshd setups answer password
+        // prompts that way rather than the plain 'password' method.
+        tryKeyboard: !!cfg.password,
         readyTimeout: 20_000,
         // Note: host keys are not pinned (homelab default). Trust the network path.
       });

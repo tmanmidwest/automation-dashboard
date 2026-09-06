@@ -10,6 +10,11 @@ import type {
 } from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
 
+/** A secret field value shaped `{ $secretRef: 'vault-key' }` references a shared vault secret. */
+function isSecretRef(v: unknown): v is { $secretRef: string } {
+  return !!v && typeof v === 'object' && typeof (v as { $secretRef?: unknown }).$secretRef === 'string' && !!(v as { $secretRef: string }).$secretRef;
+}
+
 @Injectable()
 export class ConnectorInstanceService {
   constructor(
@@ -22,6 +27,12 @@ export class ConnectorInstanceService {
 
   private secretKey(instanceId: string, field: string) {
     return `connector:${instanceId}:${field}`;
+  }
+
+  /** Read the field → vault-key reference map stored in an instance's config. */
+  private refsOf(instance: ConnectorInstance): Record<string, string> {
+    const cfg = instance.config as Record<string, unknown> | null;
+    return ((cfg?.secretRefs as Record<string, string>) ?? {});
   }
 
   /** Splits incoming config values into non-secret (stored as JSON) and secret (vault) sets. */
@@ -42,11 +53,17 @@ export class ConnectorInstanceService {
   }
 
   async secretFieldsSet(instance: ConnectorInstance): Promise<Record<string, boolean>> {
+    const refs = this.refsOf(instance);
     const out: Record<string, boolean> = {};
     for (const field of this.secretFields(instance.connectorId)) {
-      out[field] = await this.settings.hasSecret(this.secretKey(instance.id, field));
+      out[field] = !!refs[field] || (await this.settings.hasSecret(this.secretKey(instance.id, field)));
     }
     return out;
+  }
+
+  /** The field → vault-key reference map for one instance (surfaced to the edit UI). */
+  secretRefs(instance: ConnectorInstance): Record<string, string> {
+    return this.refsOf(instance);
   }
 
   async create(connectorId: string, name: string, values: Record<string, unknown>): Promise<ConnectorInstance> {
@@ -54,13 +71,16 @@ export class ConnectorInstanceService {
     const secretKeys = this.secretFields(connectorId);
     const config: Record<string, unknown> = {};
     const secrets: Record<string, string> = {};
+    const secretRefs: Record<string, string> = {};
     for (const [k, v] of Object.entries(values)) {
       if (secretKeys.includes(k)) {
-        if (v != null && `${v}` !== '') secrets[k] = String(v);
+        if (isSecretRef(v)) secretRefs[k] = v.$secretRef;
+        else if (v != null && `${v}` !== '') secrets[k] = String(v);
       } else {
         config[k] = v;
       }
     }
+    if (Object.keys(secretRefs).length) config.secretRefs = secretRefs;
     const instance = await this.prisma.connectorInstance.create({
       data: { connectorId, name: name.trim(), config: config as object, enabled: true },
     });
@@ -86,14 +106,24 @@ export class ConnectorInstanceService {
 
     if (updates.values) {
       const config: Record<string, unknown> = { ...(instance.config as object) };
+      const refs: Record<string, string> = { ...this.refsOf(instance) };
       for (const [k, v] of Object.entries(updates.values)) {
         if (secretKeys.includes(k)) {
-          // Only replace a secret when a non-blank value is supplied.
-          if (v != null && `${v}` !== '') await this.settings.setSecret(this.secretKey(id, k), String(v));
+          if (isSecretRef(v)) {
+            // Reference a shared vault secret; drop any connector-owned copy.
+            refs[k] = v.$secretRef;
+            await this.settings.deleteSecret(this.secretKey(id, k));
+          } else if (v != null && `${v}` !== '') {
+            // A literal value: store it and clear any reference.
+            await this.settings.setSecret(this.secretKey(id, k), String(v));
+            delete refs[k];
+          }
+          // Blank → leave whatever is currently set (secret or reference) untouched.
         } else {
           config[k] = v;
         }
       }
+      config.secretRefs = refs;
       data.config = config as object;
     }
     return this.prisma.connectorInstance.update({ where: { id }, data });
@@ -110,8 +140,12 @@ export class ConnectorInstanceService {
   /** Builds a ConnectorContext with decrypted secrets merged into config. */
   private async buildContext(instance: ConnectorInstance): Promise<ConnectorContext> {
     const config: Record<string, unknown> = { ...(instance.config as object) };
+    const refs = this.refsOf(instance);
+    delete config.secretRefs; // internal bookkeeping — never expose to the connector
     for (const field of this.secretFields(instance.connectorId)) {
-      const secret = await this.settings.getSecret(this.secretKey(instance.id, field));
+      // A referenced field reveals a shared vault secret; otherwise the connector's own.
+      const key = refs[field] ? refs[field] : this.secretKey(instance.id, field);
+      const secret = await this.settings.getSecret(key);
       if (secret != null) config[field] = secret;
     }
     return {

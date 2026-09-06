@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Shared vault credentials + connector references
+- **Create secrets directly in the vault** (Settings → Secrets Vault → *New secret*) — a shared
+  credential (e.g. an SSH password) with a key, label, and category.
+- **Reference a vault secret from a connector.** Each secret field on a connector's setup form now
+  offers *Enter value* or *Use vault secret* — pick a shared secret instead of pasting the value.
+  One credential can back many connectors (e.g. the same SSH password across several Docker hosts):
+  rotate it once in the vault and every connector using it picks up the change. The connector
+  stores only a reference, not a copy.
+
 ### Added — Docker connector (monitor + manage)
 - **Docker connector** (v0.2.0) — monitor and manage a Docker host, toward a Portainer
   replacement. Lists **stacks** (grouped by Compose project), **containers** (state + health),

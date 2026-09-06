@@ -73,8 +73,15 @@ export interface ConnectorInstanceSummary {
 /** Full instance config for the edit screen — non-secret values plus which secrets are set. */
 export interface ConnectorInstanceConfig extends ConnectorInstanceSummary {
   config: Record<string, unknown>;
-  /** Keyed by secret field → whether a value is stored. */
+  /** Keyed by secret field → whether a value is stored (own secret or a vault reference). */
   secretFieldsSet: Record<string, boolean>;
+  /** Secret fields that reference a shared vault secret, keyed by field → vault key. */
+  secretRefs?: Record<string, string>;
+}
+
+/** A secret field value that points at a shared vault secret instead of a literal. */
+export interface SecretRefValue {
+  $secretRef: string;
 }
 
 /** Status of an async connector operation job (polled by the UI). */
