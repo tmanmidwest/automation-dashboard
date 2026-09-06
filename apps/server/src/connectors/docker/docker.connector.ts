@@ -274,11 +274,14 @@ services:
     environment:
       INFO: 1
       VERSION: 1
+      EVENTS: 1        # live container updates (Cerebro's real-time resource stream)
       CONTAINERS: 1
       IMAGES: 1
       VOLUMES: 1
       NETWORKS: 1
-      POST: 1          # 1 = allow actions (start/stop/restart, pull, prune); 0 = read-only
+      SYSTEM: 1        # /system/df — the host "Disk used" overview metric
+      EXEC: 1          # interactive Shell console + terminal resize
+      POST: 1          # 1 = allow actions (start/stop/restart, pull, prune, recreate); 0 = read-only
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
@@ -506,7 +509,7 @@ export class DockerConnector implements Connector {
         {
           title: 'docker-socket-proxy (run one per host)',
           description:
-            'A tiny, read/write-scoped gateway to the Docker socket — no agent, no UI. POST=1 enables the connector\'s actions (start/stop/restart, pull, prune). Set POST=0 to keep the host read-only.',
+            'A tiny, read/write-scoped gateway to the Docker socket — no agent, no UI. POST=1 enables the connector\'s actions (start/stop/restart, pull, prune, recreate); EXEC=1 the Shell console; SYSTEM=1 the host disk metric; EVENTS=1 live updates. Set POST=0 to keep the host read-only. (Stack deploy/drift and host CPU/RAM telemetry use SSH, not this proxy.)',
           language: 'yaml',
           code: SOCKET_PROXY_COMPOSE,
         },
