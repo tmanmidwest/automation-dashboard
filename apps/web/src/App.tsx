@@ -21,6 +21,7 @@ import { MonitorDetail } from '@/pages/monitors/MonitorDetail';
 import { Users } from '@/pages/Users';
 import { Logs } from '@/pages/Logs';
 import { Timeline } from '@/pages/Timeline';
+import { Automations } from '@/pages/Automations';
 import { About } from '@/pages/About';
 import { SettingsHome } from '@/pages/settings/SettingsHome';
 import { Authentication } from '@/pages/settings/Authentication';
@@ -95,6 +96,7 @@ function Router() {
       <Route path="/monitors/:id/edit" element={<Protected><RequirePerm perm="monitors:write"><MonitorForm /></RequirePerm></Protected>} />
       <Route path="/users" element={<Protected><RequirePerm perm="users:read"><Users /></RequirePerm></Protected>} />
       <Route path="/timeline" element={<Protected><RequirePerm perm="logs:read"><Timeline /></RequirePerm></Protected>} />
+      <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
       <Route path="/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />
       <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
       <Route path="/settings/authentication" element={<Protected><RequirePerm perm="settings:read"><Authentication /></RequirePerm></Protected>} />

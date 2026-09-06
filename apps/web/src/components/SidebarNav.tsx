@@ -11,6 +11,7 @@ import {
   LogOut,
   MonitorPlay,
   Video,
+  Zap,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -32,6 +33,7 @@ const NAV: NavItem[] = [
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
   { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '05-378' },
   { to: '/timeline', label: "Ship's Log", icon: History, perm: 'logs:read', code: '06-LOG' },
+  { to: '/automations', label: 'Automations', icon: Zap, perm: 'automations:read', code: '06-AUT' },
   { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read', code: '06-512' },
   { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read', code: '07-640' },
   { to: '/about', label: 'About', icon: Info, code: '08-777' },
