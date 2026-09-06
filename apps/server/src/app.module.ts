@@ -21,6 +21,7 @@ import { SeedModule } from './seed/seed.module';
 import { McpModule } from './mcp/mcp.module';
 import { OAuthModule } from './oauth/oauth.module';
 import { TimelineModule } from './timeline/timeline.module';
+import { SecretsModule } from './secrets/secrets.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -51,6 +52,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     McpModule,
     OAuthModule,
     TimelineModule,
+    SecretsModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

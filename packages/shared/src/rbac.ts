@@ -15,6 +15,9 @@ export type Permission =
   | 'users:write'
   | 'logs:read'
   | 'audit:read'
+  // Secrets vault (session-only; never a bearer-token scope)
+  | 'secrets:read' // list vault metadata
+  | 'secrets:write' // set / rotate / delete secrets
   // Connectors (extension host)
   | 'connectors:read'
   | 'connectors:write' // install / configure / enable
@@ -54,6 +57,8 @@ export const BUILTIN_ROLES = {
       'connectors:action',
       'monitors:read',
       'monitors:write',
+      'secrets:read',
+      'secrets:write',
     ] as Permission[],
   },
 } as const;

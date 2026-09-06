@@ -261,6 +261,28 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: false,
     monitorScoped: true,
   },
+
+  // ── Secrets vault ────────────────────────────────────────
+  {
+    key: 'secret.rotation_due',
+    label: 'Secret rotation due',
+    description: 'A stored credential has passed its rotation-policy age and should be rotated.',
+    category: 'Secrets',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'secret.expired',
+    label: 'Secret expired',
+    description: 'A stored credential has passed its expiry date.',
+    category: 'Secrets',
+    defaultSeverity: 'critical',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

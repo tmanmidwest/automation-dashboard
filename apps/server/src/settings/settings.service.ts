@@ -1,17 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CryptoService } from '../common/crypto.service';
+import { SecretsService } from '../secrets/secrets.service';
 
 /**
  * Central store for all UI-driven configuration.
  * - Plain values → Setting table (JSON).
- * - Secret values → Secret table (encrypted at rest via CryptoService).
+ * - Secret values → the vault (SecretsService), encrypted at rest. These methods
+ *   are thin delegates so every write also gains vault metadata and every read
+ *   stamps last-used — see docs/secrets-vault.md.
  */
 @Injectable()
 export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly crypto: CryptoService,
+    private readonly secrets: SecretsService,
   ) {}
 
   async get<T = unknown>(key: string, fallback?: T): Promise<T | undefined> {
@@ -34,29 +36,21 @@ export class SettingsService {
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   }
 
-  // ── Secret vault ──────────────────────────────────────────────
+  // ── Secret vault (delegated to SecretsService) ────────────────
 
-  async setSecret(key: string, plaintext: string): Promise<void> {
-    const ciphertext = this.crypto.encrypt(plaintext);
-    await this.prisma.secret.upsert({
-      where: { key },
-      update: { ciphertext },
-      create: { key, ciphertext },
-    });
+  setSecret(key: string, plaintext: string): Promise<void> {
+    return this.secrets.set(key, plaintext);
   }
 
-  async getSecret(key: string): Promise<string | null> {
-    const row = await this.prisma.secret.findUnique({ where: { key } });
-    if (!row) return null;
-    return this.crypto.decrypt(row.ciphertext);
+  getSecret(key: string): Promise<string | null> {
+    return this.secrets.reveal(key);
   }
 
-  async hasSecret(key: string): Promise<boolean> {
-    const row = await this.prisma.secret.findUnique({ where: { key } });
-    return !!row;
+  hasSecret(key: string): Promise<boolean> {
+    return this.secrets.has(key);
   }
 
-  async deleteSecret(key: string): Promise<void> {
-    await this.prisma.secret.deleteMany({ where: { key } });
+  deleteSecret(key: string): Promise<void> {
+    return this.secrets.remove(key);
   }
 }

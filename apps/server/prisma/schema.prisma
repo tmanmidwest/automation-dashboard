@@ -237,6 +237,32 @@ model Secret {
   updatedAt DateTime @updatedAt
 }
 
+/// Management metadata for a vault entry. 1:1 with Secret by key. Never holds
+/// secret material — see docs/secrets-vault.md.
+model SecretMeta {
+  key               String    @id
+  /// Human label, e.g. "Proxmox API token (home)".
+  label             String
+  description       String?
+  /// Grouping: 'connector' | 'notification' | 'api' | 'manual'.
+  category          String    @default("manual")
+  /// The ConnectorInstance this belongs to, when category='connector'.
+  owningConnectorId String?
+  /// Optional rotation policy: warn when older than this many days (null = no policy).
+  rotateAfterDays   Int?
+  /// Optional hard expiry (e.g. a token the provider expires).
+  expiresAt         DateTime?
+  /// Stamped by SecretsService.reveal (throttled) — null until first read.
+  lastUsedAt        DateTime?
+  /// Set on every set/rotate.
+  rotatedAt         DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([category])
+  @@index([owningConnectorId])
+}
+
 /// An installed connector instance (e.g. a specific Proxmox server).
 model ConnectorInstance {
   id           String   @id @default(cuid())

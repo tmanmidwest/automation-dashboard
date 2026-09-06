@@ -1,16 +1,20 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck, Mail, Bell, KeyRound, Boxes } from 'lucide-react';
+import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock } from 'lucide-react';
+import type { Permission } from '@cerebro/shared';
+import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
 
 export function SettingsHome() {
-  const sections = [
+  const { can } = useAuth();
+  const sections: { to: string; icon: React.ComponentType<{ className?: string }>; title: string; desc: string; perm?: Permission }[] = [
     { to: '/settings/authentication', icon: ShieldCheck, title: 'Authentication', desc: 'Local accounts and OIDC single sign-on.' },
     { to: '/settings/email', icon: Mail, title: 'Email', desc: 'Outbound SMTP server for notifications.' },
     { to: '/settings/notifications', icon: Bell, title: 'Notifications', desc: 'Outbound alerts by email and SMS.' },
+    { to: '/settings/secrets', icon: Lock, title: 'Secrets Vault', desc: 'Stored credentials, rotation policies, and last-used tracking.', perm: 'secrets:read' },
     { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.' },
     { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
-  ];
+  ].filter((s) => !s.perm || can(s.perm));
   return (
     <>
       <PageHeader title="Settings" description="Everything is configured here — no files to edit." />

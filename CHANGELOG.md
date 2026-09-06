@@ -7,6 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.0] — 2026-09-06
+### Added — Secrets vault
+- **Secrets Vault** at `/settings/secrets` — a managed view over Cerebro's encrypted secret
+  store. Every stored credential (connector tokens, SMTP and SMS keys, SSO client secrets, the
+  OAuth signing key) is listed with its category, age, last-used time, and health, and can be
+  **rotated** or deleted in place. Values are write-only: the vault can set a new value but
+  **never displays or returns an existing one**.
+- **Metadata + policies**: label, description, an optional "rotate after N days" policy, and an
+  optional hard expiry per secret. A `SecretMeta` sidecar table holds this — the ciphertext is
+  untouched. Existing secrets are backfilled with inferred metadata on startup.
+- **Rotation reminders**: a daily job raises a `secret.rotation_due` (or `secret.expired`) alert
+  through the existing notification pipeline — a new **Secrets** alert category.
+- **Auditing + last-used**: administrative set/rotate/delete are recorded to the audit trail
+  (and so appear in the timeline); reads stamp a throttled last-used time so an unused connector
+  credential stands out. New `secrets:read` / `secrets:write` permissions, granted to
+  Administrators and **never** exposed as an API-token scope — the vault is session-only.
+
 ### Added — Event timeline ("Ship's Log")
 - **Unified event timeline** at `/timeline` — a single chronological, filterable stream of
   everything that happens in Cerebro: audit events, warn/error system logs, alert deliveries,
