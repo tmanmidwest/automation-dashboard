@@ -814,6 +814,18 @@ export function ConnectorDetail() {
                 </dl>
               </div>
             ))}
+            {detail.code?.map((cb, i) => (
+              <div key={`code-${i}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                    {cb.title}{cb.language && <span className="ml-2 text-[10px] font-mono rounded bg-muted px-1.5 py-0.5">{cb.language}</span>}
+                  </p>
+                  <Button variant="ghost" size="sm" className="h-6 px-2 text-xs"
+                    onClick={() => navigator.clipboard?.writeText(cb.content)}>Copy</Button>
+                </div>
+                <pre className="max-h-72 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs font-mono whitespace-pre">{cb.content}</pre>
+              </div>
+            ))}
           </div>
         )}
 

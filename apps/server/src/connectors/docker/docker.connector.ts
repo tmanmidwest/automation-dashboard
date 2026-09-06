@@ -1,5 +1,6 @@
 import type {
   Connector,
+  ConnectorCodeBlock,
   ConnectorConsoleTarget,
   ConnectorContext,
   ConnectorDetailGroup,
@@ -52,13 +53,13 @@ const KINDS: ConnectorResourceKind[] = [
     label: 'Stacks',
     deletable: true,
     // Lifecycle actions work on ANY stack (managed or pre-existing) by acting on
-    // its containers via the Engine API — no compose file needed.
+    // its containers via the Engine API — no compose file needed. Member containers,
+    // compose, env, and deploy history are shown in the stack's detail view.
     actions: [
       { id: 'start', label: 'Start', mutating: true, showWhenStatus: ['stopped', 'degraded'] },
       { id: 'stop', label: 'Stop', mutating: true, showWhenStatus: RUNNING_LIKE, confirm: 'Stop all containers in this stack?' },
       { id: 'restart', label: 'Restart', mutating: true, showWhenStatus: RUNNING_LIKE },
     ],
-    subResources: [{ id: CONTAINER_KIND, label: 'Containers', labelSingular: 'Container' }],
   },
   {
     id: CONTAINER_KIND,
@@ -1036,7 +1037,11 @@ export class DockerConnector implements Connector {
       };
     }
 
-    // Images/volumes/networks/stacks: build a light detail from the list entry.
+    if (kind === STACK_KIND) {
+      return this.describeStack(ctx, api, resourceId);
+    }
+
+    // Images/volumes/networks: build a light detail from the list entry.
     const list = await this.listResources(ctx, kind);
     const r = list.find((x) => x.id === resourceId);
     if (!r) throw new Error(`${kind} ${resourceId} not found.`);
@@ -1045,6 +1050,68 @@ export class DockerConnector implements Connector {
       value: v == null ? '—' : String(v),
     }));
     return { id: r.id, kind, name: r.name, status: r.status, groups: [{ title: 'General', items }] };
+  }
+
+  /** Rich stack detail: status + member containers + deploy history + compose/env. */
+  private async describeStack(ctx: ConnectorContext, api: DockerApi, project: string): Promise<ConnectorResourceDetail> {
+    const instanceId = ctx.instanceId;
+    const stored = instanceId ? await this.stacks.get(instanceId, project) : null;
+    const all = await api.listContainers(true);
+    const members = all.filter((c) => (c.Labels?.[COMPOSE_PROJECT] ?? 'ungrouped') === project);
+    const running = members.filter((m) => m.State === 'running').length;
+    const unhealthy = members.filter((m) => healthFromStatus(m.Status) === 'unhealthy').length;
+    const status = members.length === 0 ? (stored?.lastStatus === 'success' ? 'stopped' : stored?.lastStatus ?? 'stopped')
+      : unhealthy > 0 ? 'unhealthy' : running === 0 ? 'stopped' : running < members.length ? 'degraded' : 'running';
+
+    const general: ConnectorDetailItem[] = [
+      { label: 'Status', value: status, variant: 'status' },
+      { label: 'Containers', value: `${running}/${members.length} running` },
+      { label: 'Managed by Cerebro', value: stored ? 'Yes' : 'No — lifecycle only' },
+    ];
+    if (stored) {
+      general.push(
+        { label: 'Last deploy', value: stored.lastDeployedAt ? (rel(stored.lastDeployedAt.toISOString()) ?? '—') : 'never' },
+        { label: 'Last result', value: stored.lastStatus, variant: 'status' },
+      );
+    }
+    const groups: ConnectorDetailGroup[] = [{ title: 'General', items: general }];
+
+    // Member containers (image · ports · state).
+    if (members.length) {
+      groups.push({
+        title: 'Containers',
+        items: members
+          .sort((a, b) => cleanContainerName(a.Names).localeCompare(cleanContainerName(b.Names)))
+          .map((m) => ({
+            label: cleanContainerName(m.Names),
+            value: [m.Image, portSummary(m), healthFromStatus(m.Status) === 'unhealthy' ? 'unhealthy' : m.State].filter(Boolean).join(' · '),
+            variant: 'mono' as const,
+          })),
+      });
+    }
+
+    // Deploy history.
+    if (stored && instanceId) {
+      const revs = await this.stacks.listRevisions(instanceId, project).catch(() => []);
+      if (revs.length) {
+        groups.push({
+          title: 'Deploy history',
+          items: revs.map((r, i) => ({
+            label: i === 0 ? 'Current' : `#${revs.length - i}`,
+            value: rel(r.createdAt.toISOString()) ?? r.createdAt.toISOString(),
+          })),
+        });
+      }
+    }
+
+    // Compose + .env, read-only.
+    const code: ConnectorCodeBlock[] = [];
+    if (stored) {
+      code.push({ title: 'docker-compose.yml', language: 'yaml', content: stored.compose });
+      if (stored.env) code.push({ title: '.env', language: 'ini', content: stored.env });
+    }
+
+    return { id: project, kind: STACK_KIND, name: project, status, groups, code: code.length ? code : undefined };
   }
 
   async listNodes(ctx: ConnectorContext): Promise<ConnectorNode[]> {

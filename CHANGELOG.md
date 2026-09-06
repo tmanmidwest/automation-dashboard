@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   available — shown per container, counted in the overview, and alertable per connector. Results
   are cached (6 h) and refreshed in the background, so registry rate limits are never a concern.
   Apply updates with the existing redeploy "Pull newer images" option.
+- **Stack detail view**: opening a stack now shows its status, member containers (image · ports ·
+  state), deploy history, and the stored **compose + `.env`** as read-only code blocks — alongside
+  the existing deploy/edit/redeploy/rollback/start/stop actions. Detail views can now include
+  copyable code blocks (a new connector capability).
 
 - **Stack environment (`.env`) + deploy options**: a Compose stack now has an **Environment**
   editor (`KEY=value` lines) written to a `.env` beside the compose for `${VAR}` interpolation,

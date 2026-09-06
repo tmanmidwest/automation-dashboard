@@ -159,6 +159,15 @@ export class DockerStackService {
     }
   }
 
+  /** Recent revisions of a stack (newest first) — for the detail view's history. */
+  listRevisions(instanceId: string, name: string) {
+    return this.prisma.dockerStackRevision.findMany({
+      where: { connectorInstanceId: instanceId, name: projectName(name) },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+  }
+
   /** The version deployed before the current one (for one-step rollback), or null. */
   async previousRevision(instanceId: string, name: string) {
     const recent = await this.prisma.dockerStackRevision.findMany({

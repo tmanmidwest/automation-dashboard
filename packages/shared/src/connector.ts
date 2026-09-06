@@ -251,6 +251,14 @@ export interface ConnectorDetailGroup {
   items: ConnectorDetailItem[];
 }
 
+/** A read-only code/text block in a resource's detail view (e.g. a stack's compose). */
+export interface ConnectorCodeBlock {
+  title: string;
+  /** Language hint for the label (e.g. 'yaml'). */
+  language?: string;
+  content: string;
+}
+
 /** Rich, read-only detail for a single resource (rendered in a drawer). */
 export interface ConnectorResourceDetail {
   id: string;
@@ -258,6 +266,8 @@ export interface ConnectorResourceDetail {
   name: string;
   status?: string;
   groups: ConnectorDetailGroup[];
+  /** Optional read-only code blocks shown below the groups (e.g. compose + .env). */
+  code?: ConnectorCodeBlock[];
 }
 
 export interface ConnectorContext {
