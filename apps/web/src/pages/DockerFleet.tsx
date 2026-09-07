@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Loader2, RefreshCw, Server, ChevronRight, ChevronDown, Play, Square, RotateCw,
-  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, Ban, GitCompare, Pencil,
+  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, GitCompare, Pencil,
 } from 'lucide-react';
 import type { DockerFleet, FleetHost, FleetStack, FleetMember, ConnectorManifest, ConnectorOperation } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -19,6 +19,8 @@ type Focus = 'unhealthy' | 'updates' | 'stopped' | 'running' | null;
 const REFRESH_MS = 30_000;
 const RUNNING_LIKE = new Set(['running', 'restarting', 'unhealthy']);
 const STOPPED_LIKE = new Set(['exited', 'created', 'dead', 'stopped', 'paused']);
+// A stack is "stopped" (offer Start) when nothing is running; else offer Stop/Restart.
+const STACK_STOPPED = new Set(['stopped', 'error', 'never']);
 
 function matchesFocus(m: FleetMember, focus: Focus): boolean {
   if (!focus) return true;
@@ -111,13 +113,13 @@ export function DockerFleet() {
   const [busy, setBusy] = useState<Set<string>>(new Set());
   // Docker manifest operations (same for every host) + the currently-open operation dialog.
   const [ops, setOps] = useState<ConnectorOperation[]>([]);
-  const [activeOp, setActiveOp] = useState<{ operation: ConnectorOperation; instanceId: string; resourceId?: string } | null>(null);
+  const [activeOp, setActiveOp] = useState<{ operation: ConnectorOperation; instanceId: string; resourceId?: string; seed?: Record<string, unknown> } | null>(null);
   useEffect(() => {
     api.get<ConnectorManifest>('/api/connectors/available/docker').then((m) => setOps(m.operations ?? [])).catch(() => {});
   }, []);
-  const openOp = (opId: string, instanceId: string, resourceId?: string) => {
+  const openOp = (opId: string, instanceId: string, resourceId?: string, seed?: Record<string, unknown>) => {
     const operation = ops.find((o) => o.id === opId);
-    if (operation) setActiveOp({ operation, instanceId, resourceId });
+    if (operation) setActiveOp({ operation, instanceId, resourceId, seed });
   };
 
   async function load(manual = false) {
@@ -182,6 +184,29 @@ export function DockerFleet() {
     withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/resources/container/${encodeURIComponent(m.id)}/actions/${actionId}`, {}), `${actionId} ${m.name}`);
   const containerRecreate = (m: FleetMember) =>
     withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } }), `Recreating ${m.name}…`);
+  // Stack-level lifecycle (start/stop/restart the whole stack) — works on ANY stack, managed or not.
+  const stackAction = (s: FleetStack, actionId: string) => {
+    if (actionId === 'stop' && !confirm(`Stop all containers in stack "${s.name}"?`)) return;
+    return withBusy(
+      [`${s.instanceId}::${s.id}`],
+      () => api.post(`/api/connectors/instances/${s.instanceId}/resources/stack/${encodeURIComponent(s.id)}/actions/${actionId}`, {}),
+      `${actionId} ${s.name}`,
+    );
+  };
+  // One-click "update the whole stack": pull the latest image + recreate every member.
+  // Works on ANY stack (no compose needed) — the fit for externally-deployed stacks.
+  const stackUpdate = (s: FleetStack) => {
+    if (!s.members.length) return;
+    if (!confirm(`Update all ${s.members.length} container${s.members.length === 1 ? '' : 's'} in "${s.name}"?\nPulls the latest image and recreates each.`)) return;
+    const keys = s.members.map((m) => `${m.instanceId}::${m.id}`);
+    return withBusy(keys, async () => {
+      const res = await Promise.allSettled(
+        s.members.map((m) => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } })),
+      );
+      const failed = res.filter((r) => r.status === 'rejected').length;
+      setMsg(`Updating "${s.name}": ${s.members.length - failed} started${failed ? `, ${failed} failed` : ''}.`);
+    });
+  };
   const openConsole = (m: FleetMember, mode: 'shell' | 'logs') =>
     navigate(`/connectors/${m.instanceId}/console/container/${encodeURIComponent(m.id)}?mode=${mode}`);
 
@@ -292,7 +317,7 @@ export function DockerFleet() {
       )}
 
       {view === 'stacks'
-        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, openConsole, memberKey }} />
+        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, stackAction, stackUpdate, openConsole, memberKey }} />
         : <ContainersView members={allMembers.filter((x) => memberVisible(x.m, x.stack))} {...{ selected, setSelected, busy, canAct, containerAction, containerRecreate, openConsole, memberKey }} />}
 
       {activeOp && (
@@ -300,6 +325,7 @@ export function DockerFleet() {
           operation={activeOp.operation}
           instanceId={activeOp.instanceId}
           resourceId={activeOp.resourceId}
+          seed={activeOp.seed}
           open={!!activeOp}
           onClose={() => setActiveOp(null)}
           onDone={() => { setActiveOp(null); load(true); }}
@@ -318,7 +344,9 @@ function StacksView(p: {
   expandedStacks: Set<string>; setExpandedStacks: (s: Set<string>) => void;
   selected: Set<string>; setSelected: (s: Set<string>) => void; busy: Set<string>; canAct: boolean;
   containerAction: (m: FleetMember, a: string) => void; containerRecreate: (m: FleetMember) => void;
-  openOp: (opId: string, instanceId: string, resourceId?: string) => void; openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
+  openOp: (opId: string, instanceId: string, resourceId?: string, seed?: Record<string, unknown>) => void;
+  stackAction: (s: FleetStack, actionId: string) => void; stackUpdate: (s: FleetStack) => void;
+  openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
   memberKey: (m: FleetMember) => string;
 }) {
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void, id: string) => {
@@ -370,13 +398,27 @@ function StacksView(p: {
                               <span className="text-xs text-muted-foreground shrink-0">{s.running}/{s.containers}</span>
                               {s.updates > 0 && <span className="text-[11px] rounded-md border border-amber-500/50 bg-amber-500/15 text-amber-400 px-1.5 py-0.5 shrink-0">{s.updates} update{s.updates === 1 ? '' : 's'}</span>}
                             </button>
-                            {p.canAct && s.managed && (
+                            {p.canAct && (
                               <div className="flex items-center gap-0.5 shrink-0">
-                                <IconBtn title="Edit & redeploy" onClick={() => p.openOp('edit-stack', s.instanceId, s.id)}><Pencil className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Redeploy (pull / recreate options)" onClick={() => p.openOp('redeploy-stack', s.instanceId, s.id)}><Rocket className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Roll back to previous" onClick={() => p.openOp('rollback-stack', s.instanceId, s.id)}><History className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Check drift" onClick={() => p.openOp('stack-check-drift', s.instanceId, s.id)}><GitCompare className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Stop (compose down)" onClick={() => p.openOp('stop-stack', s.instanceId, s.id)}><Ban className="h-4 w-4 text-destructive" /></IconBtn>
+                                {/* Compose management — only for Cerebro-managed stacks (we hold their compose). */}
+                                {s.managed && <>
+                                  <IconBtn title="Edit & redeploy (compose)" onClick={() => p.openOp('edit-stack', s.instanceId, s.id)}><Pencil className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Redeploy (pull / recreate options)" onClick={() => p.openOp('redeploy-stack', s.instanceId, s.id)}><Rocket className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Roll back to previous" onClick={() => p.openOp('rollback-stack', s.instanceId, s.id)}><History className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Check drift" onClick={() => p.openOp('stack-check-drift', s.instanceId, s.id)}><GitCompare className="h-4 w-4" /></IconBtn>
+                                </>}
+                                {/* Unmanaged stacks: one-click update (pull+recreate every member) + import path. */}
+                                {!s.managed && <>
+                                  <IconBtn title="Update stack (pull latest image + recreate every container)" onClick={() => p.stackUpdate(s)}><ArrowUpCircle className={cn('h-4 w-4', s.updates > 0 && 'text-amber-400')} /></IconBtn>
+                                  <IconBtn title="Import compose (paste it so Cerebro can edit/redeploy this stack)" onClick={() => p.openOp('deploy-stack', s.instanceId, undefined, { name: s.id })}><Rocket className="h-4 w-4" /></IconBtn>
+                                </>}
+                                {/* Whole-stack lifecycle — works on ANY stack (acts on its containers). */}
+                                {STACK_STOPPED.has(s.status)
+                                  ? <IconBtn title="Start stack" onClick={() => p.stackAction(s, 'start')}><Play className="h-4 w-4" /></IconBtn>
+                                  : <>
+                                    <IconBtn title="Restart stack" onClick={() => p.stackAction(s, 'restart')}><RotateCw className="h-4 w-4" /></IconBtn>
+                                    <IconBtn title="Stop stack" onClick={() => p.stackAction(s, 'stop')}><Square className="h-4 w-4" /></IconBtn>
+                                  </>}
                               </div>
                             )}
                           </div>

@@ -21,6 +21,7 @@ export function OperationDialog({
   operation,
   resourceId,
   extraValues,
+  seed,
   open,
   onClose,
   onDone,
@@ -30,11 +31,13 @@ export function OperationDialog({
   resourceId?: string;
   /** Values merged into the submission (e.g. { kind } for resource-scoped ops). */
   extraValues?: Record<string, unknown>;
+  /** Initial form field values (e.g. prefill a stack name when importing). */
+  seed?: Record<string, unknown>;
   open: boolean;
   onClose: () => void;
   onDone: (createdResourceId?: string) => void;
 }) {
-  const [values, setValues] = useState<Values>(() => initialValues(operation));
+  const [values, setValues] = useState<Values>(() => ({ ...initialValues(operation), ...seed }));
   const [optionsMap, setOptionsMap] = useState<Record<string, ConnectorOption[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<'form' | 'running' | 'done'>('form');
@@ -46,7 +49,7 @@ export function OperationDialog({
   // Reset when (re)opened.
   useEffect(() => {
     if (open) {
-      setValues(initialValues(operation));
+      setValues({ ...initialValues(operation), ...seed });
       setOptionsMap({});
       setError(null);
       setPhase('form');
