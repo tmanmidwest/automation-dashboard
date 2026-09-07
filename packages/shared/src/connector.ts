@@ -245,6 +245,9 @@ export interface ConnectorDetailItem {
    *  `value` as an external link (its href). 'warn' renders the value in an
    *  attention color (amber) — e.g. "update available". */
   variant?: 'default' | 'mono' | 'status' | 'link' | 'warn';
+  /** Makes the row open another resource's detail in this connector (e.g. a stack's
+   *  member container → that container's detail, where its actions live). */
+  to?: { kind: string; id: string };
 }
 
 export interface ConnectorDetailGroup {

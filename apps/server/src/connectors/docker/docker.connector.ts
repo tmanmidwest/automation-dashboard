@@ -1199,6 +1199,8 @@ export class DockerConnector implements Connector {
               m.Id && updates.get(m.Id) === true ? 'update available' : '',
             ].filter(Boolean).join(' · '),
             variant: 'mono' as const,
+            // Click a member → open that container's detail (where its actions live).
+            to: { kind: CONTAINER_KIND, id: m.Id },
           })),
       });
     }

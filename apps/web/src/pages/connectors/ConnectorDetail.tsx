@@ -276,14 +276,19 @@ export function ConnectorDetail() {
     }
   }
 
-  async function openDetail(res: ConnectorResource) {
+  async function openDetail(res: ConnectorResource, kindOverride?: string) {
+    const k = kindOverride ?? kind;
+    if (kindOverride && kindOverride !== kind) setKind(kindOverride); // switch the tab so actions/console match
     setDetailFor(res);
     setDetail(null);
     setSubItems({});
     setConfirmName('');
     setDetailLoading(true);
     try {
-      setDetail(await api.get<ConnectorResourceDetail>(`/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(res.id)}`));
+      const d = await api.get<ConnectorResourceDetail>(`/api/connectors/instances/${id}/resources/${k}/${encodeURIComponent(res.id)}`);
+      setDetail(d);
+      // Refine the header/status from the server (matters when opened via a link with a stub resource).
+      setDetailFor((prev) => (prev ? { ...prev, name: d.name || prev.name, status: d.status ?? prev.status, kind: d.kind || prev.kind } : prev));
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to load details' });
       setDetailFor(null);
@@ -291,7 +296,13 @@ export function ConnectorDetail() {
       setDetailLoading(false);
     }
     setSubItems({});
-    if (subKinds.length) void loadSubResources(res.id);
+    const subs = manifest?.resourceKinds.find((x) => x.id === k)?.subResources ?? [];
+    if (subs.length) void loadSubResources(res.id);
+  }
+
+  /** Open another resource's detail (from a linked detail item, e.g. a stack member container). */
+  function openLinkedResource(to: { kind: string; id: string }, name: string) {
+    void openDetail({ id: to.id, kind: to.kind, name, status: '' } as ConnectorResource, to.kind);
   }
 
   async function loadSubResources(resourceId: string) {
@@ -812,7 +823,14 @@ export function ConnectorDetail() {
                 <dl className="divide-y divide-border/50">
                   {g.items.map((it, i) => (
                     <div key={i} className="flex justify-between gap-4 py-1.5 text-sm">
-                      <dt className="text-muted-foreground shrink-0">{it.label}</dt>
+                      <dt className="text-muted-foreground shrink-0">
+                        {it.to
+                          ? <button onClick={() => openLinkedResource(it.to!, it.label)}
+                              className="text-foreground hover:text-primary transition-colors font-medium inline-flex items-center gap-1">
+                              {it.label} <span aria-hidden className="opacity-60">›</span>
+                            </button>
+                          : it.label}
+                      </dt>
                       <dd className={cn('text-right break-all', it.variant === 'mono' && 'font-mono text-xs',
                         it.variant === 'status' && 'capitalize',
                         it.variant === 'warn' && 'text-amber-400 font-medium')}>
