@@ -217,10 +217,12 @@ export function Timeline() {
                     {KIND_LABEL[e.kind]}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-sm break-words">{e.title}</span>
+                    {/* Inline flow (not a flex row) so a long title wraps and the actor
+                        drops to the next line instead of being clipped on narrow widths. */}
+                    <div className="text-sm break-words">
+                      {e.title}
                       {e.actor?.email && (
-                        <span className="text-xs text-muted-foreground shrink-0">· {e.actor.email}</span>
+                        <span className="text-xs text-muted-foreground whitespace-nowrap"> · {e.actor.email}</span>
                       )}
                     </div>
                     {isOpen && e.detail && (
