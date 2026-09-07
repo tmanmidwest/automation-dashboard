@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { DockerFleetService } from './docker-fleet.service';
 import { RequirePermissions } from '../auth/decorators';
 
@@ -13,7 +13,7 @@ export class DockerFleetController {
 
   @Get('fleet')
   @RequirePermissions('connectors:read')
-  get() {
-    return this.fleet.fleet();
+  get(@Query('force') force?: string) {
+    return this.fleet.fleet(force === '1' || force === 'true');
   }
 }

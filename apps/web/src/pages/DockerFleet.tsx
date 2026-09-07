@@ -50,7 +50,8 @@ export function DockerFleet() {
   async function load(manual = false) {
     if (manual) setRefreshing(true);
     try {
-      const data = await api.get<DockerFleet>('/api/docker/fleet');
+      // Manual refresh forces a fresh compute; the background poll serves the warm cache (instant).
+      const data = await api.get<DockerFleet>(`/api/docker/fleet${manual ? '?force=1' : ''}`);
       setFleet(data); setLoadedAt(new Date()); setErr(null);
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to load the fleet.'); }
     finally { if (manual) setRefreshing(false); }

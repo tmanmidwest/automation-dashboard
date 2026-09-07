@@ -33,8 +33,14 @@ instead of visiting each connector separately.
   - container actions → `POST /api/connectors/instances/:id/resources/container/:cid/actions/:action`
   - recreate / stack ops → `POST /api/connectors/instances/:id/operations/:op`
   - shell / logs → navigates to the existing `/connectors/:id/console/container/:cid?mode=…` route.
-- **Refresh**: 30s poll + manual Refresh. Per-host live SSE is a natural fast-follow (each Docker
-  connector already exposes `subscribeLive`).
+- **Refresh & caching**: the page auto-polls every **30s** plus a manual **Refresh** button.
+  Computing the tree hits every host over the network (~a few seconds cold), so `DockerFleetService`
+  keeps a **warm server-side cache**: a normal request serves the last snapshot when it's < 25s old
+  (instant), and a background `@Interval(15s)` keeps that cache fresh while the page is in active use
+  (5-min window after last access). So only the very first load — or the first after 5 min idle —
+  pays full cost; every tap after is instant. The **Refresh button** sends `?force=1` to bypass the
+  cache and recompute. Per-host live SSE is a natural further step (each Docker connector already
+  exposes `subscribeLive`).
 - **Permissions**: view = `connectors:read`; every control = `connectors:action` (unchanged).
 
 ## Not yet built / future

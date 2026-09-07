@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import type {
   ConnectorResource,
@@ -12,18 +13,52 @@ import type {
 } from '@cerebro/shared';
 
 const DOCKER = 'docker';
+/** Serve a cached snapshot up to this old on a normal request (poll/tap) — makes the page load instantly. */
+const SERVE_MAX_MS = 25_000;
+/** Keep the cache warm in the background this long after the page was last used. */
+const ACTIVE_WINDOW_MS = 5 * 60_000;
 
 /**
  * Aggregates every enabled Docker connector instance into one merged tree for the
  * Docker Fleet screen. Reuses each connector's existing overview + resource lists
  * (so image-update chips, host telemetry, stack grouping etc. all carry over) —
  * control still flows through the normal per-instance action/operation endpoints.
+ *
+ * Computing the tree hits every host over the network, so results are cached and
+ * kept warm by a background refresh while the page is in active use — a tap serves
+ * the last snapshot instantly instead of waiting on all hosts. `force` recomputes.
  */
 @Injectable()
 export class DockerFleetService {
   constructor(private readonly instances: ConnectorInstanceService) {}
 
-  async fleet(): Promise<DockerFleet> {
+  private cache: { at: number; data: DockerFleet } | null = null;
+  private inflight: Promise<DockerFleet> | null = null;
+  private lastAccess = 0;
+
+  /** The endpoint. Serves a warm cache when fresh enough; `force` awaits a fresh compute. */
+  async fleet(force = false): Promise<DockerFleet> {
+    this.lastAccess = Date.now();
+    if (!force && this.cache && Date.now() - this.cache.at < SERVE_MAX_MS) return this.cache.data;
+    return this.refresh();
+  }
+
+  /** Recompute (deduping concurrent callers) and update the cache. */
+  private refresh(): Promise<DockerFleet> {
+    if (this.inflight) return this.inflight;
+    this.inflight = this.compute()
+      .then((data) => { this.cache = { at: Date.now(), data }; return data; })
+      .finally(() => { this.inflight = null; });
+    return this.inflight;
+  }
+
+  /** While the page is being used, keep the cache warm so every tap is instant. */
+  @Interval(15_000)
+  backgroundRefresh(): void {
+    if (Date.now() - this.lastAccess < ACTIVE_WINDOW_MS) void this.refresh().catch(() => { /* keep last good cache */ });
+  }
+
+  private async compute(): Promise<DockerFleet> {
     const all = await this.instances.list();
     const docker = all.filter((i) => i.connectorId === DOCKER && i.enabled);
     const hosts = await Promise.all(docker.map((i) => this.host(i.id, i.name)));
