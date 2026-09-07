@@ -28,6 +28,67 @@ function matchesFocus(m: FleetMember, focus: Focus): boolean {
   return true;
 }
 
+// ── Live-event patching (no server round-trip for a status flip) ──
+type LiveResource = { id: string; status?: string; details?: { stack?: string; image?: string; service?: string } };
+
+/** Recompute a host's stack rollups + metric counts from its (possibly-patched) members. */
+function recomputeHost(h: FleetHost): FleetHost {
+  const stacks = h.stacks.map((s): FleetStack => {
+    const running = s.members.filter((m) => m.status === 'running').length;
+    const unhealthy = s.members.filter((m) => m.status === 'unhealthy').length;
+    const status = s.members.length === 0 ? s.status
+      : unhealthy > 0 ? 'unhealthy' : running === 0 ? 'stopped' : running < s.members.length ? 'degraded' : 'running';
+    return { ...s, running, containers: s.members.length, updates: s.members.filter((m) => m.hasUpdate).length, status };
+  });
+  const members = stacks.flatMap((s) => s.members);
+  return {
+    ...h, stacks,
+    metrics: {
+      ...h.metrics,
+      running: members.filter((m) => m.status === 'running').length,
+      stopped: members.filter((m) => STOPPED_LIKE.has(m.status)).length,
+      unhealthy: members.filter((m) => m.status === 'unhealthy').length,
+      restarting: members.filter((m) => m.status === 'restarting').length,
+    },
+  };
+}
+
+function recomputeTotals(hosts: FleetHost[]): DockerFleet['totals'] {
+  const sum = (pick: (m: FleetHost['metrics']) => number) => hosts.reduce((n, h) => n + (pick(h.metrics) || 0), 0);
+  return {
+    hosts: hosts.length,
+    online: hosts.filter((h) => h.online).length,
+    running: sum((m) => m.running),
+    stopped: sum((m) => m.stopped),
+    unhealthy: sum((m) => m.unhealthy),
+    stacks: hosts.reduce((n, h) => n + h.stacks.length, 0),
+    updates: sum((m) => m.updates),
+    diskUsedGb: Math.round(sum((m) => m.diskUsedGb ?? 0) * 10) / 10,
+  };
+}
+
+/** Apply one live container event in place. Returns the new fleet + whether a structural refresh is still needed. */
+function applyLiveEvent(fleet: DockerFleet, instanceId: string, r: LiveResource): { fleet: DockerFleet; needsRefresh: boolean } {
+  const hostIdx = fleet.hosts.findIndex((h) => h.instanceId === instanceId);
+  if (hostIdx < 0) return { fleet, needsRefresh: true };
+  const status = r.status ?? 'unknown';
+  const removed = status === 'removed';
+  let found = false;
+  const stacks = fleet.hosts[hostIdx].stacks.map((s) => {
+    const mi = s.members.findIndex((m) => m.id === r.id);
+    if (mi < 0) return s;
+    found = true;
+    const members = s.members.slice();
+    if (removed) members.splice(mi, 1);
+    else members[mi] = { ...members[mi], status, image: r.details?.image || members[mi].image };
+    return { ...s, members };
+  });
+  if (!found) return { fleet, needsRefresh: true }; // new container (or moved) → reconcile via a refresh
+  const hosts = fleet.hosts.slice();
+  hosts[hostIdx] = recomputeHost({ ...fleet.hosts[hostIdx], stacks });
+  return { fleet: { hosts, totals: recomputeTotals(hosts) }, needsRefresh: false };
+}
+
 export function DockerFleet() {
   const { can } = useAuth();
   const canAct = can('connectors:action');
@@ -38,6 +99,7 @@ export function DockerFleet() {
   const [msg, setMsg] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [live, setLive] = useState(false);
 
   const [view, setView] = useState<'stacks' | 'containers'>('stacks');
   const [focus, setFocus] = useState<Focus>(null);
@@ -57,6 +119,31 @@ export function DockerFleet() {
     finally { if (manual) setRefreshing(false); }
   }
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, []);
+
+  // Live container updates merged across all hosts — patch state in place (no server round-trip),
+  // and debounce a reconciling refresh for structural changes (new/removed containers).
+  const fleetRef = useRef<DockerFleet | null>(null);
+  useEffect(() => { fleetRef.current = fleet; }, [fleet]);
+  const structuralTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const es = new EventSource('/api/docker/fleet/live');
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false); // EventSource reconnects on its own
+    es.onmessage = (e) => {
+      const cur = fleetRef.current;
+      if (!cur) return;
+      let evt: { instanceId: string; resource: LiveResource };
+      try { evt = JSON.parse(e.data); } catch { return; }
+      const { fleet: next, needsRefresh } = applyLiveEvent(cur, evt.instanceId, evt.resource);
+      fleetRef.current = next;
+      setFleet(next);
+      setLoadedAt(new Date());
+      if (needsRefresh && !structuralTimer.current) {
+        structuralTimer.current = setTimeout(() => { structuralTimer.current = null; load(true); }, 1200);
+      }
+    };
+    return () => { es.close(); if (structuralTimer.current) clearTimeout(structuralTimer.current); };
+  }, []);
 
   const memberKey = (m: FleetMember) => `${m.instanceId}::${m.id}`;
   const allMembers = useMemo(
@@ -118,6 +205,7 @@ export function DockerFleet() {
       <PageHeader title="Docker Fleet" description="Every Docker host, stack, and container in one place."
         actions={
           <div className="flex items-center gap-2">
+            {live && <span className="flex items-center gap-1.5 text-xs text-emerald-400"><span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />Live</span>}
             {loadedAt && <span className="text-xs text-muted-foreground hidden sm:inline">Updated {loadedAt.toLocaleTimeString()}</span>}
             <Button variant="outline" onClick={() => load(true)} disabled={refreshing}>
               <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} /> Refresh

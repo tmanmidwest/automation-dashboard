@@ -39,13 +39,19 @@ instead of visiting each connector separately.
   (instant), and a background `@Interval(15s)` keeps that cache fresh while the page is in active use
   (5-min window after last access). So only the very first load — or the first after 5 min idle —
   pays full cost; every tap after is instant. The **Refresh button** sends `?force=1` to bypass the
-  cache and recompute. Per-host live SSE is a natural further step (each Docker connector already
-  exposes `subscribeLive`).
+  cache and recompute.
+- **Live updates (SSE)**: `GET /api/docker/fleet/live` (`@Sse`) subscribes to **every** Docker host's
+  container stream at once (`DockerFleetService.subscribeAll` → each connector's `subscribeLive` over
+  `GET /events`) and pushes `{ instanceId, resource }` as containers change. The page patches the
+  matching member **in place** — status, per-stack rollups, and the summary tiles recompute client-side
+  with no server round-trip — so a start/stop/health flip reflects near-instantly. Structural changes
+  (a new/removed container the tree doesn't know) debounce a single reconciling `?force=1` refresh. A
+  green **Live** pill shows when connected; the 30s poll stays as a fallback and to pull what SSE
+  doesn't push (image-update chips, host CPU/MEM/DISK telemetry).
 - **Permissions**: view = `connectors:read`; every control = `connectors:action` (unchanged).
 
 ## Not yet built / future
 
-- Per-host live SSE (currently polled).
 - Fleet-wide stack bulk ops (e.g. redeploy-all-with-pull) and a select-all.
 - Group-by (status / stack) in the containers view; host-level deploy-stack / prune shortcuts.
 - Engine version + host uptime in the host header.

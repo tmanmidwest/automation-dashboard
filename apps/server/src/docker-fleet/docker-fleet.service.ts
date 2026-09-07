@@ -66,6 +66,28 @@ export class DockerFleetService {
     return { hosts, totals: this.totals(hosts) };
   }
 
+  /**
+   * Subscribe to every enabled Docker host's live container stream at once, tagging
+   * each pushed resource with its instanceId. A host that can't stream is skipped
+   * (others still push). Returns one teardown that unsubscribes them all.
+   */
+  async subscribeAll(onEvent: (evt: { instanceId: string; resource: ConnectorResource }) => void): Promise<() => void> {
+    const all = await this.instances.list();
+    const docker = all.filter((i) => i.connectorId === DOCKER && i.enabled);
+    const unsubs = await Promise.all(
+      docker.map(async (i) => {
+        try {
+          return await this.instances.subscribeLive(i.id, (resource) => onEvent({ instanceId: i.id, resource }));
+        } catch {
+          return () => { /* this host just won't push */ };
+        }
+      }),
+    );
+    return () => {
+      for (const u of unsubs) { try { u(); } catch { /* ignore */ } }
+    };
+  }
+
   private async host(instanceId: string, name: string): Promise<FleetHost> {
     try {
       const [overview, stacks, containers] = await Promise.all([
