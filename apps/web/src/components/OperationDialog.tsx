@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, CheckCircle2, XCircle, Rocket, ChevronRight, ChevronDown, Ban } from 'lucide-react';
-import type { ConnectorOperation, ConnectorOption, ConnectorJobStatus } from '@cerebro/shared';
+import type { ConnectorOperation, ConnectorOption, ConnectorJobStatus, SecretSummary } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { Dialog } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,13 @@ import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 
 type Values = Record<string, unknown>;
+
+/** Vault secrets of a given kind (e.g. 'git') as dropdown options, with a blank "none" first. */
+async function vaultSecretOptions(kind: string): Promise<ConnectorOption[]> {
+  const secrets = await api.get<SecretSummary[]>('/api/secrets').catch(() => [] as SecretSummary[]);
+  const opts = secrets.filter((s) => s.kind === kind).map((s) => ({ value: s.key, label: s.label || s.key }));
+  return [{ value: '', label: '— none (public repo) —' }, ...opts];
+}
 
 function initialValues(op: ConnectorOperation): Values {
   const v: Values = {};
@@ -75,9 +82,13 @@ export function OperationDialog({
         return;
       }
       try {
-        const opts = await api.post<ConnectorOption[]>(`/api/connectors/instances/${instanceId}/options`, {
-          sourceId: f.optionsSource, values: { ...extraValues, ...values },
-        });
+        // `vault:<kind>` is populated directly from the secrets API (a vault-secret picker),
+        // not the connector's options endpoint.
+        const opts = f.optionsSource?.startsWith('vault:')
+          ? await vaultSecretOptions(f.optionsSource.slice('vault:'.length))
+          : await api.post<ConnectorOption[]>(`/api/connectors/instances/${instanceId}/options`, {
+              sourceId: f.optionsSource, values: { ...extraValues, ...values },
+            });
         setOptionsMap((m) => ({ ...m, [f.key]: opts }));
         // Clear a now-invalid selection.
         setValues((v) => (v[f.key] && !opts.some((o) => o.value === v[f.key]) ? { ...v, [f.key]: '' } : v));

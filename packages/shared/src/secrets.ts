@@ -14,6 +14,7 @@ export interface SecretSummary {
   key: string;
   label: string;
   description?: string | null;
+  kind: SecretKind;
   category: SecretCategory;
   owningConnectorId?: string | null;
   rotateAfterDays?: number | null;
@@ -27,9 +28,21 @@ export interface SecretSummary {
 }
 
 /** Editable metadata fields (PUT /api/secrets/:key). */
+/** Shape of a stored secret value: a single string, or a structured Git credential (JSON). */
+export type SecretKind = 'generic' | 'git';
+
+/** A Git credential's decoded value (stored as the secret's JSON plaintext, kind='git'). */
+export interface GitCredential {
+  host?: string;
+  username?: string;
+  /** A personal-access-token or a password — both authenticate as HTTPS username:secret. */
+  secret: string;
+}
+
 export interface SecretMetaInput {
   label?: string;
   description?: string | null;
+  kind?: SecretKind;
   category?: SecretCategory;
   rotateAfterDays?: number | null;
   expiresAt?: string | null;

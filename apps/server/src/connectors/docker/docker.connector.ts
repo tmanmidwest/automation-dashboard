@@ -89,6 +89,13 @@ const pruneConfirmField = (what: string) => ({
   required: true,
 });
 
+/** Source toggle: paste compose, or pull from a git repo. */
+const SOURCE_FIELD = {
+  key: 'source', label: 'Source', type: 'select' as const, required: true, default: 'compose',
+  options: [{ label: 'Compose file', value: 'compose' }, { label: 'Git repository', value: 'git' }],
+  help: 'Paste the compose, or have Cerebro pull it (and build images) from a git repo on the host.',
+};
+
 const COMPOSE_FIELD = {
   key: 'compose',
   label: 'docker-compose.yml',
@@ -96,7 +103,16 @@ const COMPOSE_FIELD = {
   required: true,
   placeholder: 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n    restart: unless-stopped',
   help: 'Standard Compose. Cerebro writes this to the host and runs "docker compose up -d".',
+  showWhen: { field: 'source', equals: 'compose' },
 };
+
+/** Git-source fields (shown when source = git). */
+const GIT_FIELDS = [
+  { key: 'gitUrl', label: 'Repository URL', type: 'text' as const, required: true, placeholder: 'https://github.com/owner/repo.git', showWhen: { field: 'source', equals: 'git' } },
+  { key: 'gitRef', label: 'Branch / tag / commit', type: 'text' as const, required: false, placeholder: 'main', help: 'Blank = the repo default branch.', showWhen: { field: 'source', equals: 'git' } },
+  { key: 'gitPath', label: 'Compose path in repo', type: 'text' as const, required: false, default: 'docker-compose.yml', placeholder: 'docker-compose.yml', help: 'Path to the compose file within the repo.', showWhen: { field: 'source', equals: 'git' } },
+  { key: 'gitCred', label: 'Git credential (private repos)', type: 'select' as const, required: false, optionsSource: 'vault:git', help: 'A Vault "Git credential" — leave blank for public repos.', showWhen: { field: 'source', equals: 'git' } },
+];
 
 const ENV_FIELD = {
   key: 'env',
@@ -110,6 +126,8 @@ const ENV_FIELD = {
 /** Redeploy toggles that map to `docker compose up` flags (Portainer-style). */
 const REDEPLOY_OPTS_FIELDS = [
   { key: 'pull', label: 'Pull newer images (--pull always)', type: 'boolean' as const, required: false, default: false },
+  { key: 'build', label: 'Build images from the repo (--build)', type: 'boolean' as const, required: false, default: false },
+  { key: 'forceRebuild', label: 'Force full rebuild (no cache, pull base layers)', type: 'boolean' as const, required: false, default: false },
   { key: 'forceRecreate', label: 'Force recreate containers', type: 'boolean' as const, required: false, default: false },
   { key: 'removeOrphans', label: 'Remove orphaned containers', type: 'boolean' as const, required: false, default: false },
 ];
@@ -126,21 +144,24 @@ const OPERATIONS: ConnectorOperation[] = [
     background: true,
     fields: [
       { key: 'name', label: 'Stack name', type: 'text', required: true, placeholder: 'my-app', help: 'Compose project name (lowercased).' },
+      SOURCE_FIELD,
       COMPOSE_FIELD,
+      ...GIT_FIELDS,
       ENV_FIELD,
+      ...REDEPLOY_OPTS_FIELDS.filter((f) => f.key === 'build' || f.key === 'forceRebuild'),
     ],
   },
   {
     id: 'edit-stack',
     label: 'Edit & redeploy',
-    description: 'Edit this stack\'s compose and environment, then redeploy it.',
+    description: 'Edit this stack\'s compose (or git source) and environment, then redeploy it.',
     scope: 'resource',
     kind: STACK_KIND,
     icon: 'pencil',
     submitLabel: 'Save & deploy',
     background: true,
     prefill: true,
-    fields: [COMPOSE_FIELD, ENV_FIELD, ...REDEPLOY_OPTS_FIELDS],
+    fields: [SOURCE_FIELD, COMPOSE_FIELD, ...GIT_FIELDS, ENV_FIELD, ...REDEPLOY_OPTS_FIELDS],
   },
   {
     id: 'redeploy-stack',
@@ -677,10 +698,20 @@ export class DockerConnector implements Connector {
         const instanceId = ctx.instanceId;
         if (!instanceId) return { ok: false, message: 'Missing connector instance.' };
         const name = operationId === 'deploy-stack' ? str(values.name) : (_resourceId ?? '');
-        const compose = str(values.compose);
         if (!name) return { ok: false, message: 'A stack name is required.' };
-        if (!compose) return { ok: false, message: 'The compose file is empty.' };
         const target = this.sshTargetFrom(ctx);
+        if (str(values.source) === 'git') {
+          const gitUrl = str(values.gitUrl);
+          if (!gitUrl) return { ok: false, message: 'A git repository URL is required.' };
+          onProgress(`Deploying stack "${projectName(name)}" from git over SSH…`);
+          const res = await this.stacks.deployGit(target, instanceId, name,
+            { gitUrl, gitRef: str(values.gitRef), gitPath: str(values.gitPath), credKey: str(values.gitCred), env: str(values.env) ?? '' },
+            optsFrom(values));
+          ctx.log(res.ok ? 'info' : 'error', `Docker git stack deploy "${projectName(name)}": ${res.message}`);
+          return res;
+        }
+        const compose = str(values.compose);
+        if (!compose) return { ok: false, message: 'The compose file is empty.' };
         onProgress(`Deploying stack "${projectName(name)}" over SSH…`);
         const res = await this.stacks.deploy(target, instanceId, name, compose, str(values.env) ?? '', optsFrom(values));
         ctx.log(res.ok ? 'info' : 'error', `Docker stack deploy "${projectName(name)}": ${res.message}`);
@@ -703,9 +734,14 @@ export class DockerConnector implements Connector {
         if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
         const stored = await this.stacks.get(instanceId, _resourceId);
         if (!stored) {
-          return { ok: false, message: 'This stack isn\'t managed by Cerebro. Use "Deploy stack" to import its compose, then redeploy.' };
+          return { ok: false, message: 'This stack isn\'t managed by Cerebro. Use "Deploy stack" to import its compose or git source, then redeploy.' };
         }
         onProgress(`Redeploying stack "${_resourceId}"…`);
+        if (stored.source === 'git' && stored.gitUrl) {
+          return await this.stacks.deployGit(this.sshTargetFrom(ctx), instanceId, _resourceId,
+            { gitUrl: stored.gitUrl, gitRef: stored.gitRef, gitPath: stored.gitPath, credKey: stored.gitCredKey, env: stored.env ?? '' },
+            optsFrom(values));
+        }
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose, stored.env ?? '', optsFrom(values));
       }
       if (operationId === 'rollback-stack') {
@@ -714,6 +750,12 @@ export class DockerConnector implements Connector {
         const prev = await this.stacks.previousRevision(instanceId, _resourceId);
         if (!prev) return { ok: false, message: 'No previous version to roll back to — this stack has only one stored version.' };
         onProgress(`Rolling back "${_resourceId}" to the previous version…`);
+        if (prev.source === 'git' && prev.gitUrl) {
+          const stored = await this.stacks.get(instanceId, _resourceId);
+          // Roll back to the exact previously-deployed commit.
+          return await this.stacks.deployGit(this.sshTargetFrom(ctx), instanceId, _resourceId,
+            { gitUrl: prev.gitUrl, gitRef: prev.commit ?? prev.gitRef, gitPath: prev.gitPath, credKey: stored?.gitCredKey, env: prev.env ?? '' });
+        }
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, prev.compose, prev.env ?? '');
       }
 
@@ -1176,6 +1218,14 @@ export class DockerConnector implements Connector {
       },
       { label: 'Managed by Cerebro', value: stored ? 'Yes' : 'No — lifecycle only' },
     ];
+    if (stored?.source === 'git') {
+      general.push(
+        { label: 'Source', value: 'Git repository' },
+        { label: 'Repository', value: stored.gitUrl ?? '—', variant: 'mono' },
+        { label: 'Ref', value: stored.gitRef || 'default branch', variant: 'mono' },
+        ...(stored.gitCredKey ? [{ label: 'Credential', value: stored.gitCredKey, variant: 'mono' as const }] : []),
+      );
+    }
     if (stored) {
       general.push(
         { label: 'Last deploy', value: stored.lastDeployedAt ? (rel(stored.lastDeployedAt.toISOString()) ?? '—') : 'never' },
@@ -1219,10 +1269,10 @@ export class DockerConnector implements Connector {
       }
     }
 
-    // Compose + .env, read-only.
+    // Compose + .env, read-only. (Git stacks have no stored compose — it lives in the repo.)
     const code: ConnectorCodeBlock[] = [];
     if (stored) {
-      code.push({ title: 'docker-compose.yml', language: 'yaml', content: stored.compose });
+      if (stored.source !== 'git' && stored.compose) code.push({ title: 'docker-compose.yml', language: 'yaml', content: stored.compose });
       if (stored.env) code.push({ title: '.env', language: 'ini', content: stored.env });
     }
 
@@ -1336,7 +1386,17 @@ export class DockerConnector implements Connector {
   ): Promise<Record<string, unknown>> {
     if (operationId === 'edit-stack' && resourceId && ctx.instanceId) {
       const stored = await this.stacks.get(ctx.instanceId, resourceId);
-      if (stored) return { compose: stored.compose, env: stored.env ?? '' };
+      if (stored) {
+        return {
+          source: stored.source ?? 'compose',
+          compose: stored.compose ?? '',
+          env: stored.env ?? '',
+          gitUrl: stored.gitUrl ?? '',
+          gitRef: stored.gitRef ?? '',
+          gitPath: stored.gitPath ?? '',
+          gitCred: stored.gitCredKey ?? '',
+        };
+      }
     }
     return {};
   }
@@ -1595,5 +1655,7 @@ function optsFrom(values: Record<string, unknown>) {
     pull: bool(values.pull),
     forceRecreate: bool(values.forceRecreate),
     removeOrphans: bool(values.removeOrphans),
+    build: bool(values.build),
+    forceRebuild: bool(values.forceRebuild),
   };
 }

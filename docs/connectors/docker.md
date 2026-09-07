@@ -300,6 +300,53 @@ more than `/info` + `/system/df` deliver.
   The `warn` `ConnectorDetailItem` variant and the amber `updates` tag-chip are generic (reusable by any
   connector). Pairs with **recreate** to pull the newer image.
 
+## Git-source stacks (Phase 6)
+
+A stack's **source** can be inline compose (the default) **or a Git repository**. For git stacks Cerebro
+clones/pulls the repo on the host over the existing SSH channel and runs `docker compose` from it — the
+fit for repos that carry their own compose and/or **build images from a Dockerfile on the host** (no
+published image).
+
+### Model
+`DockerStack` (and `DockerStackRevision`) gain: `source` (`compose` | `git`, default `compose` so existing
+stacks are untouched), `gitUrl`, `gitRef` (branch/tag/commit), `gitPath` (the compose file or its subdir
+within the repo), `gitCredKey` (the vault secret key for auth; null = public). Revisions also record the
+deployed **commit SHA** so rollback is a real `git checkout <sha>` + up, not just a re-pull.
+
+### Deploy flow (over SSH)
+1. First deploy: `git clone --branch <ref> <url> <dir>`; later: `git -C <dir> fetch` + `reset --hard origin/<ref>`.
+2. Write `.env` (from the env field) beside the compose.
+3. `docker compose -p <project> -f <dir>/<gitPath> up -d` with the build flags below; record the commit.
+
+### Auth — Vault "Git credential"
+`SecretMeta` gains `kind` (`generic` default | `git`). A **Git credential** is one vault entry storing an
+encrypted JSON `{ host, username, secret }` (the secret is a PAT or a password — both authenticate as HTTPS
+`username:secret`). A git stack references it by key; at deploy Cerebro `reveal()`s it **server-side only**
+and feeds it to git via a short-lived `GIT_ASKPASS` — never written into the remote, the compose, the
+stored stack, or shell history, and cleaned up after. Rotating the vault entry flows to the next deploy.
+
+### Build / force-rebuild options (redeploy dialog)
+- **Build images** — `--build` (for compose `build:` contexts).
+- **Force rebuild** — `docker compose build --no-cache --pull` then `up -d --force-recreate`: rebuilds the
+  image from scratch (ignore cache, pull newer base layers) and recreates — the "no published image; force
+  the update from the repo" path.
+- plus the existing pull / force-recreate / remove-orphans toggles.
+
+### Framework bits (reusable)
+- `ConnectorFormField.showWhen` accepts an **array of conditions (AND)** so a field can require e.g.
+  `source=git` and `authType=token`.
+- An operation field whose `optionsSource` is `vault:<kind>` is populated by the UI directly from the
+  secrets API (a vault-secret picker) — used for the git-credential chooser.
+- Git deploys are **operations**, so the connector resolves the referenced vault secret at operation time
+  (via `SecretsService`, injected into `DockerStackService`), unlike connector-config secret-refs which
+  resolve at `buildContext` time.
+
+### Phasing
+- **Phase 1 (this pass):** vault git-credential type; git-source deploy with HTTPS auth + build/force-rebuild;
+  the deploy/edit/redeploy UI (source toggle, git fields, credential picker, build options).
+- **Phase 2:** fleet polish — "import as git" for unmanaged stacks, a force-rebuild button on stack rows,
+  rollback-to-commit UI.
+
 ## Still open / future
 
 - **Multi-network static-IP recreate** — recreate reconnects extra named networks with their aliases,

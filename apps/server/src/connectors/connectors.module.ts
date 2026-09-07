@@ -2,6 +2,7 @@ import { Module, OnModuleInit } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { SettingsModule } from '../settings/settings.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SecretsModule } from '../secrets/secrets.module';
 import { ConnectorRegistry } from './connector-registry.service';
 import { ConnectorInstanceService } from './connector-instance.service';
 import { ConnectionMonitorService } from './connection-monitor.service';
@@ -23,7 +24,7 @@ import { BackupStateService } from './backblaze/backup-state.service';
 import { VmNameService } from './backblaze/vm-name.service';
 
 @Module({
-  imports: [SettingsModule, NotificationsModule, ScheduleModule.forRoot()],
+  imports: [SettingsModule, NotificationsModule, SecretsModule, ScheduleModule.forRoot()],
   controllers: [ConnectorsController],
   providers: [
     ConnectorRegistry, ConnectorInstanceService, ConnectionMonitorService, ResourceMonitorService, MetricThresholdMonitorService, JobService, ConsoleService,

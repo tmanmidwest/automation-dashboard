@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SecretsService } from '../../secrets/secrets.service';
 import { runSsh, type SshConfig } from './docker-ssh';
+import type { GitCredential } from '@cerebro/shared';
 
 export interface StackDeployTarget {
   ssh: SshConfig;
@@ -21,6 +23,20 @@ export interface StackDeployOpts {
   forceRecreate?: boolean;
   /** `--remove-orphans` — remove containers for services no longer in the compose. */
   removeOrphans?: boolean;
+  /** `--build` — (re)build images from the repo's Dockerfiles as part of up. */
+  build?: boolean;
+  /** `compose build --no-cache --pull` then recreate — force a full rebuild of locally-built images. */
+  forceRebuild?: boolean;
+}
+
+/** Git source for a stack. */
+export interface StackGitSource {
+  gitUrl: string;
+  gitRef?: string | null;
+  gitPath?: string | null;
+  /** Vault secret key (kind='git') to authenticate a private repo; null = public. */
+  credKey?: string | null;
+  env?: string;
 }
 
 /**
@@ -31,7 +47,10 @@ export interface StackDeployOpts {
  */
 @Injectable()
 export class DockerStackService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly secrets: SecretsService,
+  ) {}
 
   list(instanceId: string) {
     return this.prisma.dockerStack.findMany({
@@ -48,10 +67,24 @@ export class DockerStackService {
 
   private saveCompose(instanceId: string, name: string, compose: string, env: string) {
     const project = projectName(name);
+    const data = { compose, env: env || null, source: 'compose', gitUrl: null, gitRef: null, gitPath: null, gitCredKey: null };
     return this.prisma.dockerStack.upsert({
       where: { connectorInstanceId_name: { connectorInstanceId: instanceId, name: project } },
-      update: { compose, env: env || null },
-      create: { connectorInstanceId: instanceId, name: project, compose, env: env || null },
+      update: data,
+      create: { connectorInstanceId: instanceId, name: project, ...data },
+    });
+  }
+
+  private saveGit(instanceId: string, name: string, src: StackGitSource) {
+    const project = projectName(name);
+    const data = {
+      source: 'git', compose: '', env: src.env || null,
+      gitUrl: src.gitUrl, gitRef: src.gitRef || null, gitPath: src.gitPath || null, gitCredKey: src.credKey || null,
+    };
+    return this.prisma.dockerStack.upsert({
+      where: { connectorInstanceId_name: { connectorInstanceId: instanceId, name: project } },
+      update: data,
+      create: { connectorInstanceId: instanceId, name: project, ...data },
     });
   }
 
@@ -99,12 +132,16 @@ export class DockerStackService {
         return { ok: false, message: `Compose validation failed: ${detail}` };
       }
 
-      // 3) docker compose up -d [flags]
-      const flags = [
-        opts.pull ? '--pull always' : '',
-        opts.forceRecreate ? '--force-recreate' : '',
-        opts.removeOrphans ? '--remove-orphans' : '',
-      ].filter(Boolean).join(' ');
+      // 3) optional forced rebuild of locally-built images, then docker compose up -d [flags]
+      if (opts.forceRebuild) {
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' build --no-cache --pull`);
+        if (b.code !== 0) {
+          const detail = tail(b.stderr || b.stdout, 3000);
+          await this.record(instanceId, project, 'error', detail);
+          return { ok: false, message: `Image rebuild failed: ${detail}` };
+        }
+      }
+      const flags = composeUpFlags(opts);
       const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d ${flags}`.trim());
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
@@ -112,12 +149,112 @@ export class DockerStackService {
         return { ok: false, message: out || `docker compose exited ${up.code}.` };
       }
       await this.record(instanceId, project, 'success', out);
-      await this.recordRevision(instanceId, project, compose, env);
+      await this.recordRevision(instanceId, project, { compose, env, source: 'compose' });
       return { ok: true, message: `Deployed "${project}".${out ? `\n${out}` : ''}` };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Deploy failed.';
       await this.record(instanceId, project, 'error', message);
       return { ok: false, message };
+    }
+  }
+
+  /**
+   * Deploy a stack from a Git repository: clone/pull on the host (private repos
+   * authenticate with a vault Git credential fed via a temp git-credential file,
+   * removed after), then `docker compose` from the repo — with build / force-rebuild
+   * options for repos that build their own images. Stores the git source + commit.
+   */
+  async deployGit(
+    target: StackDeployTarget,
+    instanceId: string,
+    name: string,
+    src: StackGitSource,
+    opts: StackDeployOpts = {},
+  ): Promise<StackRunResult> {
+    const project = projectName(name);
+    if (!project) return { ok: false, message: 'A valid stack name is required.' };
+    if (!src.gitUrl?.trim()) return { ok: false, message: 'A git repository URL is required.' };
+
+    const base = `${trimSlash(target.stacksDir)}/${project}`;
+    const dir = `${base}/repo`;
+    const relCompose = (src.gitPath?.trim() || 'docker-compose.yml').replace(/^\/+/, '');
+    const composeFile = `${dir}/${relCompose}`;
+    const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
+    const credFile = `${base}/.gitcred`;
+    const ref = src.gitRef?.trim();
+
+    // Resolve the vault Git credential (kind='git' JSON), if any.
+    let cred: GitCredential | null = null;
+    if (src.credKey) {
+      const raw = await this.secrets.reveal(src.credKey).catch(() => null);
+      if (raw) { try { cred = JSON.parse(raw) as GitCredential; } catch { cred = { secret: raw }; } }
+    }
+    const helper = cred ? `-c credential.helper='store --file=${credFile}'` : '';
+
+    await this.saveGit(instanceId, name, src);
+    try {
+      await runSsh(target.ssh, `mkdir -p '${base}'`);
+      // Write the credential file over stdin so the token never appears in a command line.
+      if (cred?.secret) {
+        const host = cred.host?.trim() || hostFromUrl(src.gitUrl);
+        const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
+        const w = await runSsh(target.ssh, `cat > '${credFile}' && chmod 600 '${credFile}'`, line);
+        if (w.code !== 0) throw new Error('Failed to write git credentials on the host.');
+      }
+
+      // Clone (first time) or fetch + hard-reset to the ref.
+      const isRepo = (await runSsh(target.ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
+      const g = isRepo
+        ? await runSsh(target.ssh, `git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`)
+        : await runSsh(target.ssh, `rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} '${sq(src.gitUrl)}' '${dir}'`);
+      if (g.code !== 0) {
+        const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
+        await this.record(instanceId, project, 'error', detail);
+        return { ok: false, message: `Git ${isRepo ? 'update' : 'clone'} failed: ${detail}` };
+      }
+
+      // Write the .env beside the compose (only if provided).
+      if (src.env != null && src.env !== '') {
+        const we = await runSsh(target.ssh, `mkdir -p '${composeDir}' && cat > '${composeDir}/.env'`, src.env);
+        if (we.code !== 0) throw new Error('Failed to write the .env file on the host.');
+      }
+
+      // Validate, then optional force-rebuild, then up.
+      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' config -q`);
+      if (cfg.code !== 0) {
+        const detail = tail(cfg.stderr || cfg.stdout, 2000);
+        await this.record(instanceId, project, 'error', detail);
+        return { ok: false, message: `Compose validation failed: ${detail}` };
+      }
+      if (opts.forceRebuild) {
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' build --no-cache --pull`);
+        if (b.code !== 0) {
+          const detail = tail(b.stderr || b.stdout, 3000);
+          await this.record(instanceId, project, 'error', detail);
+          return { ok: false, message: `Image rebuild failed: ${detail}` };
+        }
+      }
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' up -d ${composeUpFlags(opts)}`.trim());
+      const out = tail(up.stderr || up.stdout, 4000);
+      if (up.code !== 0) {
+        await this.record(instanceId, project, 'error', out);
+        return { ok: false, message: out || `docker compose exited ${up.code}.` };
+      }
+
+      const commit = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
+      await this.record(instanceId, project, 'success', out);
+      await this.recordRevision(instanceId, project, {
+        compose: '', env: src.env ?? '', source: 'git',
+        gitUrl: src.gitUrl, gitRef: src.gitRef ?? null, gitPath: src.gitPath ?? null, commit,
+      });
+      return { ok: true, message: `Deployed "${project}" from git${commit ? ` @ ${commit.slice(0, 7)}` : ''}.${out ? `\n${out}` : ''}` };
+    } catch (err) {
+      const message = redact(err instanceof Error ? err.message : 'Git deploy failed.', cred);
+      await this.record(instanceId, project, 'error', message);
+      return { ok: false, message };
+    } finally {
+      // Never leave credentials on disk.
+      await runSsh(target.ssh, `rm -f '${credFile}'`).catch(() => { /* best-effort */ });
     }
   }
 
@@ -132,20 +269,32 @@ export class DockerStackService {
     const stored = await this.get(instanceId, name);
     if (!stored) return { ok: false, message: "This stack isn't managed by Cerebro — no stored compose to compare against." };
 
-    const file = `${trimSlash(target.stacksDir)}/${project}/docker-compose.yml`;
+    const file = await this.composeFileFor(target, instanceId, name);
     const lines: string[] = [];
     let drift = false;
 
     try {
-      // 1) File drift — the compose on the host vs. the version Cerebro deployed.
-      const read = await runSsh(target.ssh, `cat '${file}' 2>/dev/null || true`);
-      const hostFile = read.stdout;
-      if (!hostFile.trim()) {
-        lines.push(`⚠ No compose file found on the host at ${file}.`); drift = true;
-      } else if (normalizeCompose(hostFile) !== normalizeCompose(stored.compose)) {
-        lines.push('⚠ The compose file on the host DIFFERS from the version Cerebro stored (edited out of band?).'); drift = true;
+      // 1) Source drift.
+      if (stored.source === 'git') {
+        // Git stacks: compare the deployed commit to the remote tip of the ref.
+        const dir = `${trimSlash(target.stacksDir)}/${project}/repo`;
+        const ref = stored.gitRef?.trim();
+        const local = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD 2>/dev/null || true`)).stdout.trim();
+        const remote = (await runSsh(target.ssh, `git -C '${dir}' ls-remote origin ${ref ? `'${ref}'` : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
+        if (local && remote && local !== remote) { lines.push(`⚠ Repo has moved: deployed ${local.slice(0, 7)}, ${ref || 'HEAD'} is now ${remote.slice(0, 7)}. Redeploy to update.`); drift = true; }
+        else if (local) lines.push(`✓ On the latest commit for ${ref || 'the default branch'} (${local.slice(0, 7)}).`);
+        else lines.push('⚠ No git checkout found on the host.');
       } else {
-        lines.push("✓ Compose file on the host matches Cerebro's stored version.");
+        // Compose stacks: the compose on the host vs. the version Cerebro deployed.
+        const read = await runSsh(target.ssh, `cat '${file}' 2>/dev/null || true`);
+        const hostFile = read.stdout;
+        if (!hostFile.trim()) {
+          lines.push(`⚠ No compose file found on the host at ${file}.`); drift = true;
+        } else if (normalizeCompose(hostFile) !== normalizeCompose(stored.compose)) {
+          lines.push('⚠ The compose file on the host DIFFERS from the version Cerebro stored (edited out of band?).'); drift = true;
+        } else {
+          lines.push("✓ Compose file on the host matches Cerebro's stored version.");
+        }
       }
 
       // 2) Runtime drift — expected services vs. what's actually up.
@@ -173,10 +322,19 @@ export class DockerStackService {
     return { ok: true, message: `${drift ? 'DRIFT DETECTED' : 'IN SYNC'}\n\n${lines.join('\n')}` };
   }
 
+  /** The host path to a stored stack's compose file (repo path for git stacks). */
+  private async composeFileFor(target: StackDeployTarget, instanceId: string, name: string): Promise<string> {
+    const project = projectName(name);
+    const base = `${trimSlash(target.stacksDir)}/${project}`;
+    const stored = await this.get(instanceId, name).catch(() => null);
+    if (stored?.source === 'git') return `${base}/repo/${(stored.gitPath?.trim() || 'docker-compose.yml').replace(/^\/+/, '')}`;
+    return `${base}/docker-compose.yml`;
+  }
+
   /** `docker compose down` for a stored stack. */
   async down(target: StackDeployTarget, instanceId: string, name: string): Promise<StackRunResult> {
     const project = projectName(name);
-    const file = `${trimSlash(target.stacksDir)}/${project}/docker-compose.yml`;
+    const file = await this.composeFileFor(target, instanceId, name);
     try {
       const res = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' down`);
       const out = tail(res.stderr || res.stdout);
@@ -192,10 +350,18 @@ export class DockerStackService {
   private static readonly MAX_REVISIONS = 10;
 
   /** Snapshot a deployed version and prune old ones. Best-effort. */
-  private async recordRevision(instanceId: string, project: string, compose: string, env: string): Promise<void> {
+  private async recordRevision(
+    instanceId: string,
+    project: string,
+    rev: { compose: string; env: string; source: string; gitUrl?: string | null; gitRef?: string | null; gitPath?: string | null; commit?: string | null },
+  ): Promise<void> {
     try {
       await this.prisma.dockerStackRevision.create({
-        data: { connectorInstanceId: instanceId, name: project, compose, env: env || null },
+        data: {
+          connectorInstanceId: instanceId, name: project,
+          compose: rev.compose, env: rev.env || null,
+          source: rev.source, gitUrl: rev.gitUrl ?? null, gitRef: rev.gitRef ?? null, gitPath: rev.gitPath ?? null, commit: rev.commit ?? null,
+        },
       });
       const old = await this.prisma.dockerStackRevision.findMany({
         where: { connectorInstanceId: instanceId, name: project },
@@ -262,6 +428,32 @@ export function projectName(name: string): string {
 
 function trimSlash(p: string): string {
   return (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
+}
+
+/** `docker compose up` flags from the deploy options (shared by compose + git deploys). */
+function composeUpFlags(opts: StackDeployOpts): string {
+  return [
+    opts.pull ? '--pull always' : '',
+    (opts.build || opts.forceRebuild) ? '--build' : '',
+    (opts.forceRecreate || opts.forceRebuild) ? '--force-recreate' : '',
+    opts.removeOrphans ? '--remove-orphans' : '',
+  ].filter(Boolean).join(' ');
+}
+
+/** Escape a string for safe embedding inside single quotes in a shell command. */
+function sq(s: string): string {
+  return (s || '').replace(/'/g, `'\\''`);
+}
+
+/** Hostname from a git URL, for the credential-store line. */
+function hostFromUrl(url: string): string {
+  try { return new URL(url).host; } catch { return (url.match(/^https?:\/\/([^/]+)/i)?.[1]) ?? ''; }
+}
+
+/** Strip a credential's secret out of any host output before it's stored/shown. */
+function redact(text: string, cred: GitCredential | null): string {
+  if (!cred?.secret) return text;
+  return (text || '').split(cred.secret).join('***');
 }
 
 /** Normalize compose text for a stable comparison: strip trailing spaces + blank-line noise. */

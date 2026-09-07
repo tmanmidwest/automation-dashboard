@@ -244,6 +244,8 @@ model SecretMeta {
   /// Human label, e.g. "Proxmox API token (home)".
   label             String
   description       String?
+  /// Shape of the stored value: 'generic' (a single value) | 'git' (JSON {host,username,secret}).
+  kind              String    @default("generic")
   /// Grouping: 'connector' | 'notification' | 'api' | 'manual'.
   category          String    @default("manual")
   /// The ConnectorInstance this belongs to, when category='connector'.
@@ -271,10 +273,18 @@ model DockerStack {
   connectorInstanceId String
   /// Compose project name (lowercased, unique per connector).
   name                String
-  /// The compose YAML (the source of truth Cerebro stores/edits).
+  /// Where the compose comes from: 'compose' (stored YAML) | 'git' (a repo).
+  source              String   @default("compose")
+  /// The compose YAML (source of truth for source='compose'; empty for git).
   compose             String
   /// Optional `.env` file contents (KEY=value lines), written beside the compose.
   env                 String?
+  /// Git source (source='git'): repo URL, ref (branch/tag/commit), path to the compose within the repo.
+  gitUrl              String?
+  gitRef              String?
+  gitPath             String?
+  /// Vault secret key (kind='git') used to authenticate a private repo; null = public.
+  gitCredKey          String?
   /// Outcome of the last deploy: never | success | error.
   lastStatus          String   @default("never")
   lastMessage         String?
@@ -295,6 +305,13 @@ model DockerStackRevision {
   name                String
   compose             String
   env                 String?
+  /// Git source snapshot (source='git') so a git stack can roll back to an exact commit.
+  source              String   @default("compose")
+  gitUrl              String?
+  gitRef              String?
+  gitPath             String?
+  /// The commit SHA that was deployed (git stacks) — rollback checks this out.
+  commit              String?
   createdAt           DateTime @default(now())
 
   @@index([connectorInstanceId, name, createdAt])

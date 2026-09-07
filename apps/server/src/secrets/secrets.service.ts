@@ -162,6 +162,7 @@ export class SecretsService implements OnModuleInit {
     meta: {
       label: string;
       description: string | null;
+      kind: string;
       category: string;
       owningConnectorId: string | null;
       rotateAfterDays: number | null;
@@ -181,6 +182,7 @@ export class SecretsService implements OnModuleInit {
       key,
       label: meta?.label ?? inferred.label,
       description: meta?.description ?? null,
+      kind: (meta?.kind ?? 'generic') as SecretSummary['kind'],
       category: (meta?.category ?? inferred.category) as SecretCategory,
       owningConnectorId: meta?.owningConnectorId ?? inferred.owningConnectorId ?? null,
       rotateAfterDays,
@@ -226,6 +228,7 @@ function cleanMeta(meta?: SecretMetaInput): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (meta.label !== undefined) out.label = meta.label;
   if (meta.description !== undefined) out.description = meta.description;
+  if (meta.kind !== undefined) out.kind = meta.kind;
   if (meta.category !== undefined) out.category = meta.category;
   if (meta.rotateAfterDays !== undefined) out.rotateAfterDays = meta.rotateAfterDays;
   if (meta.expiresAt !== undefined) out.expiresAt = meta.expiresAt ? new Date(meta.expiresAt) : null;

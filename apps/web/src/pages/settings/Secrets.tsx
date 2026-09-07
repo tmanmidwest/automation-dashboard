@@ -51,8 +51,8 @@ export function Secrets() {
 
   // Create-new-secret dialog state.
   const [creating, setCreating] = useState(false);
-  const [newSecret, setNewSecret] = useState<{ key: string; label: string; category: SecretCategory; value: string }>({
-    key: '', label: '', category: 'manual', value: '',
+  const [newSecret, setNewSecret] = useState<{ key: string; label: string; category: SecretCategory; value: string; kind: 'generic' | 'git'; gitHost: string; gitUsername: string }>({
+    key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '',
   });
 
   async function load() {
@@ -106,13 +106,18 @@ export function Secrets() {
     setBusy(true);
     setErr(null);
     try {
+      // Git credentials are stored as one JSON value {host, username, secret}, kind='git'.
+      const value = newSecret.kind === 'git'
+        ? JSON.stringify({ host: newSecret.gitHost.trim(), username: newSecret.gitUsername.trim(), secret: newSecret.value })
+        : newSecret.value;
       await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
-        value: newSecret.value,
+        value,
         label: newSecret.label.trim() || key,
+        kind: newSecret.kind,
         category: newSecret.category,
       });
       setCreating(false);
-      setNewSecret({ key: '', label: '', category: 'manual', value: '' });
+      setNewSecret({ key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '' });
       await load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to create secret');
@@ -142,7 +147,7 @@ export function Secrets() {
       <PageHeader
         title="Secrets Vault"
         description="Every stored credential, encrypted at rest. Values can be rotated but are never shown."
-        actions={canWrite ? <Button onClick={() => { setNewSecret({ key: '', label: '', category: 'manual', value: '' }); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
+        actions={canWrite ? <Button onClick={() => { setNewSecret({ key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '' }); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
       />
 
       {err && !editing && !creating && (
@@ -243,34 +248,63 @@ export function Secrets() {
         )}
         <div className="space-y-4">
           <div>
+            <Label>Type</Label>
+            <select
+              value={newSecret.kind}
+              onChange={(e) => setNewSecret((s) => ({ ...s, kind: e.target.value as 'generic' | 'git' }))}
+              className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
+            >
+              <option value="generic">Generic secret</option>
+              <option value="git">Git credential</option>
+            </select>
+          </div>
+          <div>
             <Label>Key</Label>
-            <Input value={newSecret.key} placeholder="docker-ssh"
+            <Input value={newSecret.key} placeholder={newSecret.kind === 'git' ? 'github-pat' : 'docker-ssh'}
               onChange={(e) => setNewSecret((s) => ({ ...s, key: e.target.value }))} />
             <p className="mt-1 text-xs text-muted-foreground">A unique id used to reference this secret. Cannot be changed later.</p>
           </div>
           <div>
             <Label>Label</Label>
-            <Input value={newSecret.label} placeholder="Docker host SSH password"
+            <Input value={newSecret.label} placeholder={newSecret.kind === 'git' ? 'GitHub deploy token' : 'Docker host SSH password'}
               onChange={(e) => setNewSecret((s) => ({ ...s, label: e.target.value }))} />
           </div>
+          {newSecret.kind === 'git' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Host</Label>
+                <Input value={newSecret.gitHost} placeholder="github.com"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, gitHost: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Username</Label>
+                <Input value={newSecret.gitUsername} placeholder="x-access-token"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, gitUsername: e.target.value }))} />
+              </div>
+            </div>
+          )}
+          {newSecret.kind === 'generic' && (
+            <div>
+              <Label>Category</Label>
+              <select
+                value={newSecret.category}
+                onChange={(e) => setNewSecret((s) => ({ ...s, category: e.target.value as SecretCategory }))}
+                className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
+              >
+                <option value="manual">Manual</option>
+                <option value="connector">Connector</option>
+                <option value="notification">Notification</option>
+                <option value="api">API &amp; Auth</option>
+              </select>
+            </div>
+          )}
           <div>
-            <Label>Category</Label>
-            <select
-              value={newSecret.category}
-              onChange={(e) => setNewSecret((s) => ({ ...s, category: e.target.value as SecretCategory }))}
-              className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
-            >
-              <option value="manual">Manual</option>
-              <option value="connector">Connector</option>
-              <option value="notification">Notification</option>
-              <option value="api">API &amp; Auth</option>
-            </select>
-          </div>
-          <div>
-            <Label>Value</Label>
+            <Label>{newSecret.kind === 'git' ? 'Token / Password' : 'Value'}</Label>
             <Input type="password" autoComplete="new-password" placeholder="••••••••" value={newSecret.value}
               onChange={(e) => setNewSecret((s) => ({ ...s, value: e.target.value }))} />
-            <p className="mt-1 text-xs text-muted-foreground">Stored encrypted; never shown again after this.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {newSecret.kind === 'git' ? 'A personal-access-token or password. Stored encrypted with the host/username as one credential.' : 'Stored encrypted; never shown again after this.'}
+            </p>
           </div>
         </div>
       </Dialog>
