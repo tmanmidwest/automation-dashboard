@@ -21,6 +21,8 @@ export function bridgeDockerRaw(client: WebSocket, raw: RawConsoleUpstream, logg
   let headersParsed = false;
   let head = Buffer.alloc(0); // accumulates response bytes until headers end
   let frame = Buffer.alloc(0); // accumulates body bytes for multiplexed demux
+  let chunked = false; // response used Transfer-Encoding: chunked (e.g. proxied logs)
+  let chunkBuf = Buffer.alloc(0); // accumulates bytes for de-chunking
 
   let closed = false;
   const cleanup = () => {
@@ -49,13 +51,40 @@ export function bridgeDockerRaw(client: WebSocket, raw: RawConsoleUpstream, logg
         return;
       }
       headersParsed = true;
+      chunked = /^transfer-encoding:\s*chunked/im.test(headerText);
+      const firstLine = headerText.split('\r\n')[0];
+      logger.log(`Docker ${raw.readOnly ? 'logs' : 'exec'} stream: ${firstLine}${chunked ? ' [chunked]' : ''} framing=${raw.framing}`);
       const rest = head.slice(idx + HEADER_TERMINATOR.length);
       head = Buffer.alloc(0);
-      if (rest.length) forwardBody(rest);
+      if (rest.length) onBody(rest);
       return;
     }
-    forwardBody(chunk);
+    onBody(chunk);
   });
+
+  /** Bytes after the response headers: un-chunk first (if the response is chunked), then demux/forward. */
+  function onBody(chunk: Buffer) {
+    const bytes = chunked ? dechunk(chunk) : chunk;
+    if (bytes.length) forwardBody(bytes);
+  }
+
+  /** Strip HTTP chunked framing, returning the decoded payload bytes from complete chunks. */
+  function dechunk(chunk: Buffer): Buffer {
+    chunkBuf = Buffer.concat([chunkBuf, chunk]);
+    const parts: Buffer[] = [];
+    for (;;) {
+      const nl = chunkBuf.indexOf('\r\n');
+      if (nl < 0) break; // size line not complete yet
+      const size = parseInt(chunkBuf.slice(0, nl).toString('ascii').split(';')[0].trim(), 16);
+      if (!Number.isFinite(size)) break; // wait for a clean size line
+      if (size === 0) { chunkBuf = Buffer.alloc(0); break; } // last chunk (+ trailers)
+      const dataStart = nl + 2;
+      if (chunkBuf.length < dataStart + size + 2) break; // need full data + trailing CRLF
+      parts.push(chunkBuf.slice(dataStart, dataStart + size));
+      chunkBuf = chunkBuf.slice(dataStart + size + 2);
+    }
+    return parts.length ? Buffer.concat(parts) : Buffer.alloc(0);
+  }
 
   function forwardBody(chunk: Buffer) {
     if (client.readyState !== WebSocket.OPEN) return;

@@ -132,8 +132,9 @@ export function DockerFleet() {
     es.onmessage = (e) => {
       const cur = fleetRef.current;
       if (!cur) return;
-      let evt: { instanceId: string; resource: LiveResource };
+      let evt: { instanceId?: string; resource?: LiveResource };
       try { evt = JSON.parse(e.data); } catch { return; }
+      if (!evt?.instanceId || !evt.resource) return; // heartbeat / non-event → ignore
       const { fleet: next, needsRefresh } = applyLiveEvent(cur, evt.instanceId, evt.resource);
       fleetRef.current = next;
       setFleet(next);

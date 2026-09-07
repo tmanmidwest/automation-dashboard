@@ -1311,10 +1311,15 @@ export class DockerConnector implements Connector {
       '[ -x /bin/bash ] && exec /bin/bash || exec /bin/sh',
     ]);
     const body = JSON.stringify({ Detach: false, Tty: true });
+    // Connection: Upgrade / Upgrade: tcp makes the daemon do a proper bidirectional
+    // hijack (101 UPGRADED). Without it, a proxy in front (e.g. the docker-socket-proxy
+    // / HAProxy) only tunnels the output direction and keystrokes never reach stdin.
     const request =
       `POST /exec/${execId}/start HTTP/1.1\r\n` +
       `Host: docker\r\n` +
       `Content-Type: application/json\r\n` +
+      `Connection: Upgrade\r\n` +
+      `Upgrade: tcp\r\n` +
       `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body;
     ctx.log('info', `Docker exec shell opened for ${resourceId.slice(0, 12)}.`);

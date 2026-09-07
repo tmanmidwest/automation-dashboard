@@ -180,6 +180,14 @@ with **zero agent**.
 >
 > **Socket-proxy note:** exec needs `EXEC=1` + `POST=1` on the proxy; logs works read-only with
 > just `CONTAINERS=1`. The TLS transport does it all with no toggles.
+>
+> **Through a proxy (HAProxy / docker-socket-proxy) two fixes were needed** (a direct socket/TLS
+> hid them): the exec-start request sends `Connection: Upgrade` + `Upgrade: tcp` so the daemon does a
+> real bidirectional hijack (`101 UPGRADED`) — without it a proxy only tunnels stdout and keystrokes
+> never reach stdin; and the console bridge now **de-chunks** the response (`Transfer-Encoding:
+> chunked`, which a proxy adds to streaming responses) before de-muxing, otherwise the log stream's
+> chunk-size lines are read as frame headers and nothing renders. The bridge logs the response status
+> line (e.g. `101 UPGRADED`, `200 OK [chunked]`) once per open for diagnosis.
 
 **Deliverable:** watch containers flip live, tail logs, and drop into a shell.
 

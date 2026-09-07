@@ -1,5 +1,5 @@
 import { Controller, Get, Query, Sse, MessageEvent } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Observable, interval, map, merge } from 'rxjs';
 import { DockerFleetService } from './docker-fleet.service';
 import { RequirePermissions } from '../auth/decorators';
 
@@ -26,7 +26,7 @@ export class DockerFleetController {
   @Sse('fleet/live')
   @RequirePermissions('connectors:read')
   live(): Observable<MessageEvent> {
-    return new Observable<MessageEvent>((subscriber) => {
+    const events = new Observable<MessageEvent>((subscriber) => {
       let unsubscribe: (() => void) | undefined;
       let closed = false;
       this.fleet
@@ -35,5 +35,9 @@ export class DockerFleetController {
         .catch((err) => subscriber.error(err));
       return () => { closed = true; unsubscribe?.(); };
     });
+    // Heartbeat: keeps the long-lived stream from idling out behind a proxy/CDN.
+    // The client ignores any message without an instanceId+resource.
+    const heartbeat = interval(20_000).pipe(map((): MessageEvent => ({ data: { ping: Date.now() } })));
+    return merge(events, heartbeat);
   }
 }
