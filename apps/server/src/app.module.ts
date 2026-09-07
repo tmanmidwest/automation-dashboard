@@ -23,6 +23,7 @@ import { OAuthModule } from './oauth/oauth.module';
 import { TimelineModule } from './timeline/timeline.module';
 import { SecretsModule } from './secrets/secrets.module';
 import { AutomationsModule } from './automations/automations.module';
+import { DockerFleetModule } from './docker-fleet/docker-fleet.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -55,6 +56,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     TimelineModule,
     SecretsModule,
     AutomationsModule,
+    DockerFleetModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.
