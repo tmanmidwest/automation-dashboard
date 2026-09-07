@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Loader2, RefreshCw, Server, ChevronRight, ChevronDown, Play, Square, RotateCw,
-  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, Ban, GitCompare,
+  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, Ban, GitCompare, Pencil,
 } from 'lucide-react';
-import type { DockerFleet, FleetHost, FleetStack, FleetMember } from '@cerebro/shared';
+import type { DockerFleet, FleetHost, FleetStack, FleetMember, ConnectorManifest, ConnectorOperation } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
+import { OperationDialog } from '@/components/OperationDialog';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -108,6 +109,16 @@ export function DockerFleet() {
   const [expandedStacks, setExpandedStacks] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<Set<string>>(new Set());
+  // Docker manifest operations (same for every host) + the currently-open operation dialog.
+  const [ops, setOps] = useState<ConnectorOperation[]>([]);
+  const [activeOp, setActiveOp] = useState<{ operation: ConnectorOperation; instanceId: string; resourceId?: string } | null>(null);
+  useEffect(() => {
+    api.get<ConnectorManifest>('/api/connectors/available/docker').then((m) => setOps(m.operations ?? [])).catch(() => {});
+  }, []);
+  const openOp = (opId: string, instanceId: string, resourceId?: string) => {
+    const operation = ops.find((o) => o.id === opId);
+    if (operation) setActiveOp({ operation, instanceId, resourceId });
+  };
 
   async function load(manual = false) {
     if (manual) setRefreshing(true);
@@ -171,8 +182,6 @@ export function DockerFleet() {
     withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/resources/container/${encodeURIComponent(m.id)}/actions/${actionId}`, {}), `${actionId} ${m.name}`);
   const containerRecreate = (m: FleetMember) =>
     withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } }), `Recreating ${m.name}…`);
-  const stackOp = (s: FleetStack, opId: string, label: string) =>
-    withBusy([`${s.instanceId}::${s.id}`], () => api.post(`/api/connectors/instances/${s.instanceId}/operations/${opId}`, { resourceId: s.id, values: {} }), `${label} ${s.name}…`);
   const openConsole = (m: FleetMember, mode: 'shell' | 'logs') =>
     navigate(`/connectors/${m.instanceId}/console/container/${encodeURIComponent(m.id)}?mode=${mode}`);
 
@@ -191,12 +200,12 @@ export function DockerFleet() {
   if (!fleet && !err) return <div className="py-20 text-center text-muted-foreground"><Loader2 className="h-6 w-6 animate-spin inline" /></div>;
 
   const t = fleet?.totals;
-  const tiles: { key: Focus; label: string; value: number; tone?: 'warn' | 'bad' | 'good' }[] = [
+  const tiles: { key: Focus; label: string; value: number; tone?: 'warn' | 'bad' | 'good'; view?: 'stacks' }[] = [
     { key: null, label: 'Hosts', value: t ? t.online : 0 },
     { key: 'running', label: 'Running', value: t?.running ?? 0, tone: 'good' },
     { key: 'unhealthy', label: 'Unhealthy', value: t?.unhealthy ?? 0, tone: 'bad' },
     { key: 'stopped', label: 'Stopped', value: t?.stopped ?? 0 },
-    { key: null, label: 'Stacks', value: t?.stacks ?? 0 },
+    { key: null, label: 'Stacks', value: t?.stacks ?? 0, view: 'stacks' },
     { key: 'updates', label: 'Updates', value: t?.updates ?? 0, tone: 'warn' },
     { key: null, label: 'Disk', value: t?.diskUsedGb ?? 0 },
   ];
@@ -220,11 +229,15 @@ export function DockerFleet() {
       {/* Summary strip */}
       <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
         {tiles.map((tile, i) => {
-          const active = tile.key !== null && focus === tile.key;
-          const clickable = tile.key !== null;
+          const active = (tile.key !== null && focus === tile.key) || (tile.view === 'stacks' && view === 'stacks' && !focus);
+          const clickable = tile.key !== null || !!tile.view;
+          const onTile = () => {
+            if (tile.view) { setView(tile.view); setFocus(null); }
+            else if (tile.key !== null) setFocus(active ? null : tile.key);
+          };
           return (
             <button key={i} disabled={!clickable}
-              onClick={() => clickable && setFocus(active ? null : tile.key)}
+              onClick={onTile}
               className={cn('rounded-lg border px-3 py-2 text-left transition-colors',
                 active ? 'border-primary bg-primary/10'
                   : clickable ? 'border-border bg-card hover:border-primary/40' : 'border-border bg-card',
@@ -279,8 +292,19 @@ export function DockerFleet() {
       )}
 
       {view === 'stacks'
-        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, stackOp, openConsole, memberKey }} />
+        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, openConsole, memberKey }} />
         : <ContainersView members={allMembers.filter((x) => memberVisible(x.m, x.stack))} {...{ selected, setSelected, busy, canAct, containerAction, containerRecreate, openConsole, memberKey }} />}
+
+      {activeOp && (
+        <OperationDialog
+          operation={activeOp.operation}
+          instanceId={activeOp.instanceId}
+          resourceId={activeOp.resourceId}
+          open={!!activeOp}
+          onClose={() => setActiveOp(null)}
+          onDone={() => { setActiveOp(null); load(true); }}
+        />
+      )}
     </>
   );
 }
@@ -294,7 +318,7 @@ function StacksView(p: {
   expandedStacks: Set<string>; setExpandedStacks: (s: Set<string>) => void;
   selected: Set<string>; setSelected: (s: Set<string>) => void; busy: Set<string>; canAct: boolean;
   containerAction: (m: FleetMember, a: string) => void; containerRecreate: (m: FleetMember) => void;
-  stackOp: (s: FleetStack, op: string, label: string) => void; openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
+  openOp: (opId: string, instanceId: string, resourceId?: string) => void; openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
   memberKey: (m: FleetMember) => string;
 }) {
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void, id: string) => {
@@ -348,10 +372,11 @@ function StacksView(p: {
                             </button>
                             {p.canAct && s.managed && (
                               <div className="flex items-center gap-0.5 shrink-0">
-                                <IconBtn title="Redeploy" onClick={() => p.stackOp(s, 'redeploy-stack', 'Redeploy')}><Rocket className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Roll back" onClick={() => p.stackOp(s, 'rollback-stack', 'Rollback')}><History className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Check drift" onClick={() => p.stackOp(s, 'stack-check-drift', 'Drift-check')}><GitCompare className="h-4 w-4" /></IconBtn>
-                                <IconBtn title="Stop (compose down)" onClick={() => p.stackOp(s, 'stop-stack', 'Stop')}><Ban className="h-4 w-4 text-destructive" /></IconBtn>
+                                <IconBtn title="Edit & redeploy" onClick={() => p.openOp('edit-stack', s.instanceId, s.id)}><Pencil className="h-4 w-4" /></IconBtn>
+                                <IconBtn title="Redeploy (pull / recreate options)" onClick={() => p.openOp('redeploy-stack', s.instanceId, s.id)}><Rocket className="h-4 w-4" /></IconBtn>
+                                <IconBtn title="Roll back to previous" onClick={() => p.openOp('rollback-stack', s.instanceId, s.id)}><History className="h-4 w-4" /></IconBtn>
+                                <IconBtn title="Check drift" onClick={() => p.openOp('stack-check-drift', s.instanceId, s.id)}><GitCompare className="h-4 w-4" /></IconBtn>
+                                <IconBtn title="Stop (compose down)" onClick={() => p.openOp('stop-stack', s.instanceId, s.id)}><Ban className="h-4 w-4 text-destructive" /></IconBtn>
                               </div>
                             )}
                           </div>
