@@ -342,10 +342,16 @@ stored stack, or shell history, and cleaned up after. Rotating the vault entry f
   resolve at `buildContext` time.
 
 ### Phasing
-- **Phase 1 (this pass):** vault git-credential type; git-source deploy with HTTPS auth + build/force-rebuild;
-  the deploy/edit/redeploy UI (source toggle, git fields, credential picker, build options).
-- **Phase 2:** fleet polish — "import as git" for unmanaged stacks, a force-rebuild button on stack rows,
-  rollback-to-commit UI.
+- **Phase 1 (built + verified):** vault git-credential type; git-source deploy with HTTPS auth +
+  build/force-rebuild; the deploy/edit/redeploy UI (source toggle, git fields, credential picker,
+  build options).
+- **Phase 2 (built):** fleet "import as git" (the unmanaged-stack Import button opens the deploy dialog,
+  which now carries the source toggle); a one-click **Force rebuild** (🔨) button on managed fleet stack
+  rows; deploy history shows the deployed **commit SHA** for git revisions; and stack **delete now removes
+  the host directory** (`DockerStackService.purgeDir`) — for git that's the whole cloned repo, not just a
+  compose file.
+- **Later:** a pick-any-revision rollback UI (one-step rollback + per-revision commits already exist);
+  private-repo live test with a vault Git credential.
 
 ## Still open / future
 

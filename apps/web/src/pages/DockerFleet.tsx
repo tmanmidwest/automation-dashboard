@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Loader2, RefreshCw, Server, ChevronRight, ChevronDown, Play, Square, RotateCw,
-  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, GitCompare, Pencil,
+  Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, GitCompare, Pencil, Hammer,
 } from 'lucide-react';
 import type { DockerFleet, FleetHost, FleetStack, FleetMember, ConnectorManifest, ConnectorOperation } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -207,6 +207,15 @@ export function DockerFleet() {
       setMsg(`Updating "${s.name}": ${s.members.length - failed} started${failed ? `, ${failed} failed` : ''}.`);
     });
   };
+  // One-click force-rebuild (managed stacks): git pull + `build --no-cache --pull` + recreate.
+  const stackForceRebuild = (s: FleetStack) => {
+    if (!confirm(`Force-rebuild "${s.name}"?\nPulls the source and rebuilds images with --no-cache, then recreates.`)) return;
+    return withBusy(
+      [`${s.instanceId}::${s.id}`],
+      () => api.post(`/api/connectors/instances/${s.instanceId}/operations/redeploy-stack`, { resourceId: s.id, values: { forceRebuild: true, pull: true } }),
+      `Force-rebuilding "${s.name}"…`,
+    );
+  };
   const openConsole = (m: FleetMember, mode: 'shell' | 'logs') =>
     navigate(`/connectors/${m.instanceId}/console/container/${encodeURIComponent(m.id)}?mode=${mode}`);
 
@@ -317,7 +326,7 @@ export function DockerFleet() {
       )}
 
       {view === 'stacks'
-        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, stackAction, stackUpdate, openConsole, memberKey }} />
+        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, stackAction, stackUpdate, stackForceRebuild, openConsole, memberKey }} />
         : <ContainersView members={allMembers.filter((x) => memberVisible(x.m, x.stack))} {...{ selected, setSelected, busy, canAct, containerAction, containerRecreate, openConsole, memberKey }} />}
 
       {activeOp && (
@@ -345,7 +354,7 @@ function StacksView(p: {
   selected: Set<string>; setSelected: (s: Set<string>) => void; busy: Set<string>; canAct: boolean;
   containerAction: (m: FleetMember, a: string) => void; containerRecreate: (m: FleetMember) => void;
   openOp: (opId: string, instanceId: string, resourceId?: string, seed?: Record<string, unknown>) => void;
-  stackAction: (s: FleetStack, actionId: string) => void; stackUpdate: (s: FleetStack) => void;
+  stackAction: (s: FleetStack, actionId: string) => void; stackUpdate: (s: FleetStack) => void; stackForceRebuild: (s: FleetStack) => void;
   openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
   memberKey: (m: FleetMember) => string;
 }) {
@@ -402,15 +411,16 @@ function StacksView(p: {
                               <div className="flex items-center gap-0.5 shrink-0">
                                 {/* Compose management — only for Cerebro-managed stacks (we hold their compose). */}
                                 {s.managed && <>
-                                  <IconBtn title="Edit & redeploy (compose)" onClick={() => p.openOp('edit-stack', s.instanceId, s.id)}><Pencil className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Edit & redeploy" onClick={() => p.openOp('edit-stack', s.instanceId, s.id)}><Pencil className="h-4 w-4" /></IconBtn>
                                   <IconBtn title="Redeploy (pull / recreate options)" onClick={() => p.openOp('redeploy-stack', s.instanceId, s.id)}><Rocket className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Force rebuild (pull + build --no-cache + recreate)" onClick={() => p.stackForceRebuild(s)}><Hammer className="h-4 w-4" /></IconBtn>
                                   <IconBtn title="Roll back to previous" onClick={() => p.openOp('rollback-stack', s.instanceId, s.id)}><History className="h-4 w-4" /></IconBtn>
                                   <IconBtn title="Check drift" onClick={() => p.openOp('stack-check-drift', s.instanceId, s.id)}><GitCompare className="h-4 w-4" /></IconBtn>
                                 </>}
                                 {/* Unmanaged stacks: one-click update (pull+recreate every member) + import path. */}
                                 {!s.managed && <>
                                   <IconBtn title="Update stack (pull latest image + recreate every container)" onClick={() => p.stackUpdate(s)}><ArrowUpCircle className={cn('h-4 w-4', s.updates > 0 && 'text-amber-400')} /></IconBtn>
-                                  <IconBtn title="Import compose (paste it so Cerebro can edit/redeploy this stack)" onClick={() => p.openOp('deploy-stack', s.instanceId, undefined, { name: s.id })}><Rocket className="h-4 w-4" /></IconBtn>
+                                  <IconBtn title="Import to manage (paste compose or point at a git repo)" onClick={() => p.openOp('deploy-stack', s.instanceId, undefined, { name: s.id })}><Rocket className="h-4 w-4" /></IconBtn>
                                 </>}
                                 {/* Whole-stack lifecycle — works on ANY stack (acts on its containers). */}
                                 {STACK_STOPPED.has(s.status)

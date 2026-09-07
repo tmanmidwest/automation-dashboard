@@ -646,11 +646,13 @@ export class DockerConnector implements Connector {
         if (!ctx.instanceId) return { ok: false, message: 'Missing connector instance.' };
         const stored = await this.stacks.get(ctx.instanceId, resourceId);
         if (stored) {
-          // Managed: compose down (best-effort) then forget the stored stack.
+          // Managed: compose down + remove the host dir (best-effort), then forget the stored stack.
           try {
-            await this.stacks.down(this.sshTargetFrom(ctx), ctx.instanceId, resourceId);
+            const target = this.sshTargetFrom(ctx);
+            await this.stacks.down(target, ctx.instanceId, resourceId);
+            await this.stacks.purgeDir(target, resourceId); // remove the compose/repo files we wrote
           } catch (err) {
-            ctx.log('debug', `Stack down before delete failed: ${err instanceof Error ? err.message : err}`);
+            ctx.log('debug', `Stack teardown before delete failed: ${err instanceof Error ? err.message : err}`);
           }
           await this.stacks.remove(ctx.instanceId, resourceId);
           ctx.log('info', `Docker removed managed stack ${resourceId}.`);
@@ -1263,7 +1265,9 @@ export class DockerConnector implements Connector {
           title: 'Deploy history',
           items: revs.map((r, i) => ({
             label: i === 0 ? 'Current' : `#${revs.length - i}`,
-            value: rel(r.createdAt.toISOString()) ?? r.createdAt.toISOString(),
+            // Show the git commit for git revisions so rollbacks are legible.
+            value: [rel(r.createdAt.toISOString()) ?? r.createdAt.toISOString(), r.commit ? `@ ${r.commit.slice(0, 7)}` : ''].filter(Boolean).join('  '),
+            variant: r.commit ? ('mono' as const) : undefined,
           })),
         });
       }

@@ -94,6 +94,16 @@ export class DockerStackService {
     });
   }
 
+  /** Remove the on-host directory Cerebro wrote for a stack (compose/.env, or the cloned git repo). */
+  async purgeDir(target: StackDeployTarget, name: string): Promise<void> {
+    const project = projectName(name);
+    if (!project) return;
+    const dir = `${trimSlash(target.stacksDir)}/${project}`;
+    // Guard against a stray empty stacksDir wiping something unexpected.
+    if (!dir.includes(`/${project}`)) return;
+    await runSsh(target.ssh, `rm -rf '${dir}'`).catch(() => { /* best-effort */ });
+  }
+
   /**
    * Write the compose (+ optional `.env`) to the host, validate it, then
    * `docker compose up -d`. Stores compose/env so it can be edited/redeployed,
