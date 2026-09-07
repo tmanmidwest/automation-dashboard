@@ -242,8 +242,9 @@ export interface ConnectorDetailItem {
   label: string;
   value: string;
   /** Optional hint so the UI can style, e.g. 'status', 'mono'. 'link' renders
-   *  `value` as an external link (its href). */
-  variant?: 'default' | 'mono' | 'status' | 'link';
+   *  `value` as an external link (its href). 'warn' renders the value in an
+   *  attention color (amber) — e.g. "update available". */
+  variant?: 'default' | 'mono' | 'status' | 'link' | 'warn';
 }
 
 export interface ConnectorDetailGroup {

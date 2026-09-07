@@ -774,8 +774,13 @@ export class DockerConnector implements Connector {
 
     if (kind === CONTAINER_KIND) {
       const containers = await api.listContainers(true);
+      const updates = await this.updatesByContainerId(api, containers).catch(() => new Map<string, boolean | null>());
       return containers
-        .map((c) => this.containerToResource(c))
+        .map((c) => {
+          const r = this.containerToResource(c);
+          if (c.Id && updates.get(c.Id) === true) r.tags = { ...r.tags, updates: 'available' };
+          return r;
+        })
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
@@ -1043,7 +1048,7 @@ export class DockerConnector implements Connector {
             : cached.hasUpdate === true ? 'Newer image available'
             : cached.hasUpdate === false ? 'Up to date'
             : 'Unknown';
-          general.push({ label: 'Image update', value, variant: cached?.hasUpdate ? 'status' : 'default' });
+          general.push({ label: 'Image update', value, variant: cached?.hasUpdate === true ? 'warn' : 'default' });
         }
       } catch {
         /* best-effort */
@@ -1167,7 +1172,7 @@ export class DockerConnector implements Connector {
         value: outdated > 0 ? `${outdated} update${outdated === 1 ? '' : 's'} available`
           : checkable > 0 ? 'All up to date'
           : 'Unknown',
-        variant: outdated > 0 ? 'status' : 'default',
+        variant: outdated > 0 ? 'warn' : 'default',
       },
       { label: 'Managed by Cerebro', value: stored ? 'Yes' : 'No — lifecycle only' },
     ];

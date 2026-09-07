@@ -684,6 +684,8 @@ export function ConnectorDetail() {
                                       'text-[11px] rounded-md border px-1.5 py-0.5 font-mono transition-colors',
                                       filterActive(k, v)
                                         ? 'border-primary/60 bg-primary/15 text-foreground'
+                                        : k === 'updates'
+                                        ? 'border-amber-500/50 bg-amber-500/15 text-amber-400 hover:border-amber-400'
                                         : 'border-border bg-muted/40 text-muted-foreground hover:border-primary/40 hover:text-foreground',
                                     )}
                                   >
@@ -812,7 +814,8 @@ export function ConnectorDetail() {
                     <div key={i} className="flex justify-between gap-4 py-1.5 text-sm">
                       <dt className="text-muted-foreground shrink-0">{it.label}</dt>
                       <dd className={cn('text-right break-all', it.variant === 'mono' && 'font-mono text-xs',
-                        it.variant === 'status' && 'capitalize')}>
+                        it.variant === 'status' && 'capitalize',
+                        it.variant === 'warn' && 'text-amber-400 font-medium')}>
                         {it.variant === 'link'
                           ? <a href={it.value} target="_blank" rel="noreferrer" className="text-accent hover:underline font-mono text-xs">{it.value}</a>
                           : it.value}

@@ -284,11 +284,13 @@ more than `/info` + `/system/df` deliver.
   newer image, renames the old one aside, creates a new one from the same Config/HostConfig (+ networks),
   swaps them, and removes the old — rolling back on failure. `DockerApi.recreateContainer`. Best for
   standalone containers; compose-managed ones should use a stack redeploy.
-- **Stack image-update status** — the same cached registry-digest check that powers the overview
-  "Updates" tile now surfaces on stacks (`DockerConnector.updatesByContainerId`): the stacks list shows
-  an "N updates" chip on any stack with an outdated member image, and the stack detail shows an
-  "Image updates" summary plus an "update available" marker on each outdated member container. Pairs
-  with **recreate** to pull the newer image.
+- **Stack & container image-update status** — the same cached registry-digest check that powers the
+  overview "Updates" tile now surfaces on stacks and containers (`DockerConnector.updatesByContainerId`):
+  the stacks **and** containers lists show an **amber "updates" chip** on any row with an outdated image,
+  the stack detail shows an amber "Image updates" summary (`warn` detail variant) plus an "update
+  available" marker on each outdated member, and the container detail's "Image update" line turns amber.
+  The `warn` `ConnectorDetailItem` variant and the amber `updates` tag-chip are generic (reusable by any
+  connector). Pairs with **recreate** to pull the newer image.
 
 ## Still open / future
 
