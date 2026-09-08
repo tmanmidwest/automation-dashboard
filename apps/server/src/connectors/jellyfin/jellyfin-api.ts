@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
+import { WebSocket } from 'ws';
 
 export interface JellyfinAuth {
   /** Base URL of the server, e.g. http://10.0.0.5:8096 */
@@ -124,6 +125,52 @@ export class JellyfinApi {
   /** Start a scheduled task now. */
   runTask(taskId: string) {
     return this.request<void>('POST', `/ScheduledTasks/Running/${encodeURIComponent(taskId)}`);
+  }
+
+  /**
+   * Open Jellyfin's WebSocket and stream the live session list. Subscribes with
+   * SessionsStart, answers keep-alives, and calls onSessions on each Sessions push.
+   * Resolves when the caller aborts; rejects if the socket closes/errors otherwise.
+   */
+  watchSessions(onSessions: (sessions: JfSession[]) => void, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(this.wsUrl(), { rejectUnauthorized: !this.auth.insecureSkipVerify, handshakeTimeout: 15000 });
+      } catch (err) {
+        return reject(err instanceof Error ? err : new JellyfinApiError('Failed to open Jellyfin socket.'));
+      }
+      const onAbort = () => { try { ws.close(); } catch { /* ignore */ } };
+      signal.addEventListener('abort', onAbort);
+      ws.on('open', () => {
+        // "startPos,intervalMs" — push the session list every 1.5s.
+        ws.send(JSON.stringify({ MessageType: 'SessionsStart', Data: '0,1500' }));
+      });
+      ws.on('message', (buf: Buffer) => {
+        let m: { MessageType?: string; Data?: unknown };
+        try { m = JSON.parse(buf.toString('utf8')); } catch { return; }
+        if (m.MessageType === 'Sessions' && Array.isArray(m.Data)) onSessions(m.Data as JfSession[]);
+        else if (m.MessageType === 'ForceKeepAlive' || m.MessageType === 'KeepAlive') {
+          try { ws.send(JSON.stringify({ MessageType: 'KeepAlive' })); } catch { /* ignore */ }
+        }
+      });
+      ws.on('close', () => {
+        signal.removeEventListener('abort', onAbort);
+        if (signal.aborted) resolve();
+        else reject(new JellyfinApiError('Jellyfin socket closed.'));
+      });
+      ws.on('error', (err: Error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(new JellyfinApiError(friendly(err)));
+      });
+    });
+  }
+
+  /** ws(s)://host:port/socket?api_key=…&deviceId=cerebro — the live socket. */
+  private wsUrl(): string {
+    const base = new URL(this.baseUrl());
+    const scheme = base.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${scheme}//${base.host}/socket?api_key=${encodeURIComponent(this.auth.apiKey)}&deviceId=cerebro-live`;
   }
 
   private get<T>(path: string): Promise<T> {

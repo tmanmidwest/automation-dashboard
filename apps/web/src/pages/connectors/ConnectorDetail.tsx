@@ -179,6 +179,8 @@ export function ConnectorDetail() {
       if (r.kind !== kindRef.current) return;
       setResources((list) => {
         const idx = list.findIndex((x) => x.id === r.id);
+        // A 'removed' update means the resource is gone (a stream ended, a container destroyed).
+        if (r.status === 'removed') return idx === -1 ? list : list.filter((x) => x.id !== r.id);
         if (idx === -1) return [...list, r];
         const next = list.slice();
         next[idx] = r;

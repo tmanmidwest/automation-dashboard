@@ -66,8 +66,9 @@ export class JellyfinConnector implements Connector {
     name: 'Jellyfin',
     description:
       'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
-    version: '0.2.0',
+    version: '0.3.0',
     icon: 'jellyfin',
+    live: true,
     configFields: [
       { key: 'baseUrl', label: 'Base URL', type: 'text', required: true, placeholder: 'http://10.0.0.5:8096', help: 'Your Jellyfin server URL, including the port.' },
       { key: 'apiKey', label: 'API key', type: 'password', secret: true, required: true, help: 'Dashboard → Administration → API Keys → New API Key.' },
@@ -191,6 +192,38 @@ export class JellyfinConnector implements Connector {
       ctx.log('error', `Jellyfin operation ${operationId} failed: ${message}`);
       return { ok: false, message };
     }
+  }
+
+  /**
+   * Live "Now Playing" via Jellyfin's WebSocket. Pushes each active session as it
+   * changes and emits a `removed` update when a stream ends. Auto-reconnects.
+   */
+  async subscribeLive(ctx: ConnectorContext, onUpdate: (resource: ConnectorResource) => void): Promise<() => void> {
+    const api = this.apiFrom(ctx);
+    const controller = new AbortController();
+    let prevIds = new Set<string>();
+
+    const run = () => {
+      api
+        .watchSessions((sessions) => {
+          const active = sessions.filter((s) => s.NowPlayingItem);
+          const nowIds = new Set(active.map((s) => s.Id));
+          for (const s of active) onUpdate(sessionToResource(s));
+          // A stream that vanished from the list has ended — tell the UI to drop it.
+          for (const id of prevIds) {
+            if (!nowIds.has(id)) onUpdate({ id, kind: SESSION_KIND, name: '', status: 'removed', details: {}, tags: {} });
+          }
+          prevIds = nowIds;
+        }, controller.signal)
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          ctx.log('debug', `Jellyfin live socket ended (${err instanceof Error ? err.message : err}); reconnecting in 5s.`);
+          setTimeout(() => { if (!controller.signal.aborted) run(); }, 5000);
+        });
+    };
+    run();
+    ctx.log('info', 'Jellyfin live session stream subscribed.');
+    return () => controller.abort();
   }
 
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {

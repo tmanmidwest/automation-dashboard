@@ -46,5 +46,10 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
   (`POST /Items/{id}/Refresh`), **Run** a scheduled task (`POST /ScheduledTasks/Running/{id}`). New overview
   metric `tasksFailed`, and alerts `jellyfin.active_streams` + `jellyfin.tasks_failed` (alongside
   `transcodes_high`). Connector v0.2.0. *(User enable/disable deferred — needs the full policy round-trip.)*
-- **Phase 3:** live now-playing via Jellyfin's **WebSocket** session events (`subscribeLive` + `manifest.live`),
-  and timeline events.
+- **Phase 3 (built):** **live Now Playing** via Jellyfin's WebSocket. `JellyfinApi.watchSessions` opens
+  `ws(s)://host/socket?api_key=…`, subscribes (`SessionsStart` at 1.5s), answers keep-alives, and streams the
+  session list; `subscribeLive` (+ `manifest.live`) maps each active session and emits a **`removed`** update
+  when a stream ends. Auto-reconnects (5s). The generic frontend live handler now **drops a row on a
+  `removed` update** (helps Docker's destroyed containers too). Connector v0.3.0. *(Playback/login → Ship's
+  Log timeline events deferred — connectors don't publish to the TimelineBus yet; would need a small
+  bus-publishing hook.)*
