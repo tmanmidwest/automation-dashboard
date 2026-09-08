@@ -13,19 +13,30 @@ import type {
   OperationResult,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { JellyfinApi, JellyfinAuth, JfSession, JfUser, JfVirtualFolder, JfScheduledTask, JfItemCounts } from './jellyfin-api';
+import { JellyfinApi, JellyfinAuth, JfSession, JfUser, JfVirtualFolder, JfScheduledTask, JfItemCounts, JfDevice, JfActivityEntry, JfPlugin, JfSystemInfo } from './jellyfin-api';
 
+const SERVER_KIND = 'server';
 const SESSION_KIND = 'session';
 const USER_KIND = 'user';
 const LIBRARY_KIND = 'library';
 const TASK_KIND = 'task';
+const DEVICE_KIND = 'device';
+const ACTIVITY_KIND = 'activity';
+const PLUGIN_KIND = 'plugin';
 
 const TICKS_PER_SEC = 10_000_000;
 /** Session statuses that mean something is actively playing (drive which controls show). */
 const PLAYING_LIKE = ['playing', 'transcoding'];
 
-/** Phase 2: session/library/task controls. */
 const KINDS: ConnectorResourceKind[] = [
+  {
+    id: SERVER_KIND, label: 'Server', deletable: false,
+    actions: [
+      { id: 'scan-all', label: 'Scan all libraries', mutating: true },
+      { id: 'restart', label: 'Restart', mutating: true, intent: 'destructive', confirm: 'Restart the Jellyfin server? Active streams will drop.' },
+      { id: 'shutdown', label: 'Shut down', mutating: true, intent: 'destructive', confirm: 'Shut down the Jellyfin server? It will go offline until started again.' },
+    ],
+  },
   {
     id: SESSION_KIND, label: 'Now Playing', deletable: false,
     actions: [
@@ -34,9 +45,18 @@ const KINDS: ConnectorResourceKind[] = [
       { id: 'stop', label: 'Stop', mutating: true, intent: 'destructive', confirm: 'Stop this stream?', showWhenStatus: [...PLAYING_LIKE, 'paused'] },
     ],
   },
-  { id: USER_KIND, label: 'Users', deletable: false, actions: [] },
+  {
+    id: USER_KIND, label: 'Users', deletable: false,
+    actions: [
+      { id: 'disable', label: 'Disable', mutating: true, intent: 'destructive', confirm: 'Disable this user? They will not be able to sign in.', showWhenStatus: ['enabled', 'admin'] },
+      { id: 'enable', label: 'Enable', mutating: true, showWhenStatus: ['disabled'] },
+    ],
+  },
   { id: LIBRARY_KIND, label: 'Libraries', deletable: false, actions: [{ id: 'scan', label: 'Scan', mutating: true }] },
   { id: TASK_KIND, label: 'Scheduled Tasks', deletable: false, actions: [{ id: 'run', label: 'Run now', mutating: true, showWhenStatus: ['idle', 'failed'] }] },
+  { id: DEVICE_KIND, label: 'Devices', deletable: true, actions: [] },
+  { id: ACTIVITY_KIND, label: 'Activity', deletable: false, actions: [] },
+  { id: PLUGIN_KIND, label: 'Plugins', deletable: false, actions: [] },
 ];
 
 const OPERATIONS: ConnectorOperation[] = [
@@ -66,7 +86,7 @@ export class JellyfinConnector implements Connector {
     name: 'Jellyfin',
     description:
       'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
-    version: '0.3.0',
+    version: '0.4.0',
     icon: 'jellyfin',
     live: true,
     configFields: [
@@ -115,6 +135,23 @@ export class JellyfinConnector implements Connector {
   async listResources(ctx: ConnectorContext, kind: string): Promise<ConnectorResource[]> {
     const api = this.apiFrom(ctx);
 
+    if (kind === SERVER_KIND) {
+      const info = await api.systemInfo();
+      return [serverToResource(info)];
+    }
+    if (kind === DEVICE_KIND) {
+      const devices = await api.devices();
+      devices.sort((a, b) => Date.parse(b.DateLastActivity ?? '') - Date.parse(a.DateLastActivity ?? '') || 0);
+      return devices.map((d) => deviceToResource(d));
+    }
+    if (kind === ACTIVITY_KIND) {
+      const entries = await api.activity(40);
+      return entries.map((e) => activityToResource(e));
+    }
+    if (kind === PLUGIN_KIND) {
+      const plugins = await api.plugins();
+      return plugins.map((p) => pluginToResource(p)).sort((a, b) => a.name.localeCompare(b.name));
+    }
     if (kind === SESSION_KIND) {
       const sessions = (await api.sessions()).filter((s) => s.NowPlayingItem);
       return sessions.map((s) => sessionToResource(s)).sort((a, b) => a.name.localeCompare(b.name));
@@ -153,12 +190,37 @@ export class JellyfinConnector implements Connector {
   async performAction(ctx: ConnectorContext, kind: string, resourceId: string, actionId: string): Promise<{ ok: boolean; message: string }> {
     const api = this.apiFrom(ctx);
     try {
+      if (kind === SERVER_KIND) {
+        if (actionId === 'scan-all') {
+          await api.refreshAllLibraries();
+          return { ok: true, message: 'Library scan started for all libraries.' };
+        }
+        if (actionId === 'restart') {
+          await api.restartServer();
+          ctx.log('warn', 'Jellyfin server restart requested.');
+          return { ok: true, message: 'Restart requested — the server will be briefly unavailable.' };
+        }
+        if (actionId === 'shutdown') {
+          await api.shutdownServer();
+          ctx.log('warn', 'Jellyfin server shutdown requested.');
+          return { ok: true, message: 'Shutdown requested — the server is going offline.' };
+        }
+        return { ok: false, message: `Unsupported server action "${actionId}".` };
+      }
       if (kind === SESSION_KIND) {
         const cmd = actionId === 'pause' ? 'Pause' : actionId === 'unpause' ? 'Unpause' : actionId === 'stop' ? 'Stop' : null;
         if (!cmd) return { ok: false, message: `Unsupported session action "${actionId}".` };
         await api.sessionCommand(resourceId, cmd);
         ctx.log('info', `Jellyfin session ${cmd} on ${resourceId.slice(0, 8)}.`);
         return { ok: true, message: `${cmd} sent to the client.` };
+      }
+      if (kind === USER_KIND && (actionId === 'enable' || actionId === 'disable')) {
+        const disable = actionId === 'disable';
+        const user = await api.getUser(resourceId);
+        const policy = { ...(user.Policy ?? {}), IsDisabled: disable };
+        await api.setUserPolicy(resourceId, policy);
+        ctx.log('info', `Jellyfin user ${user.Name ?? resourceId} ${disable ? 'disabled' : 'enabled'}.`);
+        return { ok: true, message: `User ${disable ? 'disabled' : 'enabled'}.` };
       }
       if (kind === LIBRARY_KIND && actionId === 'scan') {
         await api.refreshItem(resourceId);
@@ -172,6 +234,20 @@ export class JellyfinConnector implements Connector {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Action failed.';
       ctx.log('error', `Jellyfin ${kind} ${actionId} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
+    if (kind !== DEVICE_KIND) return { ok: false, message: `Cannot delete a ${kind}.` };
+    const api = this.apiFrom(ctx);
+    try {
+      await api.deleteDevice(resourceId);
+      ctx.log('info', `Jellyfin device ${resourceId.slice(0, 8)} removed.`);
+      return { ok: true, message: 'Device removed.' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Delete failed.';
+      ctx.log('error', `Jellyfin device delete failed: ${message}`);
       return { ok: false, message };
     }
   }
@@ -339,6 +415,70 @@ function taskToResource(t: JfScheduledTask): ConnectorResource {
       ...(t.LastExecutionResult?.ErrorMessage ? { error: t.LastExecutionResult.ErrorMessage } : {}),
     },
     tags: { state: (t.State ?? 'idle').toLowerCase() },
+  };
+}
+
+function serverToResource(info: JfSystemInfo): ConnectorResource {
+  return {
+    id: info.Id || 'server',
+    kind: SERVER_KIND,
+    name: info.ServerName ?? 'Jellyfin',
+    status: 'online',
+    details: {
+      version: info.Version ?? '—',
+      operating_system: info.OperatingSystem ?? '—',
+      id: info.Id ?? '—',
+    },
+    tags: { version: info.Version ?? '?' },
+  };
+}
+
+function deviceToResource(d: JfDevice): ConnectorResource {
+  return {
+    id: d.Id || d.Name || 'device',
+    kind: DEVICE_KIND,
+    name: `${d.LastUserName ?? '?'} · ${d.Name ?? d.AppName ?? 'Device'}`,
+    status: 'known',
+    details: {
+      user: d.LastUserName ?? '—',
+      device: d.Name ?? '—',
+      app: [d.AppName, d.AppVersion].filter(Boolean).join(' ') || '—',
+      last_activity: rel(d.DateLastActivity),
+    },
+    tags: { app: d.AppName ?? 'app' },
+  };
+}
+
+function activityToResource(e: JfActivityEntry): ConnectorResource {
+  const sev = (e.Severity ?? 'Information').toLowerCase();
+  const status = sev === 'error' || sev === 'critical' ? 'error' : sev === 'warning' ? 'warning' : 'info';
+  return {
+    id: String(e.Id ?? `${e.Date}-${e.Name}`),
+    kind: ACTIVITY_KIND,
+    name: e.Name ?? 'Activity',
+    status,
+    details: {
+      severity: e.Severity ?? 'Information',
+      when: rel(e.Date),
+      ...(e.ShortOverview ? { detail: e.ShortOverview } : {}),
+    },
+    tags: { severity: sev },
+  };
+}
+
+function pluginToResource(p: JfPlugin): ConnectorResource {
+  const status = (p.Status ?? 'active').toLowerCase() === 'active' ? 'active' : (p.Status ?? 'unknown').toLowerCase();
+  return {
+    id: p.Id || p.Name || 'plugin',
+    kind: PLUGIN_KIND,
+    name: p.Name ?? 'Plugin',
+    status,
+    details: {
+      version: p.Version ?? '—',
+      status: p.Status ?? '—',
+      ...(p.Description ? { description: p.Description } : {}),
+    },
+    tags: { status },
   };
 }
 

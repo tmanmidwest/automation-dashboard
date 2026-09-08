@@ -15,12 +15,16 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
 
 ## Resource kinds
 
-| Kind | Source | Shows | Actions (Phase 2) |
+| Kind | Source | Shows | Actions |
 | --- | --- | --- | --- |
+| **server** | `GET /System/Info` | name · version · OS | Scan all libraries · Restart · Shut down |
 | **session** | `GET /Sessions` | active streams: user · title · client/device · **play method** (Direct Play / Direct Stream / **Transcode**) · progress · bitrate | Pause · Unpause · Stop · Send message |
 | **user** | `GET /Users` | name · last activity · admin · enabled | Enable / Disable |
 | **library** | `GET /Library/VirtualFolders` (+ `/Items/Counts`) | name · type · item count | Scan now |
 | **task** | `GET /ScheduledTasks` | scheduled jobs · state · last result · progress | Run now |
+| **device** | `GET /Devices` | remembered clients: user · device · app · last activity | Delete (forget) |
+| **activity** | `GET /System/ActivityLog/Entries` | recent server log: name · severity · when | — (read-only) |
+| **plugin** | `GET /Plugins` | installed plugins: name · version · status | — (read-only) |
 
 ## Overview (dashboard)
 - Tiles: **Active streams**, **Transcodes** (alert-worthy), **Users** (total), **Movies**, **Episodes**,
@@ -53,3 +57,10 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
   `removed` update** (helps Docker's destroyed containers too). Connector v0.3.0. *(Playback/login → Ship's
   Log timeline events deferred — connectors don't publish to the TimelineBus yet; would need a small
   bus-publishing hook.)*
+- **Phase 4 (built):** everything else the API cheaply exposes. New read-only kinds **device**
+  (`GET /Devices`, deletable — "forget" a remembered client), **activity** (`GET /System/ActivityLog/Entries`,
+  recent server log with severity), and **plugin** (`GET /Plugins`). New **server** kind (single resource
+  from `/System/Info`) with **Scan all libraries** (`POST /Library/Refresh`), **Restart** (`POST /System/Restart`),
+  and **Shut down** (`POST /System/Shutdown`) — both destructive + confirm. **User Enable/Disable** now
+  implemented via the full policy round-trip (`GET /Users/{id}` → set `Policy.IsDisabled` → `POST /Users/{id}/Policy`).
+  Connector v0.4.0.

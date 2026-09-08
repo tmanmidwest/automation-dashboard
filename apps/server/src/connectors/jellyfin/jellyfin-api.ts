@@ -85,6 +85,45 @@ export interface JfItemCounts {
   BoxSetCount?: number;
 }
 
+/** GET /Devices (paged) */
+export interface JfDevice {
+  Id?: string;
+  Name?: string;
+  LastUserName?: string;
+  AppName?: string;
+  AppVersion?: string;
+  DateLastActivity?: string;
+}
+
+/** GET /System/ActivityLog/Entries (paged) */
+export interface JfActivityEntry {
+  Id?: number;
+  Name?: string;
+  Type?: string;
+  Severity?: string; // Trace | Debug | Information | Warning | Error | Critical
+  Date?: string;
+  UserId?: string;
+  ShortOverview?: string;
+}
+
+/** GET /Plugins */
+export interface JfPlugin {
+  Id?: string;
+  Name?: string;
+  Version?: string;
+  Status?: string; // Active | Disabled | NotSupported | …
+  Description?: string;
+}
+
+/** GET /Users/{id} — includes the full editable policy. */
+export interface JfUserFull {
+  Id: string;
+  Name?: string;
+  Policy?: Record<string, unknown> & { IsDisabled?: boolean; IsAdministrator?: boolean };
+}
+
+interface JfPaged<T> { Items?: T[]; TotalRecordCount?: number }
+
 /** GET /ScheduledTasks */
 export interface JfScheduledTask {
   Id: string;
@@ -108,6 +147,22 @@ export class JellyfinApi {
   virtualFolders() { return this.get<JfVirtualFolder[]>('/Library/VirtualFolders'); }
   itemCounts() { return this.get<JfItemCounts>('/Items/Counts'); }
   scheduledTasks() { return this.get<JfScheduledTask[]>('/ScheduledTasks'); }
+  async devices() { return (await this.get<JfPaged<JfDevice>>('/Devices')).Items ?? []; }
+  async activity(limit = 40) { return (await this.get<JfPaged<JfActivityEntry>>(`/System/ActivityLog/Entries?limit=${limit}`)).Items ?? []; }
+  plugins() { return this.get<JfPlugin[]>('/Plugins'); }
+  getUser(userId: string) { return this.get<JfUserFull>(`/Users/${encodeURIComponent(userId)}`); }
+
+  // ── Writes ────────────────────────────────────────────────────────
+  /** Replace a user's policy (fetch, mutate, then POST the whole object back). */
+  setUserPolicy(userId: string, policy: Record<string, unknown>) {
+    return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}/Policy`, policy);
+  }
+  deleteDevice(deviceId: string) {
+    return this.request<void>('DELETE', `/Devices?id=${encodeURIComponent(deviceId)}`);
+  }
+  refreshAllLibraries() { return this.request<void>('POST', '/Library/Refresh'); }
+  restartServer() { return this.request<void>('POST', '/System/Restart'); }
+  shutdownServer() { return this.request<void>('POST', '/System/Shutdown'); }
 
   // ── Controls (Phase 2) ────────────────────────────────────────────
   /** Playback command on a session: Pause | Unpause | Stop | PlayPause | Seek | … */
