@@ -381,6 +381,9 @@ export function ConnectorDetail() {
   })();
   const hasTags = tagKeys.length > 0;
   const hasIp = resources.some((r) => r.details?.ip != null && r.details.ip !== '');
+  // Node + CPU/RAM columns are VM-oriented (Proxmox) — only show them when a resource actually has them.
+  const hasNode = resources.some((r) => r.details?.node != null && r.details.node !== '');
+  const hasResources = resources.some((r) => r.details?.cpu != null || r.details?.memory != null || r.details?.uptime != null);
   const valuesForKey = (key: string) =>
     [...new Set(resources.map((r) => r.tags?.[key]).filter((v): v is string => v != null && v !== ''))].sort((a, b) => a.localeCompare(b));
 
@@ -400,7 +403,8 @@ export function ConnectorDetail() {
     }),
   );
 
-  const colSpan = (canAct ? 6 : 5) + (hasTags ? 1 : 0) + (hasIp ? 1 : 0);
+  // Base columns: Name, ID, Status (+ Actions) + the conditional ones.
+  const colSpan = 3 + (canAct ? 1 : 0) + (hasNode ? 1 : 0) + (hasResources ? 1 : 0) + (hasIp ? 1 : 0) + (hasTags ? 1 : 0);
   function toggleSort(col: typeof sortCol) {
     if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortCol(col); setSortDir('asc'); }
@@ -589,7 +593,7 @@ export function ConnectorDetail() {
                 <option value="none">No grouping</option>
                 {!hasTags && <option value="tag">Group by tag</option>}
                 {!hasTags && <option value="pool">Group by pool</option>}
-                <option value="node">Group by node</option>
+                {hasNode && <option value="node">Group by node</option>}
                 <option value="status">Group by status</option>
                 {tagKeys.map((k) => <option key={`g-${k}`} value={`tagk:${k}`}>Group by tag: {k}</option>)}
               </select>
@@ -644,8 +648,8 @@ export function ConnectorDetail() {
                   <tr>
                     <SortHead col="name" label="Name" />
                     <SortHead col="vmid" label="ID" />
-                    <SortHead col="node" label="Node" />
-                    <th className="px-4 py-3 font-medium">Resources</th>
+                    {hasNode && <SortHead col="node" label="Node" />}
+                    {hasResources && <th className="px-4 py-3 font-medium">Resources</th>}
                     {hasIp && <th className="px-4 py-3 font-medium">IP</th>}
                     <SortHead col="status" label="Status" />
                     {hasTags && <th className="px-4 py-3 font-medium">Tags</th>}
@@ -670,11 +674,13 @@ export function ConnectorDetail() {
                             </button>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">{String(r.details?.vmid ?? r.id)}</td>
-                          <td className="px-4 py-3 text-muted-foreground">{String(r.details?.node ?? '—')}</td>
-                          <td className="px-4 py-3 text-muted-foreground">
-                            {[r.details?.cpu, r.details?.memory].filter(Boolean).join(' · ') || '—'}
-                            {r.details?.uptime ? ` · up ${r.details.uptime}` : ''}
-                          </td>
+                          {hasNode && <td className="px-4 py-3 text-muted-foreground">{String(r.details?.node ?? '—')}</td>}
+                          {hasResources && (
+                            <td className="px-4 py-3 text-muted-foreground">
+                              {[r.details?.cpu, r.details?.memory].filter(Boolean).join(' · ') || '—'}
+                              {r.details?.uptime ? ` · up ${r.details.uptime}` : ''}
+                            </td>
+                          )}
                           {hasIp && (
                             <td className="px-4 py-3 text-muted-foreground font-mono text-xs">{r.details?.ip ? String(r.details.ip) : '—'}</td>
                           )}
