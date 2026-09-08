@@ -2,12 +2,15 @@ import type {
   Connector,
   ConnectorContext,
   ConnectorManifest,
+  ConnectorOperation,
   ConnectorResource,
   ConnectorResourceDetail,
   ConnectorResourceKind,
   ConnectorDetailItem,
   ConnectorOverview,
   OverviewMetric,
+  OperationProgress,
+  OperationResult,
   TestConnectionResult,
 } from '@cerebro/shared';
 import { JellyfinApi, JellyfinAuth, JfSession, JfUser, JfVirtualFolder, JfScheduledTask, JfItemCounts } from './jellyfin-api';
@@ -18,13 +21,38 @@ const LIBRARY_KIND = 'library';
 const TASK_KIND = 'task';
 
 const TICKS_PER_SEC = 10_000_000;
+/** Session statuses that mean something is actively playing (drive which controls show). */
+const PLAYING_LIKE = ['playing', 'transcoding'];
 
-/** Phase 1: read-only. Actions (pause/stop/scan/run) come in Phase 2. */
+/** Phase 2: session/library/task controls. */
 const KINDS: ConnectorResourceKind[] = [
-  { id: SESSION_KIND, label: 'Now Playing', deletable: false, actions: [] },
+  {
+    id: SESSION_KIND, label: 'Now Playing', deletable: false,
+    actions: [
+      { id: 'pause', label: 'Pause', mutating: true, showWhenStatus: PLAYING_LIKE },
+      { id: 'unpause', label: 'Resume', mutating: true, showWhenStatus: ['paused'] },
+      { id: 'stop', label: 'Stop', mutating: true, intent: 'destructive', confirm: 'Stop this stream?', showWhenStatus: [...PLAYING_LIKE, 'paused'] },
+    ],
+  },
   { id: USER_KIND, label: 'Users', deletable: false, actions: [] },
-  { id: LIBRARY_KIND, label: 'Libraries', deletable: false, actions: [] },
-  { id: TASK_KIND, label: 'Scheduled Tasks', deletable: false, actions: [] },
+  { id: LIBRARY_KIND, label: 'Libraries', deletable: false, actions: [{ id: 'scan', label: 'Scan', mutating: true }] },
+  { id: TASK_KIND, label: 'Scheduled Tasks', deletable: false, actions: [{ id: 'run', label: 'Run now', mutating: true, showWhenStatus: ['idle', 'failed'] }] },
+];
+
+const OPERATIONS: ConnectorOperation[] = [
+  {
+    id: 'send-message',
+    label: 'Send message',
+    description: 'Pop a message on the client that owns this session.',
+    scope: 'resource',
+    kind: SESSION_KIND,
+    icon: 'message-square',
+    submitLabel: 'Send',
+    fields: [
+      { key: 'text', label: 'Message', type: 'text', required: true, placeholder: 'Please switch to Direct Play 🙂' },
+      { key: 'header', label: 'Header', type: 'text', required: false, default: 'Cerebro' },
+    ],
+  },
 ];
 
 /**
@@ -37,8 +65,8 @@ export class JellyfinConnector implements Connector {
     id: 'jellyfin',
     name: 'Jellyfin',
     description:
-      'Monitor a Jellyfin media server: who is streaming what right now (and who is transcoding), users, libraries, and scheduled tasks — with tiles that flag active streams and transcodes.',
-    version: '0.1.0',
+      'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
+    version: '0.2.0',
     icon: 'jellyfin',
     configFields: [
       { key: 'baseUrl', label: 'Base URL', type: 'text', required: true, placeholder: 'http://10.0.0.5:8096', help: 'Your Jellyfin server URL, including the port.' },
@@ -46,6 +74,7 @@ export class JellyfinConnector implements Connector {
       { key: 'insecureSkipVerify', label: 'Skip TLS verification (self-signed HTTPS)', type: 'boolean', required: false, default: false },
     ],
     resourceKinds: KINDS,
+    operations: OPERATIONS,
     help: {
       overview: 'Monitor Jellyfin: a "Now Playing" list of active streams (with play method and transcode flag), users and their last activity, libraries and item counts, and scheduled tasks. The summary flags active streams and transcodes.',
       setupSteps: [
@@ -120,20 +149,61 @@ export class JellyfinConnector implements Connector {
     return { id: resourceId, kind, name: r?.name ?? resourceId, status: r?.status, groups: [{ title: 'Details', items }] };
   }
 
-  async performAction(): Promise<{ ok: boolean; message: string }> {
-    // Read-only in Phase 1 — controls (pause/stop/message/scan/run) land in Phase 2.
-    return { ok: false, message: 'This action is not available yet (read-only in this version).' };
+  async performAction(ctx: ConnectorContext, kind: string, resourceId: string, actionId: string): Promise<{ ok: boolean; message: string }> {
+    const api = this.apiFrom(ctx);
+    try {
+      if (kind === SESSION_KIND) {
+        const cmd = actionId === 'pause' ? 'Pause' : actionId === 'unpause' ? 'Unpause' : actionId === 'stop' ? 'Stop' : null;
+        if (!cmd) return { ok: false, message: `Unsupported session action "${actionId}".` };
+        await api.sessionCommand(resourceId, cmd);
+        ctx.log('info', `Jellyfin session ${cmd} on ${resourceId.slice(0, 8)}.`);
+        return { ok: true, message: `${cmd} sent to the client.` };
+      }
+      if (kind === LIBRARY_KIND && actionId === 'scan') {
+        await api.refreshItem(resourceId);
+        return { ok: true, message: 'Library scan started.' };
+      }
+      if (kind === TASK_KIND && actionId === 'run') {
+        await api.runTask(resourceId);
+        return { ok: true, message: 'Task started.' };
+      }
+      return { ok: false, message: `Unsupported action "${actionId}".` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Action failed.';
+      ctx.log('error', `Jellyfin ${kind} ${actionId} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  async runOperation(ctx: ConnectorContext, operationId: string, resourceId: string | undefined, values: Record<string, unknown>, _onProgress: OperationProgress): Promise<OperationResult> {
+    const api = this.apiFrom(ctx);
+    try {
+      if (operationId === 'send-message') {
+        if (!resourceId) return { ok: false, message: 'Missing session reference.' };
+        const text = String(values.text ?? '').trim();
+        if (!text) return { ok: false, message: 'A message is required.' };
+        await api.sendMessage(resourceId, text, String(values.header ?? 'Cerebro') || 'Cerebro');
+        return { ok: true, message: 'Message sent.' };
+      }
+      return { ok: false, message: `Unknown operation "${operationId}".` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Operation failed.';
+      ctx.log('error', `Jellyfin operation ${operationId} failed: ${message}`);
+      return { ok: false, message };
+    }
   }
 
   async overview(ctx: ConnectorContext): Promise<ConnectorOverview> {
     const api = this.apiFrom(ctx);
-    const [sessions, users, counts] = await Promise.all([
+    const [sessions, users, counts, tasks] = await Promise.all([
       api.sessions().catch(() => [] as JfSession[]),
       api.users().catch(() => [] as JfUser[]),
       api.itemCounts().catch(() => ({}) as JfItemCounts),
+      api.scheduledTasks().catch(() => [] as JfScheduledTask[]),
     ]);
     const active = sessions.filter((s) => s.NowPlayingItem);
     const transcodes = active.filter((s) => s.TranscodingInfo).length;
+    const tasksFailed = tasks.filter((t) => t.LastExecutionResult?.Status === 'Failed').length;
 
     const metrics: OverviewMetric[] = [
       { key: 'activeStreams', label: 'Now playing', value: active.length },
@@ -142,6 +212,7 @@ export class JellyfinConnector implements Connector {
       { key: 'movies', label: 'Movies', value: num(counts.MovieCount) },
       { key: 'episodes', label: 'Episodes', value: num(counts.EpisodeCount) },
       { key: 'series', label: 'Series', value: num(counts.SeriesCount) },
+      { key: 'tasksFailed', label: 'Failed tasks', value: tasksFailed },
     ];
 
     const guests = active

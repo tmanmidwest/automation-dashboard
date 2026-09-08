@@ -354,6 +354,26 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'jellyfin.active_streams',
+    label: 'Active streams over threshold',
+    description: 'The number of active Jellyfin streams crossed the limit set on its page.',
+    category: 'Jellyfin',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'jellyfin.tasks_failed',
+    label: 'Failed scheduled tasks over threshold',
+    description: 'The number of Jellyfin scheduled tasks whose last run failed crossed the limit set on its page.',
+    category: 'Jellyfin',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
 
   // ── Automations ──────────────────────────────────────────
   {

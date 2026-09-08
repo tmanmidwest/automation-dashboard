@@ -39,9 +39,12 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
 - **Ship's Log** — playback / login / error events flow into the timeline.
 
 ## Phasing
-- **Phase 1 (this pass):** read-only — sessions (now playing), users, libraries, tasks; overview tiles +
-  guests; connection health; transcode threshold alert.
-- **Phase 2:** controls — pause/unpause/stop/message a session, scan a library, run a task; +
-  active-streams / failed-task alerts.
+- **Phase 1 (built + verified):** read-only — sessions (now playing), users, libraries, tasks; overview
+  tiles + guests; connection health; transcode threshold alert.
+- **Phase 2 (built):** controls — **Pause / Resume / Stop** a session (`POST /Sessions/{id}/Playing/{cmd}`),
+  **Send message** to a client (`send-message` operation → `POST /Sessions/{id}/Message`), **Scan** a library
+  (`POST /Items/{id}/Refresh`), **Run** a scheduled task (`POST /ScheduledTasks/Running/{id}`). New overview
+  metric `tasksFailed`, and alerts `jellyfin.active_streams` + `jellyfin.tasks_failed` (alongside
+  `transcodes_high`). Connector v0.2.0. *(User enable/disable deferred — needs the full policy round-trip.)*
 - **Phase 3:** live now-playing via Jellyfin's **WebSocket** session events (`subscribeLive` + `manifest.live`),
   and timeline events.

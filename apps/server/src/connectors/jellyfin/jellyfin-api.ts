@@ -108,6 +108,24 @@ export class JellyfinApi {
   itemCounts() { return this.get<JfItemCounts>('/Items/Counts'); }
   scheduledTasks() { return this.get<JfScheduledTask[]>('/ScheduledTasks'); }
 
+  // ── Controls (Phase 2) ────────────────────────────────────────────
+  /** Playback command on a session: Pause | Unpause | Stop | PlayPause | Seek | … */
+  sessionCommand(sessionId: string, command: string) {
+    return this.request<void>('POST', `/Sessions/${encodeURIComponent(sessionId)}/Playing/${encodeURIComponent(command)}`);
+  }
+  /** Pop a message on a client. */
+  sendMessage(sessionId: string, text: string, header = 'Cerebro') {
+    return this.request<void>('POST', `/Sessions/${encodeURIComponent(sessionId)}/Message`, { Text: text, Header: header, TimeoutMs: 5000 });
+  }
+  /** Trigger a library (or item) rescan. */
+  refreshItem(itemId: string) {
+    return this.request<void>('POST', `/Items/${encodeURIComponent(itemId)}/Refresh?Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default`);
+  }
+  /** Start a scheduled task now. */
+  runTask(taskId: string) {
+    return this.request<void>('POST', `/ScheduledTasks/Running/${encodeURIComponent(taskId)}`);
+  }
+
   private get<T>(path: string): Promise<T> {
     return this.request<T>('GET', path);
   }

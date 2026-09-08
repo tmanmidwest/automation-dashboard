@@ -41,6 +41,8 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'dockerHostMem', metricKey: 'hostMemUsedPct', alertKey: 'docker.host_mem', label: 'Host memory used' },
   { id: 'dockerHostLoad', metricKey: 'hostLoadPct', alertKey: 'docker.host_load', label: 'Host CPU load' },
   { id: 'jellyfinTranscodes', metricKey: 'transcodes', alertKey: 'jellyfin.transcodes_high', label: 'Transcoding sessions' },
+  { id: 'jellyfinStreams', metricKey: 'activeStreams', alertKey: 'jellyfin.active_streams', label: 'Active streams' },
+  { id: 'jellyfinTasksFailed', metricKey: 'tasksFailed', alertKey: 'jellyfin.tasks_failed', label: 'Failed tasks' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {
