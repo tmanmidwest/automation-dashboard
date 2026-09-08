@@ -330,3 +330,40 @@ External validation of Cerebro's own tokens isn't possible today (HS256, no JWKS
 - Sessions are cookie/`express-session` (`req.session.userId`), Redis-backed — no `Session`
   table. Bearer auth is orthogonal and adds no session.
 - Ids are cuid; secrets vault (`Secret`) is AES-256-GCM via `CryptoService`.
+
+## Phase 5 — Timeline, resource delete & automations tools (BUILT 2026-09-07)
+
+Closing the gap between what the app can now do and what the programmatic surface exposes.
+New connector *features* (Jellyfin, Docker, …) already flow through the generic
+`list_actions` / `run_action` / `run_operation` tools with no per-connector work — but three
+things had no agent-reachable surface. Added, all scope-gated as usual:
+
+- **Timeline / Ship's Log** — `get_timeline` (`logs:read`): the unioned event stream (audit,
+  app logs, notifications, jobs, monitor transitions), newest first, with kind/severity/source/
+  actor/text filters and `before` paging. Mirrors the REST controller's **audit gate** — a
+  caller without `audit:read` never sees `audit` events (dropped from the requested kinds).
+  Lets an agent answer "what happened recently?" / investigate incidents.
+- **`delete_resource`** (`connectors:action`, destructive + confirm): the one generic connector
+  verb MCP lacked. Calls `ConnectorInstanceService.deleteResource` — the same path the UI's
+  delete uses (Jellyfin device "forget", Docker container rm, …).
+- **Automations** — read via `list_automations` / `get_automation` / `get_automation_runs`
+  (`automations:read`); operate via `set_automation_enabled` and `test_automation`
+  (`automations:write`, both confirm-gated; `test_automation` destructive-hinted since a rule
+  can run infra actions). **Rule authoring (create/edit/delete) is deliberately NOT exposed over
+  a token** — it stays on the session-only REST controller. Enough to observe and operate rules,
+  not to write them.
+
+**Scopes:** `automations:read` + `automations:write` added to `GRANTABLE_TOKEN_SCOPES`
+([`rbac.ts`](../packages/shared/src/rbac.ts)) so tokens/OAuth clients can hold them (the OAuth
+metadata `scopes_supported` and consent screen pick this up automatically); the API-Tokens
+picker ([`ApiTokens.tsx`](../apps/web/src/pages/settings/ApiTokens.tsx)) gained matching entries,
+and `logs:read` is relabelled "Logs & timeline". The automations REST controller stays
+`@SessionOnly()`, so granting `automations:*` to a token unlocks the **MCP** tools, not REST rule
+authoring.
+
+**Deliberately skipped:** the **vault/secrets** — `secrets:*` remains non-grantable and gets no
+MCP tools; secret values should never be reachable by a long-lived token or an LLM.
+
+Wiring: `McpModule` now imports `TimelineModule` + `AutomationsModule` (the latter gained
+`exports: [AutomationsService]`); the factory injects `TimelineService` + `AutomationsService`.
+No DB change, no new deps. Server + web + shared build clean.

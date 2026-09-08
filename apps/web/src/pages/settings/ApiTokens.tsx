@@ -14,12 +14,14 @@ import { Dialog } from '@/components/ui/dialog';
 const SCOPES: { scope: Permission; label: string; desc: string; write?: boolean }[] = [
   { scope: 'connectors:read', label: 'Connectors', desc: 'Read connector instances and their resources.' },
   { scope: 'monitors:read', label: 'Monitors', desc: 'Read uptime monitors and their status.' },
-  { scope: 'logs:read', label: 'Logs', desc: 'Read application logs.' },
-  { scope: 'audit:read', label: 'Audit trail', desc: 'Read the audit log.' },
+  { scope: 'logs:read', label: 'Logs & timeline', desc: 'Read application logs and the event timeline (Ship\'s Log).' },
+  { scope: 'audit:read', label: 'Audit trail', desc: 'Read the audit log (and audit events in the timeline).' },
   { scope: 'users:read', label: 'Users', desc: 'Read user accounts.' },
   { scope: 'settings:read', label: 'Settings', desc: 'Read application settings.' },
-  { scope: 'connectors:action', label: 'Connector actions', desc: 'Start/stop/reboot resources and run operations.', write: true },
+  { scope: 'automations:read', label: 'Automations', desc: 'Read automation rules and their run history.' },
+  { scope: 'connectors:action', label: 'Connector actions', desc: 'Start/stop/reboot resources, run operations, delete resources.', write: true },
   { scope: 'monitors:write', label: 'Monitor management', desc: 'Pause, resume, and trigger monitors.', write: true },
+  { scope: 'automations:write', label: 'Automation control', desc: 'Enable/disable and test automation rules (not author them).', write: true },
 ];
 
 function relative(iso: string | null): string {

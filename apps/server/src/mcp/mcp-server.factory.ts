@@ -6,10 +6,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ConnectorInstance } from '@prisma/client';
-import type { ConnectorInstanceSummary, Permission, SessionUser } from '@cerebro/shared';
+import type { ConnectorInstanceSummary, Permission, SessionUser, TimelineKind } from '@cerebro/shared';
+import { TIMELINE_KINDS } from '@cerebro/shared';
 import { ConnectorRegistry } from '../connectors/connector-registry.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { MonitorsService } from '../monitors/monitors.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { AutomationsService } from '../automations/automations.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
 
@@ -35,6 +38,8 @@ export class McpServerFactory {
     private readonly registry: ConnectorRegistry,
     private readonly instances: ConnectorInstanceService,
     private readonly monitors: MonitorsService,
+    private readonly timeline: TimelineService,
+    private readonly automations: AutomationsService,
     private readonly audit: AuditService,
     private readonly logging: LoggingService,
   ) {}
@@ -202,6 +207,17 @@ export class McpServerFactory {
           jobId: z.string().describe('Job id to cancel'),
         },
       }, ({ instanceId, jobId }) => Promise.resolve({ ok: this.instances.cancelJob(instanceId, jobId) }));
+
+      actionTool('delete_resource', {
+        description:
+          'Delete/remove a resource whose kind is deletable — e.g. forget a Jellyfin device, remove a Docker container. Check list_resources / the connector to confirm the kind is deletable. Irreversible.',
+        destructive: true,
+        inputSchema: {
+          instanceId: z.string().describe('Connector instance id'),
+          kind: z.string().describe('Resource kind (must be deletable for this connector)'),
+          resourceId: z.string().describe('Resource id to delete'),
+        },
+      }, ({ instanceId, kind, resourceId }) => this.instances.deleteResource(instanceId, kind, resourceId));
     }
 
     // ── Monitors (monitors:read) ──
@@ -240,6 +256,84 @@ export class McpServerFactory {
       }, ({ monitorId }) => this.monitors.checkNow(monitorId));
     }
 
+    // ── Timeline / Ship's Log (logs:read) ──
+    if (has('logs:read')) {
+      tool('get_timeline', {
+        description:
+          "Recent events across all of Cerebro (the \"Ship's Log\"): audit actions, app logs, delivered alerts, connector jobs, and monitor state changes — newest first. Filter by kind, severity, source (connectorId / monitor id / 'auth'), actor, or a text substring; page older with `before` (pass a prior nextCursor). Use this to answer \"what happened recently?\" or investigate an incident.",
+        inputSchema: {
+          kinds: z.array(z.string()).optional().describe(`Filter to these kinds. Any of: ${TIMELINE_KINDS.join(', ')}.`),
+          severities: z.array(z.string()).optional().describe('Filter to these severities: info, success, warning, critical.'),
+          source: z.string().optional().describe("Match an event's source (connectorId, monitor id, 'auth', 'system', …)"),
+          actorId: z.string().optional().describe('Only events by this actor id'),
+          text: z.string().optional().describe('Case-insensitive substring over title/detail'),
+          before: z.string().optional().describe('ISO cursor — return events strictly older than this (from a prior nextCursor)'),
+          limit: z.number().optional().describe('Max events (default 100, max 500)'),
+        },
+      }, (args) => {
+        // Mirror the controller's audit gate: a caller without audit:read never
+        // sees the who-did-what stream, so drop 'audit' from the requested kinds.
+        const requested = (args.kinds ?? []).filter((k): k is TimelineKind => (TIMELINE_KINDS as string[]).includes(k));
+        let kinds: TimelineKind[] | undefined = requested.length ? requested : undefined;
+        if (!has('audit:read')) {
+          const base = kinds ?? TIMELINE_KINDS;
+          kinds = base.filter((k) => k !== 'audit');
+        }
+        return this.timeline.query({
+          kinds,
+          severities: args.severities as ('info' | 'success' | 'warning' | 'critical')[] | undefined,
+          source: args.source,
+          actorId: args.actorId,
+          text: args.text,
+          before: args.before,
+          limit: args.limit,
+        });
+      });
+    }
+
+    // ── Automations (automations:read) ──
+    if (has('automations:read')) {
+      tool('list_automations', {
+        description: 'List automation rules (WHEN a trigger → IF conditions → DO actions) with their enabled state, trigger, and last-fired time.',
+      }, () => this.automations.list());
+
+      tool('get_automation', {
+        description: 'Full detail for one automation rule: trigger, conditions, actions, cooldown.',
+        inputSchema: { ruleId: z.string().describe('Automation rule id') },
+      }, async ({ ruleId }) => {
+        const rule = await this.automations.get(ruleId);
+        if (!rule) throw new Error('Rule not found.');
+        return rule;
+      });
+
+      tool('get_automation_runs', {
+        description: 'Recent automation run history (status + message per firing), optionally for one rule.',
+        inputSchema: {
+          ruleId: z.string().optional().describe('Optional rule id to filter by'),
+          limit: z.number().optional().describe('Max runs (default 100)'),
+        },
+      }, ({ ruleId, limit }) => this.automations.runs(ruleId, limit));
+    }
+
+    // ── Automation management (automations:write) ──
+    // Rule authoring (create/edit/delete) stays in the session-only REST API; over a
+    // token we expose only enable/disable and test — enough to operate, not to author.
+    if (has('automations:write')) {
+      actionTool('set_automation_enabled', {
+        description: 'Enable or disable an automation rule.',
+        inputSchema: {
+          ruleId: z.string().describe('Automation rule id'),
+          enabled: z.boolean().describe('true to enable, false to disable'),
+        },
+      }, ({ ruleId, enabled }) => this.automations.update(ruleId, { enabled }, { actorId: user.id, actorEmail: user.email }));
+
+      actionTool('test_automation', {
+        description: 'Run an automation rule now (fires its actions, ignoring the trigger and cooldown). May be destructive depending on the rule.',
+        destructive: true,
+        inputSchema: { ruleId: z.string().describe('Automation rule id') },
+      }, ({ ruleId }) => this.automations.test(ruleId));
+    }
+
     return server;
   }
 
@@ -270,7 +364,7 @@ export class McpServerFactory {
   /** Record an MCP-initiated action to the audit trail (services don't audit; controllers do). */
   private async recordAudit(user: SessionUser, origin: McpOrigin, toolName: string, args: Record<string, unknown>) {
     const { confirm: _confirm, ...meta } = args;
-    const target = String(args.resourceId ?? args.monitorId ?? args.operationId ?? args.jobId ?? args.instanceId ?? '');
+    const target = String(args.resourceId ?? args.monitorId ?? args.ruleId ?? args.operationId ?? args.jobId ?? args.instanceId ?? '');
     await this.audit
       .record({
         actorId: user.id,

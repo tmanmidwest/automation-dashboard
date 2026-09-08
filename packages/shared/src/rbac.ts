@@ -91,9 +91,11 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   'audit:read',
   'users:read',
   'settings:read',
+  'automations:read',
   // Write / action scopes:
   'connectors:action',
   'monitors:write',
+  'automations:write',
 ];
 
 /** True for a grantable scope that lets a credential change state (not read-only). */

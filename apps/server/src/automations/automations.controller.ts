@@ -5,7 +5,10 @@ import type { AutomationRuleInput, SessionUser } from '@cerebro/shared';
 
 /**
  * Automation rules API. Session-only — a rule can run infrastructure actions, so
- * it's never reachable with a bearer token (automations:* isn't a grantable scope).
+ * rule *authoring* (create/edit/delete) is never reachable with a bearer token.
+ * Programmatic access is via MCP instead, which exposes read + enable/disable + test
+ * only (automations:* is a grantable scope for MCP, but this REST controller stays
+ * session-gated so tokens can't author rules).
  */
 @Controller('api/automations')
 @SessionOnly()

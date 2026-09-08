@@ -15,5 +15,6 @@ import { AutomationsController } from './automations.controller';
   imports: [ConnectorsModule, NotificationsModule, MonitorsModule],
   controllers: [AutomationsController],
   providers: [AutomationsService],
+  exports: [AutomationsService],
 })
 export class AutomationsModule {}
