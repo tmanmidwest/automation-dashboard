@@ -344,6 +344,17 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: true,
   },
 
+  {
+    key: 'jellyfin.transcodes_high',
+    label: 'Transcoding sessions over threshold',
+    description: 'The number of active transcoding streams on Jellyfin crossed the limit set on its page (server strain).',
+    category: 'Jellyfin',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+
   // ── Automations ──────────────────────────────────────────
   {
     key: 'automation.notify',

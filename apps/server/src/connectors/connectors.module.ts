@@ -17,6 +17,7 @@ import { HomeAssistantConnector } from './home-assistant/home-assistant.connecto
 import { CloudflareConnector } from './cloudflare/cloudflare.connector';
 import { DockerConnector } from './docker/docker.connector';
 import { DockerStackService } from './docker/docker-stack.service';
+import { JellyfinConnector } from './jellyfin/jellyfin.connector';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
 import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
@@ -49,6 +50,7 @@ export class ConnectorsModule implements OnModuleInit {
     this.registry.register(new HomeAssistantConnector());
     this.registry.register(new CloudflareConnector());
     this.registry.register(new DockerConnector(this.dockerStacks));
+    this.registry.register(new JellyfinConnector());
     // The Backblaze connector reads restore history, a durable state mirror, and VM names.
     this.registry.register(new BackblazeConnector(this.backupRuns, this.backupState, this.vmNames));
   }
