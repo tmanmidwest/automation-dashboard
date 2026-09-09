@@ -195,6 +195,7 @@ export function Dashboard() {
   const [userCount, setUserCount] = useState(0);
   const startedRef = useRef(Date.now());
   const lastPollRef = useRef(Date.now());
+  const gotDataRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
   const [, tick] = useState(0);
 
@@ -205,6 +206,7 @@ export function Dashboard() {
         lastPollRef.current = Date.now();
         setOverview((prev) => {
           const empty = data.metrics.length === 0 && data.guests.length === 0;
+          if (!empty) gotDataRef.current = true;
           // Keep the last good telemetry if a poll momentarily returns nothing.
           if (empty && prev && (prev.metrics.length > 0 || prev.guests.length > 0)) {
             return { ...prev, connectors: data.connectors };
@@ -237,9 +239,12 @@ export function Dashboard() {
     api.get<VersionInfo>('/api/version').then(setVersion).catch(() => {});
     api.get<Array<unknown>>('/api/users').then((u) => setUserCount(u.length)).catch(() => {});
     pollCore();
+    // Fast catch-up retries so a transient first-load failure (e.g. the session cookie
+    // still settling right after login) recovers in under a second, not on the next 5s tick.
+    const retries = [700, 1600, 3000].map((ms) => setTimeout(() => { if (!gotDataRef.current) pollCore(); }, ms));
     const t = setInterval(() => { pollCore(); tick((x) => x + 1); }, 5000);
     const clock = setInterval(() => tick((x) => x + 1), 1000);
-    return () => { clearInterval(t); clearInterval(clock); };
+    return () => { clearInterval(t); clearInterval(clock); retries.forEach(clearTimeout); };
   }, [pollCore]);
 
   useEffect(() => {

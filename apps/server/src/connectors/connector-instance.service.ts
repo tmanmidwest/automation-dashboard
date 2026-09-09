@@ -1,4 +1,5 @@
-import { BadGatewayException, BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
@@ -16,7 +17,7 @@ function isSecretRef(v: unknown): v is { $secretRef: string } {
 }
 
 @Injectable()
-export class ConnectorInstanceService {
+export class ConnectorInstanceService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
@@ -373,7 +374,67 @@ export class ConnectorInstanceService {
    * Source health (`sources`/`ok`) still reflects the real, current failure.
    */
   private connectorTelemetry = new Map<string, { at: number; metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] }>();
-  private static readonly TELEMETRY_STALE_MS = 60000;
+  /** Connectors with a background warm in flight, so we never fetch one twice at once. */
+  private warming = new Set<string>();
+
+  /**
+   * Seed the in-memory telemetry cache from the persisted snapshots on boot, so the very
+   * first dashboard request after a redeploy serves last-known-good data instantly rather
+   * than blocking on a cold network fan-out. See docs/dashboard-telemetry-snapshots.md.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const rows = await this.prisma.connectorTelemetrySnapshot.findMany();
+      for (const row of rows) {
+        this.connectorTelemetry.set(row.instanceId, {
+          at: row.syncedAt.getTime(),
+          metrics: (row.metrics as unknown as OverviewMetric[]) ?? [],
+          guests: (row.guests as unknown as { name: string; kind: string; status: string; node: string }[]) ?? [],
+        });
+      }
+      if (rows.length) void this.logging.info('connectors', `Seeded telemetry cache from ${rows.length} snapshot(s).`);
+    } catch (err) {
+      void this.logging.warn('connectors', `Could not seed telemetry snapshots: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /** Write-through: update the hot cache and persist the snapshot (fire-and-forget). */
+  private rememberTelemetry(id: string, metrics: OverviewMetric[], guests: { name: string; kind: string; status: string; node: string }[]) {
+    const at = Date.now();
+    this.connectorTelemetry.set(id, { at, metrics, guests });
+    const data = {
+      metrics: metrics as unknown as Prisma.InputJsonValue,
+      guests: guests as unknown as Prisma.InputJsonValue,
+      syncedAt: new Date(at),
+    };
+    void this.prisma.connectorTelemetrySnapshot
+      .upsert({ where: { instanceId: id }, create: { instanceId: id, ...data }, update: data })
+      .catch((err) => void this.logging.warn('connectors', `Persist telemetry ${id} failed: ${err instanceof Error ? err.message : err}`));
+  }
+
+  /**
+   * Refresh one connector's telemetry in the background (deduped). Used by the
+   * stale-while-revalidate path in dashboardOverview so a request never blocks on
+   * a live fetch when we already have a last-good value to serve.
+   */
+  private warmConnector(inst: ConnectorInstance): void {
+    if (this.warming.has(inst.id)) return;
+    const connector = this.registry.get(inst.connectorId);
+    if (!connector?.overview) return;
+    this.warming.add(inst.id);
+    void (async () => {
+      try {
+        const ctx = await this.buildContext(inst);
+        const ov = await connector.overview!(ctx);
+        this.markSynced(inst.id);
+        this.rememberTelemetry(inst.id, ov.metrics, ov.guests);
+      } catch {
+        /* leave the last-good value in place; source health still reflects the failure */
+      } finally {
+        this.warming.delete(inst.id);
+      }
+    })();
+  }
 
   /** Force a fresh overview: drop the connector's internal caches (e.g. billing) and re-fetch. */
   async refreshOverview(id: string): Promise<{ metrics: OverviewMetric[]; guests: OverviewGuest[] }> {
@@ -399,6 +460,9 @@ export class ConnectorInstanceService {
     try {
       const ov = await connector.overview(ctx);
       this.markSynced(id);
+      // Write through to the dashboard cache + persist. The per-minute resource-monitor
+      // cron calls this for every connector, so the dashboard stays warm for free.
+      this.rememberTelemetry(id, ov.metrics, ov.guests);
       return { metrics: ov.metrics, guests: ov.guests.map((g) => ({ ...g, connector: instance.name })) };
     } catch (err) {
       throw new BadGatewayException(err instanceof Error ? err.message : 'Failed to reach the connector.');
@@ -416,52 +480,36 @@ export class ConnectorInstanceService {
     const sources: OverviewSource[] = [];
     let ok = 0;
 
-    await Promise.all(
-      instances.map(async (inst) => {
-        const connector = this.registry.get(inst.connectorId);
-        if (!connector?.overview) return;
-        let contribution: { metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] } | undefined;
+    // Stale-while-revalidate: this request never blocks on a live connector fetch.
+    // Each connector's telemetry is served from the in-memory cache (seeded from the
+    // persisted snapshot on boot); when it's older than the connector's refresh interval
+    // we kick a deduped background warm and still serve the last-good value this turn.
+    // Warming also happens on the per-minute resource-monitor cron.
+    for (const inst of instances) {
+      const connector = this.registry.get(inst.connectorId);
+      if (!connector?.overview) continue;
 
-        // Background-sync throttle: only re-query this connector's external system
-        // once per its refreshIntervalSec. Between, serve the cached telemetry so the
-        // dashboard stays live without extra API calls. Keyed on when the telemetry
-        // was last actually fetched (not any read), so it refreshes on schedule.
-        const intervalMs = ((inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30) * 1000;
-        const cachedTel = this.connectorTelemetry.get(inst.id);
-        if (cachedTel && now - cachedTel.at < intervalMs) {
-          ok++;
-          sources.push({ name: inst.name, ok: true });
-          contribution = { metrics: cachedTel.metrics, guests: cachedTel.guests };
-        } else {
-          try {
-            const ctx = await this.buildContext(inst);
-            const ov = await connector.overview(ctx);
-            ok++;
-            this.markSynced(inst.id);
-            sources.push({ name: inst.name, ok: true });
-            contribution = { metrics: ov.metrics, guests: ov.guests };
-            this.connectorTelemetry.set(inst.id, { at: now, ...contribution });
-          } catch (err) {
-            sources.push({ name: inst.name, ok: false, message: err instanceof Error ? err.message : 'unreachable' });
-            // Substitute this connector's last-good numbers so a blip doesn't drop it from the totals.
-            const cached = this.connectorTelemetry.get(inst.id);
-            if (cached && now - cached.at < ConnectorInstanceService.TELEMETRY_STALE_MS) {
-              contribution = { metrics: cached.metrics, guests: cached.guests };
-            }
-          }
+      const intervalMs = ((inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30) * 1000;
+      const cachedTel = this.connectorTelemetry.get(inst.id);
+      const fresh = !!cachedTel && now - cachedTel.at < intervalMs;
+      if (!fresh) this.warmConnector(inst); // background refresh; doesn't block this response
+
+      if (cachedTel) {
+        ok++;
+        sources.push({ name: inst.name, ok: true });
+        for (const m of cachedTel.metrics) {
+          const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [], asOf: m.asOf };
+          e.values.push(m.value);
+          // Keep the oldest "as of" across connectors so the tile reflects the stalest figure.
+          if (m.asOf && (!e.asOf || m.asOf < e.asOf)) e.asOf = m.asOf;
+          metricMap.set(m.key, e);
         }
-        if (contribution) {
-          for (const m of contribution.metrics) {
-            const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [], asOf: m.asOf };
-            e.values.push(m.value);
-            // Keep the oldest "as of" across connectors so the tile reflects the stalest figure.
-            if (m.asOf && (!e.asOf || m.asOf < e.asOf)) e.asOf = m.asOf;
-            metricMap.set(m.key, e);
-          }
-          for (const g of contribution.guests) guests.push({ ...g, connector: inst.name });
-        }
-      }),
-    );
+        for (const g of cachedTel.guests) guests.push({ ...g, connector: inst.name });
+      } else {
+        // No telemetry yet (never warmed, no snapshot) — it'll appear once the warm lands.
+        sources.push({ name: inst.name, ok: false, message: 'warming up…' });
+      }
+    }
     sources.sort((a, b) => Number(a.ok) - Number(b.ok) || a.name.localeCompare(b.name));
 
     // Percentages average across connectors; everything else sums.

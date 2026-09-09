@@ -1,5 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import type {
   ConnectorResource,
@@ -13,10 +16,14 @@ import type {
 } from '@cerebro/shared';
 
 const DOCKER = 'docker';
-/** Serve a cached snapshot up to this old on a normal request (poll/tap) — makes the page load instantly. */
+/** Beyond this age, a served snapshot triggers a background refresh (but is still served instantly). */
 const SERVE_MAX_MS = 25_000;
-/** Keep the cache warm in the background this long after the page was last used. */
+/** Keep the cache warm on the fast 15s cadence this long after the page was last used. */
 const ACTIVE_WINDOW_MS = 5 * 60_000;
+/** Even when idle, refresh at least this often so a login gets fresh-enough data. */
+const IDLE_REFRESH_MS = 60_000;
+/** Single-row snapshot key. */
+const SNAPSHOT_ID = 'singleton';
 
 /**
  * Aggregates every enabled Docker connector instance into one merged tree for the
@@ -29,33 +36,66 @@ const ACTIVE_WINDOW_MS = 5 * 60_000;
  * the last snapshot instantly instead of waiting on all hosts. `force` recomputes.
  */
 @Injectable()
-export class DockerFleetService {
-  constructor(private readonly instances: ConnectorInstanceService) {}
+export class DockerFleetService implements OnModuleInit {
+  constructor(
+    private readonly instances: ConnectorInstanceService,
+    private readonly prisma: PrismaService,
+    private readonly logging: LoggingService,
+  ) {}
 
   private cache: { at: number; data: DockerFleet } | null = null;
   private inflight: Promise<DockerFleet> | null = null;
   private lastAccess = 0;
 
-  /** The endpoint. Serves a warm cache when fresh enough; `force` awaits a fresh compute. */
-  async fleet(force = false): Promise<DockerFleet> {
-    this.lastAccess = Date.now();
-    if (!force && this.cache && Date.now() - this.cache.at < SERVE_MAX_MS) return this.cache.data;
-    return this.refresh();
+  /**
+   * Seed the cache from the persisted snapshot on boot, so the first Docker Fleet request
+   * after a redeploy serves last-known-good instantly rather than a cold network compute.
+   * See docs/dashboard-telemetry-snapshots.md.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const row = await this.prisma.dockerFleetSnapshot.findUnique({ where: { id: SNAPSHOT_ID } });
+      if (row) this.cache = { at: row.syncedAt.getTime(), data: row.data as unknown as DockerFleet };
+    } catch (err) {
+      void this.logging.warn('docker-fleet', `Could not seed fleet snapshot: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
-  /** Recompute (deduping concurrent callers) and update the cache. */
+  /**
+   * The endpoint. Serves any warm cache immediately (stale-while-revalidate): a stale
+   * snapshot is returned now and refreshed in the background, so a login never blocks on
+   * a cold fan-out. `force` awaits a fresh compute; only a completely empty cache blocks.
+   */
+  async fleet(force = false): Promise<DockerFleet> {
+    this.lastAccess = Date.now();
+    if (force || !this.cache) return this.refresh();
+    if (Date.now() - this.cache.at >= SERVE_MAX_MS) void this.refresh().catch(() => { /* keep last good */ });
+    return this.cache.data;
+  }
+
+  /** Recompute (deduping concurrent callers), update the cache, and persist the snapshot. */
   private refresh(): Promise<DockerFleet> {
     if (this.inflight) return this.inflight;
     this.inflight = this.compute()
-      .then((data) => { this.cache = { at: Date.now(), data }; return data; })
+      .then((data) => { this.cache = { at: Date.now(), data }; this.persist(data); return data; })
       .finally(() => { this.inflight = null; });
     return this.inflight;
   }
 
-  /** While the page is being used, keep the cache warm so every tap is instant. */
+  /** Persist the aggregated tree so it survives a redeploy (fire-and-forget). */
+  private persist(data: DockerFleet): void {
+    const payload = { data: data as unknown as Prisma.InputJsonValue, syncedAt: new Date() };
+    void this.prisma.dockerFleetSnapshot
+      .upsert({ where: { id: SNAPSHOT_ID }, create: { id: SNAPSHOT_ID, ...payload }, update: payload })
+      .catch((err) => void this.logging.warn('docker-fleet', `Persist fleet snapshot failed: ${err instanceof Error ? err.message : err}`));
+  }
+
+  /** Fast cadence while the page is in use; a slower floor keeps it fresh enough when idle. */
   @Interval(15_000)
   backgroundRefresh(): void {
-    if (Date.now() - this.lastAccess < ACTIVE_WINDOW_MS) void this.refresh().catch(() => { /* keep last good cache */ });
+    const active = Date.now() - this.lastAccess < ACTIVE_WINDOW_MS;
+    const stale = !this.cache || Date.now() - this.cache.at >= IDLE_REFRESH_MS;
+    if (active || stale) void this.refresh().catch(() => { /* keep last good cache */ });
   }
 
   private async compute(): Promise<DockerFleet> {

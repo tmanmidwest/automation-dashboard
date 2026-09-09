@@ -332,7 +332,35 @@ model ConnectorInstance {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  telemetry    ConnectorTelemetrySnapshot?
+
   @@index([connectorId])
+}
+
+/// Last-known-good dashboard telemetry for one connector, so the dashboard renders
+/// instantly on login / after a redeploy instead of waiting on a cold network fan-out.
+/// Written by the background warmer; seeded into an in-memory cache on boot.
+/// See docs/dashboard-telemetry-snapshots.md.
+model ConnectorTelemetrySnapshot {
+  instanceId String            @id
+  instance   ConnectorInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  /// OverviewMetric[]
+  metrics    Json
+  /// { name, kind, status, node }[]
+  guests     Json
+  /// When the telemetry was actually fetched from the connector.
+  syncedAt   DateTime
+  updatedAt  DateTime          @updatedAt
+}
+
+/// Single-row cache (id = "singleton") of the aggregated Docker Fleet tree — same purpose
+/// as ConnectorTelemetrySnapshot, for the /docker-fleet page.
+model DockerFleetSnapshot {
+  id        String   @id
+  /// DockerFleet
+  data      Json
+  syncedAt  DateTime
+  updatedAt DateTime @updatedAt
 }
 
 /// One execution of a connector operation worth keeping (e.g. a Backblaze restore).
