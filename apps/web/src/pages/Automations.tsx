@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, Play, Pencil, Zap } from 'lucide-react';
 import type {
   AutomationRule, AutomationRuleInput, AutomationRun,
-  ConnectorInstanceSummary, ConnectorManifest, MonitorSummary, RuleAction, RuleCondition, RuleTrigger,
+  ConnectorInstanceSummary, ConnectorManifest, ConnectorOperation, ConnectorResource,
+  MonitorSummary, RuleAction, RuleCondition, RuleTrigger,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
+import { OperationFields } from '@/components/OperationFields';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -366,6 +368,41 @@ const ACTION_LABEL: Record<RuleAction['type'], string> = {
   pause_monitor: 'Pause monitor', resume_monitor: 'Resume monitor', webhook: 'Webhook',
 };
 
+/** Fetch a connector instance's resources of one kind (for the resource pickers). */
+function useResources(instanceId: string | undefined, kind: string | undefined): ConnectorResource[] | null {
+  const [list, setList] = useState<ConnectorResource[] | null>(null);
+  useEffect(() => {
+    if (!instanceId || !kind) { setList(null); return; }
+    let cancelled = false;
+    setList(null);
+    api.get<ConnectorResource[]>(`/api/connectors/instances/${instanceId}/resources?kind=${encodeURIComponent(kind)}`)
+      .then((r) => { if (!cancelled) setList(r); })
+      .catch(() => { if (!cancelled) setList([]); });
+    return () => { cancelled = true; };
+  }, [instanceId, kind]);
+  return list;
+}
+
+/** A dropdown of the chosen connector+kind's actual resources, replacing the old free-text id box.
+ *  Falls back to a manual id input when the kind can't be listed here, and always keeps an
+ *  already-saved id selectable even if it's not in the current list. */
+function ResourceSelect({ instanceId, kind, value, onChange }: {
+  instanceId: string; kind: string; value: string; onChange: (v: string) => void;
+}) {
+  const list = useResources(instanceId || undefined, kind || undefined);
+  if (!instanceId || !kind) return <select className={selectCls} disabled><option>Pick a connector and kind first…</option></select>;
+  if (list === null) return <select className={selectCls} disabled><option>Loading resources…</option></select>;
+  if (list.length === 0) return <Input placeholder="Resource id" value={value} onChange={(e) => onChange(e.target.value)} />;
+  const known = list.some((r) => r.id === value);
+  return (
+    <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select resource…</option>
+      {list.map((r) => <option key={r.id} value={r.id}>{r.name}{r.status ? ` · ${r.status}` : ''}</option>)}
+      {value && !known && <option value={value}>{value} (saved)</option>}
+    </select>
+  );
+}
+
 function ActionRow({ action, connectors, monitors, manifests, loadManifest, onChange, onRemove }: {
   action: RuleAction; connectors: ConnectorInstanceSummary[]; monitors: MonitorSummary[]; manifests: Record<string, ConnectorManifest>;
   loadManifest: (connectorId: string) => Promise<ConnectorManifest | null>;
@@ -384,40 +421,75 @@ function ActionRow({ action, connectors, monitors, manifests, loadManifest, onCh
       </div>
       {action.type === 'notify' && (
         <div className="space-y-2">
-          <Input placeholder="Notification title" value={action.title} onChange={(e) => onChange({ ...action, title: e.target.value })} />
+          <div className="grid grid-cols-[1fr_9rem] gap-2">
+            <Input placeholder="Notification title" value={action.title} onChange={(e) => onChange({ ...action, title: e.target.value })} />
+            <select className={selectCls + ' !mt-0'} value={action.severity ?? 'warning'}
+              onChange={(e) => onChange({ ...action, severity: e.target.value as 'info' | 'warning' | 'critical' })}>
+              {COND_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
           <Input placeholder="Body (optional)" value={action.body ?? ''} onChange={(e) => onChange({ ...action, body: e.target.value })} />
         </div>
       )}
-      {isConnector && (
-        <div className="grid grid-cols-2 gap-2">
-          <select className={selectCls} value={action.instanceId}
-            onChange={(e) => onChange({ ...action, instanceId: e.target.value })}>
-            <option value="">Select connector…</option>
-            {connectors.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          {action.type === 'connector_action' ? (
-            <>
-              <select className={selectCls} value={action.kind} onChange={(e) => onChange({ ...action, kind: e.target.value, actionId: '' })}>
-                <option value="">Kind…</option>
-                {(manifest?.resourceKinds ?? []).map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
-              </select>
-              <select className={selectCls} value={action.actionId} onChange={(e) => onChange({ ...action, actionId: e.target.value })}>
-                <option value="">Action…</option>
-                {(manifest?.resourceKinds.find((k) => k.id === action.kind)?.actions ?? []).map((ac) => <option key={ac.id} value={ac.id}>{ac.label}</option>)}
-              </select>
-              <Input placeholder="Resource id (copy from the resource list)" value={action.resourceId} onChange={(e) => onChange({ ...action, resourceId: e.target.value })} />
-            </>
-          ) : action.type === 'connector_operation' ? (
-            <>
-              <select className={selectCls} value={action.operationId} onChange={(e) => onChange({ ...action, operationId: e.target.value })}>
-                <option value="">Operation…</option>
-                {(manifest?.operations ?? []).map((op) => <option key={op.id} value={op.id}>{op.label}</option>)}
-              </select>
-              <Input placeholder="Resource id (for resource-scoped ops)" value={action.resourceId ?? ''} onChange={(e) => onChange({ ...action, resourceId: e.target.value })} />
-            </>
-          ) : null}
+      {action.type === 'connector_action' && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 gap-2">
+            <select className={selectCls} value={action.instanceId}
+              onChange={(e) => onChange({ ...action, instanceId: e.target.value, kind: '', actionId: '', resourceId: '' })}>
+              <option value="">Connector…</option>
+              {connectors.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select className={selectCls} value={action.kind} disabled={!action.instanceId}
+              onChange={(e) => onChange({ ...action, kind: e.target.value, actionId: '', resourceId: '' })}>
+              <option value="">Kind…</option>
+              {(manifest?.resourceKinds ?? []).map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+            </select>
+            <select className={selectCls} value={action.actionId} disabled={!action.kind}
+              onChange={(e) => onChange({ ...action, actionId: e.target.value })}>
+              <option value="">Action…</option>
+              {(manifest?.resourceKinds.find((k) => k.id === action.kind)?.actions ?? []).map((ac) => <option key={ac.id} value={ac.id}>{ac.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs">Resource</Label>
+            <ResourceSelect instanceId={action.instanceId} kind={action.kind} value={action.resourceId}
+              onChange={(v) => onChange({ ...action, resourceId: v })} />
+          </div>
         </div>
       )}
+      {action.type === 'connector_operation' && (() => {
+        const op = manifest?.operations?.find((o) => o.id === action.operationId);
+        return (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <select className={selectCls} value={action.instanceId}
+                onChange={(e) => onChange({ ...action, instanceId: e.target.value, operationId: '', resourceId: undefined, values: undefined })}>
+                <option value="">Connector…</option>
+                {connectors.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <select className={selectCls} value={action.operationId} disabled={!action.instanceId}
+                onChange={(e) => onChange({ ...action, operationId: e.target.value, resourceId: undefined, values: undefined })}>
+                <option value="">Operation…</option>
+                {(manifest?.operations ?? []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+              </select>
+            </div>
+            {op?.scope === 'resource' && op.kind && (
+              <div>
+                <Label className="text-xs">Resource</Label>
+                <ResourceSelect instanceId={action.instanceId} kind={op.kind} value={action.resourceId ?? ''}
+                  onChange={(v) => onChange({ ...action, resourceId: v })} />
+              </div>
+            )}
+            {op && op.fields.length > 0 && (
+              <div className="rounded-md border border-border/60 bg-muted/20 p-2">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Parameters</p>
+                <OperationFields instanceId={action.instanceId} operation={op}
+                  values={action.values ?? {}} onChange={(values) => onChange({ ...action, values })} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {(action.type === 'pause_monitor' || action.type === 'resume_monitor') && (
         <select className={selectCls} value={action.monitorId} onChange={(e) => onChange({ ...action, monitorId: e.target.value })}>
           <option value="">Select monitor…</option>
