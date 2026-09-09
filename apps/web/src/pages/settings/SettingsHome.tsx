@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock } from 'lucide-react';
+import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock, DatabaseBackup } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -14,6 +14,7 @@ export function SettingsHome() {
     { to: '/settings/secrets', icon: Lock, title: 'Secrets Vault', desc: 'Stored credentials, rotation policies, and last-used tracking.', perm: 'secrets:read' },
     { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.' },
     { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
+    { to: '/settings/backup', icon: DatabaseBackup, title: 'Backup & Restore', desc: 'Full encrypted backup you can move to another machine.', perm: 'settings:write' },
   ].filter((s) => !s.perm || can(s.perm));
   return (
     <>

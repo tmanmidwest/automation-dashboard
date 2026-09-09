@@ -31,6 +31,7 @@ import { Notifications } from '@/pages/settings/Notifications';
 import { ApiTokens } from '@/pages/settings/ApiTokens';
 import { Secrets } from '@/pages/settings/Secrets';
 import { OAuthClients } from '@/pages/settings/OAuthClients';
+import { BackupRestore } from '@/pages/settings/BackupRestore';
 
 function FullscreenBrand() {
   return (
@@ -107,6 +108,7 @@ function Router() {
       <Route path="/settings/secrets" element={<Protected><RequirePerm perm="secrets:read"><Secrets /></RequirePerm></Protected>} />
       <Route path="/settings/api-tokens" element={<Protected><RequirePerm perm="settings:read"><ApiTokens /></RequirePerm></Protected>} />
       <Route path="/settings/oauth-clients" element={<Protected><RequirePerm perm="settings:read"><OAuthClients /></RequirePerm></Protected>} />
+      <Route path="/settings/backup" element={<Protected><RequirePerm perm="settings:write"><BackupRestore /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 

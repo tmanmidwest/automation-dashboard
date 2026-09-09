@@ -26,6 +26,27 @@ export class CryptoService {
     this.key = createHash('sha256').update(raw).digest();
   }
 
+  /** Derive the stable 32-byte key from any raw key string (same rule as the constructor). */
+  static deriveKey(raw: string): Buffer {
+    return createHash('sha256').update(raw).digest();
+  }
+
+  /** The raw APP_ENCRYPTION_KEY this process runs with (for the backup manifest / re-key check). */
+  get rawKey(): string {
+    return process.env.APP_ENCRYPTION_KEY as string;
+  }
+
+  /** Decrypt a payload with an explicitly supplied raw key — used to re-key a restored backup
+   *  whose secrets were encrypted with a different machine's APP_ENCRYPTION_KEY. */
+  decryptWithKey(payload: string, rawKey: string): string {
+    const key = CryptoService.deriveKey(rawKey);
+    const [ivB64, tagB64, dataB64] = payload.split(':');
+    if (!ivB64 || !tagB64 || !dataB64) throw new Error('Malformed ciphertext.');
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]).toString('utf8');
+  }
+
   encrypt(plaintext: string): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, iv);
