@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -96,6 +96,26 @@ export class DockerFleetService implements OnModuleInit {
     const active = Date.now() - this.lastAccess < ACTIVE_WINDOW_MS;
     const stale = !this.cache || Date.now() - this.cache.at >= IDLE_REFRESH_MS;
     if (active || stale) void this.refresh().catch(() => { /* keep last good cache */ });
+  }
+
+  /**
+   * Recompute a single host and patch it into the cached tree, so the per-host refresh
+   * button on the Docker Fleet page hits only that host instead of the whole fleet.
+   * Returns the freshly-computed host; totals + snapshot are updated in place.
+   */
+  async refreshHost(instanceId: string): Promise<FleetHost> {
+    const inst = await this.instances.get(instanceId);
+    if (inst.connectorId !== DOCKER) throw new BadRequestException('Not a Docker connector.');
+    const host = await this.host(instanceId, inst.name);
+    const prev = this.cache?.data.hosts ?? [];
+    const hosts = prev.some((h) => h.instanceId === instanceId)
+      ? prev.map((h) => (h.instanceId === instanceId ? host : h))
+      : [...prev, host];
+    hosts.sort((a, b) => a.name.localeCompare(b.name));
+    const data = { hosts, totals: this.totals(hosts) };
+    this.cache = { at: Date.now(), data };
+    this.persist(data);
+    return host;
   }
 
   private async compute(): Promise<DockerFleet> {

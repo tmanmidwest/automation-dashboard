@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Sse, MessageEvent } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, Sse, MessageEvent } from '@nestjs/common';
 import { Observable, interval, map, merge } from 'rxjs';
 import { DockerFleetService } from './docker-fleet.service';
 import { RequirePermissions } from '../auth/decorators';
@@ -16,6 +16,13 @@ export class DockerFleetController {
   @RequirePermissions('connectors:read')
   get(@Query('force') force?: string) {
     return this.fleet.fleet(force === '1' || force === 'true');
+  }
+
+  /** Refresh a single host (recompute + patch into the cached tree). Returns the updated host. */
+  @Post('fleet/hosts/:instanceId/refresh')
+  @RequirePermissions('connectors:read')
+  refreshHost(@Param('instanceId') instanceId: string) {
+    return this.fleet.refreshHost(instanceId);
   }
 
   /**

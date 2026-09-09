@@ -133,6 +133,23 @@ export function DockerFleet() {
   }
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, []);
 
+  // Per-host refresh: recompute just one host server-side and patch it into local state,
+  // instead of re-polling every host like the top-level Refresh does.
+  const [hostBusy, setHostBusy] = useState<Set<string>>(new Set());
+  async function refreshHost(instanceId: string) {
+    setHostBusy((prev) => new Set(prev).add(instanceId));
+    try {
+      const host = await api.post<FleetHost>(`/api/docker/fleet/hosts/${instanceId}/refresh`, {});
+      setFleet((prev) => {
+        if (!prev) return prev;
+        const hosts = prev.hosts.map((h) => (h.instanceId === instanceId ? host : h));
+        return { hosts, totals: recomputeTotals(hosts) };
+      });
+      setLoadedAt(new Date());
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to refresh host.'); }
+    finally { setHostBusy((prev) => { const n = new Set(prev); n.delete(instanceId); return n; }); }
+  }
+
   // Live container updates merged across all hosts — patch state in place (no server round-trip),
   // and debounce a reconciling refresh for structural changes (new/removed containers).
   const fleetRef = useRef<DockerFleet | null>(null);
@@ -326,7 +343,7 @@ export function DockerFleet() {
       )}
 
       {view === 'stacks'
-        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, stackAction, stackUpdate, stackForceRebuild, openConsole, memberKey }} />
+        ? <StacksView fleet={fleet!} {...{ query, focus, memberVisible, collapsedHosts, setCollapsedHosts, expandedStacks, setExpandedStacks, selected, setSelected, busy, canAct, containerAction, containerRecreate, openOp, stackAction, stackUpdate, stackForceRebuild, openConsole, memberKey, refreshHost, hostBusy }} />
         : <ContainersView members={allMembers.filter((x) => memberVisible(x.m, x.stack))} {...{ selected, setSelected, busy, canAct, containerAction, containerRecreate, openConsole, memberKey }} />}
 
       {activeOp && (
@@ -357,6 +374,7 @@ function StacksView(p: {
   stackAction: (s: FleetStack, actionId: string) => void; stackUpdate: (s: FleetStack) => void; stackForceRebuild: (s: FleetStack) => void;
   openConsole: (m: FleetMember, mode: 'shell' | 'logs') => void;
   memberKey: (m: FleetMember) => string;
+  refreshHost: (instanceId: string) => void; hostBusy: Set<string>;
 }) {
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void, id: string) => {
     const n = new Set(set); n.has(id) ? n.delete(id) : n.add(id); setter(n);
@@ -371,25 +389,36 @@ function StacksView(p: {
         const collapsed = p.collapsedHosts.has(h.instanceId);
         return (
           <Card key={h.instanceId}>
-            <button onClick={() => toggle(p.collapsedHosts, p.setCollapsedHosts, h.instanceId)}
-              className="w-full flex items-center gap-3 px-4 py-3 text-left">
-              {collapsed ? <ChevronRight className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
-              <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="font-semibold">{h.name}</span>
-              <span className={cn('h-2 w-2 rounded-full shrink-0', h.online ? 'bg-emerald-400' : 'bg-destructive')} title={h.online ? 'Online' : (h.error ?? 'Offline')} />
-              <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground flex-wrap justify-end">
-                {!h.online ? <span className="text-destructive">{h.error ?? 'offline'}</span> : <>
-                  <span className="text-emerald-400">{h.metrics.running} up</span>
-                  {h.metrics.unhealthy > 0 && <span className="text-destructive">{h.metrics.unhealthy} unhealthy</span>}
-                  {h.metrics.stopped > 0 && <span>{h.metrics.stopped} stopped</span>}
-                  {h.metrics.updates > 0 && <span className="text-amber-400">{h.metrics.updates} updates</span>}
-                  <span className="opacity-50">·</span>
-                  {h.metrics.hostLoadPct != null && <span>CPU {h.metrics.hostLoadPct}%</span>}
-                  {h.metrics.hostMemUsedPct != null && <span>MEM {h.metrics.hostMemUsedPct}%</span>}
-                  {h.metrics.hostRootDiskPct != null && <span>DISK {h.metrics.hostRootDiskPct}%</span>}
-                </>}
-              </div>
-            </button>
+            <div className="w-full flex items-center gap-3 px-4 py-3">
+              <button onClick={() => toggle(p.collapsedHosts, p.setCollapsedHosts, h.instanceId)}
+                className="flex items-center gap-3 min-w-0 flex-1 text-left">
+                {collapsed ? <ChevronRight className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
+                <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="font-semibold">{h.name}</span>
+                <span className={cn('h-2 w-2 rounded-full shrink-0', h.online ? 'bg-emerald-400' : 'bg-destructive')} title={h.online ? 'Online' : (h.error ?? 'Offline')} />
+                <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground flex-wrap justify-end">
+                  {!h.online ? <span className="text-destructive">{h.error ?? 'offline'}</span> : <>
+                    <span className="text-emerald-400">{h.metrics.running} up</span>
+                    {h.metrics.unhealthy > 0 && <span className="text-destructive">{h.metrics.unhealthy} unhealthy</span>}
+                    {h.metrics.stopped > 0 && <span>{h.metrics.stopped} stopped</span>}
+                    {h.metrics.updates > 0 && <span className="text-amber-400">{h.metrics.updates} updates</span>}
+                    <span className="opacity-50">·</span>
+                    {h.metrics.hostLoadPct != null && <span>CPU {h.metrics.hostLoadPct}%</span>}
+                    {h.metrics.hostMemUsedPct != null && <span>MEM {h.metrics.hostMemUsedPct}%</span>}
+                    {h.metrics.hostRootDiskPct != null && <span>DISK {h.metrics.hostRootDiskPct}%</span>}
+                  </>}
+                </div>
+              </button>
+              <button
+                onClick={() => p.refreshHost(h.instanceId)}
+                disabled={p.hostBusy.has(h.instanceId)}
+                title="Refresh this host"
+                aria-label={`Refresh ${h.name}`}
+                className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50"
+              >
+                <RefreshCw className={cn('h-4 w-4', p.hostBusy.has(h.instanceId) && 'animate-spin')} />
+              </button>
+            </div>
             {!collapsed && (
               <CardContent className="pt-0 pb-2">
                 {stacks.length === 0 ? <p className="text-sm text-muted-foreground py-3">No stacks.</p> : (
