@@ -19,7 +19,7 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
 | --- | --- | --- | --- |
 | **server** | `GET /System/Info` | name · version · OS | Scan all libraries · Restart · Shut down |
 | **session** | `GET /Sessions` | active streams: user · title · client/device · **play method** (Direct Play / Direct Stream / **Transcode**) · progress · bitrate | Pause · Unpause · Stop · Send message |
-| **user** | `GET /Users` | name · last activity · admin · enabled | Enable / Disable |
+| **user** | `GET /Users` | name · last activity · admin · enabled | New user · Edit settings (full policy + config) · Set password · Make/Revoke admin · Enable/Disable · Delete |
 | **library** | `GET /Library/VirtualFolders` (+ `/Items/Counts`) | name · type · item count | Scan now |
 | **task** | `GET /ScheduledTasks` | scheduled jobs · state · last result · progress | Run now |
 | **device** | `GET /Devices` | remembered clients: user · device · app · last activity | Delete (forget) |
@@ -64,3 +64,23 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
   and **Shut down** (`POST /System/Shutdown`) — both destructive + confirm. **User Enable/Disable** now
   implemented via the full policy round-trip (`GET /Users/{id}` → set `Policy.IsDisabled` → `POST /Users/{id}/Policy`).
   Connector v0.4.0.
+- **Phase 5 (built):** full **user management**. **New user** (`create-user`, scope `create` on the user kind →
+  `POST /Users/New`, then a policy round-trip if Administrator is checked), **Set password** (`reset-password`
+  resource op → `POST /Users/{id}/Password` as admin, blank clears it), **Make / Revoke admin** (policy
+  round-trip toggling `Policy.IsAdministrator`), and **Delete** user (user kind now `deletable` →
+  `DELETE /Users/{id}`), alongside the existing Enable/Disable. Connector v0.5.0.
+- **Phase 6 (built):** **full user editor** — an **Edit settings** operation (`edit-user`, scope `resource`,
+  `prefill: true`) that opens populated with the user's current **Policy** *and* **Configuration** and mirrors
+  the whole Jellyfin user page: rename; every permission toggle (playback/transcoding/remuxing, content
+  deletion/downloads/conversion, collection/subtitle/live-TV management, remote access & remote control,
+  hidden); library/device/channel access (all-vs-list, libraries picked by **name**); parental control
+  (max rating, block unrated types, blocked/allowed tags); limits (max sessions, remote bitrate, lockout);
+  SyncPlay + auth providers; and the display Configuration (audio/subtitle language + mode, missing episodes,
+  auto-play next, remember selections, local PIN, latest/my-media excludes, home library order). Driven by one
+  `USER_FIELD_DEFS` descriptor list that generates the form fields, the prefill (`operationDefaults`), and the
+  save coder — so each field round-trips through the same key/target/type. **Save merges over the freshly
+  fetched Policy/Configuration** (only managed keys overridden), so unmanaged/structured settings (e.g.
+  `AccessSchedules`) are preserved. API additions: `getUser` now returns `Configuration`; new
+  `setUserConfiguration` (`POST /Users/{id}/Configuration`) + `updateUser` (`POST /Users/{id}` for rename).
+  Library-id ↔ name mapping via `/Library/VirtualFolders`. Connector v0.6.0. *(AccessSchedules time-window
+  editing is intentionally left out of the form — preserved but not editable here.)*

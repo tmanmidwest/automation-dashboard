@@ -3,6 +3,7 @@ import type {
   ConnectorContext,
   ConnectorManifest,
   ConnectorOperation,
+  ConnectorFormField,
   ConnectorResource,
   ConnectorResourceDetail,
   ConnectorResourceKind,
@@ -46,10 +47,12 @@ const KINDS: ConnectorResourceKind[] = [
     ],
   },
   {
-    id: USER_KIND, label: 'Users', deletable: false,
+    id: USER_KIND, label: 'Users', deletable: true,
     actions: [
       { id: 'disable', label: 'Disable', mutating: true, intent: 'destructive', confirm: 'Disable this user? They will not be able to sign in.', showWhenStatus: ['enabled', 'admin'] },
       { id: 'enable', label: 'Enable', mutating: true, showWhenStatus: ['disabled'] },
+      { id: 'make-admin', label: 'Make admin', mutating: true, showWhenStatus: ['enabled'] },
+      { id: 'revoke-admin', label: 'Revoke admin', mutating: true, intent: 'destructive', confirm: 'Remove administrator rights from this user?', showWhenStatus: ['admin'] },
     ],
   },
   { id: LIBRARY_KIND, label: 'Libraries', deletable: false, actions: [{ id: 'scan', label: 'Scan', mutating: true }] },
@@ -59,7 +62,152 @@ const KINDS: ConnectorResourceKind[] = [
   { id: PLUGIN_KIND, label: 'Plugins', deletable: false, actions: [] },
 ];
 
+// ── Full user editor (Policy + Configuration) ─────────────────────
+// One descriptor list drives the edit-user form, its prefill, and the save
+// merge — so every field round-trips through the same key + target + coder.
+
+type UserFieldTarget = 'policy' | 'config';
+type UserFieldType = 'boolean' | 'number' | 'text' | 'select' | 'arrayCsv' | 'intOrNull' | 'folders';
+
+interface UserFieldDef {
+  /** Jellyfin property name inside Policy/Configuration (e.g. 'EnableMediaPlayback'). */
+  key: string;
+  label: string;
+  target: UserFieldTarget;
+  type: UserFieldType;
+  help?: string;
+  options?: { label: string; value: string }[];
+  showWhen?: { field: string; equals: boolean };
+}
+
+const SUBTITLE_MODES = ['Default', 'Always', 'OnlyForced', 'None', 'Smart'];
+const SYNCPLAY_MODES = ['CreateAndJoinGroups', 'JoinGroups', 'None'];
+
+/** Every editable Policy + Configuration field the Jellyfin user page exposes. */
+const USER_FIELD_DEFS: UserFieldDef[] = [
+  // Policy — core status
+  { key: 'IsAdministrator', label: 'Administrator', target: 'policy', type: 'boolean', help: 'Full server admin rights.' },
+  { key: 'IsDisabled', label: 'Disabled (cannot sign in)', target: 'policy', type: 'boolean' },
+  { key: 'IsHidden', label: 'Hidden from login screen', target: 'policy', type: 'boolean' },
+  // Policy — playback permissions
+  { key: 'EnableMediaPlayback', label: 'Allow media playback', target: 'policy', type: 'boolean' },
+  { key: 'EnableAudioPlaybackTranscoding', label: 'Allow audio transcoding', target: 'policy', type: 'boolean' },
+  { key: 'EnableVideoPlaybackTranscoding', label: 'Allow video transcoding', target: 'policy', type: 'boolean' },
+  { key: 'EnablePlaybackRemuxing', label: 'Allow video remuxing', target: 'policy', type: 'boolean' },
+  { key: 'ForceRemoteSourceTranscoding', label: 'Force transcoding of remote sources', target: 'policy', type: 'boolean' },
+  // Policy — content management
+  { key: 'EnableContentDeletion', label: 'Allow content deletion', target: 'policy', type: 'boolean' },
+  { key: 'EnableContentDownloading', label: 'Allow media downloads', target: 'policy', type: 'boolean' },
+  { key: 'EnableCollectionManagement', label: 'Allow collection management', target: 'policy', type: 'boolean' },
+  { key: 'EnableSubtitleManagement', label: 'Allow subtitle management', target: 'policy', type: 'boolean' },
+  { key: 'EnableSyncTranscoding', label: 'Allow sync transcoding (downloads)', target: 'policy', type: 'boolean' },
+  { key: 'EnableMediaConversion', label: 'Allow media conversion', target: 'policy', type: 'boolean' },
+  // Policy — remote / device control
+  { key: 'EnableRemoteAccess', label: 'Allow remote (off-LAN) connections', target: 'policy', type: 'boolean' },
+  { key: 'EnableRemoteControlOfOtherUsers', label: 'Allow remote control of other users', target: 'policy', type: 'boolean' },
+  { key: 'EnableSharedDeviceControl', label: 'Allow control of shared devices', target: 'policy', type: 'boolean' },
+  { key: 'EnableUserPreferenceAccess', label: 'Allow editing own display preferences', target: 'policy', type: 'boolean' },
+  // Policy — live TV
+  { key: 'EnableLiveTvAccess', label: 'Allow Live TV access', target: 'policy', type: 'boolean' },
+  { key: 'EnableLiveTvManagement', label: 'Allow Live TV management', target: 'policy', type: 'boolean' },
+  // Policy — library access
+  { key: 'EnableAllFolders', label: 'Access all libraries', target: 'policy', type: 'boolean' },
+  { key: 'EnabledFolders', label: 'Allowed libraries', target: 'policy', type: 'folders', help: 'Comma-separated library names.', showWhen: { field: 'EnableAllFolders', equals: false } },
+  // Policy — device access
+  { key: 'EnableAllDevices', label: 'Access from all devices', target: 'policy', type: 'boolean' },
+  { key: 'EnabledDevices', label: 'Allowed device IDs', target: 'policy', type: 'arrayCsv', help: 'Comma-separated device IDs.', showWhen: { field: 'EnableAllDevices', equals: false } },
+  // Policy — channel access
+  { key: 'EnableAllChannels', label: 'Access all channels', target: 'policy', type: 'boolean' },
+  { key: 'EnabledChannels', label: 'Allowed channel IDs', target: 'policy', type: 'arrayCsv', help: 'Comma-separated channel IDs.', showWhen: { field: 'EnableAllChannels', equals: false } },
+  // Policy — parental control
+  { key: 'MaxParentalRating', label: 'Max parental rating (score)', target: 'policy', type: 'intOrNull', help: 'Blank = no limit.' },
+  { key: 'BlockUnratedItems', label: 'Block unrated item types', target: 'policy', type: 'arrayCsv', help: 'e.g. Movie, Series, Music, Book, LiveTvChannel, Other.' },
+  { key: 'BlockedTags', label: 'Blocked tags', target: 'policy', type: 'arrayCsv', help: 'Comma-separated tags.' },
+  { key: 'AllowedTags', label: 'Allowed tags (allowlist)', target: 'policy', type: 'arrayCsv', help: 'Comma-separated tags.' },
+  // Policy — limits & sync
+  { key: 'MaxActiveSessions', label: 'Max simultaneous streams', target: 'policy', type: 'number', help: '0 = unlimited.' },
+  { key: 'RemoteClientBitrateLimit', label: 'Remote bitrate limit (bit/s)', target: 'policy', type: 'number', help: '0 = unlimited.' },
+  { key: 'LoginAttemptsBeforeLockout', label: 'Failed logins before lockout', target: 'policy', type: 'number', help: '-1 = default, 0 = never lock.' },
+  { key: 'SyncPlayAccess', label: 'SyncPlay access', target: 'policy', type: 'select', options: SYNCPLAY_MODES.map((v) => ({ label: v, value: v })) },
+  { key: 'AuthenticationProviderId', label: 'Authentication provider', target: 'policy', type: 'text', help: 'Advanced — e.g. an LDAP provider id.' },
+  { key: 'PasswordResetProviderId', label: 'Password reset provider', target: 'policy', type: 'text', help: 'Advanced.' },
+  // Configuration — display / playback preferences
+  { key: 'AudioLanguagePreference', label: 'Preferred audio language', target: 'config', type: 'text', help: 'ISO code, e.g. eng.' },
+  { key: 'PlayDefaultAudioTrack', label: 'Play default audio track regardless of language', target: 'config', type: 'boolean' },
+  { key: 'SubtitleLanguagePreference', label: 'Preferred subtitle language', target: 'config', type: 'text', help: 'ISO code, e.g. eng.' },
+  { key: 'SubtitleMode', label: 'Subtitle mode', target: 'config', type: 'select', options: SUBTITLE_MODES.map((v) => ({ label: v, value: v })) },
+  { key: 'DisplayMissingEpisodes', label: 'Display missing episodes', target: 'config', type: 'boolean' },
+  { key: 'HidePlayedInLatest', label: 'Hide played items from "Latest"', target: 'config', type: 'boolean' },
+  { key: 'RememberAudioSelections', label: 'Remember audio selections', target: 'config', type: 'boolean' },
+  { key: 'RememberSubtitleSelections', label: 'Remember subtitle selections', target: 'config', type: 'boolean' },
+  { key: 'EnableNextEpisodeAutoPlay', label: 'Auto-play next episode', target: 'config', type: 'boolean' },
+  { key: 'EnableLocalPassword', label: 'Require a PIN on this network', target: 'config', type: 'boolean' },
+  { key: 'CastReceiverId', label: 'Cast receiver id', target: 'config', type: 'text', help: 'Advanced.' },
+  { key: 'GroupedFolders', label: 'Grouped into "My Media" as home', target: 'config', type: 'folders', help: 'Comma-separated library names.' },
+  { key: 'LatestItemsExcludes', label: 'Exclude from "Latest"', target: 'config', type: 'folders', help: 'Comma-separated library names.' },
+  { key: 'MyMediaExcludes', label: 'Exclude from "My Media"', target: 'config', type: 'folders', help: 'Comma-separated library names.' },
+  { key: 'OrderedViews', label: 'Home screen library order', target: 'config', type: 'folders', help: 'Comma-separated library names, in order.' },
+];
+
+/** Build the operation form field for a user-field descriptor. */
+function defToFormField(d: UserFieldDef): ConnectorFormField {
+  const type: ConnectorFormField['type'] =
+    d.type === 'boolean' ? 'boolean'
+    : d.type === 'number' ? 'number'
+    : d.type === 'select' ? 'select'
+    : d.type === 'arrayCsv' || d.type === 'folders' ? 'textarea'
+    : 'text'; // text + intOrNull
+  return {
+    key: d.key, label: d.label, type, required: false,
+    ...(d.help ? { help: d.help } : {}),
+    ...(d.options ? { options: d.options } : {}),
+    ...(d.showWhen ? { showWhen: d.showWhen } : {}),
+  };
+}
+
+const EDIT_USER_FIELDS: ConnectorFormField[] = [
+  { key: 'name', label: 'Username', type: 'text', required: true },
+  ...USER_FIELD_DEFS.map(defToFormField),
+];
+
 const OPERATIONS: ConnectorOperation[] = [
+  {
+    id: 'edit-user',
+    label: 'Edit settings',
+    description: 'Rename the user and edit the full Jellyfin access policy and display preferences.',
+    scope: 'resource',
+    kind: USER_KIND,
+    icon: 'sliders-horizontal',
+    submitLabel: 'Save settings',
+    prefill: true,
+    fields: EDIT_USER_FIELDS,
+  },
+  {
+    id: 'create-user',
+    label: 'New user',
+    description: 'Create a Jellyfin user account.',
+    scope: 'create',
+    kind: USER_KIND,
+    icon: 'user-plus',
+    submitLabel: 'Create user',
+    fields: [
+      { key: 'name', label: 'Username', type: 'text', required: true, placeholder: 'jane' },
+      { key: 'password', label: 'Password', type: 'password', required: false, help: 'Leave blank for no password (the user can set one on first login).' },
+      { key: 'isAdmin', label: 'Administrator', type: 'boolean', required: false, default: false, help: 'Grant full admin rights.' },
+    ],
+  },
+  {
+    id: 'reset-password',
+    label: 'Set password',
+    description: 'Set or clear this user\'s password.',
+    scope: 'resource',
+    kind: USER_KIND,
+    icon: 'key-round',
+    submitLabel: 'Save password',
+    fields: [
+      { key: 'password', label: 'New password', type: 'password', required: false, help: 'Leave blank to remove the password entirely.' },
+    ],
+  },
   {
     id: 'send-message',
     label: 'Send message',
@@ -85,8 +233,8 @@ export class JellyfinConnector implements Connector {
     id: 'jellyfin',
     name: 'Jellyfin',
     description:
-      'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
-    version: '0.4.0',
+      'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Full user management — create/delete users, set passwords, and edit the complete access policy + display preferences (library/device access, parental controls, playback & content permissions, limits); pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
+    version: '0.6.0',
     icon: 'jellyfin',
     live: true,
     configFields: [
@@ -222,6 +370,14 @@ export class JellyfinConnector implements Connector {
         ctx.log('info', `Jellyfin user ${user.Name ?? resourceId} ${disable ? 'disabled' : 'enabled'}.`);
         return { ok: true, message: `User ${disable ? 'disabled' : 'enabled'}.` };
       }
+      if (kind === USER_KIND && (actionId === 'make-admin' || actionId === 'revoke-admin')) {
+        const admin = actionId === 'make-admin';
+        const user = await api.getUser(resourceId);
+        const policy = { ...(user.Policy ?? {}), IsAdministrator: admin };
+        await api.setUserPolicy(resourceId, policy);
+        ctx.log('info', `Jellyfin user ${user.Name ?? resourceId} admin ${admin ? 'granted' : 'revoked'}.`);
+        return { ok: true, message: `Administrator rights ${admin ? 'granted' : 'revoked'}.` };
+      }
       if (kind === LIBRARY_KIND && actionId === 'scan') {
         await api.refreshItem(resourceId);
         return { ok: true, message: 'Library scan started.' };
@@ -239,8 +395,20 @@ export class JellyfinConnector implements Connector {
   }
 
   async deleteResource(ctx: ConnectorContext, kind: string, resourceId: string): Promise<{ ok: boolean; message: string }> {
-    if (kind !== DEVICE_KIND) return { ok: false, message: `Cannot delete a ${kind}.` };
     const api = this.apiFrom(ctx);
+    if (kind === USER_KIND) {
+      try {
+        const user = await api.getUser(resourceId).catch(() => null);
+        await api.deleteUser(resourceId);
+        ctx.log('info', `Jellyfin user ${user?.Name ?? resourceId} deleted.`);
+        return { ok: true, message: 'User deleted.' };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Delete failed.';
+        ctx.log('error', `Jellyfin user delete failed: ${message}`);
+        return { ok: false, message };
+      }
+    }
+    if (kind !== DEVICE_KIND) return { ok: false, message: `Cannot delete a ${kind}.` };
     try {
       await api.deleteDevice(resourceId);
       ctx.log('info', `Jellyfin device ${resourceId.slice(0, 8)} removed.`);
@@ -252,9 +420,65 @@ export class JellyfinConnector implements Connector {
     }
   }
 
+  /** Prefill the edit-user form with the user's current policy + configuration. */
+  async operationDefaults(ctx: ConnectorContext, operationId: string, resourceId: string | undefined): Promise<Record<string, unknown>> {
+    if (operationId !== 'edit-user' || !resourceId) return {};
+    const api = this.apiFrom(ctx);
+    const user = await api.getUser(resourceId);
+    const policy = user.Policy ?? {};
+    const config = user.Configuration ?? {};
+    const { idToName } = await folderMaps(api);
+    const out: Record<string, unknown> = { name: user.Name ?? '' };
+    for (const d of USER_FIELD_DEFS) {
+      const raw = (d.target === 'policy' ? policy : config)[d.key];
+      out[d.key] = formatUserField(d, raw, idToName);
+    }
+    return out;
+  }
+
   async runOperation(ctx: ConnectorContext, operationId: string, resourceId: string | undefined, values: Record<string, unknown>, _onProgress: OperationProgress): Promise<OperationResult> {
     const api = this.apiFrom(ctx);
     try {
+      if (operationId === 'edit-user') {
+        if (!resourceId) return { ok: false, message: 'Missing user reference.' };
+        const newName = String(values.name ?? '').trim();
+        if (!newName) return { ok: false, message: 'A username is required.' };
+        // Merge form values over the *fresh* policy/config so untouched settings
+        // (e.g. access schedules, unknown future fields) are preserved verbatim.
+        const user = await api.getUser(resourceId);
+        const policy: Record<string, unknown> = { ...(user.Policy ?? {}) };
+        const config: Record<string, unknown> = { ...(user.Configuration ?? {}) };
+        const { nameToId } = await folderMaps(api);
+        for (const d of USER_FIELD_DEFS) {
+          if (!(d.key in values)) continue;
+          const target = d.target === 'config' ? config : policy;
+          target[d.key] = parseUserField(d, values[d.key], nameToId);
+        }
+        if (newName !== (user.Name ?? '')) await api.updateUser(resourceId, { ...user, Name: newName });
+        await api.setUserPolicy(resourceId, policy);
+        await api.setUserConfiguration(resourceId, config);
+        ctx.log('info', `Jellyfin user ${newName} settings updated.`);
+        return { ok: true, message: 'User settings saved.' };
+      }
+      if (operationId === 'create-user') {
+        const name = String(values.name ?? '').trim();
+        if (!name) return { ok: false, message: 'A username is required.' };
+        const password = String(values.password ?? '');
+        const created = await api.createUser(name, password || undefined);
+        if (bool(values.isAdmin) && created.Id) {
+          const policy = { ...(created.Policy ?? {}), IsAdministrator: true };
+          await api.setUserPolicy(created.Id, policy);
+        }
+        ctx.log('info', `Jellyfin user ${name} created${bool(values.isAdmin) ? ' (admin)' : ''}.`);
+        return { ok: true, message: `User "${name}" created.`, createdResourceId: created.Id };
+      }
+      if (operationId === 'reset-password') {
+        if (!resourceId) return { ok: false, message: 'Missing user reference.' };
+        const password = String(values.password ?? '');
+        await api.setUserPassword(resourceId, password || undefined);
+        ctx.log('info', `Jellyfin user ${resourceId.slice(0, 8)} password ${password ? 'set' : 'cleared'}.`);
+        return { ok: true, message: password ? 'Password updated.' : 'Password cleared.' };
+      }
       if (operationId === 'send-message') {
         if (!resourceId) return { ok: false, message: 'Missing session reference.' };
         const text = String(values.text ?? '').trim();
@@ -483,6 +707,49 @@ function pluginToResource(p: JfPlugin): ConnectorResource {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
+
+/** Build id↔name maps for the server's libraries (for the folder-list fields). */
+async function folderMaps(api: JellyfinApi): Promise<{ idToName: Map<string, string>; nameToId: Map<string, string> }> {
+  const folders = await api.virtualFolders().catch(() => [] as JfVirtualFolder[]);
+  const idToName = new Map<string, string>();
+  const nameToId = new Map<string, string>();
+  for (const f of folders) {
+    if (f.ItemId && f.Name) {
+      idToName.set(f.ItemId, f.Name);
+      nameToId.set(f.Name.toLowerCase(), f.ItemId);
+    }
+  }
+  return { idToName, nameToId };
+}
+
+/** Split a comma/newline-separated field into trimmed, non-empty entries. */
+function csvToArray(v: unknown): string[] {
+  return String(v ?? '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/** Current stored value → the form's field value. */
+function formatUserField(d: UserFieldDef, raw: unknown, idToName: Map<string, string>): unknown {
+  switch (d.type) {
+    case 'boolean': return raw === true;
+    case 'number': return typeof raw === 'number' ? raw : Number(raw ?? 0) || 0;
+    case 'intOrNull': return raw == null ? '' : String(raw);
+    case 'arrayCsv': return Array.isArray(raw) ? raw.map((x) => String(x)).join(', ') : '';
+    case 'folders': return Array.isArray(raw) ? raw.map((id) => idToName.get(String(id)) ?? String(id)).join(', ') : '';
+    default: return raw == null ? '' : String(raw); // text | select
+  }
+}
+
+/** Form field value → the value written back into Policy/Configuration. */
+function parseUserField(d: UserFieldDef, v: unknown, nameToId: Map<string, string>): unknown {
+  switch (d.type) {
+    case 'boolean': return v === true;
+    case 'number': { const n = Number(v); return Number.isFinite(n) ? n : 0; }
+    case 'intOrNull': { const t = String(v ?? '').trim(); if (!t) return null; const n = parseInt(t, 10); return Number.isFinite(n) ? n : null; }
+    case 'arrayCsv': return csvToArray(v);
+    case 'folders': return csvToArray(v).map((entry) => nameToId.get(entry.toLowerCase()) ?? entry);
+    default: return String(v ?? ''); // text | select
+  }
+}
 
 function nowPlayingTitle(s: JfSession): string {
   const item = s.NowPlayingItem;

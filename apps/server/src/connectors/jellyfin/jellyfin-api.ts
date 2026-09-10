@@ -115,11 +115,13 @@ export interface JfPlugin {
   Description?: string;
 }
 
-/** GET /Users/{id} — includes the full editable policy. */
+/** GET /Users/{id} — the full editable user (policy + display configuration). */
 export interface JfUserFull {
   Id: string;
   Name?: string;
   Policy?: Record<string, unknown> & { IsDisabled?: boolean; IsAdministrator?: boolean };
+  Configuration?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 interface JfPaged<T> { Items?: T[]; TotalRecordCount?: number }
@@ -156,6 +158,32 @@ export class JellyfinApi {
   /** Replace a user's policy (fetch, mutate, then POST the whole object back). */
   setUserPolicy(userId: string, policy: Record<string, unknown>) {
     return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}/Policy`, policy);
+  }
+  /** Replace a user's display configuration (audio/subtitle prefs, latest-view options, …). */
+  setUserConfiguration(userId: string, config: Record<string, unknown>) {
+    return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}/Configuration`, config);
+  }
+  /** Update the user record itself (used for rename — POST the whole UserDto back). */
+  updateUser(userId: string, dto: Record<string, unknown>) {
+    return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}`, dto);
+  }
+  /** Create a new user. Returns the created user (with its generated Id). */
+  createUser(name: string, password?: string) {
+    return this.request<JfUserFull>('POST', '/Users/New', { Name: name, Password: password ?? '' });
+  }
+  /** Permanently delete a user. */
+  deleteUser(userId: string) {
+    return this.request<void>('DELETE', `/Users/${encodeURIComponent(userId)}`);
+  }
+  /**
+   * Set or clear a user's password as an administrator (no current password needed).
+   * Pass an empty/undefined newPw to remove the password entirely.
+   */
+  setUserPassword(userId: string, newPw?: string) {
+    const body = newPw
+      ? { CurrentPw: '', NewPw: newPw, ResetPassword: false }
+      : { CurrentPw: '', NewPw: '', ResetPassword: true };
+    return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}/Password`, body);
   }
   deleteDevice(deviceId: string) {
     return this.request<void>('DELETE', `/Devices?id=${encodeURIComponent(deviceId)}`);

@@ -275,8 +275,16 @@ export class OllamaProvisionService {
 
       if (opts.model) {
         yield { type: 'log', text: `Pulling model ${opts.model} … (several minutes on first download)` };
-        await pullModel(baseUrl, opts.model);
-        yield { type: 'log', text: `Model ${opts.model} ready.` };
+        try {
+          for await (const line of pullModelStream(baseUrl, opts.model)) yield { type: 'log', text: line };
+          yield { type: 'log', text: `Model ${opts.model} ready.` };
+        } catch (pullErr) {
+          // Non-fatal: the container is up and configured; the model can be pulled on a retry.
+          yield {
+            type: 'log',
+            text: `⚠ Model pull didn't finish (${pullErr instanceof Error ? pullErr.message : String(pullErr)}). The container is running — re-run Deploy to resume the pull (it's resumable).`,
+          };
+        }
       }
 
       // Optional: front it with an Nginx Proxy Manager proxy host and hand the Computer the
@@ -411,15 +419,62 @@ async function waitReady(baseUrl: string, attempts = 20, delayMs = 2000): Promis
   return false;
 }
 
-/** Pull a model via Ollama's own HTTP API (blocking until complete). */
-async function pullModel(baseUrl: string, model: string): Promise<void> {
+/**
+ * Pull a model via Ollama's STREAMING /api/pull, yielding throttled progress lines. Streaming
+ * is essential: a non-streaming pull sends no response until the multi-GB download completes,
+ * which trips the HTTP client's headers timeout ("network error"). Progress lines also give
+ * the user real feedback. The download is resumable, so a failed pull can just be re-run.
+ */
+async function* pullModelStream(baseUrl: string, model: string): AsyncGenerator<string> {
   const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/pull`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: model, stream: false }),
+    body: JSON.stringify({ name: model, stream: true }),
   });
-  if (!res.ok) {
+  if (!res.ok || !res.body) {
     const text = await res.text().catch(() => '');
-    throw new Error(`model pull failed (${res.status}): ${text.slice(0, 300) || res.statusText}`);
+    throw new Error(`pull failed (${res.status}): ${text.slice(0, 200) || res.statusText}`);
   }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let lastStatus = '';
+  let lastPct = -10;
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) continue;
+      let msg: { status?: string; error?: string; total?: number; completed?: number };
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (msg.error) throw new Error(msg.error);
+      const status = msg.status ?? '';
+      // Emit on a status change, or every ~5% within a download phase (throttle the flood).
+      if (msg.total && msg.completed) {
+        const pct = Math.floor((msg.completed / msg.total) * 100);
+        if (status !== lastStatus || pct - lastPct >= 5) {
+          yield `  ${status} — ${pct}% (${fmtBytes(msg.completed)}/${fmtBytes(msg.total)})`;
+          lastStatus = status;
+          lastPct = pct;
+        }
+      } else if (status && status !== lastStatus) {
+        yield `  ${status}`;
+        lastStatus = status;
+        lastPct = -10;
+      }
+    }
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
+  return `${n} B`;
 }

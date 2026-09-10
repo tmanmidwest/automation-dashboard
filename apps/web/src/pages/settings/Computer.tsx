@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { RefreshCw, Save, BookOpen, Rocket, Loader2, Server } from 'lucide-react';
 import type {
@@ -55,6 +55,7 @@ export function ComputerSettings() {
   const [deployLog, setDeployLog] = useState<string[]>([]);
   const [deploying, setDeploying] = useState(false);
   const [deployDone, setDeployDone] = useState(false);
+  const deployLogRef = useRef<HTMLPreElement>(null);
   // Reverse-proxy (NPM) option.
   const [wProxyOn, setWProxyOn] = useState(false);
   const [proxies, setProxies] = useState<OllamaHost[]>([]);
@@ -135,6 +136,9 @@ export function ComputerSettings() {
 
   // Reset a stale GPU probe when the target host changes.
   useEffect(() => { setGpu(null); setGpuLog([]); }, [wInstance]);
+
+  // Keep the deploy log scrolled to the newest line.
+  useEffect(() => { deployLogRef.current?.scrollTo({ top: deployLogRef.current.scrollHeight }); }, [deployLog]);
 
   async function checkGpu() {
     if (!wInstance) return;
@@ -547,7 +551,7 @@ export function ComputerSettings() {
             </div>
 
             {deployLog.length > 0 && (
-              <pre className="max-h-56 overflow-y-auto rounded border border-border/60 bg-background/70 p-2 text-xs font-mono leading-relaxed whitespace-pre-wrap">
+              <pre ref={deployLogRef} className="max-h-56 overflow-y-auto rounded border border-border/60 bg-background/70 p-2 text-xs font-mono leading-relaxed whitespace-pre-wrap">
                 {deployLog.join('\n')}
               </pre>
             )}
