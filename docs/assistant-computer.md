@@ -205,6 +205,14 @@ it. Endpoints: `GET /api/assistant/ollama/hosts`, `POST /api/assistant/ollama/de
 `settings:write`. Idempotent (reuses an existing `cerebro-ollama`). The manual compose path below
 remains as a fallback.
 
+**Reverse-proxy option.** The wizard can also front Ollama with an **Nginx Proxy Manager** proxy
+host: pick an NPM connector, a public hostname, and an optional certificate. Cerebro deploys + pulls
+over the direct URL, then reuses NPM's own `create-proxy-host` operation (`forward_host`/`forward_port`
+= the container host:port, same recipe as the App Replicator's `IngressService`) and points the
+Computer at `http(s)://<hostname>` instead. On failure it warns and falls back to the direct URL.
+Extra endpoints: `GET /api/assistant/ollama/proxies`, `GET /api/assistant/ollama/proxy-certs`. This
+gives a clean hostname + TLS for a remote GPU box instead of an unauthenticated `:11434` on the LAN.
+
 ## Deployment (contained-by-default)
 
 - New optional service in compose: `ollama/ollama` with a named volume for model weights, on the

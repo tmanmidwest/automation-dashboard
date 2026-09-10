@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { OllamaDeployEvent, OllamaDeployRequest, OllamaHost } from '@cerebro/shared';
+import type { OllamaCertOption, OllamaDeployEvent, OllamaDeployRequest, OllamaHost } from '@cerebro/shared';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerApi, type DockerAuth } from '../connectors/docker/docker-api';
 
@@ -7,6 +7,8 @@ const CONTAINER_NAME = 'cerebro-ollama';
 const VOLUME_NAME = 'cerebro-ollama';
 const IMAGE = 'ollama/ollama:latest';
 const OLLAMA_PORT = '11434';
+const DOCKER_CONNECTOR = 'docker';
+const NPM_CONNECTOR = 'nginx-proxy-manager';
 
 /**
  * One-click Ollama provisioning: deploy a self-hosted Ollama container onto one of the
@@ -21,7 +23,19 @@ export class OllamaProvisionService {
   /** Docker connector instances that can host Ollama. */
   async hosts(): Promise<OllamaHost[]> {
     const rows = await this.instances.list();
-    return rows.filter((r) => r.connectorId === 'docker').map((r) => ({ instanceId: r.id, name: r.name }));
+    return rows.filter((r) => r.connectorId === DOCKER_CONNECTOR).map((r) => ({ instanceId: r.id, name: r.name }));
+  }
+
+  /** Nginx Proxy Manager instances available to front Ollama (reverse-proxy option). */
+  async proxies(): Promise<OllamaHost[]> {
+    const rows = await this.instances.list();
+    return rows.filter((r) => r.connectorId === NPM_CONNECTOR).map((r) => ({ instanceId: r.id, name: r.name }));
+  }
+
+  /** Certificates an NPM instance offers (id 0 = None / HTTP only). */
+  async proxyCerts(instanceId: string): Promise<OllamaCertOption[]> {
+    const opts = await this.instances.resolveOptions(instanceId, 'npm-certs', {}).catch(() => []);
+    return opts.map((o) => ({ id: Number(o.value) || 0, name: o.label }));
   }
 
   /** Deploy (or reuse) the Ollama container and optionally pull a model, streaming progress. */
@@ -111,7 +125,41 @@ export class OllamaProvisionService {
         yield { type: 'log', text: `Model ${opts.model} ready.` };
       }
 
-      yield { type: 'done', baseUrl, model: opts.model };
+      // Optional: front it with an Nginx Proxy Manager proxy host and hand the Computer the
+      // proxy URL. The deploy + model pull above used the direct URL; only the connection the
+      // Computer keeps is moved behind the proxy. On failure we warn and fall back to direct.
+      let finalUrl = baseUrl;
+      if (opts.proxy?.instanceId && opts.proxy.domain?.trim()) {
+        const domain = opts.proxy.domain.trim();
+        const certId = opts.proxy.certificateId ?? 0;
+        try {
+          const direct = new URL(baseUrl);
+          const forwardHost = direct.hostname;
+          const forwardPort = Number(direct.port) || port;
+          yield { type: 'log', text: `Creating reverse proxy ${domain} → ${forwardHost}:${forwardPort} …` };
+          const res = await this.instances.runResourceOperationAwait(opts.proxy.instanceId, 'create-proxy-host', undefined, {
+            domain_names: domain,
+            forward_scheme: 'http',
+            forward_host: forwardHost,
+            forward_port: forwardPort,
+            certificate_id: String(certId),
+            ssl_forced: certId > 0 && !!opts.proxy.sslForced,
+            block_exploits: true,
+            allow_websocket_upgrade: true,
+            caching_enabled: false,
+          });
+          if (!res.ok) {
+            yield { type: 'log', text: `⚠ Reverse proxy not created (${res.message || 'NPM rejected it'}). Using the direct URL instead.` };
+          } else {
+            finalUrl = `${certId > 0 ? 'https' : 'http'}://${domain}`;
+            yield { type: 'log', text: `Reverse proxy ready. The Computer will connect via ${finalUrl}` };
+          }
+        } catch (err) {
+          yield { type: 'log', text: `⚠ Reverse proxy failed (${err instanceof Error ? err.message : String(err)}). Using the direct URL instead.` };
+        }
+      }
+
+      yield { type: 'done', baseUrl: finalUrl, model: opts.model };
     } catch (err) {
       yield { type: 'error', message: err instanceof Error ? err.message : String(err) };
     }

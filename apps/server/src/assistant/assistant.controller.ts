@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Put, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Post, Put, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type {
   AssistantChatMessage,
@@ -9,6 +9,7 @@ import type {
   AssistantProposeRuleRequest,
   AssistantResumeRequest,
   AssistantRuleProposal,
+  OllamaCertOption,
   OllamaDeployRequest,
   OllamaHost,
   SessionUser,
@@ -65,6 +66,20 @@ export class AssistantController {
     return this.ollama.hosts();
   }
 
+  /** Nginx Proxy Manager instances that can front the deployed Ollama. */
+  @Get('ollama/proxies')
+  @RequirePermissions('settings:write')
+  ollamaProxies(): Promise<OllamaHost[]> {
+    return this.ollama.proxies();
+  }
+
+  /** Certificates offered by an NPM instance (for the reverse-proxy option). */
+  @Get('ollama/proxy-certs')
+  @RequirePermissions('settings:write')
+  ollamaProxyCerts(@Query('instanceId') instanceId: string): Promise<OllamaCertOption[]> {
+    return this.ollama.proxyCerts(String(instanceId ?? ''));
+  }
+
   /** Deploy (or reuse) an Ollama container on a Docker host, streaming progress as SSE. */
   @Post('ollama/deploy')
   @RequirePermissions('settings:write')
@@ -79,6 +94,14 @@ export class AssistantController {
       gpu: body?.gpu === true,
       model: body?.model ? String(body.model) : undefined,
       baseUrlOverride: body?.baseUrlOverride ? String(body.baseUrlOverride) : undefined,
+      proxy: body?.proxy?.instanceId && body?.proxy?.domain
+        ? {
+            instanceId: String(body.proxy.instanceId),
+            domain: String(body.proxy.domain),
+            certificateId: Number(body.proxy.certificateId) || 0,
+            sslForced: body.proxy.sslForced === true,
+          }
+        : undefined,
     }));
   }
 

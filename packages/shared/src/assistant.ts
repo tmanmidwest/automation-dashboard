@@ -94,10 +94,29 @@ export interface AssistantModelInfo {
 
 // ── One-click Ollama provisioning (deploy a self-hosted backend from the UI) ──
 
-/** A Docker connector instance that can host the Ollama container. */
+/** A Docker connector instance that can host the Ollama container (also reused to list
+ *  Nginx Proxy Manager instances for the reverse-proxy option). */
 export interface OllamaHost {
   instanceId: string;
   name: string;
+}
+
+/** An NPM certificate option (id 0 = None / HTTP only). */
+export interface OllamaCertOption {
+  id: number;
+  name: string;
+}
+
+/** Optional reverse-proxy (Nginx Proxy Manager) fronting for the deployed Ollama. */
+export interface OllamaProxyConfig {
+  /** NPM connector instance id. */
+  instanceId: string;
+  /** Public hostname to route to Ollama, e.g. ollama.lan or ollama.example.com. */
+  domain: string;
+  /** NPM certificate id to attach (0 / omitted = HTTP only). */
+  certificateId?: number;
+  /** Force HTTPS (only meaningful with a certificate). */
+  sslForced?: boolean;
 }
 
 /** Body of POST /api/assistant/ollama/deploy. */
@@ -116,6 +135,12 @@ export interface OllamaDeployRequest {
    * be reached on the LAN. Blank = derive from the Docker host. Full URL, e.g. http://gpu-box:11434.
    */
   baseUrlOverride?: string;
+  /**
+   * Optionally front Ollama with an Nginx Proxy Manager proxy host. When set, Cerebro
+   * deploys + pulls over the direct URL, then routes `domain` → the container and points the
+   * Computer at the proxy URL instead. Omit for a direct connection.
+   */
+  proxy?: OllamaProxyConfig;
 }
 
 /** SSE progress events from the deploy stream. */

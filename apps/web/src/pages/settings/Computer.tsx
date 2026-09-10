@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { RefreshCw, Save, BookOpen, Rocket, Loader2, Server } from 'lucide-react';
 import type {
   AssistantConfigView, AssistantModelInfo, LlmBackend,
-  OllamaDeployEvent, OllamaHost,
+  OllamaCertOption, OllamaDeployEvent, OllamaHost,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -49,6 +49,13 @@ export function ComputerSettings() {
   const [deployLog, setDeployLog] = useState<string[]>([]);
   const [deploying, setDeploying] = useState(false);
   const [deployDone, setDeployDone] = useState(false);
+  // Reverse-proxy (NPM) option.
+  const [wProxyOn, setWProxyOn] = useState(false);
+  const [proxies, setProxies] = useState<OllamaHost[]>([]);
+  const [wProxyInstance, setWProxyInstance] = useState('');
+  const [wProxyDomain, setWProxyDomain] = useState('');
+  const [proxyCerts, setProxyCerts] = useState<OllamaCertOption[]>([]);
+  const [wProxyCertId, setWProxyCertId] = useState(0);
 
   useEffect(() => {
     api.get<AssistantConfigView>('/api/assistant/config').then(setCfg).catch(() => setCfg(null));
@@ -105,14 +112,29 @@ export function ComputerSettings() {
     setDeployLog([]); setDeployDone(false); setWizardOpen(true);
     setWModel(cfg.model || 'qwen2.5:7b');
     setHosts(null);
+    setWProxyOn(false); setProxyCerts([]); setWProxyCertId(0);
     try {
-      const h = await api.get<OllamaHost[]>('/api/assistant/ollama/hosts');
+      const [h, p] = await Promise.all([
+        api.get<OllamaHost[]>('/api/assistant/ollama/hosts'),
+        api.get<OllamaHost[]>('/api/assistant/ollama/proxies').catch(() => [] as OllamaHost[]),
+      ]);
       setHosts(h);
       if (h.length) setWInstance((cur) => cur || h[0].instanceId);
+      setProxies(p);
+      if (p.length) setWProxyInstance((cur) => cur || p[0].instanceId);
     } catch {
       setHosts([]);
     }
   }
+
+  // Load NPM certificate options when the chosen proxy instance changes.
+  useEffect(() => {
+    if (!wProxyOn || !wProxyInstance) return;
+    setProxyCerts([]);
+    api.get<OllamaCertOption[]>(`/api/assistant/ollama/proxy-certs?instanceId=${encodeURIComponent(wProxyInstance)}`)
+      .then(setProxyCerts)
+      .catch(() => setProxyCerts([]));
+  }, [wProxyOn, wProxyInstance]);
 
   async function deployOllama() {
     if (!wInstance || deploying) return;
@@ -123,7 +145,14 @@ export function ComputerSettings() {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instanceId: wInstance, port: wPort, gpu: wGpu, model: wModel.trim() || undefined, baseUrlOverride: wBaseUrlOverride.trim() || undefined }),
+        body: JSON.stringify({
+          instanceId: wInstance, port: wPort, gpu: wGpu,
+          model: wModel.trim() || undefined,
+          baseUrlOverride: wBaseUrlOverride.trim() || undefined,
+          proxy: wProxyOn && wProxyInstance && wProxyDomain.trim()
+            ? { instanceId: wProxyInstance, domain: wProxyDomain.trim(), certificateId: wProxyCertId, sslForced: wProxyCertId > 0 }
+            : undefined,
+        }),
       });
       if (!res.ok || !res.body) throw new Error((await res.text().catch(() => '')) || `Request failed (${res.status})`);
       const reader = res.body.getReader();
@@ -371,6 +400,49 @@ export function ComputerSettings() {
                 Leave blank to derive it from the Docker host. Set it if Cerebro should reach Ollama at a
                 different address than the Docker API (e.g. a LAN IP vs a VPN IP).
               </p>
+            </div>
+
+            <div className="rounded-md border border-border/60 p-3 space-y-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" className="h-4 w-4" checked={wProxyOn}
+                  onChange={(e) => setWProxyOn(e.target.checked)}
+                  disabled={deploying || proxies.length === 0} />
+                <span>Put it behind a reverse proxy (Nginx Proxy Manager)</span>
+              </label>
+              {proxies.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No Nginx Proxy Manager connector configured. <Link to="/connectors" className="underline">Add one</Link> to
+                  route Ollama through a clean hostname with optional TLS.
+                </p>
+              ) : wProxyOn && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Proxy manager</Label>
+                      <select className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={wProxyInstance} onChange={(e) => setWProxyInstance(e.target.value)} disabled={deploying}>
+                        {proxies.map((p) => <option key={p.instanceId} value={p.instanceId}>{p.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Certificate</Label>
+                      <select className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={wProxyCertId} onChange={(e) => setWProxyCertId(Number(e.target.value) || 0)} disabled={deploying}>
+                        <option value={0}>None (HTTP)</option>
+                        {proxyCerts.filter((c) => c.id > 0).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Public hostname</Label>
+                    <Input value={wProxyDomain} onChange={(e) => setWProxyDomain(e.target.value)}
+                      placeholder="ollama.lan or ollama.example.com" disabled={deploying} />
+                    <p className="text-xs text-muted-foreground">
+                      The Computer will connect via {wProxyCertId > 0 ? 'https' : 'http'}://{wProxyDomain.trim() || '<hostname>'} instead of the direct URL.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {deployLog.length > 0 && (
