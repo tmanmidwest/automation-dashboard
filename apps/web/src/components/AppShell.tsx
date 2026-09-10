@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Menu, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Menu, X, PanelLeftClose, PanelLeftOpen, Search } from 'lucide-react';
 import { useAuth } from '@/auth/AuthContext';
 import { Brand } from './Brand';
 import { SidebarNav } from './SidebarNav';
+import { CommandPalette } from './CommandPalette';
 import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
 
@@ -36,7 +37,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const clock = useClock();
+
+  // Global ⌘K / Ctrl+K opens the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     try {
@@ -97,6 +111,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="md:hidden font-lcars font-semibold text-lg text-[hsl(210_40%_96%)]">CEREBRO</span>
 
           <div className="ml-auto flex items-center gap-2 min-w-0">
+            <button
+              onClick={() => setPaletteOpen(true)}
+              className="flex items-center gap-2 rounded-md px-2.5 py-1 text-xs text-[hsl(210_40%_96%)] bg-white/10 hover:bg-white/20 transition-colors"
+              title="Search & commands (⌘K)"
+              aria-label="Open command palette"
+            >
+              <Search className="h-3.5 w-3.5" />
+              <span className="hidden md:inline">Search</span>
+              <kbd className="hidden md:inline text-[10px] opacity-80 border border-white/30 rounded px-1">⌘K</kbd>
+            </button>
             <span className="hidden lg:flex lcars-chip">SD {stardate()}</span>
             <span className="hidden sm:flex lcars-chip tabular-nums">{clock}</span>
             {user?.roleSlug === 'viewer' && (
@@ -143,6 +167,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }

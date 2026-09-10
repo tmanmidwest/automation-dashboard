@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Plus, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, ScrollText, X, Ban } from 'lucide-react';
 import type {
   ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
@@ -37,6 +37,11 @@ const statusColor = statusBadgeColor;
 
 export function ConnectorDetail() {
   const { id } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Deep link from the command palette: ?kind=<k>&resource=<id> opens that kind's tab + drawer.
+  const wantKind = searchParams.get('kind');
+  const wantResource = searchParams.get('resource');
+  const deepLinkDone = useRef(false);
   const navigate = useNavigate();
   const { can } = useAuth();
   const canWrite = can('connectors:write');
@@ -102,7 +107,9 @@ export function ConnectorDetail() {
       setSyncedAt(i.lastSyncedAt);
       const m = await api.get<ConnectorManifest>(`/api/connectors/available/${i.connectorId}`);
       setManifest(m);
-      setKind(m.resourceKinds[0]?.id ?? '');
+      // Honor a deep-linked kind (from the palette) if valid, else default to the first kind.
+      const initialKind = wantKind && m.resourceKinds.some((k) => k.id === wantKind) ? wantKind : m.resourceKinds[0]?.id ?? '';
+      setKind(initialKind);
       if (canAct) {
         setOperations(await api.get<ConnectorOperation[]>(`/api/connectors/instances/${id}/operations?scope=create`).catch(() => []));
       }
@@ -130,6 +137,18 @@ export function ConnectorDetail() {
   }, [id, kind, inst?.enabled]);
 
   useEffect(() => { void loadResources(); }, [loadResources]);
+
+  // Once the deep-linked kind's resources are in, open that resource's drawer (once).
+  useEffect(() => {
+    if (deepLinkDone.current || !wantResource || !wantKind || kind !== wantKind || resources.length === 0) return;
+    const res = resources.find((r) => r.id === wantResource);
+    if (res) {
+      deepLinkDone.current = true;
+      void openDetail(res);
+      setSearchParams({}, { replace: true }); // clean the URL so a refresh doesn't reopen it
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resources, kind, wantResource, wantKind]);
 
   // Clear the tag filters when switching resource kinds (tag facets differ per kind).
   useEffect(() => { setTagFilters([]); setAddKey(''); }, [kind]);

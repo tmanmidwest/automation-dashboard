@@ -216,3 +216,15 @@ export interface ViewscreenConfig {
   /** Grid columns on wide screens (1–6). */
   columns?: number;
 }
+
+/** One cross-connector resource hit from GET /api/search (the command palette's resource search). */
+export interface SearchHit {
+  instanceId: string;
+  instanceName: string;
+  connectorId: string;
+  kind: string;
+  kindLabel: string;
+  id: string;
+  name: string;
+  status?: string;
+}
