@@ -48,7 +48,10 @@ export type RuleAction =
   /** Resume a paused monitor. */
   | { type: 'resume_monitor'; monitorId: string }
   /** POST/GET an outbound webhook. `body` supports {{title}} {{severity}} {{source}} {{detail}} {{kind}} {{ruleName}} tokens. */
-  | { type: 'webhook'; url: string; method?: 'GET' | 'POST'; body?: string };
+  | { type: 'webhook'; url: string; method?: 'GET' | 'POST'; body?: string }
+  /** Ask the Computer (in-app LLM) headlessly — it runs read-only tools, produces a
+   *  short answer grounded in the triggering event, and delivers it as a notification. */
+  | { type: 'ask_computer'; prompt: string; title?: string; severity?: AutomationSeverity };
 
 export interface AutomationRule {
   id: string;

@@ -30,7 +30,9 @@ export type Permission =
   | 'connectors:action' // perform managing actions (start/stop VM, etc.)
   // Uptime monitors
   | 'monitors:read'
-  | 'monitors:write'; // add / edit / pause / delete monitors
+  | 'monitors:write' // add / edit / pause / delete monitors
+  // The Computer — in-app LLM assistant (session-only; runs tools as the user)
+  | 'assistant:use';
 
 /** The two built-in roles requested for launch: View Only and Full Control. */
 export const BUILTIN_ROLES = {
@@ -46,6 +48,7 @@ export const BUILTIN_ROLES = {
       'connectors:read',
       'monitors:read',
       'replicator:read',
+      'assistant:use',
     ] as Permission[],
   },
   admin: {
@@ -70,6 +73,7 @@ export const BUILTIN_ROLES = {
       'automations:write',
       'replicator:read',
       'replicator:write',
+      'assistant:use',
     ] as Permission[],
   },
 } as const;

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Puzzle, Ship, Video, Activity, Users, History, Zap, ScrollText,
   Settings, Info, Search, CornerDownLeft, ChevronRight, ChevronLeft, Plus, DatabaseBackup,
-  LogOut, Lock, KeyRound, Bell, Mail, ShieldCheck, Boxes, Play,
+  LogOut, Lock, KeyRound, Bell, Mail, ShieldCheck, Boxes, Play, Cpu,
 } from 'lucide-react';
 import type { Permission, ConnectorInstanceSummary, MonitorSummary, SearchHit, ConnectorManifest } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -194,8 +194,21 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       .filter((x): x is { c: Command; s: number } => x.s !== null)
       .sort((a, b) => a.s - b.s || a.c.label.localeCompare(b.c.label))
       .map((x) => x.c);
-    return [...recentCommands, ...client, ...resourceCommands]; // resources already server-ranked
-  }, [mode, query, rootCommands, resourceCommands, recentCommands]);
+    // "Ask the Computer" always leads when the user has access — it takes the raw query
+    // (not fuzzy-matched) and sends it straight to the Computer.
+    const ask: Command[] = [];
+    const q = query.trim();
+    if (can('assistant:use')) {
+      ask.push({
+        id: 'ask-computer',
+        group: 'Ask',
+        label: q ? `Ask the Computer: "${q}"` : 'Ask the Computer…',
+        icon: Cpu,
+        run: () => { onClose(); navigate('/computer', q ? { state: { ask: q } } : undefined); },
+      });
+    }
+    return [...ask, ...recentCommands, ...client, ...resourceCommands]; // resources already server-ranked
+  }, [mode, query, rootCommands, resourceCommands, recentCommands, can, navigate, onClose]);
 
   useEffect(() => { setSel(0); }, [query, mode.type]);
   useEffect(() => { if (sel >= results.length) setSel(Math.max(0, results.length - 1)); }, [results.length, sel]);

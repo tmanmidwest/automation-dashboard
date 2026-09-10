@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Loader2, Plus, Trash2, Play, Pencil, Zap } from 'lucide-react';
+import { Loader2, Plus, Trash2, Play, Pencil, Zap, Cpu } from 'lucide-react';
 import type {
+  AssistantRuleProposal,
   AutomationRule, AutomationRuleInput, AutomationRun,
   ConnectorInstanceSummary, ConnectorManifest, ConnectorOperation, ConnectorResource,
   MonitorSummary, RuleAction, RuleCondition, RuleTrigger,
@@ -55,6 +56,29 @@ export function Automations() {
   const [editing, setEditing] = useState<AutomationRule | 'new' | null>(null);
   const [form, setForm] = useState<AutomationRuleInput>(blankRule());
   const [busy, setBusy] = useState(false);
+  const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
+
+  // "Draft with the Computer" state.
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState('');
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftErr, setDraftErr] = useState<string | null>(null);
+
+  async function draftWithComputer() {
+    if (!draftPrompt.trim() || draftBusy) return;
+    setDraftBusy(true); setDraftErr(null);
+    try {
+      const res = await api.post<AssistantRuleProposal>('/api/assistant/propose-rule', { prompt: draftPrompt.trim() });
+      if (!res.rule) { setDraftErr(res.notes || 'The Computer could not draft a rule.'); return; }
+      setForm({ ...blankRule(), ...res.rule });
+      setNoticeMsg(res.notes || null);
+      setDraftOpen(false); setDraftPrompt(''); setEditing('new'); setErr(null);
+    } catch (e) {
+      setDraftErr(e instanceof ApiError ? e.message : 'Draft failed');
+    } finally {
+      setDraftBusy(false);
+    }
+  }
 
   async function load() {
     try {
@@ -76,10 +100,10 @@ export function Automations() {
     return m;
   }
 
-  function openNew() { setForm(blankRule()); setEditing('new'); setErr(null); }
+  function openNew() { setForm(blankRule()); setEditing('new'); setErr(null); setNoticeMsg(null); }
   function openEdit(r: AutomationRule) {
     setForm({ name: r.name, enabled: r.enabled, trigger: r.trigger, conditions: r.conditions, actions: r.actions, cooldownSec: r.cooldownSec });
-    setEditing(r); setErr(null);
+    setEditing(r); setErr(null); setNoticeMsg(null);
     // Warm manifests for any connector actions.
     for (const a of r.actions) if (a.type === 'connector_action' || a.type === 'connector_operation') void loadManifest(connectors.find((c) => c.id === a.instanceId)?.connectorId ?? '');
   }
@@ -111,7 +135,16 @@ export function Automations() {
   return (
     <>
       <PageHeader title="Automations" description="Rules that react to events and act across your connectors."
-        actions={canWrite ? <Button onClick={openNew}><Plus className="h-4 w-4" /> New rule</Button> : undefined} />
+        actions={canWrite ? (
+          <div className="flex items-center gap-2">
+            {can('assistant:use') && (
+              <Button variant="outline" onClick={() => { setDraftErr(null); setDraftOpen(true); }}>
+                <Cpu className="h-4 w-4" /> Draft with Computer
+              </Button>
+            )}
+            <Button onClick={openNew}><Plus className="h-4 w-4" /> New rule</Button>
+          </div>
+        ) : undefined} />
 
       {err && !editing && (
         <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>
@@ -181,7 +214,27 @@ export function Automations() {
           <Button onClick={save} disabled={busy || !form.name.trim() || (form.actions ?? []).length === 0}>{busy ? 'Saving…' : 'Save rule'}</Button>
         </>}>
         {err && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
+        {noticeMsg && (
+          <div className="mb-4 text-sm rounded-md px-3 py-2 border border-primary/40 bg-primary/10 flex gap-2">
+            <Cpu className="h-4 w-4 shrink-0 mt-0.5" /><span>Drafted by the Computer — review before saving. {noticeMsg}</span>
+          </div>
+        )}
         <RuleEditor form={form} setForm={setForm} connectors={connectors} monitors={monitors} manifests={manifests} loadManifest={loadManifest} />
+      </Dialog>
+
+      <Dialog open={draftOpen} onClose={() => setDraftOpen(false)}
+        title="Draft a rule with the Computer"
+        description="Describe what you want in plain language; the Computer proposes a rule you can review and edit."
+        footer={<>
+          <Button variant="outline" onClick={() => setDraftOpen(false)}>Cancel</Button>
+          <Button onClick={draftWithComputer} disabled={draftBusy || !draftPrompt.trim()}>
+            {draftBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />} Draft
+          </Button>
+        </>}>
+        {draftErr && <div className="mb-3 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{draftErr}</div>}
+        <textarea className="w-full min-h-[6rem] rounded-md border border-input bg-background/60 p-2 text-sm resize-y"
+          placeholder="e.g. When a backup fails, text me and ask the Computer for a likely cause."
+          value={draftPrompt} onChange={(e) => setDraftPrompt(e.target.value)} autoFocus />
       </Dialog>
     </>
   );
@@ -343,6 +396,7 @@ function RuleEditor({ form, setForm, connectors, monitors, manifests, loadManife
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'pause_monitor', monitorId: '' }] })}>+ Pause monitor</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'resume_monitor', monitorId: '' }] })}>+ Resume monitor</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'webhook', url: '', method: 'POST', body: '' }] })}>+ Webhook</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => set({ actions: [...actions, { type: 'ask_computer', prompt: '', title: 'Computer', severity: 'info' }] })}>+ Ask the Computer</Button>
           </div>
         </div>
         {actions.length === 0 ? <p className="text-xs text-destructive">Add at least one action.</p> : (
@@ -366,6 +420,7 @@ function updateCond(conditions: RuleCondition[], i: number, next: RuleCondition,
 const ACTION_LABEL: Record<RuleAction['type'], string> = {
   notify: 'Notify', connector_action: 'Connector action', connector_operation: 'Connector operation',
   pause_monitor: 'Pause monitor', resume_monitor: 'Resume monitor', webhook: 'Webhook',
+  ask_computer: 'Ask the Computer',
 };
 
 /** Fetch a connector instance's resources of one kind (for the resource pickers). */
@@ -495,6 +550,21 @@ function ActionRow({ action, connectors, monitors, manifests, loadManifest, onCh
           <option value="">Select monitor…</option>
           {monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
         </select>
+      )}
+      {action.type === 'ask_computer' && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-[1fr_9rem] gap-2">
+            <Input placeholder="Notification title" value={action.title ?? ''} onChange={(e) => onChange({ ...action, title: e.target.value })} />
+            <select className={selectCls + ' !mt-0'} value={action.severity ?? 'info'}
+              onChange={(e) => onChange({ ...action, severity: e.target.value as 'info' | 'warning' | 'critical' })}>
+              {COND_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <textarea className="w-full min-h-[5rem] rounded-md border border-input bg-background/60 p-2 text-sm resize-y"
+            placeholder="What should the Computer do? e.g. “Summarize what failed and suggest a likely cause.”"
+            value={action.prompt} onChange={(e) => onChange({ ...action, prompt: e.target.value })} />
+          <p className="text-xs text-muted-foreground">Runs read-only with the triggering event as context; the answer is sent as a notification.</p>
+        </div>
       )}
       {action.type === 'webhook' && (
         <div className="space-y-2">

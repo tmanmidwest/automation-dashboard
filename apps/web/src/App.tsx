@@ -24,6 +24,7 @@ import { Timeline } from '@/pages/Timeline';
 import { Automations } from '@/pages/Automations';
 import { DockerFleet } from '@/pages/DockerFleet';
 import { Replicator } from '@/pages/Replicator';
+import { Computer } from '@/pages/Computer';
 import { About } from '@/pages/About';
 import { SettingsHome } from '@/pages/settings/SettingsHome';
 import { Authentication } from '@/pages/settings/Authentication';
@@ -33,6 +34,7 @@ import { ApiTokens } from '@/pages/settings/ApiTokens';
 import { Secrets } from '@/pages/settings/Secrets';
 import { OAuthClients } from '@/pages/settings/OAuthClients';
 import { BackupRestore } from '@/pages/settings/BackupRestore';
+import { ComputerSettings } from '@/pages/settings/Computer';
 
 function FullscreenBrand() {
   return (
@@ -102,6 +104,7 @@ function Router() {
       <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
       <Route path="/docker-fleet" element={<Protected><RequirePerm perm="connectors:read"><DockerFleet /></RequirePerm></Protected>} />
       <Route path="/replicator" element={<Protected><RequirePerm perm="replicator:read"><Replicator /></RequirePerm></Protected>} />
+      <Route path="/computer" element={<Protected><RequirePerm perm="assistant:use"><Computer /></RequirePerm></Protected>} />
       <Route path="/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />
       <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
       <Route path="/settings/authentication" element={<Protected><RequirePerm perm="settings:read"><Authentication /></RequirePerm></Protected>} />
@@ -111,6 +114,7 @@ function Router() {
       <Route path="/settings/api-tokens" element={<Protected><RequirePerm perm="settings:read"><ApiTokens /></RequirePerm></Protected>} />
       <Route path="/settings/oauth-clients" element={<Protected><RequirePerm perm="settings:read"><OAuthClients /></RequirePerm></Protected>} />
       <Route path="/settings/backup" element={<Protected><RequirePerm perm="settings:write"><BackupRestore /></RequirePerm></Protected>} />
+      <Route path="/settings/computer" element={<Protected><RequirePerm perm="settings:write"><ComputerSettings /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 

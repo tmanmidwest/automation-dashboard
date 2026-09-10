@@ -1,7 +1,9 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import type { Subscription } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { ASSISTANT_AUTOMATION_PORT, type AssistantAutomationPort } from '../assistant/assistant.port';
 import { LoggingService } from '../logging/logging.service';
 import { AuditService } from '../logging/audit.service';
 import { TimelineBus } from '../timeline/timeline-bus';
@@ -45,6 +47,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     private readonly notifications: NotificationsService,
     private readonly instances: ConnectorInstanceService,
     private readonly monitors: MonitorsService,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   async onModuleInit() {
@@ -255,6 +258,25 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
         });
         if (!res.ok) throw new Error(`webhook ${res.status}`);
         return `webhook ${method} ${res.status}`;
+      }
+      case 'ask_computer': {
+        let assistant: AssistantAutomationPort;
+        try {
+          assistant = this.moduleRef.get<AssistantAutomationPort>(ASSISTANT_AUTOMATION_PORT, { strict: false });
+        } catch {
+          throw new Error('the Computer is not available');
+        }
+        const context = event
+          ? `kind=${event.kind}; severity=${event.severity}; title=${event.title}; ` +
+            `source=${event.source ?? ''}; detail=${event.detail ?? ''}`
+          : undefined;
+        const answer = await assistant.summarizeForAutomation(action.prompt, context);
+        await this.notifications.dispatchAlert('automation.ask_computer', {
+          title: action.title ?? 'Computer',
+          body: answer || '(no answer)',
+          dedupeKey: `automation.ask_computer:${rule.id}`,
+        });
+        return `computer replied (${answer.length} chars)`;
       }
       default:
         throw new Error('unknown action type');

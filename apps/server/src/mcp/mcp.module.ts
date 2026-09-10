@@ -1,15 +1,12 @@
 import { Module } from '@nestjs/common';
-import { ConnectorsModule } from '../connectors/connectors.module';
-import { MonitorsModule } from '../monitors/monitors.module';
-import { TimelineModule } from '../timeline/timeline.module';
-import { AutomationsModule } from '../automations/automations.module';
+import { ToolsModule } from '../tools/tools.module';
 import { McpServerFactory } from './mcp-server.factory';
 import { McpController } from './mcp.controller';
 
 @Module({
-  // ConnectorsModule exports ConnectorRegistry + ConnectorInstanceService;
-  // MonitorsModule exports MonitorsService; Timeline/Automations export their services.
-  imports: [ConnectorsModule, MonitorsModule, TimelineModule, AutomationsModule],
+  // ToolsModule exports the shared ToolCatalogService the factory registers from.
+  // AuditService + LoggingService come from LoggingModule (global).
+  imports: [ToolsModule],
   controllers: [McpController],
   providers: [McpServerFactory],
 })
