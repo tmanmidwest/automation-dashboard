@@ -362,11 +362,39 @@ model ReplicatorDeployment {
   status           String        @default("pending")
   lastMessage      String?
   deployedCommit   String?
+  /// Phase 3: set by the update-check sweep when the repo's ref has moved ahead.
+  updateAvailable  Boolean       @default(false)
+  /// The remote tip commit that's available but not yet deployed (Phase 3).
+  availableCommit  String?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
+  ingress          ReplicatorIngress[]
 
   @@index([appId])
   @@index([dockerInstanceId])
+}
+
+/// An ingress route (Phase 2) exposing one of a deployment's published ports via
+/// a Cloudflare tunnel public-hostname route or an Nginx Proxy Manager proxy
+/// host. `ref` is the created route/proxy-host id, used to tear it down.
+model ReplicatorIngress {
+  id           String               @id @default(cuid())
+  deploymentId String
+  deployment   ReplicatorDeployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  /// 'cloudflare' | 'npm'.
+  kind         String
+  /// The Cloudflare / NPM ConnectorInstance that owns the route.
+  instanceId   String
+  /// Which published port this fronts.
+  service      String
+  hostPort     Int
+  hostname     String
+  /// Teardown handle: CF → the tunnel id (the route is keyed by `hostname`);
+  /// NPM → the created proxy-host id.
+  ref          String
+  createdAt    DateTime             @default(now())
+
+  @@index([deploymentId])
 }
 
 /// An installed connector instance (e.g. a specific Proxmox server).

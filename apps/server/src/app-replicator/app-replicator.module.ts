@@ -4,6 +4,8 @@ import { ReplicatorService } from './replicator.service';
 import { DeploymentService } from './deployment.service';
 import { RepoIntrospectService } from './repo-introspect.service';
 import { PortAllocatorService } from './port-allocator.service';
+import { IngressService } from './ingress.service';
+import { UpdateCheckService } from './update-check.service';
 import { AppReplicatorController } from './app-replicator.controller';
 
 /**
@@ -14,6 +16,6 @@ import { AppReplicatorController } from './app-replicator.controller';
 @Module({
   imports: [ConnectorsModule],
   controllers: [AppReplicatorController],
-  providers: [ReplicatorService, DeploymentService, RepoIntrospectService, PortAllocatorService],
+  providers: [ReplicatorService, DeploymentService, RepoIntrospectService, PortAllocatorService, IngressService, UpdateCheckService],
 })
 export class AppReplicatorModule {}

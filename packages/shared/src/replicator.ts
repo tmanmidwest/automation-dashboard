@@ -75,8 +75,12 @@ export interface ReplicatorDeployment {
   status: ReplicatorDeploymentStatus;
   lastMessage?: string | null;
   deployedCommit?: string | null;
-  /** Set when a drift check found the repo has moved ahead of the deployed commit. */
+  /** Set when the update-check sweep found the repo has moved ahead of the deployed commit. */
   updateAvailable?: boolean;
+  /** The remote tip commit that's available but not yet deployed. */
+  availableCommit?: string | null;
+  /** Ingress routes fronting this deployment's ports (Phase 2). */
+  ingress?: ReplicatorIngress[];
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +143,65 @@ export interface DeployTargetInfo {
   hostIp: string;
   usedPorts: number[];
   suggestions: PortSuggestion[];
+}
+
+// ── Ingress (Phase 2) ─────────────────────────────────────────────
+
+export type ReplicatorIngressKind = 'cloudflare' | 'npm';
+
+/** One ingress route exposing a deployment's published port to the outside. */
+export interface ReplicatorIngress {
+  id: string;
+  deploymentId: string;
+  kind: ReplicatorIngressKind;
+  /** The Cloudflare / NPM connector instance that owns the route. */
+  instanceId: string;
+  instanceName?: string;
+  /** Which published port this fronts (the compose service + host port). */
+  service: string;
+  hostPort: number;
+  hostname: string;
+  /** Teardown handle: CF → the tunnel id (route keyed by hostname); NPM → the proxy-host id. */
+  ref: string;
+  /** Convenience: https://<hostname>. */
+  url: string;
+  createdAt: string;
+}
+
+/** A Cloudflare or NPM connector instance that can front a deployment. */
+export interface IngressTarget {
+  instanceId: string;
+  name: string;
+  kind: ReplicatorIngressKind;
+}
+
+/** A tunnel offered by a Cloudflare instance (for the ingress picker). */
+export interface CfTunnelOption {
+  id: string;
+  name: string;
+  /** False when the tunnel is locally-managed (its ingress can't be edited via the API). */
+  editable: boolean;
+}
+
+/** A certificate offered by an NPM instance (id 0 = None / HTTP-only). */
+export interface NpmCertOption {
+  id: number;
+  name: string;
+}
+
+/** Add an ingress route to a deployment's published port. */
+export interface AddIngressInput {
+  kind: ReplicatorIngressKind;
+  instanceId: string;
+  service: string;
+  hostPort: number;
+  hostname: string;
+  /** Cloudflare: the tunnel to add the public-hostname route to. */
+  tunnelId?: string;
+  /** NPM: an existing certificate id to attach (0/omitted = HTTP-only). */
+  certificateId?: number;
+  /** NPM: force SSL when a cert is attached. */
+  sslForced?: boolean;
 }
 
 /** A Docker connector instance eligible as a deploy target. */

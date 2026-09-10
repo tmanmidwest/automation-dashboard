@@ -140,14 +140,22 @@ behind. A reconcile check can also sweep vault keys whose deployment no longer e
 Non-secret variables are passed through the normal stack env (they already have safe defaults and
 are fine on the host).
 
-## Updates (notify + one-click, opt-in auto)
+## Updates (notify + one-click, opt-in auto) — ✅ Phase 3 built
 
-Each App tracks its deployed commit per Deployment (already recorded by `deployGit`). A periodic
-`checkDrift()` (reusing the Docker connector's read-only local-vs-remote commit compare) flags
-**"update available"** on any Deployment whose repo has moved ahead. Default UX: an amber chip +
-one-click **Redeploy** (which re-runs `deployGit` with `pull`/`forceRebuild`). Because drift lands
-on the timeline bus, an **Automations** trigger (`app.update_available`) lets you *opt into*
-auto-redeploy per app — but nothing auto-redeploys by default.
+Each App tracks its deployed commit per Deployment (recorded by `deployGit`). An hourly
+`UpdateCheckService` sweep resolves each repo's remote tip **Cerebro-side** via `git ls-remote`
+(deduped per repo+ref, no clone, no host round-trip) and sets `updateAvailable` when the tip differs
+from the deployed commit. UX: an amber **"update available"** chip + a highlighted one-click
+**Redeploy** (re-runs `deployGit` with `pull`/`forceRebuild`, which clears the flag). A manual
+**Check for updates** button forces a sweep; `GET /deployments/:id/check-update` re-checks one.
+
+On the **rising edge** (not-available → available) the sweep records an audit event
+`replicator.update_available` (target `app/project`, `meta` carries `deploymentId`,
+`dockerInstanceId`, `project`, `from`/`to` commits). Because that lands on the timeline bus as a
+`kind:'audit'` event, an **Automations** rule can *opt into* auto-redeploy: trigger on the audit
+event (`textContains: "update available"`) → a `connector_operation` running the Docker connector's
+`redeploy-stack` on that `project` (each deployment is a managed stack). Nothing auto-redeploys by
+default.
 
 ## Data model
 
@@ -174,17 +182,18 @@ interface Deployment {
   createdAt; updatedAt;
 }
 
-interface DeploymentIngress {
+interface ReplicatorIngress {                // Phase 2
   kind: 'cloudflare' | 'npm';
   instanceId: string;                        // CF or NPM connector instance
   service: string; hostPort: number;         // which published port this fronts
   hostname: string;
-  ref: string;                               // created route id / proxy-host id (for teardown)
+  ref: string;                               // teardown handle: CF → the tunnel id
+                                             // (route keyed by hostname); NPM → the proxy-host id
 }
 ```
 
-New migration `0016_app_replicator` (App, Deployment, DeploymentIngress). Follows the
-`0014_git_stacks` precedent for git columns.
+Migrations: `0016_app_replicator` (ReplicatorApp, ReplicatorDeployment) + `0017_replicator_ingress`
+(ReplicatorIngress). Follow the `0014_git_stacks` precedent for git columns.
 
 ## Backend surface
 
@@ -214,13 +223,19 @@ infra). Every deploy/teardown writes an audit event → shows up in Ship's Log.
 
 ## Phasing
 
-- **Phase 1 — Catalog + deploy to Docker.** Register app, introspect compose, generated variable
-  form, vault secrets + lifecycle cleanup, port allocation/preflight, `deployGit`. Ingress done
-  manually. *This alone delivers the POC use case.*
-- **Phase 2 — Ingress wiring.** Cloudflare tunnel route + NPM proxy host as an optional per-port
-  wizard step, with teardown.
-- **Phase 3 — Updates.** `checkDrift` chips + one-click redeploy + `app.update_available`
-  automations trigger.
+- **Phase 1 — Catalog + deploy to Docker.** ✅ **Built.** Register app, introspect compose, generated
+  variable form, vault secrets + lifecycle cleanup, port allocation/preflight, `deployGit`.
+  *This alone delivers the POC use case.*
+- **Phase 2 — Ingress wiring.** ✅ **Built.** Per published port, expose via a **Cloudflare tunnel
+  route** or an **NPM proxy host**, driven through those connectors' own operations
+  (`ConnectorInstanceService.runResourceOperationAwait` — CF `tunnel-add-route` is resource-scoped on
+  the tunnel id; NPM `create-proxy-host` returns the proxy-host id). `forward_host` is auto-filled
+  from the deployment's Docker host IP. Teardown removes the CF route (`tunnel-delete-route`) / NPM
+  proxy host (`deleteResource('proxy_host', …)`) and runs automatically when the deployment is
+  removed. Managed in a per-deployment **Ingress** dialog.
+- **Phase 3 — Updates.** ✅ **Built.** Hourly `git ls-remote` sweep → `updateAvailable` flag + amber
+  chip + highlighted redeploy (clears the flag); `replicator.update_available` audit/timeline event on
+  the rising edge for an opt-in Automations auto-redeploy rule. Migration `0018_replicator_updates`.
 - **V2 — AWS ECS target.** Build → push to ECR → run on Fargate. Deferred; the `target` abstraction
   (Docker instance today) is designed to accept an ECS target later.
 

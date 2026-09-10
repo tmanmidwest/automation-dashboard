@@ -6,10 +6,12 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { DockerStackService, projectName } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { PortAllocatorService } from './port-allocator.service';
+import { IngressService } from './ingress.service';
 import type {
   DeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
+  ReplicatorIngress, ReplicatorIngressKind,
 } from '@cerebro/shared';
-import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow } from '@prisma/client';
+import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
 
 /** The vault key holding one deployment's secret variable value. */
 function secretKey(deploymentId: string, varName: string): string {
@@ -38,6 +40,7 @@ export class DeploymentService {
     private readonly secrets: SecretsService,
     private readonly audit: AuditService,
     private readonly ports: PortAllocatorService,
+    private readonly ingress: IngressService,
   ) {}
 
   /** Build the SSH deploy target for a Docker connector instance (throws if not deployable). */
@@ -173,7 +176,11 @@ export class DeploymentService {
     const commit = await this.latestCommit(row.dockerInstanceId, row.project);
     const updated = await this.prisma.replicatorDeployment.update({
       where: { id: row.id },
-      data: { status: result.ok ? 'deployed' : 'error', lastMessage: result.message.slice(0, 1000), deployedCommit: commit },
+      data: {
+        status: result.ok ? 'deployed' : 'error', lastMessage: result.message.slice(0, 1000), deployedCommit: commit,
+        // A successful redeploy pulls latest, so clear any pending "update available".
+        ...(result.ok ? { updateAvailable: false, availableCommit: null } : {}),
+      },
     });
     await this.audit.record({ ...actor, action: result.ok ? 'replicator.redeploy' : 'replicator.redeploy_failed', target: `${app.name}/${row.project}`, meta: { ok: result.ok } });
     return this.map(updated, app.name);
@@ -184,6 +191,10 @@ export class DeploymentService {
   async remove(id: string, actor: ActorCtx): Promise<{ ok: boolean; message: string }> {
     const { row, app } = await this.load(id);
     const problems: string[] = [];
+
+    // Tear down any ingress routes first (CF tunnel routes / NPM proxy hosts),
+    // so we don't leave dangling public hostnames pointing at a dead port.
+    problems.push(...await this.ingress.removeAllForDeployment(row.id));
 
     // Best-effort: stop the stack and remove its host dir + managed-stack record.
     try {
@@ -208,36 +219,34 @@ export class DeploymentService {
       : { ok: true, message: `Removed "${row.project}" and cleaned up its secrets.` };
   }
 
-  // ── Update check (drift) ───────────────────────────────────────────
-
-  async checkUpdate(id: string): Promise<{ updateAvailable: boolean; message: string }> {
-    const { row, app } = await this.load(id);
-    const target = await this.targetFor(row.dockerInstanceId);
-    const drift = await this.stacks.checkDrift(target, row.dockerInstanceId, row.project);
-    void app;
-    const updateAvailable = /Repo has moved/i.test(drift.message);
-    return { updateAvailable, message: drift.message };
-  }
-
   // ── Listing ────────────────────────────────────────────────────────
 
   async listForApp(appId: string): Promise<ReplicatorDeployment[]> {
     const [app, rows] = await Promise.all([
       this.prisma.replicatorApp.findUnique({ where: { id: appId } }),
-      this.prisma.replicatorDeployment.findMany({ where: { appId }, orderBy: { createdAt: 'desc' } }),
+      this.prisma.replicatorDeployment.findMany({ where: { appId }, orderBy: { createdAt: 'desc' }, include: { ingress: true } }),
     ]);
     const names = await this.instanceNames();
-    return rows.map((r) => this.map(r, app?.name, names.get(r.dockerInstanceId)));
+    return rows.map((r) => this.map(r, app?.name, names.get(r.dockerInstanceId), this.mapIngress(r.ingress, names)));
   }
 
   async listAll(): Promise<ReplicatorDeployment[]> {
     const [apps, rows, names] = await Promise.all([
       this.prisma.replicatorApp.findMany(),
-      this.prisma.replicatorDeployment.findMany({ orderBy: { createdAt: 'desc' } }),
+      this.prisma.replicatorDeployment.findMany({ orderBy: { createdAt: 'desc' }, include: { ingress: true } }),
       this.instanceNames(),
     ]);
     const appName = new Map(apps.map((a) => [a.id, a.name]));
-    return rows.map((r) => this.map(r, appName.get(r.appId), names.get(r.dockerInstanceId)));
+    return rows.map((r) => this.map(r, appName.get(r.appId), names.get(r.dockerInstanceId), this.mapIngress(r.ingress, names)));
+  }
+
+  private mapIngress(rows: IngressRow[] | undefined, names: Map<string, string>): ReplicatorIngress[] {
+    return (rows ?? []).map((r) => ({
+      id: r.id, deploymentId: r.deploymentId, kind: r.kind as ReplicatorIngressKind,
+      instanceId: r.instanceId, instanceName: names.get(r.instanceId),
+      service: r.service, hostPort: r.hostPort, hostname: r.hostname, ref: r.ref,
+      url: `https://${r.hostname}`, createdAt: r.createdAt.toISOString(),
+    }));
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
@@ -314,7 +323,7 @@ export class DeploymentService {
     return rev?.commit ?? null;
   }
 
-  private map(row: DeploymentRow, appName?: string, instanceName?: string): ReplicatorDeployment {
+  private map(row: DeploymentRow, appName?: string, instanceName?: string, ingress?: ReplicatorIngress[]): ReplicatorDeployment {
     return {
       id: row.id,
       appId: row.appId,
@@ -329,6 +338,9 @@ export class DeploymentService {
       status: row.status as ReplicatorDeploymentStatus,
       lastMessage: row.lastMessage,
       deployedCommit: row.deployedCommit,
+      updateAvailable: row.updateAvailable,
+      availableCommit: row.availableCommit,
+      ingress: ingress ?? [],
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     };

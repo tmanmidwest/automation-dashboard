@@ -93,6 +93,37 @@ export class RepoIntrospectService {
     }
   }
 
+  /**
+   * The current commit at the tip of a repo's ref, without cloning
+   * (`git ls-remote`). Used by the update-check sweep to tell whether a
+   * deployment's repo has moved ahead of its deployed commit. Returns null on
+   * any failure (unreachable/auth) — the caller treats that as "no update".
+   */
+  async remoteCommit(input: { gitUrl: string; gitRef?: string | null; gitCredKey?: string | null }): Promise<string | null> {
+    const gitUrl = input.gitUrl?.trim();
+    if (!gitUrl) return null;
+    const ref = input.gitRef?.trim() || 'HEAD';
+    const cred = await this.resolveCred(input.gitCredKey);
+    const workdir = await mkdtemp(join(tmpdir(), 'cerebro-lsremote-'));
+    const credFile = join(workdir, '.gitcred');
+    try {
+      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' };
+      const helper = cred ? ['-c', `credential.helper=store --file=${credFile}`] : [];
+      if (cred?.secret) {
+        const host = cred.host?.trim() || hostFromUrl(gitUrl);
+        const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
+        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+      }
+      const out = await this.run('git', [...helper, 'ls-remote', gitUrl, ref], workdir, env);
+      const sha = out.split(/\s+/)[0]?.trim() ?? '';
+      return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+    } catch {
+      return null;
+    } finally {
+      await rm(workdir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   private async resolveCred(credKey?: string | null): Promise<GitCredential | null> {
     if (!credKey) return null;
     const raw = await this.secrets.reveal(credKey).catch(() => null);

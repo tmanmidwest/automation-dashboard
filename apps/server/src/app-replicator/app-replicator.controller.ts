@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 import { ReplicatorService } from './replicator.service';
 import { DeploymentService } from './deployment.service';
+import { IngressService } from './ingress.service';
+import { UpdateCheckService } from './update-check.service';
 import type {
-  SessionUser, IntrospectRepoInput, RegisterAppInput, DeployInput,
+  SessionUser, IntrospectRepoInput, RegisterAppInput, DeployInput, AddIngressInput,
 } from '@cerebro/shared';
 
 /**
@@ -16,6 +18,8 @@ export class AppReplicatorController {
   constructor(
     private readonly replicator: ReplicatorService,
     private readonly deployments: DeploymentService,
+    private readonly ingress: IngressService,
+    private readonly updates: UpdateCheckService,
   ) {}
 
   // ── Catalog ──
@@ -104,7 +108,15 @@ export class AppReplicatorController {
   @Get('deployments/:id/check-update')
   @RequirePermissions('replicator:read')
   checkUpdate(@Param('id') id: string) {
-    return this.deployments.checkUpdate(id);
+    return this.updates.checkOne(id);
+  }
+
+  /** Recompute "update available" across all deployments (manual refresh). */
+  @Post('updates/check')
+  @RequirePermissions('replicator:read')
+  async checkUpdates() {
+    const changed = await this.updates.checkAll();
+    return { changed };
   }
 
   @Delete('deployments/:id')
@@ -112,5 +124,44 @@ export class AppReplicatorController {
   @SessionOnly()
   remove(@Param('id') id: string, @CurrentUser() user: SessionUser) {
     return this.deployments.remove(id, { actorId: user.id, actorEmail: user.email });
+  }
+
+  // ── Ingress (Phase 2) ──
+  @Get('ingress/targets')
+  @RequirePermissions('replicator:read')
+  ingressTargets() {
+    return this.ingress.listTargets();
+  }
+
+  @Get('ingress/tunnels')
+  @RequirePermissions('replicator:read')
+  ingressTunnels(@Query('instanceId') instanceId: string) {
+    return this.ingress.listTunnels(instanceId);
+  }
+
+  @Get('ingress/certs')
+  @RequirePermissions('replicator:read')
+  ingressCerts(@Query('instanceId') instanceId: string) {
+    return this.ingress.listCerts(instanceId);
+  }
+
+  @Get('deployments/:id/ingress')
+  @RequirePermissions('replicator:read')
+  listIngress(@Param('id') id: string) {
+    return this.ingress.listForDeployment(id);
+  }
+
+  @Post('deployments/:id/ingress')
+  @RequirePermissions('replicator:write')
+  @SessionOnly()
+  addIngress(@Param('id') id: string, @Body() body: AddIngressInput, @CurrentUser() user: SessionUser) {
+    return this.ingress.add(id, body, { actorId: user.id, actorEmail: user.email });
+  }
+
+  @Delete('ingress/:ingressId')
+  @RequirePermissions('replicator:write')
+  @SessionOnly()
+  removeIngress(@Param('ingressId') ingressId: string, @CurrentUser() user: SessionUser) {
+    return this.ingress.remove(ingressId, { actorId: user.id, actorEmail: user.email });
   }
 }

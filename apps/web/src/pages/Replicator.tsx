@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, RefreshCw, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2 } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable,
   IntrospectResult, DeployTargetInfo, SecretSummary,
+  IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -34,20 +35,31 @@ export function Replicator() {
   const [apps, setApps] = useState<ReplicatorApp[] | null>(null);
   const [deployments, setDeployments] = useState<ReplicatorDeployment[]>([]);
   const [targets, setTargets] = useState<ReplicatorTarget[]>([]);
+  const [ingressTargets, setIngressTargets] = useState<IngressTarget[]>([]);
   const [gitSecrets, setGitSecrets] = useState<SecretSummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const [registering, setRegistering] = useState(false);
   const [deployFor, setDeployFor] = useState<ReplicatorApp | null>(null);
+  const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function checkUpdates() {
+    setChecking(true); setErr(null);
+    try { await api.post('/api/replicator/updates/check'); await refresh(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Update check failed.'); }
+    finally { setChecking(false); }
+  }
 
   async function refresh() {
     try {
-      const [a, d, t] = await Promise.all([
+      const [a, d, t, it] = await Promise.all([
         api.get<ReplicatorApp[]>('/api/replicator/apps'),
         api.get<ReplicatorDeployment[]>('/api/replicator/deployments'),
         api.get<ReplicatorTarget[]>('/api/replicator/targets'),
+        api.get<IngressTarget[]>('/api/replicator/ingress/targets'),
       ]);
-      setApps(a); setDeployments(d); setTargets(t);
+      setApps(a); setDeployments(d); setTargets(t); setIngressTargets(it);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to load.');
       setApps([]);
@@ -70,7 +82,16 @@ export function Replicator() {
       <PageHeader
         title="App Replicator"
         description="Register a Git-repo app once, then replicate it as isolated instances onto a Docker host."
-        actions={canWrite ? <Button onClick={() => setRegistering(true)}><Plus className="h-4 w-4" /> Register app</Button> : undefined}
+        actions={
+          <>
+            {(apps?.length ?? 0) > 0 && (
+              <Button variant="outline" onClick={checkUpdates} disabled={checking}>
+                {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Check for updates
+              </Button>
+            )}
+            {canWrite && <Button onClick={() => setRegistering(true)}><Plus className="h-4 w-4" /> Register app</Button>}
+          </>
+        }
       />
 
       {err && <p className="text-sm text-destructive">{err}</p>}
@@ -89,7 +110,9 @@ export function Replicator() {
               app={app}
               deployments={deploymentsByApp.get(app.id) ?? []}
               canWrite={canWrite}
+              hasIngress={ingressTargets.length > 0}
               onDeploy={() => setDeployFor(app)}
+              onIngress={setIngressFor}
               onChanged={refresh}
               setErr={setErr}
             />
@@ -114,15 +137,24 @@ export function Replicator() {
           setErr={setErr}
         />
       )}
+      {ingressFor && (
+        <IngressDialog
+          deployment={ingressFor}
+          targets={ingressTargets}
+          onClose={() => setIngressFor(null)}
+          onChanged={() => { void refresh(); }}
+          setErr={setErr}
+        />
+      )}
     </div>
   );
 }
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, onDeploy, onChanged, setErr }: {
-  app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean;
-  onDeploy: () => void; onChanged: () => void; setErr: (s: string | null) => void;
+function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, onChanged, setErr }: {
+  app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
+  onDeploy: () => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const ports = app.variables.filter((v) => v.role === 'host_port').length;
@@ -164,28 +196,53 @@ function AppCard({ app, deployments, canWrite, onDeploy, onChanged, setErr }: {
         <CardContent className="pt-0">
           <div className="rounded-lg border border-border/60 divide-y divide-border/60">
             {deployments.map((d) => (
-              <div key={d.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                <div className="min-w-0">
-                  <p className="font-medium truncate">{d.project} <span className={`text-xs ${STATUS_COLOR[d.status] ?? ''}`}>· {d.status}</span></p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {d.dockerInstanceName ?? d.dockerInstanceId}
-                    {d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
-                    {d.deployedCommit && ` · ${d.deployedCommit.slice(0, 7)}`}
-                  </p>
-                  {d.lastMessage && d.status === 'error' && <p className="text-xs text-destructive truncate">{d.lastMessage}</p>}
+              <div key={d.id} className="px-3 py-2 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium truncate flex items-center gap-2">
+                      {d.project} <span className={`text-xs ${STATUS_COLOR[d.status] ?? ''}`}>· {d.status}</span>
+                      {d.updateAvailable && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 text-amber-400 px-2 py-0.5 text-[0.65rem] font-semibold"
+                          title={`Repo moved to ${d.availableCommit?.slice(0, 7) ?? '?'} — redeploy to update`}>
+                          <ArrowUpCircle className="h-3 w-3" /> update available
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {d.dockerInstanceName ?? d.dockerInstanceId}
+                      {d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
+                      {d.deployedCommit && ` · ${d.deployedCommit.slice(0, 7)}`}
+                    </p>
+                    {d.lastMessage && d.status === 'error' && <p className="text-xs text-destructive truncate">{d.lastMessage}</p>}
+                  </div>
+                  {canWrite && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      {hasIngress && (
+                        <Button variant="ghost" size="icon" aria-label="Manage ingress" title="Expose via Cloudflare / NPM"
+                          onClick={() => onIngress(d)}><Globe className="h-4 w-4" /></Button>
+                      )}
+                      <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id}
+                        title={d.updateAvailable ? 'Update available — pull latest & redeploy' : 'Pull latest & redeploy'}
+                        onClick={() => act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }))}>
+                        {busy === d.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
+                      </Button>
+                      <Button variant="ghost" size="icon" aria-label="Delete deployment" disabled={busy === d.id}
+                        title="Stop, remove & clean up secrets"
+                        onClick={() => { if (confirm(`Remove deployment "${d.project}"? This stops the stack, removes any ingress, and deletes its secrets.`)) act(d.id, () => api.delete(`/api/replicator/deployments/${d.id}`)); }}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
+                  )}
                 </div>
-                {canWrite && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button variant="ghost" size="icon" aria-label="Redeploy" disabled={busy === d.id}
-                      title="Pull latest & redeploy"
-                      onClick={() => act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }))}>
-                      {busy === d.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
-                    </Button>
-                    <Button variant="ghost" size="icon" aria-label="Delete deployment" disabled={busy === d.id}
-                      title="Stop, remove & clean up secrets"
-                      onClick={() => { if (confirm(`Remove deployment "${d.project}"? This stops the stack and deletes its secrets.`)) act(d.id, () => api.delete(`/api/replicator/deployments/${d.id}`)); }}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+                {d.ingress && d.ingress.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {d.ingress.map((ing) => (
+                      <a key={ing.id} href={ing.url} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 text-xs hover:bg-muted"
+                        title={`${ing.kind === 'cloudflare' ? 'Cloudflare tunnel' : 'NPM proxy'} → :${ing.hostPort}`}>
+                        <Globe className="h-3 w-3" /> {ing.hostname}<ExternalLink className="h-3 w-3 opacity-60" />
+                      </a>
+                    ))}
                   </div>
                 )}
               </div>
@@ -384,6 +441,130 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
             </label>
           </div>
         )}
+      </div>
+    </Dialog>
+  );
+}
+
+// ── Ingress dialog (expose a port via Cloudflare / NPM) ─────────────
+
+function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
+  deployment: ReplicatorDeployment; targets: IngressTarget[];
+  onClose: () => void; onChanged: () => void; setErr: (s: string | null) => void;
+}) {
+  const [list, setList] = useState<ReplicatorIngress[]>(deployment.ingress ?? []);
+  const [hostPort, setHostPort] = useState<number>(deployment.ports[0]?.hostPort ?? 0);
+  const [instanceId, setInstanceId] = useState(targets[0]?.instanceId ?? '');
+  const [hostname, setHostname] = useState('');
+  const [tunnelId, setTunnelId] = useState('');
+  const [certId, setCertId] = useState(0);
+  const [tunnels, setTunnels] = useState<CfTunnelOption[]>([]);
+  const [certs, setCerts] = useState<NpmCertOption[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const target = targets.find((t) => t.instanceId === instanceId);
+  const kind = target?.kind;
+
+  useEffect(() => {
+    setTunnels([]); setCerts([]); setTunnelId(''); setCertId(0);
+    if (!instanceId || !kind) return;
+    if (kind === 'cloudflare') {
+      api.get<CfTunnelOption[]>(`/api/replicator/ingress/tunnels?instanceId=${instanceId}`).then((t) => { setTunnels(t); setTunnelId(t[0]?.id ?? ''); }).catch(() => {});
+    } else {
+      api.get<NpmCertOption[]>(`/api/replicator/ingress/certs?instanceId=${instanceId}`).then(setCerts).catch(() => {});
+    }
+  }, [instanceId, kind]);
+
+  async function refetch() {
+    const l = await api.get<ReplicatorIngress[]>(`/api/replicator/deployments/${deployment.id}/ingress`).catch(() => list);
+    setList(l); onChanged();
+  }
+
+  async function add() {
+    setBusy(true); setErr(null);
+    try {
+      const service = deployment.ports.find((p) => p.hostPort === hostPort)?.service ?? 'app';
+      await api.post(`/api/replicator/deployments/${deployment.id}/ingress`, {
+        kind, instanceId, service, hostPort, hostname,
+        tunnelId: kind === 'cloudflare' ? tunnelId : undefined,
+        certificateId: kind === 'npm' ? certId : undefined,
+        sslForced: kind === 'npm' && certId > 0,
+      });
+      setHostname(''); await refetch();
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not add ingress.'); }
+    finally { setBusy(false); }
+  }
+
+  async function remove(id: string) {
+    setBusy(true); setErr(null);
+    try { await api.delete(`/api/replicator/ingress/${id}`); await refetch(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not remove ingress.'); }
+    finally { setBusy(false); }
+  }
+
+  const canAdd = !!kind && !!instanceId && !!hostname.trim() && (kind !== 'cloudflare' || !!tunnelId);
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Ingress · ${deployment.project}`}
+      description="Expose a published port through a Cloudflare tunnel or Nginx Proxy Manager."
+      footer={<Button variant="outline" onClick={onClose}>Done</Button>}>
+      <div className="space-y-4">
+        {list.length > 0 && (
+          <div className="rounded-lg border border-border/60 divide-y divide-border/60">
+            {list.map((ing) => (
+              <div key={ing.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <a href={ing.url} target="_blank" rel="noreferrer" className="font-medium truncate inline-flex items-center gap-1 hover:underline">
+                    {ing.hostname} <ExternalLink className="h-3 w-3 opacity-60" />
+                  </a>
+                  <p className="text-xs text-muted-foreground">{ing.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'} · {ing.instanceName} · →:{ing.hostPort}</p>
+                </div>
+                <Button variant="ghost" size="icon" aria-label="Remove ingress" disabled={busy} onClick={() => remove(ing.id)}>
+                  <X className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="rounded-lg border border-border/60 p-3 space-y-3">
+          <p className="text-sm font-medium">Add ingress</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Published port</Label>
+              <select className={selectCls} value={hostPort} onChange={(e) => setHostPort(Number(e.target.value))}>
+                {deployment.ports.map((p) => <option key={p.hostPort} value={p.hostPort}>{p.service} · {p.hostPort}→{p.containerPort}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>Via</Label>
+              <select className={selectCls} value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
+                {targets.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name} ({t.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'})</option>)}
+              </select>
+            </div>
+            <div className="col-span-2"><Label>Hostname</Label><Input value={hostname} placeholder="app.example.com" onChange={(e) => setHostname(e.target.value)} /></div>
+            {kind === 'cloudflare' && (
+              <div className="col-span-2">
+                <Label>Tunnel</Label>
+                <select className={selectCls} value={tunnelId} onChange={(e) => setTunnelId(e.target.value)}>
+                  {tunnels.length === 0 && <option value="">No tunnels found</option>}
+                  {tunnels.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">Adds a proxied CNAME and a public-hostname route to the tunnel.</p>
+              </div>
+            )}
+            {kind === 'npm' && (
+              <div className="col-span-2">
+                <Label>Certificate</Label>
+                <select className={selectCls} value={certId} onChange={(e) => setCertId(Number(e.target.value))}>
+                  {certs.length === 0 && <option value={0}>None (HTTP only)</option>}
+                  {certs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+          <Button onClick={add} disabled={busy || !canAdd}>{busy ? 'Adding…' : <><Plus className="h-4 w-4" /> Add route</>}</Button>
+        </div>
       </div>
     </Dialog>
   );

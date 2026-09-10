@@ -7,7 +7,7 @@ import { ConnectorRegistry } from './connector-registry.service';
 import { JobService } from './job.service';
 import type {
   ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget, ConnectorStreamTarget, ConnectorNode,
-  DashboardOverview, OverviewMetric, OverviewGuest, OverviewSource,
+  DashboardOverview, OverviewMetric, OverviewGuest, OverviewSource, OperationResult,
 } from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
 
@@ -182,6 +182,25 @@ export class ConnectorInstanceService implements OnModuleInit {
     if (!connector.runOperation) throw new BadRequestException('This connector does not support operations.');
     const ctx = await this.buildContext(instance);
     return connector.runOperation(ctx, operationId, undefined, values, () => {});
+  }
+
+  /**
+   * Like runOperationAwait but targets a specific resource — for resource-scoped
+   * operations (e.g. adding an ingress route to a chosen Cloudflare tunnel). Returns
+   * the full OperationResult so callers can read `createdResourceId` for teardown.
+   */
+  async runResourceOperationAwait(
+    id: string,
+    operationId: string,
+    resourceId: string | undefined,
+    values: Record<string, unknown>,
+  ): Promise<OperationResult> {
+    const instance = await this.get(id);
+    if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
+    const connector = this.connectorFor(instance);
+    if (!connector.runOperation) throw new BadRequestException('This connector does not support operations.');
+    const ctx = await this.buildContext(instance);
+    return connector.runOperation(ctx, operationId, resourceId, values, () => {});
   }
 
   private connectorFor(instance: ConnectorInstance) {
