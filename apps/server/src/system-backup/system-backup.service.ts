@@ -45,9 +45,19 @@ export class SystemBackupService {
   ) {}
 
   private dbUrl(): string {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new BadRequestException('DATABASE_URL is not set.');
-    return url;
+    const raw = process.env.DATABASE_URL;
+    if (!raw) throw new BadRequestException('DATABASE_URL is not set.');
+    // Strip Prisma-only query params libpq/pg_dump don't understand (e.g. ?schema=public
+    // → "invalid URI query parameter"). Keep libpq-valid ones like sslmode.
+    try {
+      const u = new URL(raw);
+      for (const k of ['schema', 'connection_limit', 'pool_timeout', 'pgbouncer', 'socket_timeout', 'sslaccept', 'connect_timeout']) {
+        u.searchParams.delete(k);
+      }
+      return u.toString();
+    } catch {
+      return raw;
+    }
   }
 
   private signalDir(): string {
@@ -111,7 +121,13 @@ export class SystemBackupService {
     if (!passphrase) throw new BadRequestException('The passphrase is required.');
     if (!(await this.pgToolsAvailable())) throw new BadRequestException('psql is not available in this image — rebuild with postgresql-client.');
 
-    const bundle = openBundle<Bundle>(file, passphrase); // throws cleanly on wrong passphrase
+    let bundle: Bundle;
+    try {
+      bundle = openBundle<Bundle>(file, passphrase);
+    } catch (err) {
+      // Wrong passphrase / bad magic / corrupt file → a clean 400, not a 500.
+      throw new BadRequestException(err instanceof Error ? err.message : 'Could not open the backup file.');
+    }
     if (bundle?.manifest?.format !== 1 || typeof bundle.database !== 'string') {
       throw new BadRequestException('This file is not a valid Cerebro backup.');
     }

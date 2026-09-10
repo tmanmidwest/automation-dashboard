@@ -65,6 +65,19 @@ The runtime image gains **`postgresql-client-16`** (adds `pg_dump` / `psql`) fro
 apt repo — Debian bookworm's default client is v15, which **refuses to dump the `postgres:16`
 server**. One-time rebuild. If the server's Postgres major ever changes, bump the client to match.
 
+## Gotchas handled
+
+- **`DATABASE_URL` query params.** Prisma's URL carries `?schema=public` (and can carry
+  `connection_limit`, `pgbouncer`, …), which `pg_dump`/`psql` reject as "invalid URI query
+  parameter". The service strips those Prisma-only params before shelling out (keeping libpq-valid
+  ones like `sslmode`).
+- **Wrong passphrase** decrypts to a GCM failure — surfaced as a clean `400` with a readable
+  message, not a `500`.
+
+*Verified end-to-end on a rebuilt test stack (2026-09-09):* backup → delete data → restore brings it
+back byte-identical; restoring a backup onto a machine with a **different** `APP_ENCRYPTION_KEY`
+re-keys the vault so secrets decrypt under the new key; wrong passphrase → 400.
+
 ## Not doing (yet)
 
 - **Scheduled off-site self-backups to Backblaze B2** — planned follow-up, reusing the restic infra;
