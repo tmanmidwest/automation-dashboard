@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { RefreshCw, Save, BookOpen, Rocket, Loader2, Server } from 'lucide-react';
 import type {
   AssistantConfigView, AssistantModelInfo, LlmBackend,
-  OllamaCertOption, OllamaDeployEvent, OllamaHost,
+  GpuStatus, OllamaCertOption, OllamaDeployEvent, OllamaHost, OllamaSetupEvent,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -46,6 +46,12 @@ export function ComputerSettings() {
   const [wGpu, setWGpu] = useState(false);
   const [wModel, setWModel] = useState('qwen2.5:7b');
   const [wBaseUrlOverride, setWBaseUrlOverride] = useState('');
+  const [wRecreate, setWRecreate] = useState(false);
+  // GPU readiness + toolkit install.
+  const [gpu, setGpu] = useState<GpuStatus | null>(null);
+  const [gpuChecking, setGpuChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [gpuLog, setGpuLog] = useState<string[]>([]);
   const [deployLog, setDeployLog] = useState<string[]>([]);
   const [deploying, setDeploying] = useState(false);
   const [deployDone, setDeployDone] = useState(false);
@@ -127,6 +133,57 @@ export function ComputerSettings() {
     }
   }
 
+  // Reset a stale GPU probe when the target host changes.
+  useEffect(() => { setGpu(null); setGpuLog([]); }, [wInstance]);
+
+  async function checkGpu() {
+    if (!wInstance) return;
+    setGpuChecking(true); setGpu(null); setGpuLog([]);
+    try {
+      setGpu(await api.get<GpuStatus>(`/api/assistant/ollama/gpu-status?instanceId=${encodeURIComponent(wInstance)}`));
+    } catch (e) {
+      setGpuLog([`⚠ ${e instanceof ApiError ? e.message : 'GPU check failed'}`]);
+    } finally {
+      setGpuChecking(false);
+    }
+  }
+
+  async function installToolkit() {
+    if (!wInstance || installing) return;
+    setInstalling(true); setGpuLog([]);
+    const append = (line: string) => setGpuLog((l) => [...l, line]);
+    try {
+      const res = await fetch('/api/assistant/ollama/install-toolkit', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instanceId: wInstance }),
+      });
+      if (!res.ok || !res.body) throw new Error((await res.text().catch(() => '')) || `Request failed (${res.status})`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 2);
+          if (!frame.startsWith('data:')) continue;
+          const ev = JSON.parse(frame.slice(5).trim()) as OllamaSetupEvent;
+          if (ev.type === 'log') append(ev.text);
+          else if (ev.type === 'error') append(`⚠ ${ev.message}`);
+          else if (ev.type === 'done') { append('✓ Toolkit installed.'); await checkGpu(); }
+        }
+      }
+    } catch (e) {
+      append(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setInstalling(false);
+    }
+  }
+
   // Load NPM certificate options when the chosen proxy instance changes.
   useEffect(() => {
     if (!wProxyOn || !wProxyInstance) return;
@@ -149,6 +206,7 @@ export function ComputerSettings() {
           instanceId: wInstance, port: wPort, gpu: wGpu,
           model: wModel.trim() || undefined,
           baseUrlOverride: wBaseUrlOverride.trim() || undefined,
+          recreate: wRecreate,
           proxy: wProxyOn && wProxyInstance && wProxyDomain.trim()
             ? { instanceId: wProxyInstance, domain: wProxyDomain.trim(), certificateId: wProxyCertId, sslForced: wProxyCertId > 0 }
             : undefined,
@@ -392,6 +450,49 @@ export function ComputerSettings() {
               <input type="checkbox" className="h-4 w-4" checked={wGpu} onChange={(e) => setWGpu(e.target.checked)} disabled={deploying} />
               <span>Request all GPUs (host must have the NVIDIA container runtime)</span>
             </label>
+
+            <div className="rounded-md border border-border/60 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">GPU readiness</span>
+                <Button type="button" variant="outline" size="sm" onClick={checkGpu} disabled={gpuChecking || installing || deploying || !wInstance}>
+                  {gpuChecking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Check
+                </Button>
+              </div>
+              {gpu && (
+                <div className="space-y-1 text-xs">
+                  {!gpu.sshConfigured ? (
+                    <p className="text-amber-500">{gpu.message}</p>
+                  ) : !gpu.reachable ? (
+                    <p className="text-red-500">{gpu.message}</p>
+                  ) : (
+                    <>
+                      <StatusRow ok={gpu.driver.present} label="NVIDIA driver" detail={gpu.driver.detail} />
+                      <StatusRow ok={gpu.toolkit.present} label="Container Toolkit" detail={gpu.toolkit.detail} />
+                      <StatusRow ok={gpu.runtime.present} label="Docker nvidia runtime" />
+                      <p className="text-muted-foreground pt-1">{gpu.message}{gpu.distro ? ` (${gpu.distro})` : ''}</p>
+                      {gpu.canInstallToolkit && (
+                        <Button type="button" size="sm" className="mt-1" onClick={installToolkit} disabled={installing || deploying}>
+                          {installing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />} Install Container Toolkit
+                        </Button>
+                      )}
+                      {gpu.canInstallToolkit && (
+                        <p className="text-[11px] text-muted-foreground">Installs over SSH and restarts Docker on the host (briefly bounces its containers).</p>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+              {gpuLog.length > 0 && (
+                <pre className="max-h-40 overflow-y-auto rounded border border-border/60 bg-background/70 p-2 text-xs font-mono leading-relaxed whitespace-pre-wrap">
+                  {gpuLog.join('\n')}
+                </pre>
+              )}
+            </div>
+
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" className="h-4 w-4" checked={wRecreate} onChange={(e) => setWRecreate(e.target.checked)} disabled={deploying} />
+              <span>Rebuild the container from scratch <span className="text-xs text-muted-foreground">(use to change GPU/port, or fix a broken container)</span></span>
+            </label>
             <div className="space-y-1.5">
               <Label>Base URL override <span className="text-xs text-muted-foreground">(optional, advanced)</span></Label>
               <Input value={wBaseUrlOverride} onChange={(e) => setWBaseUrlOverride(e.target.value)}
@@ -557,6 +658,16 @@ function BackendGuide({ backend }: { backend: LlmBackend }) {
 
 function Code({ children }: { children: React.ReactNode }) {
   return <code className="rounded bg-background/70 px-1 text-xs font-mono">{children}</code>;
+}
+
+function StatusRow({ ok, label, detail }: { ok: boolean; label: string; detail?: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className={ok ? 'text-emerald-500' : 'text-red-500'}>{ok ? '✓' : '✗'}</span>
+      <span>{label}</span>
+      {detail && <span className="text-muted-foreground truncate">— {detail}</span>}
+    </div>
+  );
 }
 
 function Snippet({ text }: { text: string }) {

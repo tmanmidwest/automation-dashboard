@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import type { OllamaCertOption, OllamaDeployEvent, OllamaDeployRequest, OllamaHost } from '@cerebro/shared';
+import type {
+  GpuStatus, OllamaCertOption, OllamaDeployEvent, OllamaDeployRequest, OllamaHost, OllamaSetupEvent,
+} from '@cerebro/shared';
+import type { ConnectorContext } from '@cerebro/shared';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerApi, type DockerAuth } from '../connectors/docker/docker-api';
+import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
 
 const CONTAINER_NAME = 'cerebro-ollama';
 const VOLUME_NAME = 'cerebro-ollama';
@@ -38,6 +42,123 @@ export class OllamaProvisionService {
     return opts.map((o) => ({ id: Number(o.value) || 0, name: o.label }));
   }
 
+  // ── GPU readiness + NVIDIA Container Toolkit install ──────────────
+
+  /** Probe a Docker host's GPU stack (driver / toolkit / docker runtime) over SSH + Engine API. */
+  async gpuStatus(instanceId: string): Promise<GpuStatus> {
+    const inst = await this.instances.get(instanceId);
+    if (inst.connectorId !== DOCKER_CONNECTOR) throw new Error('Not a Docker host.');
+    const ctx = await this.instances.contextFor(inst);
+
+    // Docker `nvidia` runtime via the Engine API (no SSH needed).
+    let runtimePresent = false;
+    try {
+      const info = (await new DockerApi(dockerAuth(ctx)).info()) as { Runtimes?: Record<string, unknown> };
+      runtimePresent = !!info.Runtimes && !!info.Runtimes.nvidia;
+    } catch { /* leave false */ }
+
+    const ssh = sshFrom(ctx);
+    if (!ssh) {
+      return {
+        sshConfigured: false, reachable: false, distroSupported: false,
+        driver: { present: false }, toolkit: { present: false }, runtime: { present: runtimePresent },
+        canInstallToolkit: false,
+        message: 'This Docker connector has no SSH credentials, so Cerebro can\'t inspect or install GPU components. Add an SSH host, user, and key/password on the connector to enable this.',
+      };
+    }
+
+    let reachable = false;
+    let distro: string | undefined;
+    let driver: GpuStatus['driver'] = { present: false };
+    let toolkit: GpuStatus['toolkit'] = { present: false };
+    try {
+      const os = await runSsh(ssh, '. /etc/os-release 2>/dev/null; echo "$ID $VERSION_ID"');
+      reachable = true;
+      distro = os.stdout.trim() || undefined;
+      const smi = await runSsh(ssh, 'nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null');
+      if (smi.code === 0 && smi.stdout.trim()) driver = { present: true, detail: firstLine(smi.stdout) };
+      const ctk = await runSsh(ssh, 'nvidia-ctk --version 2>/dev/null');
+      if (ctk.code === 0 && ctk.stdout.trim()) toolkit = { present: true, detail: firstLine(ctk.stdout) };
+    } catch (err) {
+      return {
+        sshConfigured: true, reachable: false, distroSupported: false,
+        driver, toolkit, runtime: { present: runtimePresent }, canInstallToolkit: false,
+        message: `Couldn't reach the host over SSH: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    const distroId = (distro ?? '').split(' ')[0].toLowerCase();
+    const distroSupported = distroId === 'ubuntu' || distroId === 'debian';
+    const canInstallToolkit = reachable && distroSupported && !toolkit.present;
+
+    return {
+      sshConfigured: true, reachable, distro, distroSupported,
+      driver, toolkit, runtime: { present: runtimePresent }, canInstallToolkit,
+      message: gpuMessage({ driver, toolkit, runtimePresent, distroSupported, canInstallToolkit }),
+    };
+  }
+
+  /** Install the NVIDIA Container Toolkit on a Debian/Ubuntu Docker host, streaming progress. */
+  async *installToolkit(instanceId: string): AsyncGenerator<OllamaSetupEvent> {
+    let ssh: SshConfig | null;
+    try {
+      const inst = await this.instances.get(instanceId);
+      if (inst.connectorId !== DOCKER_CONNECTOR) { yield { type: 'error', message: 'Not a Docker host.' }; return; }
+      ssh = sshFrom(await this.instances.contextFor(inst));
+    } catch (err) {
+      yield { type: 'error', message: err instanceof Error ? err.message : String(err) };
+      return;
+    }
+    if (!ssh) { yield { type: 'error', message: 'This Docker connector has no SSH credentials.' }; return; }
+
+    try {
+      const os = await runSsh(ssh, '. /etc/os-release 2>/dev/null; echo "$ID"');
+      const id = os.stdout.trim().toLowerCase();
+      if (id !== 'ubuntu' && id !== 'debian') {
+        yield { type: 'error', message: `Auto-install supports Debian/Ubuntu only (host reports "${id || 'unknown'}"). Install the NVIDIA Container Toolkit manually.` };
+        return;
+      }
+      // Non-root users need passwordless sudo; root runs the commands directly.
+      const S = ssh.username === 'root' ? '' : 'sudo -n ';
+
+      const steps: { label: string; cmd: string; timeoutMs?: number }[] = [
+        {
+          label: 'Adding the NVIDIA package repository',
+          cmd:
+            `curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | ${S}gpg --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && ` +
+            `curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | ` +
+            `sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | ${S}tee /etc/apt/sources.list.d/nvidia-container-toolkit.list`,
+        },
+        { label: 'Updating package lists', cmd: `${S}apt-get update`, timeoutMs: 180_000 },
+        { label: 'Installing nvidia-container-toolkit', cmd: `${S}apt-get install -y nvidia-container-toolkit`, timeoutMs: 300_000 },
+        { label: 'Configuring the Docker runtime', cmd: `${S}nvidia-ctk runtime configure --runtime=docker` },
+        { label: 'Restarting Docker', cmd: `${S}systemctl restart docker`, timeoutMs: 60_000 },
+      ];
+
+      for (const step of steps) {
+        yield { type: 'log', text: `${step.label}…` };
+        const r = await runSsh(ssh, step.cmd, undefined, step.timeoutMs ?? 120_000);
+        if (r.code !== 0) {
+          const detail = tail(r.stderr || r.stdout) || `exit ${r.code}`;
+          const hint = S && /sudo/.test(detail) ? ' (the SSH user needs passwordless sudo, or use root)' : '';
+          yield { type: 'error', message: `${step.label} failed: ${detail}${hint}` };
+          return;
+        }
+        const out = tail(r.stdout);
+        if (out) yield { type: 'log', text: out };
+      }
+
+      // Verify the runtime is now registered.
+      const verify = await runSsh(ssh, `docker info --format '{{json .Runtimes}}' 2>/dev/null`);
+      if (verify.stdout.includes('nvidia')) yield { type: 'log', text: '✓ Docker now has the nvidia runtime.' };
+      else yield { type: 'log', text: '⚠ Installed, but the nvidia runtime is not visible yet — a Docker restart or host reboot may be needed.' };
+
+      yield { type: 'done' };
+    } catch (err) {
+      yield { type: 'error', message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   /** Deploy (or reuse) the Ollama container and optionally pull a model, streaming progress. */
   async *deploy(opts: OllamaDeployRequest): AsyncGenerator<OllamaDeployEvent> {
     const port = opts.port || Number(OLLAMA_PORT);
@@ -65,36 +186,69 @@ export class OllamaProvisionService {
     }
 
     try {
+      // GPU preflight: creating with a DeviceRequest against a host that has no `nvidia`
+      // runtime yields a confusing 500 on start. Catch it here with an actionable message.
+      if (opts.gpu) {
+        const info = (await api.info().catch(() => ({}))) as { Runtimes?: Record<string, unknown> };
+        if (!info.Runtimes || !info.Runtimes.nvidia) {
+          yield {
+            type: 'error',
+            message:
+              'GPU requested, but this Docker host has no "nvidia" runtime — the NVIDIA Container Toolkit ' +
+              'isn\'t installed. Install it on the host (nvidia-ctk runtime configure --runtime=docker, then ' +
+              'restart Docker), or uncheck "Request all GPUs" to run on CPU.',
+          };
+          return;
+        }
+      }
+
       yield { type: 'log', text: `Pulling image ${IMAGE} … (first time can take a minute)` };
       await api.pullImage(IMAGE, () => { /* coarse progress; SSE keeps the connection open */ });
       yield { type: 'log', text: 'Image ready.' };
 
-      const existing = (await api.listContainers(true)).find((c) =>
+      const desiredBody = (): Record<string, unknown> => ({
+        Image: IMAGE,
+        ExposedPorts: { [`${OLLAMA_PORT}/tcp`]: {} },
+        HostConfig: {
+          RestartPolicy: { Name: 'unless-stopped' },
+          PortBindings: { [`${OLLAMA_PORT}/tcp`]: [{ HostPort: String(port) }] },
+          Binds: [`${VOLUME_NAME}:/root/.ollama`],
+          ...(opts.gpu ? { DeviceRequests: [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu']] }] } : {}),
+        },
+      });
+
+      let existing = (await api.listContainers(true)).find((c) =>
         (c.Names ?? []).some((n) => stripSlash(n) === CONTAINER_NAME),
       );
 
+      // Explicit rebuild, or auto-heal a broken container.
+      if (existing && opts.recreate) {
+        yield { type: 'log', text: 'Removing existing container to rebuild it…' };
+        await api.removeContainer(existing.Id).catch(() => { /* ignore */ });
+        existing = undefined;
+      }
+
       if (existing) {
-        if ((existing.State ?? '') !== 'running') {
-          yield { type: 'log', text: 'Starting existing cerebro-ollama container…' };
-          await api.startContainer(existing.Id);
-        } else {
+        const id = existing.Id;
+        if ((existing.State ?? '') === 'running') {
           yield { type: 'log', text: 'Container "cerebro-ollama" already running — reusing it.' };
+        } else {
+          yield { type: 'log', text: 'Starting existing cerebro-ollama container…' };
+          try {
+            await api.startContainer(id);
+          } catch (startErr) {
+            // A container created by a prior (e.g. GPU) attempt can be un-startable on this
+            // host. Rebuild it from scratch with the current options.
+            const msg = startErr instanceof Error ? startErr.message : String(startErr);
+            yield { type: 'log', text: `⚠ Existing container wouldn't start (${msg}). Rebuilding it…` };
+            await api.removeContainer(id).catch(() => { /* ignore */ });
+            const newId = await api.createContainer(CONTAINER_NAME, desiredBody());
+            await api.startContainer(newId);
+          }
         }
       } else {
         yield { type: 'log', text: `Creating container "${CONTAINER_NAME}" (volume ${VOLUME_NAME}, port ${port})…` };
-        const body: Record<string, unknown> = {
-          Image: IMAGE,
-          ExposedPorts: { [`${OLLAMA_PORT}/tcp`]: {} },
-          HostConfig: {
-            RestartPolicy: { Name: 'unless-stopped' },
-            PortBindings: { [`${OLLAMA_PORT}/tcp`]: [{ HostPort: String(port) }] },
-            Binds: [`${VOLUME_NAME}:/root/.ollama`],
-            ...(opts.gpu
-              ? { DeviceRequests: [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu']] }] }
-              : {}),
-          },
-        };
-        const id = await api.createContainer(CONTAINER_NAME, body);
+        const id = await api.createContainer(CONTAINER_NAME, desiredBody());
         yield { type: 'log', text: 'Starting container…' };
         await api.startContainer(id);
       }
@@ -174,6 +328,57 @@ function str(v: unknown): string | undefined {
 
 function stripSlash(n: string): string {
   return n.startsWith('/') ? n.slice(1) : n;
+}
+
+/** Build Docker Engine auth from a connector context (mirrors the docker connector). */
+function dockerAuth(ctx: ConnectorContext): DockerAuth {
+  return {
+    endpoint: String(ctx.config.endpoint ?? ''),
+    tlsCaCert: str(ctx.config.tlsCaCert),
+    tlsClientCert: str(ctx.config.tlsClientCert),
+    tlsClientKey: str(ctx.config.tlsClientKey),
+    insecureSkipVerify: ctx.config.insecureSkipVerify === true,
+  };
+}
+
+/** Build an SSH config from a connector context, or null if none is set. */
+function sshFrom(ctx: ConnectorContext): SshConfig | null {
+  const host = str(ctx.config.sshHost);
+  const key = str(ctx.config.sshPrivateKey);
+  const password = str(ctx.config.sshPassword);
+  if (!host || (!key && !password)) return null;
+  return {
+    host,
+    port: Number(ctx.config.sshPort) || 22,
+    username: str(ctx.config.sshUser) || 'root',
+    privateKey: key,
+    password,
+  };
+}
+
+function firstLine(s: string): string {
+  return s.split('\n')[0].trim();
+}
+
+/** Last few non-empty lines, for compact log/error output. */
+function tail(s: string, lines = 3): string {
+  return s.split('\n').map((l) => l.trimEnd()).filter(Boolean).slice(-lines).join('\n');
+}
+
+function gpuMessage(x: {
+  driver: GpuStatus['driver']; toolkit: GpuStatus['toolkit'];
+  runtimePresent: boolean; distroSupported: boolean; canInstallToolkit: boolean;
+}): string {
+  if (x.driver.present && x.toolkit.present && x.runtimePresent) return 'GPU ready — driver, toolkit, and Docker runtime are all present.';
+  const missing: string[] = [];
+  if (!x.driver.present) missing.push('NVIDIA driver (nvidia-smi)');
+  if (!x.toolkit.present) missing.push('NVIDIA Container Toolkit');
+  if (x.driver.present && x.toolkit.present && !x.runtimePresent) missing.push('Docker nvidia runtime (restart Docker)');
+  const parts = [`Missing: ${missing.join(', ')}.`];
+  if (!x.driver.present) parts.push('Install the NVIDIA driver on the host first (Cerebro does not auto-install drivers).');
+  if (x.canInstallToolkit) parts.push('Cerebro can install the Container Toolkit for you (button below).');
+  else if (!x.toolkit.present && !x.distroSupported) parts.push('Auto-install supports Debian/Ubuntu only; install the toolkit manually here.');
+  return parts.join(' ');
 }
 
 /** Suggest a Base URL Cerebro can use to reach the container. Best-effort; user can edit. */

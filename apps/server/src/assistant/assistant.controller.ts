@@ -9,6 +9,7 @@ import type {
   AssistantProposeRuleRequest,
   AssistantResumeRequest,
   AssistantRuleProposal,
+  GpuStatus,
   OllamaCertOption,
   OllamaDeployRequest,
   OllamaHost,
@@ -80,6 +81,24 @@ export class AssistantController {
     return this.ollama.proxyCerts(String(instanceId ?? ''));
   }
 
+  /** Probe a Docker host's GPU readiness (driver / toolkit / runtime). */
+  @Get('ollama/gpu-status')
+  @RequirePermissions('settings:write')
+  gpuStatus(@Query('instanceId') instanceId: string): Promise<GpuStatus> {
+    return this.ollama.gpuStatus(String(instanceId ?? ''));
+  }
+
+  /** Install the NVIDIA Container Toolkit on a Debian/Ubuntu Docker host, streaming progress. */
+  @Post('ollama/install-toolkit')
+  @RequirePermissions('settings:write')
+  async installToolkit(
+    @Body() body: { instanceId?: string },
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.stream(req, res, this.ollama.installToolkit(String(body?.instanceId ?? '')));
+  }
+
   /** Deploy (or reuse) an Ollama container on a Docker host, streaming progress as SSE. */
   @Post('ollama/deploy')
   @RequirePermissions('settings:write')
@@ -94,6 +113,7 @@ export class AssistantController {
       gpu: body?.gpu === true,
       model: body?.model ? String(body.model) : undefined,
       baseUrlOverride: body?.baseUrlOverride ? String(body.baseUrlOverride) : undefined,
+      recreate: body?.recreate === true,
       proxy: body?.proxy?.instanceId && body?.proxy?.domain
         ? {
             instanceId: String(body.proxy.instanceId),

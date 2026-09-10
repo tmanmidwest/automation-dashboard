@@ -141,6 +141,8 @@ export interface OllamaDeployRequest {
    * Computer at the proxy URL instead. Omit for a direct connection.
    */
   proxy?: OllamaProxyConfig;
+  /** Remove and rebuild the container from scratch (e.g. to change GPU/port, or fix a broken one). */
+  recreate?: boolean;
 }
 
 /** SSE progress events from the deploy stream. */
@@ -148,6 +150,40 @@ export type OllamaDeployEvent =
   | { type: 'log'; text: string }
   | { type: 'done'; baseUrl: string; model?: string }
   | { type: 'error'; message: string };
+
+/** SSE progress events from a setup stream (toolkit install). */
+export type OllamaSetupEvent =
+  | { type: 'log'; text: string }
+  | { type: 'done' }
+  | { type: 'error'; message: string };
+
+/** One GPU-stack component's presence on a Docker host. */
+export interface GpuComponent {
+  present: boolean;
+  detail?: string;
+}
+
+/** GPU readiness of a Docker host, probed over the connector's SSH + Engine API. */
+export interface GpuStatus {
+  /** The connector has SSH credentials (needed to inspect/install). */
+  sshConfigured: boolean;
+  /** SSH connected successfully. */
+  reachable: boolean;
+  /** e.g. "ubuntu 22.04". */
+  distro?: string;
+  /** Auto-install is supported for this distro (Debian/Ubuntu). */
+  distroSupported: boolean;
+  /** NVIDIA driver (nvidia-smi). */
+  driver: GpuComponent;
+  /** NVIDIA Container Toolkit (nvidia-ctk). */
+  toolkit: GpuComponent;
+  /** Docker `nvidia` runtime registered. */
+  runtime: GpuComponent;
+  /** Cerebro can install the toolkit from here (supported distro + reachable + toolkit missing). */
+  canInstallToolkit: boolean;
+  /** Human-readable summary / next step. */
+  message: string;
+}
 
 /** Body of POST /api/assistant/propose-rule — a natural-language automation request. */
 export interface AssistantProposeRuleRequest {

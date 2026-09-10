@@ -213,6 +213,19 @@ Computer at `http(s)://<hostname>` instead. On failure it warns and falls back t
 Extra endpoints: `GET /api/assistant/ollama/proxies`, `GET /api/assistant/ollama/proxy-certs`. This
 gives a clean hostname + TLS for a remote GPU box instead of an unauthenticated `:11434` on the LAN.
 
+**GPU readiness + NVIDIA Container Toolkit install.** The wizard has a **GPU readiness** panel:
+**Check** probes the chosen host — Docker `nvidia` runtime via the Engine API, and (over the
+connector's SSH) `nvidia-smi` (driver) + `nvidia-ctk` (toolkit) + distro — and reports each with a
+next-step message. When the driver is present but the toolkit is missing on a **Debian/Ubuntu** host,
+an **Install Container Toolkit** button runs the official apt install over SSH (add repo → apt-get
+install → `nvidia-ctk runtime configure` → restart Docker), streaming progress, then re-probes.
+Cerebro deliberately does **not** auto-install the GPU *driver* (reboots/kernel risk) — it detects and
+guides that. Deploy also preflights GPU (fails fast with an actionable message if the `nvidia` runtime
+is absent, rather than leaving a broken container) and **auto-heals**: a container that won't start is
+removed and rebuilt; a **Rebuild from scratch** checkbox forces a clean container. Endpoints:
+`GET /api/assistant/ollama/gpu-status`, `POST /api/assistant/ollama/install-toolkit` (SSE). Install
+needs the connector's SSH user to be root or have passwordless sudo.
+
 ## Deployment (contained-by-default)
 
 - New optional service in compose: `ollama/ollama` with a named volume for model weights, on the
