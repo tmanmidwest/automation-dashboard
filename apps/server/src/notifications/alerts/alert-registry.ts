@@ -375,6 +375,38 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: true,
   },
 
+  // ── Nginx Proxy Manager ──────────────────────────────────
+  {
+    key: 'npm.certs_expiring',
+    label: 'Certificates expiring over threshold',
+    description: 'The number of Nginx Proxy Manager SSL certificates expiring soon (within ~14 days) or already expired crossed the limit set on its page.',
+    category: 'Nginx Proxy Manager',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'npm.hosts_errored',
+    label: 'Hosts offline over threshold',
+    description: 'The number of proxy hosts Nginx Proxy Manager failed to bring online (bad config or certificate) crossed the limit set on its page.',
+    category: 'Nginx Proxy Manager',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'npm.hosts_disabled',
+    label: 'Disabled hosts over threshold',
+    description: 'The number of disabled proxy hosts crossed the limit set on its page.',
+    category: 'Nginx Proxy Manager',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+
   // ── Automations ──────────────────────────────────────────
   {
     key: 'automation.notify',

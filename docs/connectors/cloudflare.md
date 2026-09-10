@@ -1,10 +1,10 @@
 # Cloudflare connector
 
-> **Status: BUILT — connector v0.6.0, all six phases complete (2026-09-05).** 12 resource
-> kinds, 6 operations, 5 alerts. Verified via per-phase harnesses and live against the real
-> `api.cloudflare.com` on the :3900 test stack. Not yet git-committed / deployed (per the
-> repo's edit-only workflow — the user commits, builds, and deploys). This document now
-> describes what was built; the original plan is preserved in the phasing table at the end.
+> **Status: BUILT — connector v0.7.0 (2026-09-09).** 12 resource kinds, 9 operations, 5 alerts,
+> plus a **tunnel → public-hostname routes** sub-resource (Phase 7). Verified via per-phase
+> harnesses and live against the real `api.cloudflare.com` on the :3900 test stack. Not yet
+> git-committed / deployed (per the repo's edit-only workflow — the user commits, builds, and
+> deploys). This document describes what was built; the original plan is in the phasing table.
 
 A read-first **edge + network health** connector for a Cloudflare account. Cerebro
 treats Cloudflare the way it treats Proxmox, AWS, and Home Assistant: a typed API
@@ -122,7 +122,7 @@ All **12** kinds, as built. "Phase" is when each landed.
 
 | kind id | label | actions / ops | phase | notes |
 |---------|-------|---------|-------|-------|
-| `tunnel` | Tunnels | delete | 1/2 | status healthy/degraded/down/inactive; conns + client version in detail |
+| `tunnel` | Tunnels | delete; **public-hostname routes** (sub-resource: add / edit / delete) | 1/2/7 | status healthy/degraded/down/inactive; conns + client version in detail |
 | `zone` | Zones | purge cache (action); security-level, dev-mode, purge-URLs (ops) | 1/2 | status active/pending/paused; plan; name servers |
 | `dns_record` | DNS Records | proxy on/off (actions); create, edit (ops); delete | 1/2 | type/name/content/ttl/proxied; grouped by zone |
 | `certificate` | Certificates | *(read)* | 3 | edge cert packs; earliest `expires_on` → expiry alert |
@@ -170,6 +170,21 @@ statuses so the badges color correctly:
 - `zone-dev-mode` (scope `resource`, kind `zone`): on/off, prefilled → `PATCH /settings/development_mode`.
 - `zone-purge-urls` (scope `resource`, kind `zone`): textarea of URLs → `POST /purge_cache {files:[…]}` (trims + drops blank lines).
 - `pages-retry-deploy` (scope `resource`, kind `pages_project`, no fields): looks up the project's latest deployment id → `POST …/deployments/:id/retry`.
+
+## Tunnel public-hostname routes (Phase 7)
+
+A tunnel's **public hostnames** (the `app.example.com → http://192.168.1.50:8080` mappings) are
+exposed as a **sub-resource** under the tunnel (like Proxmox snapshots) — open a tunnel to see and
+manage them:
+- **List** — `GET …/cfd_tunnel/:tid/configurations`, showing the ingress rules that have a hostname
+  (the trailing catch-all is hidden).
+- **Add / Edit / Delete** — read-modify-`PUT` of the ingress array. The final catch-all rule is always
+  kept last and `warp-routing` is preserved. **Add** also creates the matching proxied `CNAME`
+  (`hostname → <tunnelId>.cfargotunnel.com`) in the zone that owns the hostname — mirroring what the
+  dashboard does — and **Delete** removes that CNAME *only if* it still points at this tunnel.
+- ⚠️ **Remote-managed only.** If the tunnel's config `source` is `local` (ingress in a `cloudflared`
+  config file), the API can't see or change routes — the list is empty and edits are refused with a
+  clear message. (Backed by ops `tunnel-add-route`, `tunnel-edit-route`, `tunnel-delete-route`.)
 
 ## Overview (dashboard tiles)
 
@@ -226,6 +241,7 @@ stays unset.
 | **4** | Zero Trust: `access_app`, `service_token` (+ expiry alert), `warp_device`. | ✅ done (v0.4.0) |
 | **5** | Analytics (GraphQL overview tiles, cached) + `firewall_rule` kind (enable/disable) + threats alert. | ✅ done (v0.5.0) |
 | **6** | Bonus kinds: `worker`, `pages_project` (+ retry-deploy op), `r2_bucket`, `load_balancer`. | ✅ done (v0.6.0) |
+| **7** | Tunnel **public-hostname routes** as a sub-resource: list + add (with DNS CNAME) / edit / delete; remote-managed tunnels only. | ✅ done (v0.7.0) |
 
 The one deliberate deviation from the plan: the planned separate "under-attack" zone action
 became the **`zone-security-level`** operation, which sets any security level (including

@@ -1,4 +1,4 @@
-import { Server, Cloud, CloudCog, Building2, Archive, House, Puzzle, Container, Clapperboard } from 'lucide-react';
+import { Server, Cloud, CloudCog, Building2, Archive, House, Puzzle, Container, Clapperboard, Waypoints } from 'lucide-react';
 
 /** Maps a connector manifest icon key to a glyph. */
 export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; className?: string }) {
@@ -19,6 +19,8 @@ export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; 
       return <Container className={className} />;
     case 'jellyfin':
       return <Clapperboard className={className} />;
+    case 'nginx-proxy-manager':
+      return <Waypoints className={className} />;
     default:
       return <Puzzle className={className} />;
   }

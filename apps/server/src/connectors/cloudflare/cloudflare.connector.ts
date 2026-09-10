@@ -19,6 +19,7 @@ import {
   CfApi, CfAuth, CfZone, CfDnsRecord, CfTunnel, CfCertPack,
   CfAccessApp, CfServiceToken, CfDevice, CfRule,
   CfWorker, CfPagesProject, CfR2Bucket, CfLoadBalancer,
+  CfIngressRule,
 } from './cf-api';
 
 const TUNNEL_KIND = 'tunnel';
@@ -79,6 +80,19 @@ const KINDS: ConnectorResourceKind[] = [
     // Delete is offered as a typed-name delete in the detail drawer (cascades connections).
     deletable: true,
     actions: [],
+    // Public-hostname routes (ingress rules) live under each tunnel.
+    subResources: [
+      {
+        id: 'route',
+        label: 'Public Hostnames',
+        labelSingular: 'public hostname',
+        createOperationId: 'tunnel-add-route',
+        itemActions: [
+          { id: 'edit', label: 'Edit', operationId: 'tunnel-edit-route', paramKey: 'hostname' },
+          { id: 'delete', label: 'Delete', operationId: 'tunnel-delete-route', paramKey: 'hostname', confirm: 'Remove this public hostname route? Its DNS record (if pointed at this tunnel) is removed too.', intent: 'destructive' },
+        ],
+      },
+    ],
   },
   {
     id: ZONE_KIND,
@@ -203,6 +217,35 @@ const OPERATIONS: ConnectorOperation[] = [
     submitLabel: 'Retry deployment',
     fields: [],
   },
+  // ---- Tunnel public-hostname routes (sub-resource ops; no `kind` so they surface only under the tunnel) ----
+  {
+    id: 'tunnel-add-route',
+    label: 'Add public hostname',
+    description: 'Route a public hostname through this tunnel to a local service, and (optionally) create its DNS record.',
+    scope: 'resource',
+    icon: 'plus',
+    submitLabel: 'Add route',
+    fields: [
+      { key: 'hostname', label: 'Public hostname', type: 'text', required: true, placeholder: 'app.example.com', help: 'The public DNS name visitors use. Must be in one of your Cloudflare zones.' },
+      { key: 'service', label: 'Service (local target)', type: 'text', required: true, placeholder: 'http://192.168.1.50:8080', help: 'Where cloudflared forwards traffic — scheme + local IP/host + port.' },
+      { key: 'path', label: 'Path (optional)', type: 'text', placeholder: '/api', help: 'Restrict this rule to a path prefix. Leave blank for all paths.' },
+      { key: 'createDns', label: 'Create the DNS record for this hostname', type: 'boolean', default: true, help: 'Adds a proxied CNAME to the tunnel in the matching zone (like the dashboard does).' },
+    ],
+  },
+  {
+    id: 'tunnel-edit-route',
+    label: 'Edit public hostname',
+    description: 'Change where this public hostname points.',
+    scope: 'resource',
+    icon: 'pencil',
+    submitLabel: 'Save',
+    prefill: true,
+    fields: [
+      { key: 'service', label: 'Service (local target)', type: 'text', required: true, placeholder: 'http://192.168.1.50:8080' },
+      { key: 'path', label: 'Path (optional)', type: 'text', placeholder: '/api' },
+    ],
+  },
+  { id: 'tunnel-delete-route', label: 'Delete public hostname', scope: 'resource', fields: [] },
 ];
 
 function strOrUndef(v: unknown): string | undefined {
@@ -251,6 +294,23 @@ function daysUntil(iso?: string | null): number | null {
   return Math.floor((t - Date.now()) / 86_400_000);
 }
 
+/** The zone that owns a hostname — the longest zone name that is a suffix of it. */
+function zoneForHostname(zones: CfZone[], hostname: string): CfZone | undefined {
+  const h = hostname.toLowerCase();
+  return zones
+    .filter((z) => h === z.name.toLowerCase() || h.endsWith(`.${z.name.toLowerCase()}`))
+    .sort((a, b) => b.name.length - a.name.length)[0];
+}
+
+/** Split an ingress list into the public-hostname rules and the trailing catch-all rules (no hostname). */
+function splitIngress(ingress: CfIngressRule[]): { hostRules: CfIngressRule[]; catchAll: CfIngressRule[] } {
+  const hostRules = ingress.filter((r) => !!r.hostname);
+  const catchAll = ingress.filter((r) => !r.hostname);
+  // Cloudflare requires a final catch-all; synthesize one if the config somehow lacks it.
+  if (catchAll.length === 0) catchAll.push({ service: 'http_status:404' });
+  return { hostRules, catchAll };
+}
+
 /** Best-effort relative-time label for an ISO timestamp. */
 function rel(iso?: string | null): string | null {
   if (!iso) return null;
@@ -282,8 +342,8 @@ export class CloudflareConnector implements Connector {
     id: 'cloudflare',
     name: 'Cloudflare',
     description:
-      'Monitor and manage Cloudflare — Tunnels, DNS, SSL certificates, Zero Trust, WAF, analytics, plus Workers, Pages, R2, and load balancers. Edit DNS, purge cache, toggle security/dev mode and firewall rules, retry Pages deploys, and get alerted on tunnels down, paused zones, expiring certs/tokens, and threats.',
-    version: '0.6.0',
+      'Monitor and manage Cloudflare — Tunnels (+ their public-hostname routes), DNS, SSL certificates, Zero Trust, WAF, analytics, plus Workers, Pages, R2, and load balancers. Edit DNS, purge cache, toggle security/dev mode and firewall rules, retry Pages deploys, and get alerted on tunnels down, paused zones, expiring certs/tokens, and threats.',
+    version: '0.7.0',
     icon: 'cloudflare',
     configFields: [
       {
@@ -336,7 +396,7 @@ export class CloudflareConnector implements Connector {
         { label: 'API rate limits', url: 'https://developers.cloudflare.com/fundamentals/api/reference/limits/' },
       ],
       notes:
-        'The Cloudflare API is free — there is no per-call charge. Editing features need the matching Edit permissions on the token; without them, those actions fail with a clear message while read-only views keep working. Proxy (orange cloud) applies only to A, AAAA, and CNAME records.',
+        'The Cloudflare API is free — there is no per-call charge. Editing features need the matching Edit permissions on the token; without them, those actions fail with a clear message while read-only views keep working. Proxy (orange cloud) applies only to A, AAAA, and CNAME records. A tunnel\'s public-hostname routes (open a tunnel to see them) can only be managed for dashboard/remotely-managed tunnels — tunnels whose ingress lives in a local cloudflared config file are read-only here.',
     },
   };
 
@@ -782,6 +842,26 @@ export class CloudflareConnector implements Connector {
     };
   }
 
+  /** A tunnel's public-hostname routes (ingress rules with a hostname). */
+  async listSubResources(ctx: ConnectorContext, kind: string, resourceId: string, subKind: string): Promise<ConnectorResource[]> {
+    if (kind !== TUNNEL_KIND || subKind !== 'route') return [];
+    const api = new CfApi(this.authFrom(ctx));
+    const accountId = await this.resolveAccountId(ctx, api);
+    const cfg = await api.getTunnelConfig(accountId, resourceId);
+    const local = cfg.source === 'local';
+    const ingress = cfg.config?.ingress ?? [];
+    return ingress
+      .filter((r) => !!r.hostname)
+      .map((r) => ({
+        id: r.hostname as string,
+        kind: 'route',
+        name: r.path ? `${r.hostname}${r.path}` : (r.hostname as string),
+        // Locally-managed tunnels can't be edited via the API — flag it in the row.
+        status: local ? 'local' : 'active',
+        details: { hostname: r.hostname ?? null, service: r.service, path: r.path ?? null },
+      }));
+  }
+
   private workerToResource(w: CfWorker): ConnectorResource {
     return {
       id: w.id,
@@ -1179,8 +1259,18 @@ export class CloudflareConnector implements Connector {
     ctx: ConnectorContext,
     operationId: string,
     resourceId: string | undefined,
+    values: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const api = new CfApi(this.authFrom(ctx));
+
+    if (operationId === 'tunnel-edit-route' && resourceId) {
+      const hostname = strOrUndef(values.hostname);
+      if (!hostname) return {};
+      const accountId = await this.resolveAccountId(ctx, api);
+      const cfg = await api.getTunnelConfig(accountId, resourceId);
+      const rule = (cfg.config?.ingress ?? []).find((r) => r.hostname === hostname);
+      return rule ? { service: rule.service, path: rule.path ?? '' } : {};
+    }
 
     if (operationId === 'edit-dns-record' && resourceId) {
       const parts = splitDnsId(resourceId);
@@ -1277,6 +1367,93 @@ export class CloudflareConnector implements Connector {
         onProgress(`Purging ${files.length} URL(s)…`);
         await api.purgeCache(resourceId, { files });
         return { ok: true, message: `Purge requested for ${files.length} URL(s).` };
+      }
+
+      if (operationId === 'tunnel-add-route' || operationId === 'tunnel-edit-route' || operationId === 'tunnel-delete-route') {
+        if (!resourceId) return { ok: false, message: 'No target tunnel.' };
+        const accountId = await this.resolveAccountId(ctx, api);
+        const cfg = await api.getTunnelConfig(accountId, resourceId);
+        if (cfg.source === 'local') {
+          return { ok: false, message: 'This tunnel is locally-managed (its ingress lives in a cloudflared config file), so its routes can\'t be changed from here.' };
+        }
+        const { hostRules, catchAll } = splitIngress(cfg.config?.ingress ?? []);
+        const warpRouting = cfg.config?.['warp-routing'];
+
+        if (operationId === 'tunnel-add-route') {
+          const hostname = strOrUndef(values.hostname);
+          const service = strOrUndef(values.service);
+          if (!hostname || !service) return { ok: false, message: 'Hostname and service are required.' };
+          if (hostRules.some((r) => r.hostname === hostname)) return { ok: false, message: `A route for ${hostname} already exists on this tunnel.` };
+          const path = strOrUndef(values.path);
+          const rule: CfIngressRule = { hostname, service, ...(path ? { path } : {}) };
+          onProgress(`Adding route ${hostname} → ${service}…`);
+          await api.putTunnelConfig(accountId, resourceId, {
+            ingress: [...hostRules, rule, ...catchAll],
+            ...(warpRouting ? { 'warp-routing': warpRouting } : {}),
+          });
+          // Mirror the dashboard: point a proxied CNAME at the tunnel so the hostname resolves.
+          let dnsNote = '';
+          if (asBool(values.createDns)) {
+            try {
+              const zone = zoneForHostname(await api.listZones(), hostname);
+              if (!zone) {
+                dnsNote = ' (no matching zone found — add the DNS record manually)';
+              } else {
+                await api.createDnsRecord(zone.id, {
+                  type: 'CNAME', name: hostname, content: `${resourceId}.cfargotunnel.com`, proxied: true, ttl: 1,
+                });
+                dnsNote = ` and pointed DNS at the tunnel in ${zone.name}`;
+              }
+            } catch (err) {
+              dnsNote = ` (route added, but the DNS record failed: ${err instanceof Error ? err.message : err})`;
+            }
+          }
+          return { ok: true, message: `Route ${hostname} added${dnsNote}.` };
+        }
+
+        if (operationId === 'tunnel-edit-route') {
+          const hostname = strOrUndef(values.hostname);
+          const service = strOrUndef(values.service);
+          if (!hostname || !service) return { ok: false, message: 'Hostname and service are required.' };
+          const idx = hostRules.findIndex((r) => r.hostname === hostname);
+          if (idx < 0) return { ok: false, message: `No route for ${hostname} on this tunnel.` };
+          const path = strOrUndef(values.path);
+          hostRules[idx] = { ...hostRules[idx], hostname, service, ...(path ? { path } : {}) };
+          if (!path) delete hostRules[idx].path;
+          onProgress(`Updating route ${hostname}…`);
+          await api.putTunnelConfig(accountId, resourceId, {
+            ingress: [...hostRules, ...catchAll],
+            ...(warpRouting ? { 'warp-routing': warpRouting } : {}),
+          });
+          return { ok: true, message: `Route ${hostname} updated.` };
+        }
+
+        // tunnel-delete-route
+        const hostname = strOrUndef(values.hostname);
+        if (!hostname) return { ok: false, message: 'No route specified.' };
+        const remaining = hostRules.filter((r) => r.hostname !== hostname);
+        if (remaining.length === hostRules.length) return { ok: false, message: `No route for ${hostname} on this tunnel.` };
+        onProgress(`Removing route ${hostname}…`);
+        await api.putTunnelConfig(accountId, resourceId, {
+          ingress: [...remaining, ...catchAll],
+          ...(warpRouting ? { 'warp-routing': warpRouting } : {}),
+        });
+        // Best-effort: remove the CNAME iff it points at THIS tunnel (don't touch unrelated records).
+        let dnsNote = '';
+        try {
+          const zone = zoneForHostname(await api.listZones(), hostname);
+          if (zone) {
+            const recs = await api.listDnsRecords(zone.id);
+            const cname = recs.find((r) => r.type === 'CNAME' && r.name === hostname && r.content === `${resourceId}.cfargotunnel.com`);
+            if (cname) {
+              await api.deleteDnsRecord(zone.id, cname.id);
+              dnsNote = ' and removed its DNS record';
+            }
+          }
+        } catch (err) {
+          ctx.log('debug', `Cloudflare route DNS cleanup skipped: ${err instanceof Error ? err.message : err}`);
+        }
+        return { ok: true, message: `Route ${hostname} removed${dnsNote}.` };
       }
 
       if (operationId === 'pages-retry-deploy') {

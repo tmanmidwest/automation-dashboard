@@ -158,6 +158,15 @@ export class ConnectorInstanceService implements OnModuleInit {
   }
 
   /**
+   * Public: a decrypted ConnectorContext for an instance. For connector-specific
+   * background pollers (e.g. the NPM audit-log → Ship's Log feed) that need to
+   * reach a connector's own API outside the generic Connector interface.
+   */
+  contextFor(instance: ConnectorInstance): Promise<ConnectorContext> {
+    return this.buildContext(instance);
+  }
+
+  /**
    * Run an operation to completion and return its result (unlike startOperation,
    * which is fire-and-forget via JobService). Used by the scheduler, which needs
    * the outcome to record a durable run.

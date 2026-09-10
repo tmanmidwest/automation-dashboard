@@ -5,9 +5,13 @@ import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
 
+type SettingsSection = { to: string; icon: React.ComponentType<{ className?: string }>; title: string; desc: string; perm?: Permission };
+
 export function SettingsHome() {
   const { can } = useAuth();
-  const sections: { to: string; icon: React.ComponentType<{ className?: string }>; title: string; desc: string; perm?: Permission }[] = [
+  // Annotate the array literal (not the .filter() result) so the `perm` string literals
+  // are checked against Permission instead of widening to `string`.
+  const allSections: SettingsSection[] = [
     { to: '/settings/authentication', icon: ShieldCheck, title: 'Authentication', desc: 'Local accounts and OIDC single sign-on.' },
     { to: '/settings/email', icon: Mail, title: 'Email', desc: 'Outbound SMTP server for notifications.' },
     { to: '/settings/notifications', icon: Bell, title: 'Notifications', desc: 'Outbound alerts by email and SMS.' },
@@ -15,7 +19,8 @@ export function SettingsHome() {
     { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.' },
     { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
     { to: '/settings/backup', icon: DatabaseBackup, title: 'Backup & Restore', desc: 'Full encrypted backup you can move to another machine.', perm: 'settings:write' },
-  ].filter((s) => !s.perm || can(s.perm));
+  ];
+  const sections = allSections.filter((s) => !s.perm || can(s.perm));
   return (
     <>
       <PageHeader title="Settings" description="Everything is configured here — no files to edit." />

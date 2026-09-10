@@ -128,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appear in the timeline.
 
 ### Added — Cloudflare connector
-- **Cloudflare connector** (v0.6.0): monitor and manage a Cloudflare account from the UI,
+- **Cloudflare connector** (v0.7.0): monitor and manage a Cloudflare account from the UI,
   authenticated with a single **scoped API token** (encrypted at rest — never the legacy
   Global API Key). The account id is auto-detected for single-account tokens. The Cloudflare
   API is free (no per-call cost); the connector keeps the every-minute health poll cheap by
@@ -141,6 +141,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (including "I'm Under Attack!") and development mode; enable / disable WAF firewall rules;
   retry a Pages deployment; and delete tunnels. Editing features degrade gracefully — a token
   missing a scope fails that action with a clear message while read-only views keep working.
+- **Tunnel public hostnames (routes)**: open a Cloudflare Tunnel to see and manage its
+  public-hostname routes (`app.example.com → http://192.168.1.50:8080`). Add / edit / delete
+  a route; adding one can also create the matching proxied DNS record in the owning zone (as
+  the dashboard does), and deleting removes that record when it still points at the tunnel.
+  The tunnel's catch-all rule and private-network (WARP) routing are preserved on every change.
+  Dashboard/remotely-managed tunnels only — tunnels configured from a local `cloudflared` file
+  are shown read-only with a clear note.
 - **Health overview + alerts**: dashboard tiles for tunnels down, paused zones, expiring
   certificates and service tokens, and (plan-permitting) 24h requests / bandwidth / threats.
   A new **Cloudflare** alert category raises email alerts when tunnels-down, zones-paused,

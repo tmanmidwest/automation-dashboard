@@ -43,6 +43,10 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'jellyfinTranscodes', metricKey: 'transcodes', alertKey: 'jellyfin.transcodes_high', label: 'Transcoding sessions' },
   { id: 'jellyfinStreams', metricKey: 'activeStreams', alertKey: 'jellyfin.active_streams', label: 'Active streams' },
   { id: 'jellyfinTasksFailed', metricKey: 'tasksFailed', alertKey: 'jellyfin.tasks_failed', label: 'Failed tasks' },
+  // Nginx Proxy Manager health (counts from the connector's overview).
+  { id: 'npmCertsExpiring', metricKey: 'certsExpiring', alertKey: 'npm.certs_expiring', label: 'Certificates expiring' },
+  { id: 'npmHostsErrored', metricKey: 'erroredHosts', alertKey: 'npm.hosts_errored', label: 'Hosts offline' },
+  { id: 'npmHostsDisabled', metricKey: 'disabledHosts', alertKey: 'npm.hosts_disabled', label: 'Disabled hosts' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {

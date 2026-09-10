@@ -46,6 +46,9 @@ const THRESHOLD_DEFS = [
   { id: 'jellyfinTranscodes', metricKey: 'transcodes', alertKey: 'jellyfin.transcodes_high', label: 'Transcoding sessions' },
   { id: 'jellyfinStreams', metricKey: 'activeStreams', alertKey: 'jellyfin.active_streams', label: 'Active streams' },
   { id: 'jellyfinTasksFailed', metricKey: 'tasksFailed', alertKey: 'jellyfin.tasks_failed', label: 'Failed tasks' },
+  { id: 'npmCertsExpiring', metricKey: 'certsExpiring', alertKey: 'npm.certs_expiring', label: 'Certificates expiring' },
+  { id: 'npmHostsErrored', metricKey: 'erroredHosts', alertKey: 'npm.hosts_errored', label: 'Hosts offline' },
+  { id: 'npmHostsDisabled', metricKey: 'disabledHosts', alertKey: 'npm.hosts_disabled', label: 'Disabled hosts' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 

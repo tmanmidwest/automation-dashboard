@@ -59,6 +59,28 @@ export interface CfTunnel {
   connections?: { colo_name?: string; client_version?: string; origin_ip?: string; is_pending_reconnect?: boolean }[];
 }
 
+/** One ingress rule in a tunnel's configuration (a public-hostname route, or the catch-all). */
+export interface CfIngressRule {
+  /** Present for a public-hostname route; absent on the catch-all rule. */
+  hostname?: string;
+  /** Where the tunnel sends matching traffic, e.g. "http://192.168.1.50:8080" or "http_status:404". */
+  service: string;
+  path?: string;
+  originRequest?: Record<string, unknown>;
+}
+
+/** A tunnel's remote configuration (GET/PUT /accounts/:id/cfd_tunnel/:tid/configurations). */
+export interface CfTunnelConfig {
+  version?: number;
+  /** "cloudflare" for remotely-managed tunnels, "local" when the ingress lives in a local config file. */
+  source?: string;
+  config?: {
+    ingress?: CfIngressRule[];
+    'warp-routing'?: Record<string, unknown>;
+    originRequest?: Record<string, unknown>;
+  };
+}
+
 /** A Zero Trust Access application (GET /accounts/:id/access/apps). */
 export interface CfAccessApp {
   id: string;
@@ -426,6 +448,24 @@ export class CfApi {
       'PATCH',
       `/zones/${encodeURIComponent(zoneId)}/rulesets/${encodeURIComponent(rulesetId)}/rules/${encodeURIComponent(ruleId)}`,
       body,
+    );
+  }
+
+  /** GET /accounts/:id/cfd_tunnel/:tid/configurations — a tunnel's ingress config + source. */
+  async getTunnelConfig(accountId: string, tunnelId: string): Promise<CfTunnelConfig> {
+    const env = await this.request<CfTunnelConfig>(
+      'GET',
+      `/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`,
+    );
+    return env.result ?? {};
+  }
+
+  /** PUT /accounts/:id/cfd_tunnel/:tid/configurations — replace a tunnel's config (remote-managed only). */
+  async putTunnelConfig(accountId: string, tunnelId: string, config: CfTunnelConfig['config']): Promise<void> {
+    await this.request<unknown>(
+      'PUT',
+      `/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`,
+      { config },
     );
   }
 
