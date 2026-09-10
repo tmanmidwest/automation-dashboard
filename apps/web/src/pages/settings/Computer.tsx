@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, Save } from 'lucide-react';
+import { RefreshCw, Save, BookOpen } from 'lucide-react';
 import type { AssistantConfigView, AssistantModelInfo, LlmBackend } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -128,6 +128,8 @@ export function ComputerSettings() {
             {backend && <p className="text-xs text-muted-foreground">{backend.hint}</p>}
           </div>
 
+          <BackendGuide backend={cfg.backend} />
+
           <div className="space-y-1.5">
             <Label>Base URL {cfg.backend === 'anthropic' && <span className="text-xs text-muted-foreground">(optional)</span>}</Label>
             <Input value={cfg.baseUrl} onChange={(e) => set('baseUrl', e.target.value)} placeholder={backend?.placeholder} />
@@ -220,5 +222,108 @@ export function ComputerSettings() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+const ollamaCompose = `services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    # GPU (optional): uncomment if the host has the NVIDIA runtime
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+volumes:
+  ollama:`;
+
+/** Step-by-step setup directions for the selected backend. */
+function BackendGuide({ backend }: { backend: LlmBackend }) {
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-sm">
+      <div className="flex items-center gap-2 font-medium mb-2">
+        <BookOpen className="h-4 w-4 text-primary" />
+        Setup guide
+      </div>
+
+      {backend === 'ollama' && (
+        <ol className="list-decimal pl-5 space-y-1.5 text-muted-foreground">
+          <li>
+            Run an Ollama container on the same Docker network as Cerebro. Add this to your
+            <code className="mx-1 rounded bg-background/70 px-1">docker-compose.override.yml</code> and redeploy:
+            <Snippet text={ollamaCompose} />
+          </li>
+          <li>
+            Pull a model into it (once): <Code>docker compose exec ollama ollama pull qwen2.5:7b</Code>. On a GPU
+            host, prefer a larger model such as <Code>qwen2.5:14b</Code> or <Code>qwen2.5:32b</Code> for reliable
+            tool-calling.
+          </li>
+          <li>Set <b>Base URL</b> to <Code>http://ollama:11434</Code> (the in-network service name).</li>
+          <li>Click the refresh icon by <b>Model</b> to list installed models, pick one, then <b>Save</b>.</li>
+          <li className="text-amber-500/90">
+            CPU-only works but is slow and less reliable at multi-step actions — a GPU is recommended if you want
+            the Computer to take actions, not just answer questions.
+          </li>
+        </ol>
+      )}
+
+      {backend === 'openai-compat' && (
+        <ol className="list-decimal pl-5 space-y-1.5 text-muted-foreground">
+          <li>
+            Works with any OpenAI-compatible server: <b>LM Studio</b>, <b>vLLM</b>, <b>llama.cpp server</b>,
+            <b> LocalAI</b>, or the <b>OpenAI API</b> itself. It must expose a streaming
+            <Code>/chat/completions</Code> endpoint with tool-calling.
+          </li>
+          <li>
+            Set <b>Base URL</b> to the API root ending in <Code>/v1</Code> — e.g. <Code>http://192.168.1.50:1234/v1</Code>
+            {' '}(LM Studio) or <Code>https://api.openai.com/v1</Code>.
+          </li>
+          <li>
+            <b>API key</b>: leave blank for most local servers; required for OpenAI (starts with <Code>sk-</Code>).
+          </li>
+          <li>
+            Enter the <b>Model</b> id (e.g. <Code>gpt-4o-mini</Code>, or the exact name your local server reports),
+            or click refresh to list what the server advertises. Then <b>Save</b>.
+          </li>
+          <li>This backend leaves your box only if the base URL is remote (e.g. OpenAI); a local server stays contained.</li>
+        </ol>
+      )}
+
+      {backend === 'anthropic' && (
+        <ol className="list-decimal pl-5 space-y-1.5 text-muted-foreground">
+          <li>
+            Create an API key at{' '}
+            <a className="underline" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
+              console.anthropic.com
+            </a>{' '}
+            — it starts with <Code>sk-ant-</Code>.
+          </li>
+          <li>Leave <b>Base URL</b> blank to use the default endpoint (<Code>https://api.anthropic.com</Code>).</li>
+          <li>Paste the key into <b>API key</b>.</li>
+          <li>
+            Set <b>Model</b> to e.g. <Code>claude-opus-5</Code> (best), <Code>claude-sonnet-5</Code>, or
+            {' '}<Code>claude-haiku-4-5</Code> (cheapest); or click refresh to list available models. Then <b>Save</b>.
+          </li>
+          <li className="text-amber-500/90">
+            Best-in-class tool-calling, but not self-contained — requests go to Anthropic and are billed per token.
+            Temperature is ignored (current Claude models set it internally).
+          </li>
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function Code({ children }: { children: React.ReactNode }) {
+  return <code className="rounded bg-background/70 px-1 text-xs font-mono">{children}</code>;
+}
+
+function Snippet({ text }: { text: string }) {
+  return (
+    <pre className="mt-1 overflow-x-auto rounded border border-border/60 bg-background/70 p-2 text-xs font-mono leading-relaxed">
+      {text}
+    </pre>
   );
 }
