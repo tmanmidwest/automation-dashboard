@@ -317,6 +317,58 @@ model DockerStackRevision {
   @@index([connectorInstanceId, name, createdAt])
 }
 
+/// App Replicator catalog entry: a Git-repo app registered once, deployed many
+/// times as isolated instances. The variable/port schema is snapshotted from the
+/// repo's compose file (Compose's own `${VAR:-default}` interpolation is the
+/// manifest). See docs/app-replicator.md.
+model ReplicatorApp {
+  id                   String   @id @default(cuid())
+  name                 String
+  gitUrl               String
+  gitRef               String   @default("main")
+  gitPath              String?
+  /// Vault secret key (kind='git') to authenticate a private repo; null = public.
+  gitCredKey           String?
+  /// Detected + reviewed variable schema (ReplicatorVariable[]) as JSON.
+  variables            Json     @default("[]")
+  /// True when the repo had only a Dockerfile and Cerebro generated a compose wrapper.
+  usesGeneratedCompose Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  deployments          ReplicatorDeployment[]
+}
+
+/// One deployed instance of a ReplicatorApp on a Docker host. The low-level
+/// compose stack is owned by the Docker connector (a DockerStack keyed by the
+/// same project name, so redeploy/rollback/down all work through the connector);
+/// this row holds the higher-level record — which app, resolved values, the vault
+/// secret names, and the published ports.
+model ReplicatorDeployment {
+  id               String        @id @default(cuid())
+  appId            String
+  app              ReplicatorApp @relation(fields: [appId], references: [id], onDelete: Cascade)
+  /// The target Docker ConnectorInstance.
+  dockerInstanceId String
+  /// Operator-chosen name.
+  name             String
+  /// Sanitized compose project name (matches the managed DockerStack.name).
+  project          String
+  /// Non-secret resolved variable values as JSON ({ VAR: value }).
+  values           Json          @default("{}")
+  /// Names of variables whose values live in the vault (deployment:<id>:<name>).
+  secretVars       String[]      @default([])
+  /// Published ports (ReplicatorPort[]) as JSON.
+  ports            Json          @default("[]")
+  status           String        @default("pending")
+  lastMessage      String?
+  deployedCommit   String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([appId])
+  @@index([dockerInstanceId])
+}
+
 /// An installed connector instance (e.g. a specific Proxmox server).
 model ConnectorInstance {
   id           String   @id @default(cuid())

@@ -7,3 +7,4 @@ export * from './timeline';
 export * from './secrets';
 export * from './automations';
 export * from './docker-fleet';
+export * from './replicator';

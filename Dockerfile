@@ -51,11 +51,12 @@ ARG JAVA_VERSION=25
 
 # openssl → Prisma engine; restic → Backblaze B2 backup connector; iputils-ping →
 # the uptime monitor's Ping probe (needs CAP_NET_RAW on the container, see compose);
+# git → App Replicator clones a repo to introspect its compose file (docs/app-replicator.md);
 # postgresql-client-16 → pg_dump/psql for the full system backup & restore. Pulled from the
 # official PGDG repo (bookworm ships only client 15, which can't dump our postgres:16 server).
 # See docs/system-backup.md. Then fetch a Temurin JRE (arch-matched) + signal-cli onto PATH.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl restic ca-certificates wget gnupg iputils-ping \
+ && apt-get install -y --no-install-recommends openssl restic ca-certificates wget gnupg iputils-ping git \
  && install -d /usr/share/keyrings \
  && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \

@@ -13,6 +13,7 @@ import {
   Video,
   Zap,
   Ship,
+  Boxes,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -31,6 +32,7 @@ const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, code: '01-000' },
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
   { to: '/docker-fleet', label: 'Docker Fleet', icon: Ship, perm: 'connectors:read', code: '02-DKR' },
+  { to: '/replicator', label: 'App Replicator', icon: Boxes, perm: 'replicator:read', code: '02-REP' },
   { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
   { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '05-378' },

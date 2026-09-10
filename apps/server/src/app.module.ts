@@ -26,6 +26,7 @@ import { AutomationsModule } from './automations/automations.module';
 import { DockerFleetModule } from './docker-fleet/docker-fleet.module';
 import { SystemBackupModule } from './system-backup/system-backup.module';
 import { SearchModule } from './search/search.module';
+import { AppReplicatorModule } from './app-replicator/app-replicator.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -61,6 +62,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     DockerFleetModule,
     SystemBackupModule,
     SearchModule,
+    AppReplicatorModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

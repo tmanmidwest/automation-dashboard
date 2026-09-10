@@ -34,7 +34,7 @@ import { VmNameService } from './backblaze/vm-name.service';
     BackupRunService, BackupSchedulerService, BackupStateService, VmNameService,
     DockerStackService, NpmAuditPollService,
   ],
-  exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService],
+  exports: [ConnectorRegistry, ConnectorInstanceService, ConsoleService, DockerStackService],
 })
 export class ConnectorsModule implements OnModuleInit {
   constructor(

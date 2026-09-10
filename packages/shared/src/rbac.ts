@@ -21,6 +21,9 @@ export type Permission =
   // Automations (rules engine; session-only — a rule can run infra actions)
   | 'automations:read'
   | 'automations:write'
+  // App Replicator (deploy apps from Git; session-only — deploying runs infra)
+  | 'replicator:read'
+  | 'replicator:write'
   // Connectors (extension host)
   | 'connectors:read'
   | 'connectors:write' // install / configure / enable
@@ -42,6 +45,7 @@ export const BUILTIN_ROLES = {
       'audit:read',
       'connectors:read',
       'monitors:read',
+      'replicator:read',
     ] as Permission[],
   },
   admin: {
@@ -64,6 +68,8 @@ export const BUILTIN_ROLES = {
       'secrets:write',
       'automations:read',
       'automations:write',
+      'replicator:read',
+      'replicator:write',
     ] as Permission[],
   },
 } as const;
