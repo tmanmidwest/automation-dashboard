@@ -7,6 +7,7 @@ import { TimelineModule } from '../timeline/timeline.module';
 import { AssistantConfigService } from './assistant-config.service';
 import { AssistantContextService } from './assistant-context.service';
 import { AssistantService } from './assistant.service';
+import { OllamaProvisionService } from './ollama-provision.service';
 import { PendingActionStore } from './pending-action.store';
 import { AssistantController } from './assistant.controller';
 import { ASSISTANT_AUTOMATION_PORT } from './assistant.port';
@@ -23,6 +24,7 @@ import { ASSISTANT_AUTOMATION_PORT } from './assistant.port';
     AssistantConfigService,
     AssistantContextService,
     AssistantService,
+    OllamaProvisionService,
     PendingActionStore,
     // Bind the automations port to the assistant so the rules engine can reach it via
     // ModuleRef without importing this module (avoids a module cycle).

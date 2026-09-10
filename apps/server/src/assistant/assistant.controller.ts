@@ -9,12 +9,14 @@ import type {
   AssistantProposeRuleRequest,
   AssistantResumeRequest,
   AssistantRuleProposal,
-  AssistantStreamEvent,
+  OllamaDeployRequest,
+  OllamaHost,
   SessionUser,
 } from '@cerebro/shared';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 import { AssistantService } from './assistant.service';
 import { AssistantConfigService } from './assistant-config.service';
+import { OllamaProvisionService } from './ollama-provision.service';
 
 /**
  * The Computer — in-app LLM assistant. Session-only (never a bearer-token surface): it
@@ -26,6 +28,7 @@ export class AssistantController {
   constructor(
     private readonly assistant: AssistantService,
     private readonly config: AssistantConfigService,
+    private readonly ollama: OllamaProvisionService,
   ) {}
 
   /** Current assistant configuration (no secret values). */
@@ -53,6 +56,30 @@ export class AssistantController {
   @RequirePermissions('settings:write')
   listModels(): Promise<AssistantModelInfo[]> {
     return this.config.listModels();
+  }
+
+  /** Docker connector hosts that can run a Cerebro-deployed Ollama container. */
+  @Get('ollama/hosts')
+  @RequirePermissions('settings:write')
+  ollamaHosts(): Promise<OllamaHost[]> {
+    return this.ollama.hosts();
+  }
+
+  /** Deploy (or reuse) an Ollama container on a Docker host, streaming progress as SSE. */
+  @Post('ollama/deploy')
+  @RequirePermissions('settings:write')
+  async ollamaDeploy(
+    @Body() body: OllamaDeployRequest,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.stream(req, res, this.ollama.deploy({
+      instanceId: String(body?.instanceId ?? ''),
+      port: Number(body?.port) || 11434,
+      gpu: body?.gpu === true,
+      model: body?.model ? String(body.model) : undefined,
+      baseUrlOverride: body?.baseUrlOverride ? String(body.baseUrlOverride) : undefined,
+    }));
   }
 
   /** Draft an automation rule from a natural-language description (for the rule builder). */
@@ -99,11 +126,12 @@ export class AssistantController {
     await this.stream(req, res, this.assistant.resume(user, pendingId, approve));
   }
 
-  /** Pipe an assistant event stream to the client as Server-Sent Events. */
+  /** Pipe an event stream to the client as Server-Sent Events. Any discriminated-union
+   *  event with a `type` works — assistant chat, resume, or ollama deploy. */
   private async stream(
     req: Request,
     res: Response,
-    events: AsyncIterable<AssistantStreamEvent>,
+    events: AsyncIterable<{ type: string }>,
   ): Promise<void> {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -116,7 +144,7 @@ export class AssistantController {
       closed = true;
     });
 
-    const send = (event: AssistantStreamEvent) => {
+    const send = (event: unknown) => {
       if (!closed) res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
 

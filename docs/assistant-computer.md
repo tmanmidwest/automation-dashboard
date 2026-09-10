@@ -188,6 +188,23 @@ model's tool-calling.
   cycle); "Computer proposes a rule" (`POST /api/assistant/propose-rule` + "Draft with Computer" in
   the rule builder).
 
+## One-click Ollama provisioning (deploy from the UI)
+
+Cerebro can **deploy the Ollama container itself** — no hand-edited compose — onto **any** Docker
+connector host, **local or remote**. That's the point: if the box running Cerebro has no GPU, register
+your GPU machine as a Docker connector and deploy Ollama *there*; the Computer connects to it over the
+network. Settings → Computer (with the Ollama backend selected) → **Deploy with Cerebro** opens a
+wizard: pick a Docker host (local or a remote GPU box), a published port, GPU on/off, a model, and an
+optional **Base URL override** (for when Cerebro should reach Ollama at a different address than the
+Docker API — LAN vs VPN IP, a reverse proxy, etc.; blank = derive from the Docker host). It streams progress over SSE while the
+server, via the Docker connector's own Engine client (`OllamaProvisionService`): pulls
+`ollama/ollama:latest`, creates/starts a `cerebro-ollama` container (named volume `cerebro-ollama`,
+restart `unless-stopped`, optional NVIDIA `DeviceRequests`), waits for the API, pulls the model via
+Ollama's `/api/pull`, then writes the resulting Base URL back into the assistant config and enables
+it. Endpoints: `GET /api/assistant/ollama/hosts`, `POST /api/assistant/ollama/deploy` (SSE), both
+`settings:write`. Idempotent (reuses an existing `cerebro-ollama`). The manual compose path below
+remains as a fallback.
+
 ## Deployment (contained-by-default)
 
 - New optional service in compose: `ollama/ollama` with a named volume for model weights, on the

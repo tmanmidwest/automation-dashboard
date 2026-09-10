@@ -92,6 +92,38 @@ export interface AssistantModelInfo {
   name: string;
 }
 
+// ── One-click Ollama provisioning (deploy a self-hosted backend from the UI) ──
+
+/** A Docker connector instance that can host the Ollama container. */
+export interface OllamaHost {
+  instanceId: string;
+  name: string;
+}
+
+/** Body of POST /api/assistant/ollama/deploy. */
+export interface OllamaDeployRequest {
+  /** Docker connector instance to deploy onto (may be a remote host, e.g. a GPU box). */
+  instanceId: string;
+  /** Host port to publish 11434 on (default 11434). */
+  port: number;
+  /** Request all GPUs (host must have the NVIDIA runtime). */
+  gpu: boolean;
+  /** Model to pull once the container is up (blank = skip). */
+  model?: string;
+  /**
+   * How Cerebro should reach the deployed Ollama, if the auto-derived URL (from the Docker
+   * endpoint) isn't the right address — e.g. the Docker API is on a VPN IP but Ollama should
+   * be reached on the LAN. Blank = derive from the Docker host. Full URL, e.g. http://gpu-box:11434.
+   */
+  baseUrlOverride?: string;
+}
+
+/** SSE progress events from the deploy stream. */
+export type OllamaDeployEvent =
+  | { type: 'log'; text: string }
+  | { type: 'done'; baseUrl: string; model?: string }
+  | { type: 'error'; message: string };
+
 /** Body of POST /api/assistant/propose-rule — a natural-language automation request. */
 export interface AssistantProposeRuleRequest {
   prompt: string;
