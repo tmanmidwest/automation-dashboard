@@ -53,6 +53,7 @@ const KINDS: ConnectorResourceKind[] = [
       { id: 'enable', label: 'Enable', mutating: true, showWhenStatus: ['disabled'] },
       { id: 'make-admin', label: 'Make admin', mutating: true, showWhenStatus: ['enabled'] },
       { id: 'revoke-admin', label: 'Revoke admin', mutating: true, intent: 'destructive', confirm: 'Remove administrator rights from this user?', showWhenStatus: ['admin'] },
+      { id: 'remove-avatar', label: 'Remove avatar', mutating: true, intent: 'destructive', confirm: 'Remove this user\'s profile image?' },
     ],
   },
   { id: LIBRARY_KIND, label: 'Libraries', deletable: false, actions: [{ id: 'scan', label: 'Scan', mutating: true }] },
@@ -197,6 +198,18 @@ const OPERATIONS: ConnectorOperation[] = [
     ],
   },
   {
+    id: 'set-avatar',
+    label: 'Set avatar',
+    description: 'Upload a profile image for this user.',
+    scope: 'resource',
+    kind: USER_KIND,
+    icon: 'image',
+    submitLabel: 'Upload',
+    fields: [
+      { key: 'image', label: 'Avatar image', type: 'image', required: true, help: 'PNG or JPEG. Large images are downscaled automatically.' },
+    ],
+  },
+  {
     id: 'reset-password',
     label: 'Set password',
     description: 'Set or clear this user\'s password.',
@@ -233,8 +246,8 @@ export class JellyfinConnector implements Connector {
     id: 'jellyfin',
     name: 'Jellyfin',
     description:
-      'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Full user management — create/delete users, set passwords, and edit the complete access policy + display preferences (library/device access, parental controls, playback & content permissions, limits); pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
-    version: '0.6.0',
+      'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Full user management — create/delete users, set passwords, upload avatars, and edit the complete access policy + display preferences (library/device access, parental controls, playback & content permissions, limits); pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
+    version: '0.7.0',
     icon: 'jellyfin',
     live: true,
     configFields: [
@@ -370,6 +383,11 @@ export class JellyfinConnector implements Connector {
         ctx.log('info', `Jellyfin user ${user.Name ?? resourceId} ${disable ? 'disabled' : 'enabled'}.`);
         return { ok: true, message: `User ${disable ? 'disabled' : 'enabled'}.` };
       }
+      if (kind === USER_KIND && actionId === 'remove-avatar') {
+        await api.deleteUserImage(resourceId);
+        ctx.log('info', `Jellyfin user ${resourceId.slice(0, 8)} avatar removed.`);
+        return { ok: true, message: 'Avatar removed.' };
+      }
       if (kind === USER_KIND && (actionId === 'make-admin' || actionId === 'revoke-admin')) {
         const admin = actionId === 'make-admin';
         const user = await api.getUser(resourceId);
@@ -471,6 +489,14 @@ export class JellyfinConnector implements Connector {
         }
         ctx.log('info', `Jellyfin user ${name} created${bool(values.isAdmin) ? ' (admin)' : ''}.`);
         return { ok: true, message: `User "${name}" created.`, createdResourceId: created.Id };
+      }
+      if (operationId === 'set-avatar') {
+        if (!resourceId) return { ok: false, message: 'Missing user reference.' };
+        const parsed = parseDataUrl(String(values.image ?? ''));
+        if (!parsed) return { ok: false, message: 'Please choose a valid image.' };
+        await api.setUserImage(resourceId, parsed.contentType, parsed.base64);
+        ctx.log('info', `Jellyfin user ${resourceId.slice(0, 8)} avatar set (${parsed.contentType}).`);
+        return { ok: true, message: 'Avatar updated.' };
       }
       if (operationId === 'reset-password') {
         if (!resourceId) return { ok: false, message: 'Missing user reference.' };
@@ -720,6 +746,15 @@ async function folderMaps(api: JellyfinApi): Promise<{ idToName: Map<string, str
     }
   }
   return { idToName, nameToId };
+}
+
+/** Parse a `data:<mime>;base64,<data>` URL into its content type + base64 payload. */
+function parseDataUrl(v: string): { contentType: string; base64: string } | null {
+  const m = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(v.trim());
+  if (!m || !m[2]) return null; // must be base64-encoded
+  const base64 = m[3];
+  if (!base64) return null;
+  return { contentType: m[1] || 'image/jpeg', base64 };
 }
 
 /** Split a comma/newline-separated field into trimmed, non-empty entries. */

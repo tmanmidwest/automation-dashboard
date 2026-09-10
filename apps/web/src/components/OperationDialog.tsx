@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, CheckCircle2, XCircle, Rocket, ChevronRight, ChevronDown, Ban } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2, CheckCircle2, XCircle, Rocket, ChevronRight, ChevronDown, Ban, Camera } from 'lucide-react';
 import type { ConnectorOperation, ConnectorOption, ConnectorJobStatus, SecretSummary } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { Dialog } from '@/components/ui/dialog';
@@ -21,6 +21,44 @@ function initialValues(op: ConnectorOperation): Values {
   const v: Values = {};
   for (const f of op.fields) if (f.default !== undefined) v[f.key] = f.default;
   return v;
+}
+
+/**
+ * Read an image file into a data-URL, downscaling large images so the payload
+ * stays small (avatars don't need to be big, and the JSON body has a size cap).
+ * Small images are passed through untouched to preserve their exact bytes/format.
+ */
+function imageToDataUrl(file: File, maxDim = 512, passthroughBytes = 60 * 1024): Promise<string> {
+  const readRaw = () =>
+    new Promise<string>((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(file);
+    });
+
+  if (file.size <= passthroughBytes) return readRaw();
+
+  return readRaw().then(
+    (raw) =>
+      new Promise<string>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const g = canvas.getContext('2d');
+          if (!g) return resolve(raw);
+          g.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.82));
+        };
+        img.onerror = () => resolve(raw);
+        img.src = raw;
+      }),
+  );
 }
 
 export function OperationDialog({
@@ -52,6 +90,55 @@ export function OperationDialog({
   const [job, setJob] = useState<ConnectorJobStatus | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+
+  // Inline camera capture for `image` fields (tablet/kiosk setup). Only one at a time.
+  const [cameraKey, setCameraKey] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const canCamera = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
+
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setCameraKey(null);
+  }, []);
+
+  const startCamera = useCallback(async (key: string) => {
+    setError(null);
+    try {
+      // 'environment' is a hint (not exact) — desktops fall back to the default webcam.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      streamRef.current = stream;
+      setCameraKey(key);
+    } catch {
+      setError('Could not access the camera. Check permissions, or choose a file instead.');
+    }
+  }, []);
+
+  const capturePhoto = useCallback((key: string, set: (k: string, v: unknown) => void) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const maxDim = 512;
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    const scale = Math.min(1, maxDim / Math.max(vw, vh));
+    const w = Math.max(1, Math.round(vw * scale)), h = Math.max(1, Math.round(vh * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const g = canvas.getContext('2d');
+    if (g) { g.drawImage(video, 0, 0, w, h); set(key, canvas.toDataURL('image/jpeg', 0.82)); }
+    stopCamera();
+  }, [stopCamera]);
+
+  // Attach the stream once the <video> is mounted, and always stop the camera
+  // when the dialog closes or leaves the form phase.
+  useEffect(() => {
+    if (cameraKey && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [cameraKey]);
+  useEffect(() => { if (!open || phase !== 'form') stopCamera(); }, [open, phase, stopCamera]);
+  useEffect(() => () => stopCamera(), [stopCamera]);
 
   // Reset when (re)opened.
   useEffect(() => {
@@ -252,6 +339,39 @@ export function OperationDialog({
                     }}
                     spellCheck={false} autoComplete="off" autoCapitalize="off"
                     className="mt-1 block w-full min-h-[16rem] max-h-[60vh] resize-y rounded-md border border-input bg-background/60 px-3 py-2 text-sm leading-snug placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring font-mono" />
+                  {f.help && <p className="text-xs text-muted-foreground mt-1">{f.help}</p>}
+                </div>
+              );
+            }
+            if (f.type === 'image') {
+              const preview = typeof values[f.key] === 'string' && String(values[f.key]).startsWith('data:') ? String(values[f.key]) : '';
+              const camActive = cameraKey === f.key;
+              return (
+                <div key={f.key}>
+                  <Label>{f.label}{f.required && <span className="text-primary"> *</span>}</Label>
+                  {camActive ? (
+                    <div className="mt-1 space-y-2">
+                      <video ref={videoRef} autoPlay playsInline muted
+                        className="w-full max-h-64 rounded-md border border-input bg-black object-contain" />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => capturePhoto(f.key, setField)}><Camera className="h-4 w-4" /> Capture</Button>
+                        <Button variant="ghost" size="sm" onClick={stopCamera}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-1 flex items-center gap-3 flex-wrap">
+                      {preview && <img src={preview} alt="preview" className="h-16 w-16 rounded-md object-cover border border-input" />}
+                      <input type="file" accept="image/*" className="text-sm"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try { setField(f.key, await imageToDataUrl(file)); }
+                          catch { setError('Could not read that image.'); }
+                        }} />
+                      {canCamera && <Button variant="secondary" size="sm" onClick={() => startCamera(f.key)}><Camera className="h-4 w-4" /> Take photo</Button>}
+                      {preview && <Button variant="ghost" size="sm" onClick={() => setField(f.key, '')}>Clear</Button>}
+                    </div>
+                  )}
                   {f.help && <p className="text-xs text-muted-foreground mt-1">{f.help}</p>}
                 </div>
               );

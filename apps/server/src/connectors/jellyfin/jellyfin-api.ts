@@ -167,6 +167,22 @@ export class JellyfinApi {
   updateUser(userId: string, dto: Record<string, unknown>) {
     return this.request<void>('POST', `/Users/${encodeURIComponent(userId)}`, dto);
   }
+  /**
+   * Set a user's profile image. Jellyfin expects the raw request body to be the
+   * base64-encoded image bytes, with Content-Type set to the image's MIME type.
+   */
+  setUserImage(userId: string, contentType: string, base64: string, imageType = 'Primary') {
+    return this.request<void>(
+      'POST',
+      `/Users/${encodeURIComponent(userId)}/Images/${encodeURIComponent(imageType)}`,
+      base64,
+      { rawContentType: contentType },
+    );
+  }
+  /** Remove a user's profile image. */
+  deleteUserImage(userId: string, imageType = 'Primary') {
+    return this.request<void>('DELETE', `/Users/${encodeURIComponent(userId)}/Images/${encodeURIComponent(imageType)}`);
+  }
   /** Create a new user. Returns the created user (with its generated Id). */
   createUser(name: string, password?: string) {
     return this.request<JfUserFull>('POST', '/Users/New', { Name: name, Password: password ?? '' });
@@ -260,7 +276,7 @@ export class JellyfinApi {
     return this.request<T>('GET', path);
   }
 
-  private request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private request<T>(method: string, path: string, body?: unknown, opts?: { rawContentType?: string }): Promise<T> {
     let url: URL;
     try {
       url = new URL(path, this.baseUrl());
@@ -276,8 +292,10 @@ export class JellyfinApi {
     };
     let payload: string | undefined;
     if (body !== undefined) {
-      payload = JSON.stringify(body);
-      headers['Content-Type'] = 'application/json';
+      // A raw content type (e.g. an image upload) sends the body string verbatim;
+      // otherwise the body is JSON-encoded.
+      payload = opts?.rawContentType ? String(body) : JSON.stringify(body);
+      headers['Content-Type'] = opts?.rawContentType ?? 'application/json';
       headers['Content-Length'] = Buffer.byteLength(payload).toString();
     }
 

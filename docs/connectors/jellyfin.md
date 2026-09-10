@@ -19,7 +19,7 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
 | --- | --- | --- | --- |
 | **server** | `GET /System/Info` | name · version · OS | Scan all libraries · Restart · Shut down |
 | **session** | `GET /Sessions` | active streams: user · title · client/device · **play method** (Direct Play / Direct Stream / **Transcode**) · progress · bitrate | Pause · Unpause · Stop · Send message |
-| **user** | `GET /Users` | name · last activity · admin · enabled | New user · Edit settings (full policy + config) · Set password · Make/Revoke admin · Enable/Disable · Delete |
+| **user** | `GET /Users` | name · last activity · admin · enabled | New user · Edit settings (full policy + config) · Set password · Set/Remove avatar · Make/Revoke admin · Enable/Disable · Delete |
 | **library** | `GET /Library/VirtualFolders` (+ `/Items/Counts`) | name · type · item count | Scan now |
 | **task** | `GET /ScheduledTasks` | scheduled jobs · state · last result · progress | Run now |
 | **device** | `GET /Devices` | remembered clients: user · device · app · last activity | Delete (forget) |
@@ -84,3 +84,15 @@ Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`
   `setUserConfiguration` (`POST /Users/{id}/Configuration`) + `updateUser` (`POST /Users/{id}` for rename).
   Library-id ↔ name mapping via `/Library/VirtualFolders`. Connector v0.6.0. *(AccessSchedules time-window
   editing is intentionally left out of the form — preserved but not editable here.)*
+- **Phase 7 (built):** **avatar upload.** New **Set avatar** operation (`set-avatar`, scope `resource`) with a
+  new framework `image` form-field type (renders a file picker, downscales large images to ≤512px / JPEG on the
+  client so the JSON payload stays small, and stores the result as a `data:` URL string) → the connector parses
+  the data-URL and `POST /Users/{id}/Images/Primary` with the raw base64 body + the image MIME as `Content-Type`
+  (`JellyfinApi.setUserImage`, via a new raw-body branch in the request helper). A **Remove avatar** user action
+  clears it (`DELETE /Users/{id}/Images/Primary` → `deleteUserImage`). Shared: `ConnectorFormField.type` gains
+  `'image'`, handled generically in `OperationDialog` (reusable by any future connector). Connector v0.7.0.
+  The `image` field also offers **inline camera capture** for tablet/kiosk setup — a "Take photo" button opens a
+  live `getUserMedia` viewfinder (rear camera hint, downscaled to ≤512px JPEG on capture, same data-URL path).
+  It requires a secure context (HTTPS/localhost); on an insecure-origin tablet the button is hidden and the file
+  picker (which still exposes the OS camera on mobile) is the fallback. No server change — a captured photo is
+  the same data-URL an uploaded file produces.

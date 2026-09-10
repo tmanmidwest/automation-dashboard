@@ -295,7 +295,8 @@ export interface TestConnectionResult {
 export interface ConnectorFormField {
   key: string;
   label: string;
-  type: 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea';
+  /** 'image' renders a file picker that stores the chosen image as a (resized) data-URL string. */
+  type: 'text' | 'password' | 'number' | 'boolean' | 'select' | 'textarea' | 'image';
   required?: boolean;
   help?: string;
   placeholder?: string;
