@@ -73,6 +73,8 @@ export interface ReplicatorDeployment {
   secretVars: string[];
   ports: ReplicatorPort[];
   status: ReplicatorDeploymentStatus;
+  /** Live sub-step while a deploy/redeploy runs (e.g. "Building images…"); null when settled. */
+  phase?: string | null;
   lastMessage?: string | null;
   deployedCommit?: string | null;
   /** Set when the update-check sweep found the repo has moved ahead of the deployed commit. */

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 import { AuditService } from '../logging/audit.service';
+import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerStackService, projectName } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
@@ -41,6 +42,7 @@ export class DeploymentService {
     private readonly audit: AuditService,
     private readonly ports: PortAllocatorService,
     private readonly ingress: IngressService,
+    private readonly logging: LoggingService,
   ) {}
 
   /** Build the SSH deploy target for a Docker connector instance (throws if not deployable). */
@@ -119,6 +121,7 @@ export class DeploymentService {
         secretVars,
         ports: portList as unknown as object,
         status: 'pending',
+        phase: 'Queued…',
       },
     });
 
@@ -129,30 +132,26 @@ export class DeploymentService {
       }, actor);
     }
 
-    // Assemble the .env and deploy.
-    const env = this.buildEnv(app, variables, project, portList, nonSecretValues, input.secrets);
-    const result = await this.stacks.deployGit(
-      target,
-      input.dockerInstanceId,
-      project,
-      { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, credKey: app.gitCredKey, env },
-      { pull: true, forceRebuild: !!input.forceRebuild },
-    );
-
-    const commit = await this.latestCommit(input.dockerInstanceId, project);
-    const updated = await this.prisma.replicatorDeployment.update({
-      where: { id: row.id },
-      data: { status: result.ok ? 'deployed' : 'error', lastMessage: result.message.slice(0, 1000), deployedCommit: commit },
+    // Hand the slow clone/build/up to the background so the request returns now;
+    // the row's status + phase reflect progress and the final outcome. All the
+    // fast checks (name, ports, required values) already ran above and threw to
+    // the caller, so only genuinely long work goes async.
+    void this.runDeployment({
+      deploymentId: row.id, app, variables, project, dockerInstanceId: input.dockerInstanceId,
+      portList, values: nonSecretValues, secrets: input.secrets, forceRebuild: !!input.forceRebuild, actor, kind: 'deploy',
     });
-    await this.audit.record({ ...actor, action: result.ok ? 'replicator.deploy' : 'replicator.deploy_failed', target: `${app.name}/${project}`, meta: { appId: app.id, dockerInstanceId: input.dockerInstanceId, ok: result.ok } });
-    return this.map(updated, app.name);
+    return this.map(row, app.name);
   }
 
   // ── Redeploy (pull latest / rebuild) ───────────────────────────────
 
   async redeploy(id: string, opts: { forceRebuild?: boolean }, actor: ActorCtx): Promise<ReplicatorDeployment> {
     const { row, app } = await this.load(id);
-    const target = await this.targetFor(row.dockerInstanceId);
+    if (row.status === 'pending' || row.status === 'updating') {
+      throw new BadRequestException('This deployment is already in progress.');
+    }
+    // Fast check: the target must still be reachable/deployable (throws to the caller).
+    await this.targetFor(row.dockerInstanceId);
     const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
     const portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
     const nonSecretValues = (row.values as unknown as Record<string, string>) ?? {};
@@ -164,26 +163,59 @@ export class DeploymentService {
       if (v != null) secrets[name] = v;
     }
 
-    await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating' } });
-    const env = this.buildEnv(app, variables, row.project, portList, nonSecretValues, secrets);
-    const result = await this.stacks.deployGit(
-      target,
-      row.dockerInstanceId,
-      row.project,
-      { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, credKey: app.gitCredKey, env },
-      { pull: true, forceRebuild: !!opts.forceRebuild },
-    );
-    const commit = await this.latestCommit(row.dockerInstanceId, row.project);
-    const updated = await this.prisma.replicatorDeployment.update({
-      where: { id: row.id },
-      data: {
-        status: result.ok ? 'deployed' : 'error', lastMessage: result.message.slice(0, 1000), deployedCommit: commit,
-        // A successful redeploy pulls latest, so clear any pending "update available".
-        ...(result.ok ? { updateAvailable: false, availableCommit: null } : {}),
-      },
+    const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
+    void this.runDeployment({
+      deploymentId: row.id, app, variables, project: row.project, dockerInstanceId: row.dockerInstanceId,
+      portList, values: nonSecretValues, secrets, forceRebuild: !!opts.forceRebuild, actor, kind: 'redeploy',
     });
-    await this.audit.record({ ...actor, action: result.ok ? 'replicator.redeploy' : 'replicator.redeploy_failed', target: `${app.name}/${row.project}`, meta: { ok: result.ok } });
     return this.map(updated, app.name);
+  }
+
+  /**
+   * The background worker for a deploy/redeploy: runs the (long) clone/build/up,
+   * streaming coarse **phase** updates onto the row and the app log, then records
+   * the final status + audit event. Fire-and-forget — never awaited by a request.
+   */
+  private async runDeployment(args: {
+    deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string; dockerInstanceId: string;
+    portList: ReplicatorPort[]; values: Record<string, string>; secrets: Record<string, string>;
+    forceRebuild: boolean; actor: ActorCtx; kind: 'deploy' | 'redeploy';
+  }): Promise<void> {
+    const { deploymentId, app, variables, project, dockerInstanceId, portList, values, secrets, forceRebuild, actor, kind } = args;
+    const setPhase = (phase: string | null) => {
+      void this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { phase } }).catch(() => {});
+      if (phase) void this.logging.info('replicator', `[${project}] ${phase}`);
+    };
+    const finalAction = (ok: boolean) =>
+      ok ? (kind === 'deploy' ? 'replicator.deploy' : 'replicator.redeploy')
+         : (kind === 'deploy' ? 'replicator.deploy_failed' : 'replicator.redeploy_failed');
+
+    try {
+      await this.audit.record({ ...actor, action: `replicator.${kind}_started`, target: `${app.name}/${project}`, meta: { deploymentId, dockerInstanceId } });
+      const target = await this.targetFor(dockerInstanceId);
+      const env = this.buildEnv(app, variables, project, portList, values, secrets);
+      const result = await this.stacks.deployGit(
+        target, dockerInstanceId, project,
+        { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, credKey: app.gitCredKey, env },
+        { pull: true, forceRebuild }, setPhase,
+      );
+      const commit = await this.latestCommit(dockerInstanceId, project);
+      await this.prisma.replicatorDeployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: result.ok ? 'deployed' : 'error', phase: null, lastMessage: result.message.slice(0, 2000), deployedCommit: commit,
+          // A successful (re)deploy pulls latest, so clear any pending "update available".
+          ...(result.ok ? { updateAvailable: false, availableCommit: null } : {}),
+        },
+      });
+      await this.audit.record({ ...actor, action: finalAction(result.ok), target: `${app.name}/${project}`, meta: { ok: result.ok } });
+      void this.logging[result.ok ? 'info' : 'warn']('replicator', `[${project}] ${kind} ${result.ok ? 'succeeded' : 'failed'}.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : `${kind} failed.`;
+      await this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { status: 'error', phase: null, lastMessage: message.slice(0, 2000) } }).catch(() => {});
+      await this.audit.record({ ...actor, action: finalAction(false), target: `${app.name}/${project}`, meta: { error: message.slice(0, 300) } }).catch(() => {});
+      void this.logging.error('replicator', `[${project}] ${kind} error: ${message.slice(0, 300)}`);
+    }
   }
 
   // ── Teardown (stack down + vault cleanup) ──────────────────────────
@@ -336,6 +368,7 @@ export class DeploymentService {
       secretVars: row.secretVars ?? [],
       ports: (row.ports as unknown as ReplicatorPort[]) ?? [],
       status: row.status as ReplicatorDeploymentStatus,
+      phase: row.phase,
       lastMessage: row.lastMessage,
       deployedCommit: row.deployedCommit,
       updateAvailable: row.updateAvailable,

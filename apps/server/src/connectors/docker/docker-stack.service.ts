@@ -40,6 +40,14 @@ export interface StackGitSource {
 }
 
 /**
+ * SSH step timeouts for deploys — a clone/build/up can far exceed runSsh's 120s
+ * default, so a slow (esp. `--no-cache`) build no longer times out mid-way.
+ */
+const GIT_TIMEOUT_MS = 300_000; // 5 min
+const BUILD_TIMEOUT_MS = 1_800_000; // 30 min
+const UP_TIMEOUT_MS = 600_000; // 10 min
+
+/**
  * Cerebro-managed compose stacks (Docker connector Phase 5). Cerebro is the
  * versioned store for each stack's compose file; deploys run the host's own
  * `docker compose` over SSH — no agent image, full compose fidelity. See
@@ -144,7 +152,7 @@ export class DockerStackService {
 
       // 3) optional forced rebuild of locally-built images, then docker compose up -d [flags]
       if (opts.forceRebuild) {
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' build --no-cache --pull`);
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
@@ -152,7 +160,7 @@ export class DockerStackService {
         }
       }
       const flags = composeUpFlags(opts);
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d ${flags}`.trim());
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d ${flags}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);
@@ -180,6 +188,7 @@ export class DockerStackService {
     name: string,
     src: StackGitSource,
     opts: StackDeployOpts = {},
+    onProgress?: (phase: string) => void,
   ): Promise<StackRunResult> {
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
@@ -214,9 +223,10 @@ export class DockerStackService {
 
       // Clone (first time) or fetch + hard-reset to the ref.
       const isRepo = (await runSsh(target.ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
+      onProgress?.(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(target.ssh, `git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`)
-        : await runSsh(target.ssh, `rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} '${sq(src.gitUrl)}' '${dir}'`);
+        ? await runSsh(target.ssh, `git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(target.ssh, `rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} '${sq(src.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) {
         const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
         await this.record(instanceId, project, 'error', detail);
@@ -230,6 +240,7 @@ export class DockerStackService {
       }
 
       // Validate, then optional force-rebuild, then up.
+      onProgress?.('Validating compose…');
       const cfg = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' config -q`);
       if (cfg.code !== 0) {
         const detail = tail(cfg.stderr || cfg.stdout, 2000);
@@ -237,14 +248,16 @@ export class DockerStackService {
         return { ok: false, message: `Compose validation failed: ${detail}` };
       }
       if (opts.forceRebuild) {
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' build --no-cache --pull`);
+        onProgress?.('Building images…');
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
           return { ok: false, message: `Image rebuild failed: ${detail}` };
         }
       }
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' up -d ${composeUpFlags(opts)}`.trim());
+      onProgress?.('Starting containers…');
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' up -d ${composeUpFlags(opts)}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);

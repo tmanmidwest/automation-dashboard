@@ -360,6 +360,9 @@ model ReplicatorDeployment {
   /// Published ports (ReplicatorPort[]) as JSON.
   ports            Json          @default("[]")
   status           String        @default("pending")
+  /// Live sub-step while a deploy/redeploy runs in the background (e.g. "Building
+  /// images…"); null when settled. Drives the progress shown on the row.
+  phase            String?
   lastMessage      String?
   deployedCommit   String?
   /// Phase 3: set by the update-check sweep when the repo's ref has moved ahead.

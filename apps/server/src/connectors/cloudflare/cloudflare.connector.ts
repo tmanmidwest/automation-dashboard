@@ -859,7 +859,10 @@ export class CloudflareConnector implements Connector {
         // Locally-managed tunnels can't be edited via the API — flag it in the row.
         status: local ? 'local' : 'active',
         details: { hostname: r.hostname ?? null, service: r.service, path: r.path ?? null },
-      }));
+      }))
+      // List routes alphabetically by hostname (case-insensitive) rather than in
+      // the tunnel config's ingress order.
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   }
 
   private workerToResource(w: CfWorker): ConnectorResource {

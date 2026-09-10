@@ -77,6 +77,15 @@ export function Replicator() {
     return m;
   }, [deployments]);
 
+  // While any deploy/redeploy is running in the background, poll so the row's
+  // phase + final status update on their own.
+  const inFlight = deployments.some((d) => d.status === 'pending' || d.status === 'updating');
+  useEffect(() => {
+    if (!inFlight) return;
+    const t = setInterval(() => { void refresh(); }, 2500);
+    return () => clearInterval(t);
+  }, [inFlight]);
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -159,6 +168,7 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, 
   const [busy, setBusy] = useState<string | null>(null);
   const ports = app.variables.filter((v) => v.role === 'host_port').length;
   const secrets = app.variables.filter((v) => v.secret).length;
+  const isInFlight = (d: ReplicatorDeployment) => d.status === 'pending' || d.status === 'updating';
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id); setErr(null);
@@ -200,8 +210,15 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, 
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="font-medium truncate flex items-center gap-2">
-                      {d.project} <span className={`text-xs ${STATUS_COLOR[d.status] ?? ''}`}>· {d.status}</span>
-                      {d.updateAvailable && (
+                      {d.project}
+                      {isInFlight(d) ? (
+                        <span className="text-xs text-amber-400 inline-flex items-center gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" /> {d.phase ?? d.status}
+                        </span>
+                      ) : (
+                        <span className={`text-xs ${STATUS_COLOR[d.status] ?? ''}`}>· {d.status}</span>
+                      )}
+                      {d.updateAvailable && !isInFlight(d) && (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 text-amber-400 px-2 py-0.5 text-[0.65rem] font-semibold"
                           title={`Repo moved to ${d.availableCommit?.slice(0, 7) ?? '?'} — redeploy to update`}>
                           <ArrowUpCircle className="h-3 w-3" /> update available
@@ -219,14 +236,14 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, 
                     <div className="flex items-center gap-1 shrink-0">
                       {hasIngress && (
                         <Button variant="ghost" size="icon" aria-label="Manage ingress" title="Expose via Cloudflare / NPM"
-                          onClick={() => onIngress(d)}><Globe className="h-4 w-4" /></Button>
+                          disabled={isInFlight(d)} onClick={() => onIngress(d)}><Globe className="h-4 w-4" /></Button>
                       )}
-                      <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id}
+                      <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id || isInFlight(d)}
                         title={d.updateAvailable ? 'Update available — pull latest & redeploy' : 'Pull latest & redeploy'}
                         onClick={() => act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }))}>
                         {busy === d.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
                       </Button>
-                      <Button variant="ghost" size="icon" aria-label="Delete deployment" disabled={busy === d.id}
+                      <Button variant="ghost" size="icon" aria-label="Delete deployment" disabled={busy === d.id || isInFlight(d)}
                         title="Stop, remove & clean up secrets"
                         onClick={() => { if (confirm(`Remove deployment "${d.project}"? This stops the stack, removes any ingress, and deletes its secrets.`)) act(d.id, () => api.delete(`/api/replicator/deployments/${d.id}`)); }}>
                         <Trash2 className="h-4 w-4 text-destructive" />
@@ -400,7 +417,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           {plan
-            ? <Button onClick={deploy} disabled={busy || !name.trim()}>{busy ? 'Deploying…' : <><Rocket className="h-4 w-4" /> Deploy</>}</Button>
+            ? <Button onClick={deploy} disabled={busy || !name.trim()}>{busy ? 'Starting…' : <><Rocket className="h-4 w-4" /> Deploy</>}</Button>
             : <Button onClick={loadPlan} disabled={busy || !dockerInstanceId}>{busy ? 'Checking host…' : 'Next: check ports'}</Button>}
         </>
       }>

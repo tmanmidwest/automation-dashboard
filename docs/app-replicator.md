@@ -119,6 +119,23 @@ Before suggesting/validating ports we ask the target what's already taken:
 sockets) → the set of published host ports. Suggest the lowest free port at/above a per-app base;
 **hard-fail preflight** if a user-chosen port is in that set. Cheap, uses `runSsh`, no new deps.
 
+### Async deploys with live phases
+
+The deploy request does only the **fast checks** synchronously — name uniqueness, port preflight,
+required-value validation — so those errors surface immediately in the dialog. It then creates the
+row (`pending`), stores the secrets, and hands the slow clone/build/`up` to a **background worker**
+(`runDeployment`, fire-and-forget); the request returns right away and the dialog closes. The worker
+streams **coarse phase markers** onto the row — *Queued… → Cloning… → Validating compose… → Building
+images… → Starting containers…* — via a progress callback threaded into `deployGit`, and sets the
+final `deployed`/`error` status + `lastMessage` when done. The page **polls every 2.5 s while any
+deployment is in flight** so the phase + outcome update on their own; a settled page never polls.
+Redeploy uses the same worker (`updating` status). Everything is logged: `replicator.<kind>_started`
++ the final `replicator.<kind>`/`_failed` audit events (Ship's Log) plus per-phase app-log lines.
+
+No infinite hang: each SSH step has a raised, bounded timeout (`git` 5 min, `build` 30 min, `up` 10
+min — the old flat 120 s could time out mid-build), so a stuck deploy always resolves to `error`.
+Migration `0019_replicator_phase` adds the `phase` column.
+
 ## Secrets & lifecycle (vault)
 
 The **encrypted vault is Cerebro's source of truth** for secret-role variables — Cerebro never
