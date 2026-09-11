@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
@@ -42,6 +42,7 @@ export function Replicator() {
   const [registering, setRegistering] = useState(false);
   const [deployFor, setDeployFor] = useState<ReplicatorApp | null>(null);
   const [refreshFor, setRefreshFor] = useState<ReplicatorApp | null>(null);
+  const [editFor, setEditFor] = useState<{ app: ReplicatorApp; d: ReplicatorDeployment } | null>(null);
   const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -123,6 +124,7 @@ export function Replicator() {
               hasIngress={ingressTargets.length > 0}
               onDeploy={() => setDeployFor(app)}
               onRefreshSchema={() => setRefreshFor(app)}
+              onEdit={(d) => setEditFor({ app, d })}
               onIngress={setIngressFor}
               onChanged={refresh}
               setErr={setErr}
@@ -156,6 +158,15 @@ export function Replicator() {
           setErr={setErr}
         />
       )}
+      {editFor && (
+        <EditRedeployDialog
+          app={editFor.app}
+          deployment={editFor.d}
+          onClose={() => setEditFor(null)}
+          onDone={() => { setEditFor(null); void refresh(); }}
+          setErr={setErr}
+        />
+      )}
       {ingressFor && (
         <IngressDialog
           deployment={ingressFor}
@@ -171,9 +182,9 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onIngress, onChanged, setErr }: {
+function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onEdit, onIngress, onChanged, setErr }: {
   app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
-  onDeploy: () => void; onRefreshSchema: () => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
+  onDeploy: () => void; onRefreshSchema: () => void; onEdit: (d: ReplicatorDeployment) => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const ports = app.variables.filter((v) => v.role === 'host_port').length;
@@ -253,6 +264,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                         <Button variant="ghost" size="icon" aria-label="Manage ingress" title="Expose via Cloudflare / NPM"
                           disabled={isInFlight(d)} onClick={() => onIngress(d)}><Globe className="h-4 w-4" /></Button>
                       )}
+                      <Button variant="ghost" size="icon" aria-label="Edit & redeploy" disabled={busy === d.id || isInFlight(d)}
+                        title="Edit values / secrets / ports, then redeploy"
+                        onClick={() => onEdit(d)}><Pencil className="h-4 w-4" /></Button>
                       <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id || isInFlight(d)}
                         title={d.updateAvailable ? 'Update available — pull latest & redeploy' : 'Pull latest & redeploy'}
                         onClick={() => act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }))}>
@@ -587,6 +601,83 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   );
 }
 
+// ── Edit & redeploy dialog (change config, then rebuild) ────────────
+
+function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
+  app: ReplicatorApp; deployment: ReplicatorDeployment;
+  onClose: () => void; onDone: () => void; setErr: (s: string | null) => void;
+}) {
+  const formVars = app.variables.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name');
+  const setVars = useMemo(() => new Set(deployment.secretVars), [deployment.secretVars]);
+  const currentPort = useMemo(
+    () => new Map(deployment.ports.map((p) => [p.variable, p.hostPort])),
+    [deployment.ports],
+  );
+
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const v: Record<string, string> = {};
+    for (const fv of formVars) {
+      if (fv.role === 'plain' || fv.role === 'host_ip') v[fv.name] = deployment.values[fv.name] ?? fv.default ?? '';
+    }
+    return v;
+  });
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [ports, setPorts] = useState<Record<string, number>>(() => {
+    const pr: Record<string, number> = {};
+    for (const fv of formVars) {
+      if (fv.role === 'host_port') pr[fv.name] = currentPort.get(fv.name) ?? Number(fv.default ?? fv.containerPort ?? 0);
+    }
+    return pr;
+  });
+  const [forceRebuild, setForceRebuild] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true); setErr(null);
+    try {
+      await api.post(`/api/replicator/deployments/${deployment.id}/redeploy`, {
+        edit: true, values, secrets, ports, forceRebuild,
+      });
+      onDone();
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Redeploy failed.'); setBusy(false); }
+  }
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Edit & redeploy · ${deployment.project}`}
+      description="Change values, rotate secrets, or move host ports, then redeploy. The stack restarts with the new config."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit} disabled={busy}>{busy ? 'Starting…' : <><RotateCw className="h-4 w-4" /> Redeploy</>}</Button>
+        </>
+      }>
+      <div className="space-y-3">
+        <p className="text-xs text-muted-foreground">
+          On {deployment.dockerInstanceName ?? deployment.dockerInstanceId}. Secrets are hidden — leave a secret blank to keep its current value.
+        </p>
+        <div className="space-y-2">
+          {formVars.map((v) => (
+            <VarField key={v.name} v={v}
+              value={v.role === 'host_port' ? String(ports[v.name] ?? '') : v.role === 'secret' ? (secrets[v.name] ?? '') : (values[v.name] ?? '')}
+              usedPorts={[]}
+              placeholder={v.secret && setVars.has(v.name) ? 'leave blank to keep current secret' : undefined}
+              hideRequired={v.secret && setVars.has(v.name)}
+              onChange={(val) => {
+                if (v.role === 'host_port') setPorts((p) => ({ ...p, [v.name]: Number(val) }));
+                else if (v.role === 'secret') setSecrets((s) => ({ ...s, [v.name]: val }));
+                else setValues((s) => ({ ...s, [v.name]: val }));
+              }} />
+          ))}
+        </div>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
+          Force rebuild images (repos that build their own image)
+        </label>
+      </div>
+    </Dialog>
+  );
+}
+
 // ── Ingress dialog (expose a port via Cloudflare / NPM) ─────────────
 
 function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
@@ -711,8 +802,9 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
   );
 }
 
-function VarField({ v, value, usedPorts, onChange }: {
+function VarField({ v, value, usedPorts, onChange, placeholder, hideRequired }: {
   v: ReplicatorVariable; value: string; usedPorts: number[]; onChange: (val: string) => void;
+  placeholder?: string; hideRequired?: boolean;
 }) {
   const conflict = v.role === 'host_port' && value && usedPorts.includes(Number(value));
   return (
@@ -722,13 +814,13 @@ function VarField({ v, value, usedPorts, onChange }: {
         {v.role === 'host_port' && <span className="text-xs text-muted-foreground">→ {v.containerPort}</span>}
         {v.role === 'host_ip' && <span className="text-xs text-muted-foreground">bind address</span>}
         {v.secret && <KeyRound className="h-3 w-3 text-amber-400" />}
-        {v.required && <span className="text-xs text-destructive">required</span>}
+        {v.required && !hideRequired && <span className="text-xs text-destructive">required</span>}
       </Label>
       <div className="flex items-center gap-2 mt-1">
         <Input
           type={v.role === 'host_port' ? 'number' : v.secret ? 'password' : 'text'}
           value={value}
-          placeholder={v.secret && !v.required ? 'leave blank to keep repo default' : v.default ?? ''}
+          placeholder={placeholder ?? (v.secret && !v.required ? 'leave blank to keep repo default' : v.default ?? '')}
           onChange={(e) => onChange(e.target.value)}
         />
         {v.secret && (

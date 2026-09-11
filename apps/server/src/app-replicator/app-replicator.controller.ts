@@ -5,7 +5,7 @@ import { DeploymentService } from './deployment.service';
 import { IngressService } from './ingress.service';
 import { UpdateCheckService } from './update-check.service';
 import type {
-  SessionUser, IntrospectRepoInput, RegisterAppInput, DeployInput, AddIngressInput,
+  SessionUser, IntrospectRepoInput, RegisterAppInput, DeployInput, RedeployInput, AddIngressInput,
 } from '@cerebro/shared';
 
 /**
@@ -108,7 +108,7 @@ export class AppReplicatorController {
   @Post('deployments/:id/redeploy')
   @RequirePermissions('replicator:write')
   @SessionOnly()
-  redeploy(@Param('id') id: string, @Body() body: { forceRebuild?: boolean }, @CurrentUser() user: SessionUser) {
+  redeploy(@Param('id') id: string, @Body() body: RedeployInput, @CurrentUser() user: SessionUser) {
     return this.deployments.redeploy(id, body ?? {}, { actorId: user.id, actorEmail: user.email });
   }
 

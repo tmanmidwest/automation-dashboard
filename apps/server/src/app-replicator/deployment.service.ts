@@ -9,7 +9,7 @@ import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { PortAllocatorService } from './port-allocator.service';
 import { IngressService } from './ingress.service';
 import type {
-  DeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
+  DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
   ReplicatorIngress, ReplicatorIngressKind,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
@@ -145,22 +145,72 @@ export class DeploymentService {
 
   // ── Redeploy (pull latest / rebuild) ───────────────────────────────
 
-  async redeploy(id: string, opts: { forceRebuild?: boolean }, actor: ActorCtx): Promise<ReplicatorDeployment> {
+  async redeploy(id: string, opts: RedeployInput, actor: ActorCtx): Promise<ReplicatorDeployment> {
     const { row, app } = await this.load(id);
     if (row.status === 'pending' || row.status === 'updating') {
       throw new BadRequestException('This deployment is already in progress.');
     }
     // Fast check: the target must still be reachable/deployable (throws to the caller).
-    await this.targetFor(row.dockerInstanceId);
+    const target = await this.targetFor(row.dockerInstanceId);
     const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
-    const portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
-    const nonSecretValues = (row.values as unknown as Record<string, string>) ?? {};
+    let portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
+    let nonSecretValues = (row.values as unknown as Record<string, string>) ?? {};
 
-    // Reveal stored secrets back into the env map.
+    // Reveal stored secrets so they flow into the env map (and satisfy required checks).
     const secrets: Record<string, string> = {};
     for (const name of row.secretVars) {
       const v = await this.secrets.reveal(secretKey(row.id, name)).catch(() => null);
       if (v != null) secrets[name] = v;
+    }
+
+    // Edit mode: merge the supplied changes over the stored config, validate, and
+    // persist BEFORE running — so a failed validation never mutates the deployment.
+    if (opts.edit) {
+      // Ports: keep each stored port unless the operator supplied a new one. Preflight
+      // against the host, treating this deployment's OWN current ports as free.
+      const chosenPorts: Record<string, number> = {};
+      for (const p of portList) chosenPorts[p.variable] = p.hostPort;
+      for (const [name, val] of Object.entries(opts.ports ?? {})) if (val != null) chosenPorts[name] = Number(val);
+      const newPortList = this.resolvePorts(variables, chosenPorts);
+      await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
+
+      // Non-secret values: merge provided plain/host_ip values over the stored ones.
+      const mergedValues: Record<string, string> = { ...nonSecretValues };
+      for (const v of variables) {
+        if (v.role !== 'plain' && v.role !== 'host_ip') continue;
+        const provided = opts.values?.[v.name];
+        if (provided === undefined) continue;
+        if (provided === '') delete mergedValues[v.name]; // cleared → fall back to repo default
+        else mergedValues[v.name] = String(provided);
+      }
+
+      // Required-value validation, accounting for an already-stored secret.
+      const missing = variables
+        .filter((v) => v.required && v.role !== 'host_port' && v.role !== 'host_ip' && v.role !== 'image_tag' && v.role !== 'container_name')
+        .filter((v) => {
+          if (v.default != null) return false;
+          if (v.secret) return !((opts.secrets?.[v.name] ?? '') !== '' || row.secretVars.includes(v.name));
+          return (mergedValues[v.name] ?? '') === '';
+        })
+        .map((v) => v.name);
+      if (missing.length) throw new BadRequestException(`Missing required value(s): ${missing.join(', ')}.`);
+
+      // Rotate any supplied (non-blank) secrets; leave the rest as stored.
+      const secretVarSet = new Set(row.secretVars);
+      for (const v of variables.filter((x) => x.secret)) {
+        const provided = opts.secrets?.[v.name];
+        if (provided == null || provided === '') continue;
+        await this.secrets.set(secretKey(row.id, v.name), String(provided), { label: `Replicator · ${row.project} · ${v.name}` }, actor);
+        secrets[v.name] = String(provided);
+        secretVarSet.add(v.name);
+      }
+
+      portList = newPortList;
+      nonSecretValues = mergedValues;
+      await this.prisma.replicatorDeployment.update({
+        where: { id: row.id },
+        data: { values: nonSecretValues, ports: portList as unknown as object, secretVars: [...secretVarSet] },
+      });
     }
 
     const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
@@ -309,8 +359,10 @@ export class DeploymentService {
       });
   }
 
-  private async preflightPorts(target: DockerTarget, portList: ReplicatorPort[]): Promise<void> {
+  private async preflightPorts(target: DockerTarget, portList: ReplicatorPort[], exclude?: Set<number>): Promise<void> {
     const used = new Set(await this.ports.usedPorts(target.ssh));
+    // A redeploy's own currently-bound ports aren't a conflict with itself.
+    if (exclude) for (const p of exclude) used.delete(p);
     const seen = new Set<number>();
     const conflicts: string[] = [];
     for (const p of portList) {

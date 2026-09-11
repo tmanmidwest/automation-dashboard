@@ -157,6 +157,25 @@ export interface DeployInput {
   forceRebuild?: boolean;
 }
 
+/**
+ * Redeploy an existing deployment. With `edit` false/absent it re-runs the stored
+ * config (pull latest / rebuild). With `edit: true` the supplied maps are merged
+ * over the stored config and persisted before the redeploy, so the operator can
+ * change values, rotate secrets, or move host ports without tearing down.
+ */
+export interface RedeployInput {
+  /** `docker compose build --no-cache` — rebuild locally-built images from scratch. */
+  forceRebuild?: boolean;
+  /** Apply the maps below before redeploying (an edit), rather than reusing the stored config. */
+  edit?: boolean;
+  /** Edited non-secret values (name→value). A key left out keeps the stored value. */
+  values?: Record<string, string>;
+  /** Rotated secrets (name→value). A key left out or blank keeps the stored secret. */
+  secrets?: Record<string, string>;
+  /** Edited host ports (host_port var name→port). A key left out keeps the stored port. */
+  ports?: Record<string, number>;
+}
+
 /** A suggested free host port for one host_port variable. */
 export interface PortSuggestion {
   variable: string;
