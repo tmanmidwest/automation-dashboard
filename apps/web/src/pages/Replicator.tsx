@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable,
-  IntrospectResult, DeployTargetInfo, SecretSummary,
+  IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -41,6 +41,7 @@ export function Replicator() {
 
   const [registering, setRegistering] = useState(false);
   const [deployFor, setDeployFor] = useState<ReplicatorApp | null>(null);
+  const [refreshFor, setRefreshFor] = useState<ReplicatorApp | null>(null);
   const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -121,6 +122,7 @@ export function Replicator() {
               canWrite={canWrite}
               hasIngress={ingressTargets.length > 0}
               onDeploy={() => setDeployFor(app)}
+              onRefreshSchema={() => setRefreshFor(app)}
               onIngress={setIngressFor}
               onChanged={refresh}
               setErr={setErr}
@@ -146,6 +148,14 @@ export function Replicator() {
           setErr={setErr}
         />
       )}
+      {refreshFor && (
+        <RefreshSchemaDialog
+          app={refreshFor}
+          onClose={() => setRefreshFor(null)}
+          onApplied={() => { setRefreshFor(null); void refresh(); }}
+          setErr={setErr}
+        />
+      )}
       {ingressFor && (
         <IngressDialog
           deployment={ingressFor}
@@ -161,9 +171,9 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, onChanged, setErr }: {
+function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onIngress, onChanged, setErr }: {
   app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
-  onDeploy: () => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
+  onDeploy: () => void; onRefreshSchema: () => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const ports = app.variables.filter((v) => v.role === 'host_port').length;
@@ -193,6 +203,11 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onIngress, 
         {canWrite && (
           <div className="flex items-center gap-2 shrink-0">
             <Button onClick={onDeploy} disabled={app.usesGeneratedCompose}><Rocket className="h-4 w-4" /> Deploy</Button>
+            <Button variant="ghost" size="icon" aria-label="Refresh schema"
+              title="Re-read the repo compose to pick up new variables"
+              onClick={onRefreshSchema}>
+              <FileCog className="h-4 w-4" />
+            </Button>
             <Button variant="ghost" size="icon" aria-label="Remove app"
               disabled={busy === 'rm' || deployments.length > 0}
               title={deployments.length > 0 ? 'Remove its deployments first' : 'Remove app'}
@@ -364,6 +379,115 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
           </div>
         )}
       </div>
+    </Dialog>
+  );
+}
+
+// ── Refresh-schema dialog (re-introspect → review diff → apply) ─────
+
+function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
+  app: ReplicatorApp; onClose: () => void; onApplied: () => void; setErr: (s: string | null) => void;
+}) {
+  const [result, setResult] = useState<RefreshSchemaResult | null>(null);
+  const [vars, setVars] = useState<ReplicatorVariable[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setErr(null);
+      try {
+        const r = await api.post<RefreshSchemaResult>(`/api/replicator/apps/${app.id}/refresh-schema`, {});
+        if (!alive) return;
+        setResult(r); setVars(r.variables);
+      } catch (e) {
+        if (alive) setErr(e instanceof ApiError ? e.message : 'Could not re-read the repo.');
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [app.id, setErr]);
+
+  const toggleSecret = (name: string) => setVars((vs) => vs.map((v) =>
+    v.name === name && (v.role === 'plain' || v.role === 'secret')
+      ? { ...v, secret: !v.secret, role: !v.secret ? 'secret' : 'plain' } : v));
+
+  async function apply() {
+    setBusy(true); setErr(null);
+    try {
+      await api.patch(`/api/replicator/apps/${app.id}`, {
+        variables: vars, usesGeneratedCompose: result?.usesGeneratedCompose,
+      });
+      onApplied();
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not save the schema.'); setBusy(false); }
+  }
+
+  const diff = result?.diff;
+  const noChanges = diff && !diff.added.length && !diff.removed.length && !diff.roleChanged.length;
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Refresh schema · ${app.name}`}
+      description="Re-read the repo's compose file and pick up variable changes. Existing deployments are untouched until you redeploy them."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={apply} disabled={busy || loading || !result}>
+            {busy ? 'Saving…' : 'Apply to app'}
+          </Button>
+        </>
+      }>
+      {loading ? (
+        <p className="text-muted-foreground flex items-center gap-2 py-6"><Loader2 className="h-4 w-4 animate-spin" /> Reading repo…</p>
+      ) : result ? (
+        <div className="space-y-4">
+          {result.warnings.map((w, i) => <p key={i} className="text-xs text-amber-400">⚠ {w}</p>)}
+          <p className="text-xs text-muted-foreground">
+            Detected from <code>{result.composePath}</code>.
+          </p>
+
+          {noChanges ? (
+            <p className="text-sm text-emerald-400">No schema changes — the stored variables already match the repo.</p>
+          ) : (
+            <div className="space-y-1.5 text-sm">
+              {diff!.added.length > 0 && (
+                <p><span className="text-emerald-400 font-medium">Added:</span> <span className="font-mono text-xs">{diff!.added.join(', ')}</span></p>
+              )}
+              {diff!.removed.length > 0 && (
+                <p><span className="text-destructive font-medium">Removed:</span> <span className="font-mono text-xs">{diff!.removed.join(', ')}</span></p>
+              )}
+              {diff!.roleChanged.map((c) => (
+                <p key={c.name}><span className="text-amber-400 font-medium">Reclassified:</span>{' '}
+                  <span className="font-mono text-xs">{c.name}</span> <span className="text-muted-foreground">{c.from} → {c.to}</span>
+                </p>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-border/60 divide-y divide-border/60 max-h-64 overflow-y-auto">
+            {vars.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name').map((v) => (
+              <div key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+                <div className="min-w-0">
+                  <span className="font-mono text-xs">{v.name}</span>
+                  {diff!.added.includes(v.name) && <span className="ml-2 text-[0.65rem] text-emerald-400">new</span>}
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {v.role === 'host_port' ? `port →${v.containerPort ?? '?'}` : v.role === 'host_ip' ? 'bind address' : v.role}
+                    {v.required ? ' · required' : v.default != null ? ` · default ${v.default === '' ? '“”' : v.default}` : ''}
+                  </span>
+                </div>
+                {(v.role === 'plain' || v.role === 'secret') && (
+                  <label className="flex items-center gap-1.5 text-xs shrink-0 cursor-pointer">
+                    <input type="checkbox" checked={v.secret} onChange={() => toggleSecret(v.name)} /> secret
+                  </label>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-destructive py-6">Could not read the repository.</p>
+      )}
     </Dialog>
   );
 }

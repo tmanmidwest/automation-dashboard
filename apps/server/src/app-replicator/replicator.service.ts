@@ -5,6 +5,7 @@ import { RepoIntrospectService } from './repo-introspect.service';
 import { dockerTargetFrom } from './docker-target';
 import type {
   IntrospectRepoInput, IntrospectResult, RegisterAppInput, ReplicatorApp, ReplicatorVariable, ReplicatorTarget,
+  ReplicatorSchemaDiff, RefreshSchemaResult,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow } from '@prisma/client';
 
@@ -75,6 +76,33 @@ export class ReplicatorService {
     return this.map(app, count);
   }
 
+  /**
+   * Re-introspect a registered app's repo and merge the fresh compose schema
+   * against the stored one — surfacing new/removed variables and role changes,
+   * while preserving the operator's per-variable secret toggles. Read-only: the
+   * returned proposal is applied by the caller via `updateApp` (PATCH), so the
+   * operator can review the diff before committing it.
+   */
+  async refreshSchema(id: string): Promise<RefreshSchemaResult> {
+    const app = await this.prisma.replicatorApp.findUnique({ where: { id } });
+    if (!app) throw new NotFoundException('App not found.');
+    const introspected = await this.repo.introspect({
+      gitUrl: app.gitUrl,
+      gitRef: app.gitRef,
+      gitPath: app.gitPath ?? undefined,
+      gitCredKey: app.gitCredKey,
+    });
+    const existing = (app.variables as unknown as ReplicatorVariable[]) ?? [];
+    const { variables, diff } = mergeSchema(existing, introspected.variables);
+    return {
+      variables,
+      diff,
+      composePath: introspected.composePath,
+      usesGeneratedCompose: introspected.usesGeneratedCompose,
+      warnings: introspected.warnings,
+    };
+  }
+
   async removeApp(id: string): Promise<void> {
     const count = await this.prisma.replicatorDeployment.count({ where: { appId: id } });
     if (count > 0) throw new BadRequestException(`Remove this app's ${count} deployment(s) first.`);
@@ -112,6 +140,43 @@ export class ReplicatorService {
       deploymentCount,
     };
   }
+}
+
+/** A role the operator may hand-toggle between plain and secret. */
+function isTogglable(role: ReplicatorVariable['role']): boolean {
+  return role === 'plain' || role === 'secret';
+}
+
+/**
+ * Merge a freshly-introspected schema onto the stored one. The repo compose is
+ * authoritative for structure (role/default/containerPort/required) — so new
+ * variables appear and vanished ones drop — but a variable that survives keeps
+ * the operator's secret decision when both sides consider it togglable. Returns
+ * the merged list plus a diff of what changed.
+ */
+function mergeSchema(
+  existing: ReplicatorVariable[],
+  fresh: ReplicatorVariable[],
+): { variables: ReplicatorVariable[]; diff: ReplicatorSchemaDiff } {
+  const prevByName = new Map(existing.map((v) => [v.name, v]));
+  const freshNames = new Set(fresh.map((v) => v.name));
+  const added: string[] = [];
+  const roleChanged: ReplicatorSchemaDiff['roleChanged'] = [];
+
+  const variables = fresh.map((f) => {
+    const prev = prevByName.get(f.name);
+    if (!prev) { added.push(f.name); return f; }
+    let merged: ReplicatorVariable = { ...f };
+    // Carry over an operator's secret toggle only where a toggle is meaningful.
+    if (isTogglable(f.role) && isTogglable(prev.role) && prev.secret !== f.secret) {
+      merged = { ...merged, secret: prev.secret, role: prev.secret ? 'secret' : 'plain' };
+    }
+    if (merged.role !== prev.role) roleChanged.push({ name: f.name, from: prev.role, to: merged.role });
+    return merged;
+  });
+
+  const removed = existing.filter((e) => !freshNames.has(e.name)).map((e) => e.name);
+  return { variables: sanitizeVariables(variables), diff: { added, removed, roleChanged } };
 }
 
 /** Keep only well-formed variables and normalize the effective secret flag. */

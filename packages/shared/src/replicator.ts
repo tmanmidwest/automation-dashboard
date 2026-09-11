@@ -107,6 +107,30 @@ export interface IntrospectResult {
   warnings: string[];
 }
 
+/** What a schema refresh would change relative to the app's stored variables. */
+export interface ReplicatorSchemaDiff {
+  /** Variables in the repo now but not in the stored schema. */
+  added: string[];
+  /** Variables in the stored schema but no longer in the repo. */
+  removed: string[];
+  /** Variables whose role changed (e.g. a bind IP reclassified from host_port → host_ip). */
+  roleChanged: { name: string; from: ReplicatorVarRole; to: ReplicatorVarRole }[];
+}
+
+/**
+ * Result of re-introspecting a registered app's repo, merged against its stored
+ * schema (new vars added, gone vars dropped, operator secret toggles preserved).
+ * Read-only preview — the operator applies it via the app PATCH.
+ */
+export interface RefreshSchemaResult {
+  /** The proposed merged variable schema. */
+  variables: ReplicatorVariable[];
+  diff: ReplicatorSchemaDiff;
+  composePath: string;
+  usesGeneratedCompose: boolean;
+  warnings: string[];
+}
+
 /** Register a reviewed app into the catalog. */
 export interface RegisterAppInput {
   name: string;

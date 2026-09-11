@@ -56,6 +56,13 @@ export class AppReplicatorController {
     return this.replicator.updateApp(id, body);
   }
 
+  @Post('apps/:id/refresh-schema')
+  @RequirePermissions('replicator:write')
+  @SessionOnly()
+  refreshSchema(@Param('id') id: string) {
+    return this.replicator.refreshSchema(id);
+  }
+
   @Delete('apps/:id')
   @RequirePermissions('replicator:write')
   @SessionOnly()
