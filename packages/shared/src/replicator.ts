@@ -7,7 +7,8 @@
 
 /** How a detected compose variable is used, which drives how the deploy form treats it. */
 export type ReplicatorVarRole =
-  | 'host_port' // left side of a `ports:` mapping — a published host port
+  | 'host_port' // the host-port segment of a `ports:` mapping — a published host port
+  | 'host_ip' // the host-IP segment of a `ports:` mapping (e.g. 0.0.0.0) — a bind address, not a port
   | 'image_tag' // appears in `image:` — auto-managed per deployment (isolation)
   | 'container_name' // appears in `container_name:` — auto-managed per deployment
   | 'secret' // name looks secret (password/token/key/…) — stored in the vault

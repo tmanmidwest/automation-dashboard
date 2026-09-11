@@ -57,13 +57,55 @@ function indentOf(line: string): number {
   return n;
 }
 
-/** The container port from a compose ports item, e.g. "127.0.0.1:8000:8000/tcp" → 8000. */
-function containerPortOf(item: string): number | null {
-  const cleaned = item.trim().replace(/^["']|["']$/g, '').split('/')[0];
-  const parts = cleaned.split(':');
-  const last = parts[parts.length - 1];
-  const n = Number(last);
-  return Number.isFinite(n) && n > 0 ? n : null;
+/**
+ * Split a compose ports item into its top-level colon segments, ignoring colons
+ * inside a `${VAR:-default}` interpolation. Docker short syntax is
+ * `[HOST_IP:][HOST_PORT:]CONTAINER_PORT[/proto]`, so segment position tells us
+ * whether a `${VAR}` on the line is a bind address or a published host port.
+ */
+function portSegments(item: string): string[] {
+  const s = item.trim().replace(/^["']|["']$/g, '').split('/')[0];
+  const segs: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const c of s) {
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+    if (c === ':' && depth === 0) { segs.push(cur); cur = ''; }
+    else cur += c;
+  }
+  segs.push(cur);
+  return segs;
+}
+
+/** Resolve a segment to a fixed container port: its literal number or a `${VAR:-8000}` default. */
+function portOfSegment(seg: string): number | null {
+  const toks = tokensIn(seg);
+  const fromDefault = toks.length && toks[0].default != null ? Number(toks[0].default) : NaN;
+  if (Number.isFinite(fromDefault) && fromDefault > 0) return fromDefault;
+  const literal = Number(seg.trim());
+  return Number.isFinite(literal) && literal > 0 ? literal : null;
+}
+
+/**
+ * Assign roles to the `${VAR}` tokens on a `ports:` list item by segment: in a
+ * 3-segment `HOST_IP:HOST_PORT:CONTAINER` mapping the leading token is a bind
+ * address (host_ip, free text), the middle is the published host port; the
+ * trailing container-port token (rare) is fixed config, treated as plain.
+ */
+function addPortsTokens(map: Map<string, ReplicatorVariable>, item: string, service: string | null): void {
+  const segs = portSegments(item);
+  const last = segs.length - 1;
+  const containerPort = portOfSegment(segs[last]);
+  segs.forEach((seg, idx) => {
+    const toks = tokensIn(seg);
+    if (!toks.length) return;
+    let role: ReplicatorVarRole;
+    if (idx === last) role = 'plain'; // the container-port slot — fixed, not a host binding
+    else if (segs.length >= 3 && idx === 0) role = 'host_ip';
+    else role = 'host_port';
+    for (const t of toks) addVar(map, t, role, service, role === 'host_port' ? containerPort : null);
+  });
 }
 
 /** Fold a newly-seen token into the map, keeping the most specific role/default. */
@@ -88,7 +130,7 @@ function addVar(
     return;
   }
   // A managed/port role always wins over 'plain'; keep the first non-null default/port.
-  const rank: Record<ReplicatorVarRole, number> = { plain: 0, secret: 1, host_port: 2, image_tag: 2, container_name: 2 };
+  const rank: Record<ReplicatorVarRole, number> = { plain: 0, secret: 1, host_ip: 2, host_port: 2, image_tag: 2, container_name: 2 };
   if (rank[role] > rank[existing.role]) existing.role = role;
   if (existing.default === null && tok.default !== null) { existing.default = tok.default; existing.required = false; }
   if (existing.containerPort == null && containerPort != null) existing.containerPort = containerPort;
@@ -122,15 +164,15 @@ export function introspectCompose(text: string): ParsedCompose {
     const fieldKey = keyM ? keyM[1] : undefined;
     const toks = tokensIn(raw);
     if (toks.length) {
-      let role: ReplicatorVarRole = 'plain';
-      let containerPort: number | null = null;
-      if (fieldKey === 'image') role = 'image_tag';
-      else if (fieldKey === 'container_name') role = 'container_name';
-      else if (parentKey === 'ports' && listM) {
-        role = 'host_port';
-        containerPort = containerPortOf(listM[1]);
+      if (parentKey === 'ports' && listM) {
+        // A ports mapping needs per-segment roles (bind IP vs host port vs container port).
+        addPortsTokens(vars, listM[1], service);
+      } else {
+        let role: ReplicatorVarRole = 'plain';
+        if (fieldKey === 'image') role = 'image_tag';
+        else if (fieldKey === 'container_name') role = 'container_name';
+        for (const t of toks) addVar(vars, t, role, service, null);
       }
-      for (const t of toks) addVar(vars, t, role, service, containerPort);
     }
 
     // Opening a nested block (a key with no inline value) pushes context.
@@ -160,7 +202,7 @@ export function introspectCompose(text: string): ParsedCompose {
 
 /** Order the form sensibly: ports first, then secrets, then plain; managed vars last. */
 function sortVars(a: ReplicatorVariable, b: ReplicatorVariable): number {
-  const order: Record<ReplicatorVarRole, number> = { host_port: 0, secret: 1, plain: 2, image_tag: 3, container_name: 3 };
+  const order: Record<ReplicatorVarRole, number> = { host_ip: 0, host_port: 0, secret: 1, plain: 2, image_tag: 3, container_name: 3 };
   return order[a.role] - order[b.role] || a.name.localeCompare(b.name);
 }
 

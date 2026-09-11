@@ -393,7 +393,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
       setPlan(p);
       // Seed defaults: plain from repo default; ports from suggestions.
       const v: Record<string, string> = {};
-      for (const fv of formVars) if (fv.role === 'plain' && fv.default != null) v[fv.name] = fv.default;
+      for (const fv of formVars) if ((fv.role === 'plain' || fv.role === 'host_ip') && fv.default != null) v[fv.name] = fv.default;
       setValues(v);
       const pr: Record<string, number> = {};
       for (const s of p.suggestions) pr[s.variable] = s.suggested;
@@ -596,6 +596,7 @@ function VarField({ v, value, usedPorts, onChange }: {
       <Label className="flex items-center gap-2">
         <span className="font-mono text-xs">{v.name}</span>
         {v.role === 'host_port' && <span className="text-xs text-muted-foreground">→ {v.containerPort}</span>}
+        {v.role === 'host_ip' && <span className="text-xs text-muted-foreground">bind address</span>}
         {v.secret && <KeyRound className="h-3 w-3 text-amber-400" />}
         {v.required && <span className="text-xs text-destructive">required</span>}
       </Label>

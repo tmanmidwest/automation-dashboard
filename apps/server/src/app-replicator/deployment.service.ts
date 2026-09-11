@@ -107,7 +107,7 @@ export class DeploymentService {
     // Persist the row first so secret vault keys can be namespaced by its id.
     const nonSecretValues: Record<string, string> = {};
     for (const v of variables) {
-      if (v.role === 'plain' && input.values[v.name] != null && input.values[v.name] !== '') nonSecretValues[v.name] = String(input.values[v.name]);
+      if ((v.role === 'plain' || v.role === 'host_ip') && input.values[v.name] != null && input.values[v.name] !== '') nonSecretValues[v.name] = String(input.values[v.name]);
     }
     const secretVars = variables.filter((v) => v.secret && input.secrets[v.name] != null && input.secrets[v.name] !== '').map((v) => v.name);
 
@@ -340,7 +340,7 @@ export class DeploymentService {
       else if (v.role === 'container_name') env.set(v.name, `${project}-${svc}`);
       else if (v.role === 'host_port') { const p = portByVar.get(v.name); if (p != null) env.set(v.name, String(p)); }
       else if (v.role === 'secret') { const s = secrets[v.name]; if (s != null && s !== '') env.set(v.name, s); }
-      else if (v.role === 'plain') { const val = values[v.name]; if (val != null && val !== '') env.set(v.name, String(val)); }
+      else if (v.role === 'plain' || v.role === 'host_ip') { const val = values[v.name]; if (val != null && val !== '') env.set(v.name, String(val)); }
     }
     // dotenv lines; drop any newline in a value (single-line format).
     return [...env.entries()].map(([k, val]) => `${k}=${String(val).replace(/[\r\n]+/g, ' ')}`).join('\n') + '\n';
