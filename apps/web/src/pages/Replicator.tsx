@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil } from 'lucide-react';
 import type {
-  ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable,
+  ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress,
 } from '@cerebro/shared';
@@ -685,7 +685,56 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
   onClose: () => void; onChanged: () => void; setErr: (s: string | null) => void;
 }) {
   const [list, setList] = useState<ReplicatorIngress[]>(deployment.ingress ?? []);
-  const [hostPort, setHostPort] = useState<number>(deployment.ports[0]?.hostPort ?? 0);
+
+  async function refetch() {
+    const l = await api.get<ReplicatorIngress[]>(`/api/replicator/deployments/${deployment.id}/ingress`).catch(() => list);
+    setList(l); onChanged();
+  }
+
+  const routesByPort = useMemo(() => {
+    const m = new Map<number, ReplicatorIngress[]>();
+    for (const ing of list) m.set(ing.hostPort, [...(m.get(ing.hostPort) ?? []), ing]);
+    return m;
+  }, [list]);
+
+  const exposed = routesByPort.size;
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Ingress · ${deployment.project}`}
+      description="Give each published port its own hostname through a Cloudflare tunnel or Nginx Proxy Manager."
+      footer={<Button variant="outline" onClick={onClose}>Done</Button>}>
+      <div className="space-y-4">
+        {deployment.ports.length === 0 ? (
+          <p className="text-sm text-amber-400">This deployment publishes no host ports, so there's nothing to expose.</p>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              {deployment.ports.length} published port{deployment.ports.length === 1 ? '' : 's'} · {exposed} with DNS.
+            </p>
+            {deployment.ports.map((p) => (
+              <PortIngressRow
+                key={p.hostPort}
+                deploymentId={deployment.id}
+                port={p}
+                routes={routesByPort.get(p.hostPort) ?? []}
+                targets={targets}
+                onChanged={refetch}
+                setErr={setErr}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+/** One published port: its existing routes plus an inline "add a route" form. */
+function PortIngressRow({ deploymentId, port, routes, targets, onChanged, setErr }: {
+  deploymentId: string; port: ReplicatorPort; routes: ReplicatorIngress[];
+  targets: IngressTarget[]; onChanged: () => Promise<void>; setErr: (s: string | null) => void;
+}) {
+  const [adding, setAdding] = useState(routes.length === 0);
   const [instanceId, setInstanceId] = useState(targets[0]?.instanceId ?? '');
   const [hostname, setHostname] = useState('');
   const [tunnelId, setTunnelId] = useState('');
@@ -694,8 +743,7 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
   const [certs, setCerts] = useState<NpmCertOption[]>([]);
   const [busy, setBusy] = useState(false);
 
-  const target = targets.find((t) => t.instanceId === instanceId);
-  const kind = target?.kind;
+  const kind = targets.find((t) => t.instanceId === instanceId)?.kind;
 
   useEffect(() => {
     setTunnels([]); setCerts([]); setTunnelId(''); setCertId(0);
@@ -707,29 +755,23 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
     }
   }, [instanceId, kind]);
 
-  async function refetch() {
-    const l = await api.get<ReplicatorIngress[]>(`/api/replicator/deployments/${deployment.id}/ingress`).catch(() => list);
-    setList(l); onChanged();
-  }
-
   async function add() {
     setBusy(true); setErr(null);
     try {
-      const service = deployment.ports.find((p) => p.hostPort === hostPort)?.service ?? 'app';
-      await api.post(`/api/replicator/deployments/${deployment.id}/ingress`, {
-        kind, instanceId, service, hostPort, hostname,
+      await api.post(`/api/replicator/deployments/${deploymentId}/ingress`, {
+        kind, instanceId, service: port.service, hostPort: port.hostPort, hostname,
         tunnelId: kind === 'cloudflare' ? tunnelId : undefined,
         certificateId: kind === 'npm' ? certId : undefined,
         sslForced: kind === 'npm' && certId > 0,
       });
-      setHostname(''); await refetch();
+      setHostname(''); setAdding(false); await onChanged();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not add ingress.'); }
     finally { setBusy(false); }
   }
 
   async function remove(id: string) {
     setBusy(true); setErr(null);
-    try { await api.delete(`/api/replicator/ingress/${id}`); await refetch(); }
+    try { await api.delete(`/api/replicator/ingress/${id}`); await onChanged(); }
     catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not remove ingress.'); }
     finally { setBusy(false); }
   }
@@ -737,44 +779,47 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
   const canAdd = !!kind && !!instanceId && !!hostname.trim() && (kind !== 'cloudflare' || !!tunnelId);
 
   return (
-    <Dialog open onClose={onClose} size="lg" title={`Ingress · ${deployment.project}`}
-      description="Expose a published port through a Cloudflare tunnel or Nginx Proxy Manager."
-      footer={<Button variant="outline" onClick={onClose}>Done</Button>}>
-      <div className="space-y-4">
-        {list.length > 0 && (
-          <div className="rounded-lg border border-border/60 divide-y divide-border/60">
-            {list.map((ing) => (
-              <div key={ing.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
-                <div className="min-w-0">
-                  <a href={ing.url} target="_blank" rel="noreferrer" className="font-medium truncate inline-flex items-center gap-1 hover:underline">
-                    {ing.hostname} <ExternalLink className="h-3 w-3 opacity-60" />
-                  </a>
-                  <p className="text-xs text-muted-foreground">{ing.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'} · {ing.instanceName} · →:{ing.hostPort}</p>
-                </div>
-                <Button variant="ghost" size="icon" aria-label="Remove ingress" disabled={busy} onClick={() => remove(ing.id)}>
-                  <X className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            ))}
-          </div>
+    <div className="rounded-lg border border-border/60 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="font-mono text-xs">{port.service} · :{port.hostPort}→{port.containerPort}</span>
+          {routes.length > 0
+            ? <span className="rounded-full bg-emerald-400/15 text-emerald-400 px-2 py-0.5 text-[0.65rem] font-semibold">{routes.length} route{routes.length === 1 ? '' : 's'}</span>
+            : <span className="rounded-full bg-muted/60 text-muted-foreground px-2 py-0.5 text-[0.65rem] font-semibold">not exposed</span>}
+        </div>
+        {!adding && (
+          <Button variant="ghost" size="sm" onClick={() => setAdding(true)}><Plus className="h-3.5 w-3.5" /> Add route</Button>
         )}
+      </div>
 
-        <div className="rounded-lg border border-border/60 p-3 space-y-3">
-          <p className="text-sm font-medium">Add ingress</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label>Published port</Label>
-              <select className={selectCls} value={hostPort} onChange={(e) => setHostPort(Number(e.target.value))}>
-                {deployment.ports.map((p) => <option key={p.hostPort} value={p.hostPort}>{p.service} · {p.hostPort}→{p.containerPort}</option>)}
-              </select>
+      {routes.length > 0 && (
+        <div className="divide-y divide-border/60 rounded-md border border-border/50">
+          {routes.map((ing) => (
+            <div key={ing.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-sm">
+              <div className="min-w-0">
+                <a href={ing.url} target="_blank" rel="noreferrer" className="font-medium truncate inline-flex items-center gap-1 hover:underline">
+                  {ing.hostname} <ExternalLink className="h-3 w-3 opacity-60" />
+                </a>
+                <p className="text-xs text-muted-foreground">{ing.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'} · {ing.instanceName}</p>
+              </div>
+              <Button variant="ghost" size="icon" aria-label="Remove route" disabled={busy} onClick={() => remove(ing.id)}>
+                <X className="h-4 w-4 text-destructive" />
+              </Button>
             </div>
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <div className="space-y-2 pt-1">
+          <div className="grid grid-cols-2 gap-2">
             <div>
               <Label>Via</Label>
               <select className={selectCls} value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
                 {targets.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name} ({t.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'})</option>)}
               </select>
             </div>
-            <div className="col-span-2"><Label>Hostname</Label><Input value={hostname} placeholder="app.example.com" onChange={(e) => setHostname(e.target.value)} /></div>
+            <div><Label>Hostname</Label><Input value={hostname} placeholder="app.example.com" onChange={(e) => setHostname(e.target.value)} /></div>
             {kind === 'cloudflare' && (
               <div className="col-span-2">
                 <Label>Tunnel</Label>
@@ -795,10 +840,13 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
               </div>
             )}
           </div>
-          <Button onClick={add} disabled={busy || !canAdd}>{busy ? 'Adding…' : <><Plus className="h-4 w-4" /> Add route</>}</Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={add} disabled={busy || !canAdd}>{busy ? 'Adding…' : <><Plus className="h-4 w-4" /> Add route</>}</Button>
+            {routes.length > 0 && <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setHostname(''); }}>Cancel</Button>}
+          </div>
         </div>
-      </div>
-    </Dialog>
+      )}
+    </div>
   );
 }
 
