@@ -4,24 +4,23 @@ import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
-import { DockerStackService, projectName } from '../connectors/docker/docker-stack.service';
+import { projectName } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { PortAllocatorService } from './port-allocator.service';
 import { IngressService } from './ingress.service';
+import { DockerDeployTarget } from './docker-deploy-target';
+import { EcsDeployTarget } from './ecs-deploy-target';
+import { ecsProfileFrom } from './ecs-target';
+import type { DeployTarget, DestroyContext } from './deploy-target';
 import type {
   DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
-  ReplicatorIngress, ReplicatorIngressKind,
+  ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
 
 /** The vault key holding one deployment's secret variable value. */
 function secretKey(deploymentId: string, varName: string): string {
   return `deployment:${deploymentId}:${varName}`;
-}
-
-/** Lowercase a compose service/name fragment to something docker accepts. */
-function slug(s: string): string {
-  return (s || 'app').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^[-.]+/, '').slice(0, 40) || 'app';
 }
 
 /**
@@ -37,13 +36,32 @@ export class DeploymentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly instances: ConnectorInstanceService,
-    private readonly stacks: DockerStackService,
     private readonly secrets: SecretsService,
     private readonly audit: AuditService,
     private readonly ports: PortAllocatorService,
     private readonly ingress: IngressService,
     private readonly logging: LoggingService,
+    private readonly docker: DockerDeployTarget,
+    private readonly ecs: EcsDeployTarget,
   ) {}
+
+  /** Resolve the backend implementation for a target kind. */
+  private targetImpl(kind: TargetKind): DeployTarget {
+    if (kind === 'docker') return this.docker;
+    if (kind === 'ecs') return this.ecs;
+    throw new BadRequestException(`Deploy target "${kind}" is not available.`);
+  }
+
+  /** Fast preflight for an ECS target: the AWS connector must exist with a profile. */
+  private async ecsPreflight(instanceId: string): Promise<void> {
+    const instance = await this.instances.get(instanceId).catch(() => null);
+    if (!instance) throw new BadRequestException('The selected AWS connector no longer exists.');
+    if (instance.connectorId !== 'aws') throw new BadRequestException('The selected target is not an AWS connector.');
+    const ctx = await this.instances.contextFor(instance);
+    const profile = ecsProfileFrom(ctx);
+    if (!profile) throw new BadRequestException('That AWS connector has no complete ECS deployment profile — set the subnets and task execution role ARN on the connector.');
+    if (!profile.builderInstanceId) throw new BadRequestException('That AWS connector’s ECS profile has no image builder — pick a Docker connector to build and push the image.');
+  }
 
   /** Build the SSH deploy target for a Docker connector instance (throws if not deployable). */
   private async targetFor(dockerInstanceId: string): Promise<DockerTarget> {
@@ -84,15 +102,20 @@ export class DeploymentService {
     const project = projectName(input.name);
     if (!project) throw new BadRequestException('A valid deployment name is required.');
 
-    const target = await this.targetFor(input.dockerInstanceId);
+    const targetKind: TargetKind = input.targetKind ?? 'docker';
 
-    // Name must be unique per host.
+    // Name must be unique per target instance.
     const clash = await this.prisma.replicatorDeployment.findFirst({ where: { dockerInstanceId: input.dockerInstanceId, project } });
-    if (clash) throw new BadRequestException(`A deployment named "${project}" already exists on that host.`);
+    if (clash) throw new BadRequestException(`A deployment named "${project}" already exists on that target.`);
 
-    // Resolve + preflight ports before creating anything.
+    // Resolve ports; Docker preflights them against the host (ECS has no host ports).
     const portList = this.resolvePorts(variables, input.ports);
-    await this.preflightPorts(target, portList);
+    if (targetKind === 'docker') {
+      const target = await this.targetFor(input.dockerInstanceId);
+      await this.preflightPorts(target, portList);
+    } else {
+      await this.ecsPreflight(input.dockerInstanceId);
+    }
 
     // Validate required non-managed values are supplied (or have a repo default).
     const missing = variables
@@ -114,6 +137,7 @@ export class DeploymentService {
     const row = await this.prisma.replicatorDeployment.create({
       data: {
         appId: app.id,
+        targetKind,
         dockerInstanceId: input.dockerInstanceId,
         name: input.name.trim(),
         project,
@@ -137,8 +161,9 @@ export class DeploymentService {
     // fast checks (name, ports, required values) already ran above and threw to
     // the caller, so only genuinely long work goes async.
     void this.runDeployment({
-      deploymentId: row.id, app, variables, project, dockerInstanceId: input.dockerInstanceId,
-      portList, values: nonSecretValues, secrets: input.secrets, forceRebuild: !!input.forceRebuild, actor, kind: 'deploy',
+      deploymentId: row.id, app, variables, project, targetKind, targetInstanceId: input.dockerInstanceId,
+      portList, values: nonSecretValues, secrets: input.secrets, forceRebuild: !!input.forceRebuild,
+      taskCpu: input.taskCpu, taskMemory: input.taskMemory, actor, kind: 'deploy',
     });
     return this.map(row, app.name);
   }
@@ -150,8 +175,10 @@ export class DeploymentService {
     if (row.status === 'pending' || row.status === 'updating') {
       throw new BadRequestException('This deployment is already in progress.');
     }
-    // Fast check: the target must still be reachable/deployable (throws to the caller).
-    const target = await this.targetFor(row.dockerInstanceId);
+    const targetKind: TargetKind = (row.targetKind as TargetKind) ?? 'docker';
+    // Fast check (Docker): the SSH target must still be reachable/deployable. ECS
+    // has no port preflight, so its target resolution happens in the worker.
+    const target = targetKind === 'docker' ? await this.targetFor(row.dockerInstanceId) : null;
     const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
     let portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
     let nonSecretValues = (row.values as unknown as Record<string, string>) ?? {};
@@ -172,7 +199,7 @@ export class DeploymentService {
       for (const p of portList) chosenPorts[p.variable] = p.hostPort;
       for (const [name, val] of Object.entries(opts.ports ?? {})) if (val != null) chosenPorts[name] = Number(val);
       const newPortList = this.resolvePorts(variables, chosenPorts);
-      await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
+      if (target) await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
 
       // Non-secret values: merge provided plain/host_ip values over the stored ones.
       const mergedValues: Record<string, string> = { ...nonSecretValues };
@@ -215,7 +242,7 @@ export class DeploymentService {
 
     const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
     void this.runDeployment({
-      deploymentId: row.id, app, variables, project: row.project, dockerInstanceId: row.dockerInstanceId,
+      deploymentId: row.id, app, variables, project: row.project, targetKind, targetInstanceId: row.dockerInstanceId,
       portList, values: nonSecretValues, secrets, forceRebuild: !!opts.forceRebuild, actor, kind: 'redeploy',
     });
     return this.map(updated, app.name);
@@ -227,11 +254,12 @@ export class DeploymentService {
    * the final status + audit event. Fire-and-forget — never awaited by a request.
    */
   private async runDeployment(args: {
-    deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string; dockerInstanceId: string;
+    deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string;
+    targetKind: TargetKind; targetInstanceId: string;
     portList: ReplicatorPort[]; values: Record<string, string>; secrets: Record<string, string>;
-    forceRebuild: boolean; actor: ActorCtx; kind: 'deploy' | 'redeploy';
+    forceRebuild: boolean; taskCpu?: string; taskMemory?: string; actor: ActorCtx; kind: 'deploy' | 'redeploy';
   }): Promise<void> {
-    const { deploymentId, app, variables, project, dockerInstanceId, portList, values, secrets, forceRebuild, actor, kind } = args;
+    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, forceRebuild, taskCpu, taskMemory, actor, kind } = args;
     const setPhase = (phase: string | null) => {
       void this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { phase } }).catch(() => {});
       if (phase) void this.logging.info('replicator', `[${project}] ${phase}`);
@@ -241,25 +269,27 @@ export class DeploymentService {
          : (kind === 'deploy' ? 'replicator.deploy_failed' : 'replicator.redeploy_failed');
 
     try {
-      await this.audit.record({ ...actor, action: `replicator.${kind}_started`, target: `${app.name}/${project}`, meta: { deploymentId, dockerInstanceId } });
-      const target = await this.targetFor(dockerInstanceId);
-      const env = this.buildEnv(app, variables, project, portList, values, secrets);
-      const result = await this.stacks.deployGit(
-        target, dockerInstanceId, project,
-        { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, credKey: app.gitCredKey, env },
-        { pull: true, forceRebuild }, setPhase,
+      await this.audit.record({ ...actor, action: `replicator.${kind}_started`, target: `${app.name}/${project}`, meta: { deploymentId, dockerInstanceId: targetInstanceId, targetKind } });
+      const outcome = await this.targetImpl(targetKind).deploy(
+        {
+          deploymentId, targetInstanceId, project,
+          source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey },
+          variables, portList, values, secrets, forceRebuild, taskCpu, taskMemory,
+        },
+        (phase) => setPhase(phase),
       );
-      const commit = await this.latestCommit(dockerInstanceId, project);
       await this.prisma.replicatorDeployment.update({
         where: { id: deploymentId },
         data: {
-          status: result.ok ? 'deployed' : 'error', phase: null, lastMessage: result.message.slice(0, 2000), deployedCommit: commit,
+          status: outcome.ok ? 'deployed' : 'error', phase: null, lastMessage: outcome.message.slice(0, 2000),
+          ...(outcome.deployedCommit !== undefined ? { deployedCommit: outcome.deployedCommit } : {}),
+          ...(outcome.refs ? { ecs: outcome.refs as unknown as object } : {}),
           // A successful (re)deploy pulls latest, so clear any pending "update available".
-          ...(result.ok ? { updateAvailable: false, availableCommit: null } : {}),
+          ...(outcome.ok ? { updateAvailable: false, availableCommit: null } : {}),
         },
       });
-      await this.audit.record({ ...actor, action: finalAction(result.ok), target: `${app.name}/${project}`, meta: { ok: result.ok } });
-      void this.logging[result.ok ? 'info' : 'warn']('replicator', `[${project}] ${kind} ${result.ok ? 'succeeded' : 'failed'}.`);
+      await this.audit.record({ ...actor, action: finalAction(outcome.ok), target: `${app.name}/${project}`, meta: { ok: outcome.ok } });
+      void this.logging[outcome.ok ? 'info' : 'warn']('replicator', `[${project}] ${kind} ${outcome.ok ? 'succeeded' : 'failed'}.`);
     } catch (err) {
       const message = err instanceof Error ? err.message : `${kind} failed.`;
       await this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { status: 'error', phase: null, lastMessage: message.slice(0, 2000) } }).catch(() => {});
@@ -278,15 +308,19 @@ export class DeploymentService {
     // so we don't leave dangling public hostnames pointing at a dead port.
     problems.push(...await this.ingress.removeAllForDeployment(row.id));
 
-    // Best-effort: stop the stack and remove its host dir + managed-stack record.
+    // Best-effort: tear down the backend (Docker stack, or ECS service + task defs
+    // + ECR repo + log group). Never blocks the vault/row cleanup below.
+    const targetKind: TargetKind = (row.targetKind as TargetKind) ?? 'docker';
+    const destroyCtx: DestroyContext = {
+      targetInstanceId: row.dockerInstanceId,
+      project: row.project,
+      ecs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null,
+    };
     try {
-      const target = await this.targetFor(row.dockerInstanceId);
-      const down = await this.stacks.down(target, row.dockerInstanceId, row.project);
-      if (!down.ok) problems.push(down.message);
-      await this.stacks.purgeDir(target, row.project);
-      await this.stacks.remove(row.dockerInstanceId, row.project);
+      const res = await this.targetImpl(targetKind).destroy(destroyCtx, (phase) => void this.logging.info('replicator', `[${row.project}] ${phase}`));
+      problems.push(...res.problems);
     } catch (err) {
-      problems.push(err instanceof Error ? err.message : 'Could not reach the host to stop the stack.');
+      problems.push(err instanceof Error ? err.message : 'Could not reach the target to tear down the deployment.');
     }
 
     // Always clean up the vault secrets and the row, so nothing is left stale.
@@ -373,40 +407,6 @@ export class DeploymentService {
     if (conflicts.length) throw new BadRequestException(`Port conflict: ${conflicts.join(', ')}. Pick different host ports.`);
   }
 
-  /** Assemble the `.env` handed to `docker compose` — managed isolation vars + host ports + user values + secrets. */
-  private buildEnv(
-    app: AppRow,
-    variables: ReplicatorVariable[],
-    project: string,
-    portList: ReplicatorPort[],
-    values: Record<string, string>,
-    secrets: Record<string, string>,
-  ): string {
-    void app;
-    const env = new Map<string, string>();
-    const portByVar = new Map(portList.map((p) => [p.variable, p.hostPort]));
-
-    for (const v of variables) {
-      const svc = slug(v.service ?? 'app');
-      if (v.role === 'image_tag') env.set(v.name, `${project}-${svc}:latest`);
-      else if (v.role === 'container_name') env.set(v.name, `${project}-${svc}`);
-      else if (v.role === 'host_port') { const p = portByVar.get(v.name); if (p != null) env.set(v.name, String(p)); }
-      else if (v.role === 'secret') { const s = secrets[v.name]; if (s != null && s !== '') env.set(v.name, s); }
-      else if (v.role === 'plain' || v.role === 'host_ip') { const val = values[v.name]; if (val != null && val !== '') env.set(v.name, String(val)); }
-    }
-    // dotenv lines; drop any newline in a value (single-line format).
-    return [...env.entries()].map(([k, val]) => `${k}=${String(val).replace(/[\r\n]+/g, ' ')}`).join('\n') + '\n';
-  }
-
-  private async latestCommit(instanceId: string, project: string): Promise<string | null> {
-    const rev = await this.prisma.dockerStackRevision.findFirst({
-      where: { connectorInstanceId: instanceId, name: project },
-      orderBy: { createdAt: 'desc' },
-      select: { commit: true },
-    }).catch(() => null);
-    return rev?.commit ?? null;
-  }
-
   private map(row: DeploymentRow, appName?: string, instanceName?: string, ingress?: ReplicatorIngress[]): ReplicatorDeployment {
     return {
       id: row.id,
@@ -414,8 +414,10 @@ export class DeploymentService {
       appName,
       name: row.name,
       project: row.project,
+      targetKind: (row.targetKind as TargetKind) ?? 'docker',
       dockerInstanceId: row.dockerInstanceId,
       dockerInstanceName: instanceName,
+      ecs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null,
       values: (row.values as unknown as Record<string, string>) ?? {},
       secretVars: row.secretVars ?? [],
       ports: (row.ports as unknown as ReplicatorPort[]) ?? [],

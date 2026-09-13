@@ -16,7 +16,31 @@ import {
   AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask,
   AwsElasticIp, AwsVolume, AwsRdsInstance, AwsS3Bucket,
   AwsNatGateway, AwsLoadBalancer, AwsEbsSnapshot, AwsRdsSnapshot, AwsLambdaFunction, AwsCloudFrontDistribution, AwsDynamoTable, AwsElastiCacheCluster,
+  EcsTaskDefInput, EcsServiceInput,
 } from './aws-api';
+
+/**
+ * Low-level deploy primitives invoked programmatically by the App Replicator's ECS
+ * target (via ConnectorInstanceService.runResourceOperationAwait), NOT through the
+ * operation UI — so they are intentionally absent from manifest.operations (which
+ * drives the action buttons) and dispatched directly in runOperation. They return
+ * structured payloads in OperationResult.data.
+ */
+const DEPLOY_OPS = new Set([
+  'ecr-ensure-repo',
+  'ecr-auth-token',
+  'ecr-delete-repo',
+  'ecs-ensure-cluster',
+  'ecs-register-taskdef',
+  'ecs-create-service',
+  'ecs-deploy-service',
+  'ecs-wait-service',
+  'ecs-delete-service',
+  'ecs-deregister-taskdef',
+  'logs-create-group',
+  'logs-delete-group',
+  'tags-get-resources',
+]);
 
 const EC2_KIND = 'ec2';
 const EKS_KIND = 'eks';
@@ -207,6 +231,62 @@ export class AwsConnector implements Connector {
         type: 'password',
         secret: true,
         help: 'Only for temporary (STS) credentials — leave blank for a normal IAM access key.',
+      },
+      // ── App Replicator ECS/Fargate deploy profile (all optional; only needed to
+      //    use this connector as an App Replicator "deploy to ECS" target). ──
+      {
+        key: 'ecsCluster',
+        label: 'ECS cluster (App Replicator)',
+        type: 'text',
+        placeholder: 'cerebro',
+        help: 'Existing ECS cluster for App Replicator deploys. Blank = "cerebro" (created if absent).',
+      },
+      {
+        key: 'ecsSubnetIds',
+        label: 'ECS subnet IDs',
+        type: 'text',
+        placeholder: 'subnet-aaa, subnet-bbb',
+        help: 'Comma-separated subnets for Fargate tasks (awsvpc). Required to deploy to ECS.',
+      },
+      {
+        key: 'ecsSecurityGroupIds',
+        label: 'ECS security group IDs',
+        type: 'text',
+        placeholder: 'sg-aaa',
+        help: 'Comma-separated security groups for Fargate tasks. Egress-only is enough with the cloudflared sidecar.',
+      },
+      {
+        key: 'ecsTaskExecutionRoleArn',
+        label: 'ECS task execution role ARN',
+        type: 'text',
+        placeholder: 'arn:aws:iam::123456789012:role/ecsTaskExecutionRole',
+        help: 'Pre-provisioned role granting ECR pull + CloudWatch Logs write. Required to deploy to ECS.',
+      },
+      {
+        key: 'ecsTaskRoleArn',
+        label: 'ECS task role ARN',
+        type: 'text',
+        placeholder: 'arn:aws:iam::123456789012:role/myAppTaskRole',
+        help: 'Optional app-level task role (permissions the running app itself needs).',
+      },
+      {
+        key: 'ecsAssignPublicIp',
+        label: 'ECS assign public IP',
+        type: 'text',
+        placeholder: 'true',
+        help: 'true (default) gives tasks a public IP for egress on a public subnet; set false for private subnets with a NAT.',
+      },
+      {
+        key: 'ecsBuilderInstanceId',
+        label: 'ECS image builder (Docker connector id)',
+        type: 'text',
+        help: 'Id of a Docker connector whose host builds + pushes the image to ECR. Required to deploy to ECS.',
+      },
+      {
+        key: 'ecsCloudflareInstanceId',
+        label: 'ECS ingress Cloudflare connector id',
+        type: 'text',
+        help: 'Optional. Cloudflare connector whose tunnel the cloudflared sidecar joins (App Replicator ECS ingress, Phase 3).',
       },
     ],
     resourceKinds: [
@@ -1439,6 +1519,148 @@ export class AwsConnector implements Connector {
     }
   }
 
+  /**
+   * Low-level ECR / ECS / Logs / tagging primitives for the App Replicator's ECS
+   * deploy target. Invoked programmatically (resourceId is unused); structured
+   * results ride in OperationResult.data. See DEPLOY_OPS.
+   */
+  private async runDeployOperation(
+    ctx: ConnectorContext,
+    operationId: string,
+    values: Record<string, unknown>,
+    onProgress: OperationProgress,
+  ): Promise<OperationResult> {
+    const api = new AwsApi(this.authFrom(ctx));
+    const str = (k: string) => String(values[k] ?? '').trim();
+    const tags = (values.tags as Record<string, string> | undefined) ?? undefined;
+    try {
+      switch (operationId) {
+        case 'ecr-ensure-repo': {
+          const name = str('name');
+          if (!name) return { ok: false, message: 'Missing repository name.' };
+          onProgress(`Ensuring ECR repository ${name}…`);
+          const { repositoryUri } = await api.ensureEcrRepo(name, tags);
+          ctx.log('info', `AWS ECR repository ready: ${name} (${repositoryUri}).`);
+          return { ok: true, message: `ECR repository ${name} ready.`, createdResourceId: name, data: { repositoryUri } };
+        }
+        case 'ecr-auth-token': {
+          onProgress('Requesting an ECR authorization token…');
+          const token = await api.ecrAuthToken();
+          return { ok: true, message: 'ECR authorization token issued.', data: { ...token } };
+        }
+        case 'ecr-delete-repo': {
+          const name = str('name');
+          if (!name) return { ok: false, message: 'Missing repository name.' };
+          onProgress(`Deleting ECR repository ${name}…`);
+          await api.deleteEcrRepo(name);
+          ctx.log('warn', `AWS ECR repository deleted: ${name}.`);
+          return { ok: true, message: `ECR repository ${name} deleted.` };
+        }
+        case 'ecs-ensure-cluster': {
+          const name = str('name');
+          if (!name) return { ok: false, message: 'Missing cluster name.' };
+          onProgress(`Ensuring ECS cluster ${name}…`);
+          const cluster = await api.ensureCluster(name, tags);
+          return { ok: true, message: `ECS cluster ${cluster} ready.`, createdResourceId: cluster, data: { cluster } };
+        }
+        case 'ecs-register-taskdef': {
+          const input = values.taskDef as EcsTaskDefInput | undefined;
+          if (!input?.family || !input.executionRoleArn || !(input.containers?.length)) {
+            return { ok: false, message: 'taskDef requires family, executionRoleArn, and at least one container.' };
+          }
+          onProgress(`Registering task definition ${input.family}…`);
+          const td = await api.registerTaskDef(input);
+          ctx.log('info', `AWS ECS registered task def ${td.ref}.`);
+          return { ok: true, message: `Registered task definition ${td.ref}.`, createdResourceId: td.ref, data: { ...td } };
+        }
+        case 'ecs-create-service': {
+          const input = values.service as EcsServiceInput | undefined;
+          if (!input?.cluster || !input.serviceName || !input.taskDefinition || !(input.subnets?.length)) {
+            return { ok: false, message: 'service requires cluster, serviceName, taskDefinition, and subnets.' };
+          }
+          onProgress(`Creating service ${input.serviceName} in ${input.cluster}…`);
+          const svc = await api.createEcsService(input);
+          ctx.log('info', `AWS ECS created service ${svc.name} in ${input.cluster}.`);
+          return { ok: true, message: `Created service ${svc.name}.`, createdResourceId: svc.arn || svc.name, data: { ...svc } };
+        }
+        case 'ecs-deploy-service': {
+          const input = values.service as EcsServiceInput | undefined;
+          if (!input?.cluster || !input.serviceName || !input.taskDefinition || !(input.subnets?.length)) {
+            return { ok: false, message: 'service requires cluster, serviceName, taskDefinition, and subnets.' };
+          }
+          onProgress(`Deploying service ${input.serviceName} in ${input.cluster}…`);
+          const svc = await api.upsertEcsService(input);
+          ctx.log('info', `AWS ECS ${svc.created ? 'created' : 'updated'} service ${svc.name} in ${input.cluster}.`);
+          return { ok: true, message: `${svc.created ? 'Created' : 'Updated'} service ${svc.name}.`, createdResourceId: svc.arn || svc.name, data: { ...svc } };
+        }
+        case 'ecs-wait-service': {
+          const cluster = str('cluster');
+          const service = str('service');
+          if (!cluster || !service) return { ok: false, message: 'Missing cluster or service.' };
+          const timeoutMs = Number(values.timeoutMs) || 300_000;
+          onProgress(`Waiting for ${service} to reach a steady state…`);
+          const res = await api.waitServiceStable(cluster, service, timeoutMs);
+          return {
+            ok: true,
+            message: res.stable ? `${service} is running ${res.running}/${res.desired} task(s).` : `${service} not yet steady (${res.running}/${res.desired} running).`,
+            data: { ...res },
+          };
+        }
+        case 'ecs-delete-service': {
+          const cluster = str('cluster');
+          const service = str('service');
+          if (!cluster || !service) return { ok: false, message: 'Missing cluster or service.' };
+          onProgress(`Deleting service ${service}…`);
+          await api.deleteEcsService(cluster, service);
+          ctx.log('warn', `AWS ECS deleted service ${service} in ${cluster}.`);
+          return { ok: true, message: `Deleted service ${service}.` };
+        }
+        case 'ecs-deregister-taskdef': {
+          const ref = str('ref');
+          const family = str('family');
+          if (!ref && !family) return { ok: false, message: 'Provide a task-definition ref or family.' };
+          if (ref) {
+            onProgress(`Deregistering task definition ${ref}…`);
+            await api.deregisterTaskDef(ref);
+            return { ok: true, message: `Deregistered ${ref}.`, data: { deregistered: [ref] } };
+          }
+          onProgress(`Deregistering all revisions of ${family}…`);
+          const arns = await api.listTaskDefArns(family);
+          for (const arn of arns) await api.deregisterTaskDef(arn);
+          ctx.log('info', `AWS ECS deregistered ${arns.length} revision(s) of ${family}.`);
+          return { ok: true, message: `Deregistered ${arns.length} revision(s) of ${family}.`, data: { deregistered: arns } };
+        }
+        case 'logs-create-group': {
+          const name = str('name');
+          if (!name) return { ok: false, message: 'Missing log group name.' };
+          onProgress(`Ensuring log group ${name}…`);
+          await api.createLogGroup(name, tags);
+          return { ok: true, message: `Log group ${name} ready.`, createdResourceId: name };
+        }
+        case 'logs-delete-group': {
+          const name = str('name');
+          if (!name) return { ok: false, message: 'Missing log group name.' };
+          onProgress(`Deleting log group ${name}…`);
+          await api.deleteLogGroup(name);
+          return { ok: true, message: `Log group ${name} deleted.` };
+        }
+        case 'tags-get-resources': {
+          const key = str('key');
+          const value = str('value');
+          if (!key || !value) return { ok: false, message: 'Provide a tag key and value.' };
+          const arns = await api.resourcesByTag(key, value);
+          return { ok: true, message: `${arns.length} resource(s) tagged ${key}=${value}.`, data: { arns } };
+        }
+        default:
+          return { ok: false, message: `Unknown operation "${operationId}".` };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Operation failed.';
+      ctx.log('error', `AWS deploy op ${operationId} failed: ${message}`);
+      return { ok: false, message };
+    }
+  }
+
   private async runEcsOperation(
     ctx: ConnectorContext,
     operationId: string,
@@ -1519,6 +1741,7 @@ export class AwsConnector implements Connector {
     values: Record<string, unknown>,
     onProgress: OperationProgress,
   ): Promise<OperationResult> {
+    if (DEPLOY_OPS.has(operationId)) return this.runDeployOperation(ctx, operationId, values, onProgress);
     if (operationId.startsWith('ecs-')) return this.runEcsOperation(ctx, operationId, resourceId, values, onProgress);
     if (operationId.startsWith('eks-')) return this.runEksOperation(ctx, operationId, resourceId, values, onProgress);
     if (operationId !== 'launch-ec2') return { ok: false, message: `Unknown operation "${operationId}".` };

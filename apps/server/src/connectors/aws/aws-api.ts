@@ -67,8 +67,33 @@ import {
   DescribeTasksCommand as EcsDescribeTasksCommand,
   UpdateServiceCommand as EcsUpdateServiceCommand,
   StopTaskCommand as EcsStopTaskCommand,
+  CreateClusterCommand as EcsCreateClusterCommand,
+  RegisterTaskDefinitionCommand,
+  DeregisterTaskDefinitionCommand,
+  ListTaskDefinitionsCommand,
+  CreateServiceCommand as EcsCreateServiceCommand,
+  DeleteServiceCommand as EcsDeleteServiceCommand,
   type Cluster as EcsClusterRaw,
+  type KeyValuePair,
+  type PortMapping,
+  type Secret as EcsSecret,
 } from '@aws-sdk/client-ecs';
+import {
+  ECRClient,
+  CreateRepositoryCommand,
+  DeleteRepositoryCommand,
+  DescribeRepositoriesCommand,
+  GetAuthorizationTokenCommand,
+} from '@aws-sdk/client-ecr';
+import {
+  CloudWatchLogsClient,
+  CreateLogGroupCommand,
+  DeleteLogGroupCommand,
+} from '@aws-sdk/client-cloudwatch-logs';
+import {
+  ResourceGroupsTaggingAPIClient,
+  GetResourcesCommand,
+} from '@aws-sdk/client-resource-groups-tagging-api';
 
 export interface AwsAuth {
   accessKeyId: string;
@@ -538,6 +563,62 @@ function normalize(i: Instance): AwsInstance {
   };
 }
 
+// ── App-Replicator ECS-target deploy primitives (Phase 1) ──
+
+/** Registry auth for `docker login`, decoded from ECR's GetAuthorizationToken. */
+export interface EcrAuthToken {
+  /** e.g. https://<acct>.dkr.ecr.<region>.amazonaws.com */
+  endpoint: string;
+  username: string;
+  password: string;
+}
+
+/** One container in a Fargate task definition (an app container or the cloudflared sidecar). */
+export interface EcsContainerDef {
+  name: string;
+  image: string;
+  essential?: boolean;
+  environment?: { name: string; value: string }[];
+  /** ARN references into Secrets Manager / SSM (hardening follow-up; unused in V2a). */
+  secrets?: { name: string; valueFrom: string }[];
+  portMappings?: { containerPort: number; protocol?: 'tcp' | 'udp' }[];
+  command?: string[];
+  /** When set, wires an awslogs driver to this CloudWatch log group. */
+  logGroup?: string;
+  logStreamPrefix?: string;
+}
+
+export interface EcsTaskDefInput {
+  family: string;
+  /** Fargate task-level CPU units as a string, e.g. '256' (0.25 vCPU). */
+  cpu: string;
+  /** Fargate task-level memory (MiB) as a string, e.g. '512'. */
+  memory: string;
+  executionRoleArn: string;
+  taskRoleArn?: string;
+  containers: EcsContainerDef[];
+  tags?: Record<string, string>;
+}
+
+export interface EcsServiceInput {
+  cluster: string;
+  serviceName: string;
+  /** Task definition family:revision or full ARN. */
+  taskDefinition: string;
+  desiredCount: number;
+  subnets: string[];
+  securityGroups?: string[];
+  assignPublicIp?: boolean;
+  tags?: Record<string, string>;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** AWS ECS tags use lower-case { key, value }; map a plain record to that shape. */
+function ecsTagList(tags?: Record<string, string>) {
+  return tags ? Object.entries(tags).map(([key, value]) => ({ key, value })) : undefined;
+}
+
 /**
  * Thin wrapper over the AWS SDK v3 EC2 + STS clients, scoped to one connector
  * instance's credentials and region. Mirrors ProxmoxApi: friendly errors, one
@@ -893,6 +974,30 @@ export class AwsApi {
       this._ecs = new ECSClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
     }
     return this._ecs;
+  }
+
+  private _ecr?: ECRClient;
+  private get ecr(): ECRClient {
+    if (!this._ecr) {
+      this._ecr = new ECRClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._ecr;
+  }
+
+  private _logs?: CloudWatchLogsClient;
+  private get logs(): CloudWatchLogsClient {
+    if (!this._logs) {
+      this._logs = new CloudWatchLogsClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._logs;
+  }
+
+  private _tagging?: ResourceGroupsTaggingAPIClient;
+  private get tagging(): ResourceGroupsTaggingAPIClient {
+    if (!this._tagging) {
+      this._tagging = new ResourceGroupsTaggingAPIClient({ region: this.auth.region, credentials: this.credentials, maxAttempts: 3 });
+    }
+    return this._tagging;
   }
 
   private mapEcsCluster(c: EcsClusterRaw): AwsEcsCluster {
@@ -1670,6 +1775,296 @@ export class AwsApi {
         }),
       );
       return (r.Instances ?? []).map((i) => i.InstanceId ?? '').filter(Boolean);
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  // ── ECR (App-Replicator ECS target) ──
+
+  /** Create the repository if absent (idempotent); returns its pull/push URI. */
+  async ensureEcrRepo(name: string, tags?: Record<string, string>): Promise<{ repositoryUri: string }> {
+    try {
+      const r = await this.ecr.send(
+        new CreateRepositoryCommand({
+          repositoryName: name,
+          imageScanningConfiguration: { scanOnPush: false },
+          tags: tags ? Object.entries(tags).map(([Key, Value]) => ({ Key, Value })) : undefined,
+        }),
+      );
+      const uri = r.repository?.repositoryUri;
+      if (uri) return { repositoryUri: uri };
+    } catch (err) {
+      if ((err as { name?: string })?.name !== 'RepositoryAlreadyExistsException') throw friendly(err);
+    }
+    // Already exists (or create returned no URI) — read it back.
+    try {
+      const d = await this.ecr.send(new DescribeRepositoriesCommand({ repositoryNames: [name] }));
+      const uri = d.repositories?.[0]?.repositoryUri;
+      if (!uri) throw new Error(`ECR repository ${name} exists but has no URI.`);
+      return { repositoryUri: uri };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** A short-lived registry credential for `docker login` (username is always "AWS"). */
+  async ecrAuthToken(): Promise<EcrAuthToken> {
+    try {
+      const r = await this.ecr.send(new GetAuthorizationTokenCommand({}));
+      const a = r.authorizationData?.[0];
+      if (!a?.authorizationToken || !a.proxyEndpoint) throw new Error('ECR did not return an authorization token.');
+      const decoded = Buffer.from(a.authorizationToken, 'base64').toString('utf8'); // "AWS:<password>"
+      const idx = decoded.indexOf(':');
+      return {
+        endpoint: a.proxyEndpoint,
+        username: idx >= 0 ? decoded.slice(0, idx) : 'AWS',
+        password: idx >= 0 ? decoded.slice(idx + 1) : decoded,
+      };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Delete a repository and every image in it (teardown). No-op if already gone. */
+  async deleteEcrRepo(name: string): Promise<void> {
+    try {
+      await this.ecr.send(new DeleteRepositoryCommand({ repositoryName: name, force: true }));
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'RepositoryNotFoundException') return;
+      throw friendly(err);
+    }
+  }
+
+  // ── ECS deploy primitives (create/register/delete — beyond the read+scale ops above) ──
+
+  /** Return an ACTIVE cluster of this name, creating it if absent. Returns its name. */
+  async ensureCluster(name: string, tags?: Record<string, string>): Promise<string> {
+    try {
+      const d = await this.ecs.send(new EcsDescribeClustersCommand({ clusters: [name] }));
+      const existing = d.clusters?.find((c) => c.status === 'ACTIVE');
+      if (existing) return existing.clusterName ?? existing.clusterArn ?? name;
+      const r = await this.ecs.send(new EcsCreateClusterCommand({ clusterName: name, tags: ecsTagList(tags) }));
+      return r.cluster?.clusterName ?? r.cluster?.clusterArn ?? name;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Register a Fargate (awsvpc) task definition; returns the new family:revision + ARN. */
+  async registerTaskDef(input: EcsTaskDefInput): Promise<{ arn: string; family: string; revision: number; ref: string }> {
+    try {
+      const r = await this.ecs.send(
+        new RegisterTaskDefinitionCommand({
+          family: input.family,
+          cpu: input.cpu,
+          memory: input.memory,
+          networkMode: 'awsvpc',
+          requiresCompatibilities: ['FARGATE'],
+          executionRoleArn: input.executionRoleArn,
+          ...(input.taskRoleArn ? { taskRoleArn: input.taskRoleArn } : {}),
+          containerDefinitions: input.containers.map((c) => ({
+            name: c.name,
+            image: c.image,
+            essential: c.essential ?? true,
+            ...(c.command ? { command: c.command } : {}),
+            ...(c.environment ? { environment: c.environment as KeyValuePair[] } : {}),
+            ...(c.secrets ? { secrets: c.secrets as EcsSecret[] } : {}),
+            ...(c.portMappings
+              ? {
+                  portMappings: c.portMappings.map(
+                    (p): PortMapping => ({ containerPort: p.containerPort, protocol: p.protocol ?? 'tcp' }),
+                  ),
+                }
+              : {}),
+            ...(c.logGroup
+              ? {
+                  logConfiguration: {
+                    logDriver: 'awslogs' as const,
+                    options: {
+                      'awslogs-group': c.logGroup,
+                      'awslogs-region': this.auth.region,
+                      'awslogs-stream-prefix': c.logStreamPrefix ?? c.name,
+                    },
+                  },
+                }
+              : {}),
+          })),
+          tags: ecsTagList(input.tags),
+        }),
+      );
+      const td = r.taskDefinition;
+      const family = td?.family ?? input.family;
+      const revision = td?.revision ?? 0;
+      return { arn: td?.taskDefinitionArn ?? '', family, revision, ref: `${family}:${revision}` };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Deregister one task-definition revision (family:revision or ARN). No-op if gone. */
+  async deregisterTaskDef(ref: string): Promise<void> {
+    try {
+      await this.ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: ref }));
+    } catch (err) {
+      const n = (err as { name?: string })?.name;
+      if (n === 'ClientException' || n === 'InvalidParameterException') return; // already deregistered / not found
+      throw friendly(err);
+    }
+  }
+
+  /** All ACTIVE task-definition revision ARNs for a family (for teardown). */
+  async listTaskDefArns(family: string): Promise<string[]> {
+    try {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, nextToken: token }));
+        out.push(...(r.taskDefinitionArns ?? []));
+        token = r.nextToken;
+      } while (token);
+      return out;
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Create a Fargate service in a cluster; returns its ARN. */
+  async createEcsService(input: EcsServiceInput): Promise<{ arn: string; name: string }> {
+    try {
+      const r = await this.ecs.send(
+        new EcsCreateServiceCommand({
+          cluster: input.cluster,
+          serviceName: input.serviceName,
+          taskDefinition: input.taskDefinition,
+          desiredCount: input.desiredCount,
+          launchType: 'FARGATE',
+          networkConfiguration: {
+            awsvpcConfiguration: {
+              subnets: input.subnets,
+              ...(input.securityGroups?.length ? { securityGroups: input.securityGroups } : {}),
+              assignPublicIp: input.assignPublicIp ? 'ENABLED' : 'DISABLED',
+            },
+          },
+          tags: ecsTagList(input.tags),
+        }),
+      );
+      return { arn: r.service?.serviceArn ?? '', name: r.service?.serviceName ?? input.serviceName };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /**
+   * Create the service, or (if an ACTIVE service of that name exists) update it to
+   * the given task definition with a forced new deployment — the idempotent path
+   * the App Replicator uses for deploy and redeploy alike.
+   */
+  async upsertEcsService(input: EcsServiceInput): Promise<{ arn: string; name: string; created: boolean }> {
+    try {
+      const d = await this.ecs.send(new EcsDescribeServicesCommand({ cluster: input.cluster, services: [input.serviceName] }));
+      const existing = d.services?.find((s) => s.status === 'ACTIVE');
+      if (existing) {
+        await this.ecs.send(
+          new EcsUpdateServiceCommand({
+            cluster: input.cluster,
+            service: input.serviceName,
+            taskDefinition: input.taskDefinition,
+            desiredCount: input.desiredCount,
+            forceNewDeployment: true,
+          }),
+        );
+        return { arn: existing.serviceArn ?? '', name: input.serviceName, created: false };
+      }
+    } catch (err) {
+      throw friendly(err);
+    }
+    const created = await this.createEcsService(input);
+    return { ...created, created: true };
+  }
+
+  /** Scale a service to 0 then delete it (force). No-op if already gone/inactive. */
+  async deleteEcsService(cluster: string, service: string): Promise<void> {
+    try {
+      try {
+        await this.updateEcsService(cluster, service, { desiredCount: 0 });
+      } catch {
+        /* may already be gone — proceed to delete */
+      }
+      await this.ecs.send(new EcsDeleteServiceCommand({ cluster, service, force: true }));
+    } catch (err) {
+      const n = (err as { name?: string })?.name;
+      if (n === 'ServiceNotFoundException' || n === 'ServiceNotActiveException') return;
+      throw friendly(err);
+    }
+  }
+
+  /**
+   * Poll DescribeServices until the primary deployment has rolled out and
+   * runningCount ≥ desiredCount, or the timeout elapses. Returns the final counts
+   * plus whether it settled (never throws on timeout — the caller decides).
+   */
+  async waitServiceStable(
+    cluster: string,
+    service: string,
+    timeoutMs = 300_000,
+  ): Promise<{ running: number; desired: number; stable: boolean }> {
+    const deadline = Date.now() + timeoutMs;
+    let last = { running: 0, desired: 0 };
+    while (Date.now() < deadline) {
+      try {
+        const r = await this.ecs.send(new EcsDescribeServicesCommand({ cluster, services: [service] }));
+        const s = r.services?.[0];
+        const running = s?.runningCount ?? 0;
+        const desired = s?.desiredCount ?? 0;
+        last = { running, desired };
+        if (desired === 0) return { ...last, stable: true };
+        const primary = s?.deployments?.find((d) => d.status === 'PRIMARY');
+        const rolloutDone = !primary?.rolloutState || primary.rolloutState === 'COMPLETED';
+        if (running >= desired && rolloutDone) return { ...last, stable: true };
+      } catch (err) {
+        throw friendly(err);
+      }
+      await sleep(5_000);
+    }
+    return { ...last, stable: false };
+  }
+
+  // ── CloudWatch Logs ──
+
+  async createLogGroup(name: string, tags?: Record<string, string>): Promise<void> {
+    try {
+      await this.logs.send(new CreateLogGroupCommand({ logGroupName: name, ...(tags ? { tags } : {}) }));
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'ResourceAlreadyExistsException') return;
+      throw friendly(err);
+    }
+  }
+
+  async deleteLogGroup(name: string): Promise<void> {
+    try {
+      await this.logs.send(new DeleteLogGroupCommand({ logGroupName: name }));
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'ResourceNotFoundException') return;
+      throw friendly(err);
+    }
+  }
+
+  // ── Resource Groups Tagging (teardown orphan sweep) ──
+
+  /** ARNs of every resource carrying tag key=value in this region. */
+  async resourcesByTag(key: string, value: string): Promise<string[]> {
+    try {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const r = await this.tagging.send(
+          new GetResourcesCommand({ TagFilters: [{ Key: key, Values: [value] }], PaginationToken: token }),
+        );
+        for (const m of r.ResourceTagMappingList ?? []) if (m.ResourceARN) out.push(m.ResourceARN);
+        token = r.PaginationToken || undefined;
+      } while (token);
+      return out;
     } catch (err) {
       throw friendly(err);
     }

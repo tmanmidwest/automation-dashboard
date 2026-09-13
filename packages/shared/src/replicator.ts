@@ -56,6 +56,55 @@ export interface ReplicatorPort {
   containerPort: number;
 }
 
+/**
+ * Which backend a deployment runs on. 'docker' materializes it as a compose stack
+ * on a Docker host over SSH (the original target); 'ecs' builds the image and runs
+ * it on AWS Fargate fronted by a cloudflared sidecar. See
+ * docs/app-replicator-ecs-target.md.
+ */
+export type TargetKind = 'docker' | 'ecs';
+
+/**
+ * Account-specific facts an ECS deploy needs that the compose file can't provide.
+ * Configured once on the AWS connector instance (not per deployment). Cerebro
+ * selects existing infrastructure here (subnets/SGs/roles/cluster) — it never
+ * creates a VPC, subnet, security group, or IAM role.
+ */
+export interface EcsDeploymentProfile {
+  /** Existing ECS cluster name (Cerebro lazily creates it only if absent). */
+  cluster: string;
+  /** Subnets for awsvpc networking (from the connector's existing subnet picker). */
+  subnetIds: string[];
+  /** Security group(s) — egress-only is enough with the cloudflared sidecar. */
+  securityGroupIds: string[];
+  /** Pre-provisioned task execution role (ECR pull + logs write). */
+  taskExecutionRoleArn: string;
+  /** Optional app-level task role. */
+  taskRoleArn?: string;
+  /** ENABLED public IP — needed for egress when subnets are public with no NAT. */
+  assignPublicIp?: boolean;
+  /** Docker connector instance used to build + push the image (else chosen at deploy). */
+  builderInstanceId?: string;
+  /** Cloudflare connector instance whose named tunnel the sidecar joins. */
+  cloudflareInstanceId?: string;
+}
+
+/** Teardown handles for an ECS deployment (persisted on the deployment row). */
+export interface EcsDeploymentRefs {
+  cluster: string;
+  serviceArn: string;
+  /** Task-definition family — every revision is deregistered on teardown. */
+  taskDefFamily: string;
+  /** ECR repository name (…/cerebro/<project>) — force-deleted on teardown. */
+  ecrRepositoryName: string;
+  /** CloudWatch log group (/cerebro/<project>). */
+  logGroupName: string;
+  /** The Docker connector instance the image was built on. */
+  builderInstanceId: string;
+  /** Container port the cloudflared sidecar routes to (the app's published port). */
+  routedContainerPort?: number;
+}
+
 export type ReplicatorDeploymentStatus = 'pending' | 'deployed' | 'error' | 'updating' | 'stopped';
 
 /** One running instance of an app on a target host. */
@@ -66,8 +115,19 @@ export interface ReplicatorDeployment {
   /** Operator-chosen name → sanitized compose project name. */
   name: string;
   project: string;
+  /**
+   * Which backend this deployment runs on. Absent/`'docker'` for the original
+   * Docker-host target; `'ecs'` for AWS Fargate.
+   */
+  targetKind?: TargetKind;
+  /**
+   * The target ConnectorInstance id. Historically named for Docker (the first and
+   * only target); for an ECS deployment this is the AWS connector instance.
+   */
   dockerInstanceId: string;
   dockerInstanceName?: string;
+  /** ECS teardown handles (present only when targetKind === 'ecs'). */
+  ecs?: EcsDeploymentRefs | null;
   /** Non-secret resolved variable values (keyed by variable name). */
   values: Record<string, string>;
   /** Names of variables whose values live in the vault (`deployment:<id>:<name>`). */
@@ -145,7 +205,13 @@ export interface RegisterAppInput {
 
 /** Deploy an app as a new isolated instance. */
 export interface DeployInput {
+  /**
+   * Target ConnectorInstance id (a Docker connector for a 'docker' deploy, an AWS
+   * connector for an 'ecs' deploy). Named for Docker for backward compatibility.
+   */
   dockerInstanceId: string;
+  /** Which backend to deploy on. Absent = 'docker' (backward compatible). */
+  targetKind?: TargetKind;
   name: string;
   /** Non-secret variable values keyed by name (missing → the repo default). */
   values: Record<string, string>;
@@ -155,6 +221,10 @@ export interface DeployInput {
   ports: Record<string, number>;
   /** `docker compose build --no-cache` — for repos that build their own image. */
   forceRebuild?: boolean;
+  /** ECS only: Fargate task CPU units (e.g. '256'); default 256. */
+  taskCpu?: string;
+  /** ECS only: Fargate task memory in MiB (e.g. '512'); default 512. */
+  taskMemory?: string;
 }
 
 /**
@@ -250,11 +320,14 @@ export interface AddIngressInput {
   sslForced?: boolean;
 }
 
-/** A Docker connector instance eligible as a deploy target. */
+/** A connector instance eligible as a deploy target (Docker host or AWS/ECS). */
 export interface ReplicatorTarget {
   instanceId: string;
   name: string;
+  /** Which backend this target deploys to. */
+  targetKind: TargetKind;
+  /** Docker: the SSH host IP (also the ingress forward host). ECS: the region. */
   hostIp: string;
-  /** False when the connector has no SSH configured (deploys need SSH). */
+  /** False when the target can't accept a deploy (Docker: no SSH; ECS: no profile). */
   deployable: boolean;
 }

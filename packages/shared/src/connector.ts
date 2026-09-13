@@ -344,6 +344,14 @@ export interface OperationResult {
   message: string;
   /** Id of a newly created resource, if the operation created one. */
   createdResourceId?: string;
+  /**
+   * Structured result payload for operations invoked programmatically (e.g. by the
+   * App Replicator's deploy engine) rather than through the operation UI, which needs
+   * to read back values the operation produced — an ECR repository URI, a registry
+   * auth token, a task-definition revision, a list of tagged ARNs, etc. UI-driven
+   * operations leave this undefined.
+   */
+  data?: Record<string, unknown>;
 }
 
 /** Callback a connector uses to report progress lines during a long operation. */

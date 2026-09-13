@@ -253,8 +253,10 @@ infra). Every deploy/teardown writes an audit event → shows up in Ship's Log.
 - **Phase 3 — Updates.** ✅ **Built.** Hourly `git ls-remote` sweep → `updateAvailable` flag + amber
   chip + highlighted redeploy (clears the flag); `replicator.update_available` audit/timeline event on
   the rising edge for an opt-in Automations auto-redeploy rule. Migration `0018_replicator_updates`.
-- **V2 — AWS ECS target.** Build → push to ECR → run on Fargate. Deferred; the `target` abstraction
-  (Docker instance today) is designed to accept an ECS target later.
+- **V2 — AWS ECS target.** Build the image on a Docker host over SSH → push to ECR → run on Fargate,
+  fronted by a **`cloudflared` sidecar** (reuses the existing CF `tunnel-add-route` ingress; no ALB).
+  Introduces a `DeployTarget` seam so the Docker path is unchanged. Full design + phasing in
+  [app-replicator-ecs-target.md](app-replicator-ecs-target.md).
 
 ## Safety & edge cases
 

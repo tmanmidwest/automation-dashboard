@@ -94,6 +94,62 @@ export class RepoIntrospectService {
   }
 
   /**
+   * Shallow-clone the repo and return the raw compose file text — what the ECS
+   * target needs to translate the compose into a Fargate task definition (the
+   * register-time introspector only returns the derived variable schema). A
+   * Dockerfile-only repo yields the generated wrapper text. See
+   * docs/app-replicator-ecs-target.md.
+   */
+  async fetchComposeText(input: IntrospectRepoInput): Promise<{ text: string; composePath: string; usesGeneratedCompose: boolean }> {
+    const gitUrl = input.gitUrl?.trim();
+    if (!gitUrl) throw new BadRequestException('A git repository URL is required.');
+    const ref = input.gitRef?.trim() || '';
+    const cred = await this.resolveCred(input.gitCredKey);
+    const workdir = await mkdtemp(join(tmpdir(), 'cerebro-ecs-compose-'));
+    const credFile = join(workdir, '.gitcred');
+    const repoDir = join(workdir, 'repo');
+    try {
+      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' };
+      const helper = cred ? ['-c', `credential.helper=store --file=${credFile}`] : [];
+      if (cred?.secret) {
+        const host = cred.host?.trim() || hostFromUrl(gitUrl);
+        const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
+        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+      }
+      try {
+        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), gitUrl, repoDir], workdir, env);
+      } catch (err) {
+        if (!ref) throw err;
+        await this.run('git', [...helper, 'clone', gitUrl, repoDir], workdir, env);
+        await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
+      }
+      const explicit = input.gitPath?.trim().replace(/^\/+/, '');
+      let composePath: string | null = null;
+      if (explicit) {
+        if (await exists(join(repoDir, explicit))) composePath = explicit;
+        else throw new BadRequestException(`No file at "${explicit}" in the repo.`);
+      } else {
+        for (const c of COMPOSE_CANDIDATES) if (await exists(join(repoDir, c))) { composePath = c; break; }
+      }
+      if (composePath) {
+        const text = await readFile(join(repoDir, composePath), 'utf8');
+        return { text, composePath, usesGeneratedCompose: false };
+      }
+      if (await exists(join(repoDir, 'Dockerfile'))) {
+        const dockerfile = await readFile(join(repoDir, 'Dockerfile'), 'utf8');
+        const wrapper = generateComposeWrapper(exposedPortOf(dockerfile) ?? 8080);
+        return { text: wrapper, composePath: 'docker-compose.yml (generated)', usesGeneratedCompose: true };
+      }
+      throw new BadRequestException('No docker-compose.yml or Dockerfile found in the repository.');
+    } catch (err) {
+      const msg = redact(err instanceof Error ? err.message : 'Failed to read the repository.', cred);
+      throw err instanceof BadRequestException ? new BadRequestException(msg) : new BadRequestException(`Could not read the compose file: ${msg}`);
+    } finally {
+      await rm(workdir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
    * The current commit at the tip of a repo's ref, without cloning
    * (`git ls-remote`). Used by the update-check sweep to tell whether a
    * deployment's repo has moved ahead of its deployed commit. Returns null on

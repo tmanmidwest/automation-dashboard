@@ -347,7 +347,11 @@ model ReplicatorDeployment {
   id               String        @id @default(cuid())
   appId            String
   app              ReplicatorApp @relation(fields: [appId], references: [id], onDelete: Cascade)
-  /// The target Docker ConnectorInstance.
+  /// Which backend this deployment runs on: 'docker' (compose over SSH) or 'ecs'
+  /// (AWS Fargate). See docs/app-replicator-ecs-target.md.
+  targetKind       String        @default("docker")
+  /// The target ConnectorInstance. Named for Docker (the original target); for an
+  /// 'ecs' deployment this is the AWS connector instance.
   dockerInstanceId String
   /// Operator-chosen name.
   name             String
@@ -369,6 +373,8 @@ model ReplicatorDeployment {
   updateAvailable  Boolean       @default(false)
   /// The remote tip commit that's available but not yet deployed (Phase 3).
   availableCommit  String?
+  /// ECS teardown handles (EcsDeploymentRefs) as JSON; null for a Docker deployment.
+  ecs              Json?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   ingress          ReplicatorIngress[]

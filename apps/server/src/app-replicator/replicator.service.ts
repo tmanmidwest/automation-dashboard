@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { RepoIntrospectService } from './repo-introspect.service';
 import { dockerTargetFrom } from './docker-target';
+import { ecsProfileFrom, regionOf } from './ecs-target';
 import type {
   IntrospectRepoInput, IntrospectResult, RegisterAppInput, ReplicatorApp, ReplicatorVariable, ReplicatorTarget,
   ReplicatorSchemaDiff, RefreshSchemaResult,
@@ -109,17 +110,30 @@ export class ReplicatorService {
     await this.prisma.replicatorApp.delete({ where: { id } });
   }
 
-  /** Docker connector instances, flagged by whether they can accept a deploy (SSH configured). */
+  /**
+   * Deploy targets: Docker connector instances (flagged by whether SSH is set up)
+   * and AWS connector instances that carry a complete ECS deployment profile.
+   */
   async listTargets(): Promise<ReplicatorTarget[]> {
-    const dockerInstances = (await this.instances.list()).filter((i) => i.connectorId === 'docker' && i.enabled);
+    const instances = (await this.instances.list()).filter((i) => i.enabled && (i.connectorId === 'docker' || i.connectorId === 'aws'));
     const out: ReplicatorTarget[] = [];
-    for (const inst of dockerInstances) {
-      try {
-        const ctx = await this.instances.contextFor(inst);
-        const t = dockerTargetFrom(ctx);
-        out.push({ instanceId: inst.id, name: inst.name, hostIp: t.hostIp, deployable: t.deployable });
-      } catch {
-        out.push({ instanceId: inst.id, name: inst.name, hostIp: '', deployable: false });
+    for (const inst of instances) {
+      if (inst.connectorId === 'docker') {
+        try {
+          const ctx = await this.instances.contextFor(inst);
+          const t = dockerTargetFrom(ctx);
+          out.push({ instanceId: inst.id, name: inst.name, targetKind: 'docker', hostIp: t.hostIp, deployable: t.deployable });
+        } catch {
+          out.push({ instanceId: inst.id, name: inst.name, targetKind: 'docker', hostIp: '', deployable: false });
+        }
+      } else {
+        try {
+          const ctx = await this.instances.contextFor(inst);
+          const profile = ecsProfileFrom(ctx);
+          out.push({ instanceId: inst.id, name: inst.name, targetKind: 'ecs', hostIp: regionOf(ctx), deployable: !!profile && !!profile.builderInstanceId });
+        } catch {
+          out.push({ instanceId: inst.id, name: inst.name, targetKind: 'ecs', hostIp: '', deployable: false });
+        }
       }
     }
     return out;
