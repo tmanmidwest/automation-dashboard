@@ -86,7 +86,7 @@ export class EcsDeployTarget implements DeployTarget {
 
     // 4. Translate the compose file into a Fargate task definition.
     onPhase('Translating compose…');
-    let taskDef, warnings: string[], primaryContainerPort: number | null;
+    let taskDef, warnings: string[], primaryContainerPort: number | null, primaryContainerName: string | null;
     try {
       const composeInfo = await this.repo.fetchComposeText({
         gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef ?? undefined, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
@@ -108,6 +108,7 @@ export class EcsDeployTarget implements DeployTarget {
       taskDef = result.taskDef;
       warnings = result.warnings;
       primaryContainerPort = result.primaryContainerPort;
+      primaryContainerName = result.primaryContainerName;
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : 'Failed to translate the compose file.' };
     }
@@ -132,7 +133,49 @@ export class EcsDeployTarget implements DeployTarget {
     const taskDefFamily = String(reg.data?.family ?? project);
     if (!taskDefRef) return { ok: false, message: 'ECS did not return the task definition revision.' };
 
-    // 8. Create or update the Fargate service.
+    // 8. Ingress plumbing (ALB target group), when a published port + ALB SGs exist.
+    //    The hostname listener rule + DNS record are added later via IngressService.
+    let albArn: string | undefined;
+    let albDnsName: string | undefined;
+    let albListenerArn: string | undefined;
+    let targetGroupArn: string | undefined;
+    let loadBalancers: EcsServiceInput['loadBalancers'];
+    const canExpose = !!primaryContainerPort && !!primaryContainerName && profile.albSecurityGroupIds.length > 0;
+    if (canExpose) {
+      onPhase('Ensuring the load balancer…');
+      const alb = await this.op(spec.targetInstanceId, 'alb-ensure', {
+        alb: { name: 'cerebro-replicator', subnetIds: profile.subnetIds, securityGroupIds: profile.albSecurityGroupIds, tags: { 'cerebro:managed': 'replicator-alb' } },
+      });
+      if (!alb.ok) return { ok: false, message: `Load balancer: ${alb.message}` };
+      albArn = String(alb.data?.albArn ?? '');
+      albDnsName = String(alb.data?.dnsName ?? '');
+      albListenerArn = String(alb.data?.listenerArn ?? '');
+      const vpcId = String(alb.data?.vpcId ?? '');
+
+      // Reuse the deployment's existing target group on redeploy; else create one.
+      targetGroupArn = spec.existingEcs?.targetGroupArn;
+      if (!targetGroupArn) {
+        const tgName = `cbo-${project}`.replace(/[^A-Za-z0-9-]/g, '-').slice(0, 32).replace(/-+$/, '');
+        const tg = await this.op(spec.targetInstanceId, 'alb-create-target-group', {
+          targetGroup: { name: tgName, vpcId, port: primaryContainerPort, tags },
+        });
+        if (!tg.ok) return { ok: false, message: `Target group: ${tg.message}` };
+        targetGroupArn = String(tg.data?.targetGroupArn ?? '');
+      }
+
+      // Let the ALB reach the tasks on the container port (idempotent).
+      if (profile.securityGroupIds.length) {
+        const auth = await this.op(spec.targetInstanceId, 'sg-authorize-task-ingress', {
+          taskSgIds: profile.securityGroupIds, albSgIds: profile.albSecurityGroupIds, port: primaryContainerPort,
+        });
+        if (!auth.ok) warnings.push(`Security-group ingress: ${auth.message}`);
+      }
+      loadBalancers = [{ targetGroupArn, containerName: primaryContainerName!, containerPort: primaryContainerPort! }];
+    } else if (primaryContainerPort && !profile.albSecurityGroupIds.length) {
+      warnings.push('No ALB security group configured, so the service runs without a public load balancer.');
+    }
+
+    // 9. Create or update the Fargate service.
     onPhase('Deploying the Fargate service…');
     const serviceInput: EcsServiceInput = {
       cluster,
@@ -142,13 +185,14 @@ export class EcsDeployTarget implements DeployTarget {
       subnets: profile.subnetIds,
       securityGroups: profile.securityGroupIds,
       assignPublicIp: profile.assignPublicIp,
+      loadBalancers,
       tags,
     };
     const svcRes = await this.op(spec.targetInstanceId, 'ecs-deploy-service', { service: serviceInput });
     if (!svcRes.ok) return { ok: false, message: `Service: ${svcRes.message}` };
     const serviceArn = String(svcRes.data?.arn ?? '');
 
-    // 9. Wait for a steady state (soft — a timeout is a note, not a failure).
+    // 10. Wait for a steady state (soft — a timeout is a note, not a failure).
     const wait = await this.op(spec.targetInstanceId, 'ecs-wait-service', { cluster, service: project, timeoutMs: 300_000 });
 
     const refs: EcsDeploymentRefs = {
@@ -159,6 +203,11 @@ export class EcsDeployTarget implements DeployTarget {
       logGroupName,
       builderInstanceId: profile.builderInstanceId,
       routedContainerPort: primaryContainerPort ?? undefined,
+      albArn: albArn || undefined,
+      albDnsName: albDnsName || undefined,
+      albListenerArn: albListenerArn || undefined,
+      targetGroupArn: targetGroupArn || undefined,
+      targetContainerName: primaryContainerName || undefined,
     };
     const parts = [`Deployed ${project} to ECS cluster ${cluster}.`, wait.message];
     if (warnings.length) parts.push(`Notes: ${warnings.join(' ')}`);
@@ -184,6 +233,12 @@ export class EcsDeployTarget implements DeployTarget {
     if (refs?.cluster) {
       phase('Deleting the ECS service…');
       await call('ecs-delete-service', { cluster: refs.cluster, service: ctx.project }, 'delete service');
+    }
+    if (refs?.targetGroupArn) {
+      // After the service is gone, the target group is no longer in use. (If ECS is
+      // still draining it, this surfaces as a problem for a later retry / tag sweep.)
+      phase('Deleting the target group…');
+      await call('alb-delete-target-group', { targetGroupArn: refs.targetGroupArn }, 'delete target group');
     }
     if (refs?.taskDefFamily) {
       phase('Deregistering task definitions…');

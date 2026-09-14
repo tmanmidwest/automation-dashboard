@@ -5,7 +5,9 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { dockerTargetFrom } from './docker-target';
 import type {
   AddIngressInput, IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, ReplicatorPort, ReplicatorIngressKind,
+  TargetKind, EcsDeploymentRefs,
 } from '@cerebro/shared';
+import type { ReplicatorDeployment as DeploymentRow } from '@prisma/client';
 import type { ActorCtx } from '../secrets/secrets.service';
 import type { ReplicatorIngress as IngressRow } from '@prisma/client';
 
@@ -61,12 +63,18 @@ export class IngressService {
     const dep = await this.prisma.replicatorDeployment.findUnique({ where: { id: deploymentId } });
     if (!dep) throw new NotFoundException('Deployment not found.');
 
+    const hostname = input.hostname?.trim();
+    if (!hostname) throw new BadRequestException('A hostname is required.');
+
+    // ECS deployments front their ALB with a Cloudflare DNS record, not a tunnel/NPM.
+    if (((dep.targetKind as TargetKind) ?? 'docker') === 'ecs') {
+      return this.addEcs(dep, input, hostname, actor);
+    }
+
     const ports = (dep.ports as unknown as ReplicatorPort[]) ?? [];
     if (!ports.some((p) => p.hostPort === input.hostPort)) {
       throw new BadRequestException('That port is not published by this deployment.');
     }
-    const hostname = input.hostname?.trim();
-    if (!hostname) throw new BadRequestException('A hostname is required.');
 
     const hostIp = await this.hostIpFor(dep.dockerInstanceId);
     if (!hostIp) throw new BadRequestException('Could not determine the deployment host IP from its Docker connector.');
@@ -108,6 +116,70 @@ export class IngressService {
     return this.map(row, names.get(row.instanceId));
   }
 
+  /**
+   * ECS ingress: add an ALB host-header rule (hostname → the deployment's target
+   * group) on its AWS connector, plus a proxied Cloudflare CNAME (hostname → the
+   * ALB DNS name) on the chosen CF connector. Both handles are stored so teardown
+   * can undo them. Best-effort rollback of the rule if the DNS step fails.
+   */
+  private async addEcs(dep: DeploymentRow, input: AddIngressInput, hostname: string, actor: ActorCtx): Promise<ReplicatorIngress> {
+    const refs = (dep.ecs as unknown as EcsDeploymentRefs | null) ?? null;
+    if (!refs?.albListenerArn || !refs.targetGroupArn || !refs.albDnsName) {
+      throw new BadRequestException('This ECS deployment has no load balancer to route to — it has no published port, or no ALB security group was configured on the AWS connector.');
+    }
+    if (input.kind !== 'cloudflare') throw new BadRequestException('ECS deployments are exposed via a Cloudflare DNS record — choose a Cloudflare target.');
+
+    // 1. ALB listener rule on the deployment's AWS connector.
+    const ruleRes = await this.instances.runResourceOperationAwait(dep.dockerInstanceId, 'alb-create-rule', undefined, {
+      rule: { listenerArn: refs.albListenerArn, hostname, targetGroupArn: refs.targetGroupArn },
+    });
+    if (!ruleRes.ok) throw new BadGatewayException(ruleRes.message || 'Could not add the ALB listener rule.');
+    const ruleArn = String(ruleRes.data?.ruleArn ?? '');
+
+    // 2. Resolve the CF zone for the hostname, then create a proxied CNAME → ALB.
+    const zoneId = await this.resolveZone(input.instanceId, hostname);
+    if (!zoneId) {
+      await this.instances.runResourceOperationAwait(dep.dockerInstanceId, 'alb-delete-rule', undefined, { ruleArn }).catch(() => {});
+      throw new BadRequestException('No Cloudflare zone on that connector matches the hostname.');
+    }
+    const dnsRes = await this.instances.runResourceOperationAwait(input.instanceId, 'create-dns-record', undefined, {
+      zone: zoneId, type: 'CNAME', name: hostname, content: refs.albDnsName, proxied: true,
+    });
+    if (!dnsRes.ok || !dnsRes.createdResourceId) {
+      await this.instances.runResourceOperationAwait(dep.dockerInstanceId, 'alb-delete-rule', undefined, { ruleArn }).catch(() => {});
+      throw new BadGatewayException(dnsRes.message || 'Cloudflare rejected the DNS record.');
+    }
+
+    const ports = (dep.ports as unknown as ReplicatorPort[]) ?? [];
+    const row = await this.prisma.replicatorIngress.create({
+      data: {
+        deploymentId: dep.id,
+        kind: 'cloudflare',
+        instanceId: input.instanceId,
+        service: ports[0]?.service ?? 'app',
+        hostPort: refs.routedContainerPort ?? 0,
+        hostname,
+        ref: dnsRes.createdResourceId, // "zoneId:recordId" — the CF teardown handle
+        meta: { ruleArn, awsInstanceId: dep.dockerInstanceId },
+      },
+    });
+    await this.audit.record({ ...actor, action: 'replicator.ingress_add', target: `${dep.project} → ${hostname}`, meta: { kind: 'ecs-alb' } });
+    const names = await this.instanceNames();
+    return this.map(row, names.get(row.instanceId));
+  }
+
+  /** Longest-suffix match of a hostname against the CF connector's zones → zone id. */
+  private async resolveZone(cfInstanceId: string, hostname: string): Promise<string | null> {
+    const zones = await this.instances.listResources(cfInstanceId, 'zone').catch(() => []);
+    let bestId: string | null = null;
+    let bestLen = -1;
+    for (const z of zones) {
+      const n = z.name;
+      if (n && (hostname === n || hostname.endsWith(`.${n}`)) && n.length > bestLen) { bestId = z.id; bestLen = n.length; }
+    }
+    return bestId;
+  }
+
   // ── Remove ─────────────────────────────────────────────────────────
 
   async remove(ingressId: string, actor: ActorCtx): Promise<{ ok: boolean; message: string }> {
@@ -135,7 +207,19 @@ export class IngressService {
 
   /** Best-effort: remove the actual route/proxy host. Returns a problem string or null. */
   private async teardown(row: IngressRow): Promise<string | null> {
+    const meta = (row.meta as unknown as { ruleArn?: string; awsInstanceId?: string } | null) ?? null;
     try {
+      // ECS/ALB ingress: remove the CF DNS record + the ALB listener rule.
+      if (meta?.ruleArn) {
+        const problems: string[] = [];
+        const dns = await this.instances.deleteResource(row.instanceId, 'dns_record', row.ref).catch((e) => ({ ok: false, message: e instanceof Error ? e.message : 'DNS delete failed' }));
+        if (!dns.ok) problems.push(dns.message);
+        if (meta.awsInstanceId) {
+          const rule = await this.instances.runResourceOperationAwait(meta.awsInstanceId, 'alb-delete-rule', undefined, { ruleArn: meta.ruleArn }).catch((e) => ({ ok: false, message: e instanceof Error ? e.message : 'rule delete failed' }));
+          if (!rule.ok) problems.push(rule.message);
+        }
+        return problems.length ? problems.join('; ') : null;
+      }
       if (row.kind === 'cloudflare') {
         const res = await this.instances.runResourceOperationAwait(row.instanceId, 'tunnel-delete-route', row.ref, { hostname: row.hostname });
         return res.ok ? null : res.message;

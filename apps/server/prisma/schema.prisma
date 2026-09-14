@@ -398,9 +398,12 @@ model ReplicatorIngress {
   service      String
   hostPort     Int
   hostname     String
-  /// Teardown handle: CF → the tunnel id (the route is keyed by `hostname`);
-  /// NPM → the created proxy-host id.
+  /// Teardown handle: CF tunnel route → the tunnel id (route keyed by `hostname`);
+  /// NPM → the created proxy-host id; ECS/ALB → the CF DNS record id ("zoneId:recordId").
   ref          String
+  /// Extra teardown handles for the ECS/ALB path (ALB listener rule ARN + the AWS
+  /// connector that owns it) as JSON; null for CF-tunnel / NPM ingress.
+  meta         Json?
   createdAt    DateTime             @default(now())
 
   @@index([deploymentId])

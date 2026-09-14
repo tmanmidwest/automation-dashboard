@@ -100,8 +100,10 @@ export interface TaskDefBuildInput {
 export interface TaskDefResult {
   taskDef: EcsTaskDefInput;
   warnings: string[];
-  /** The first published container port — the sidecar's default route target. */
+  /** The first published container port — the ALB target-group port. */
   primaryContainerPort: number | null;
+  /** The container that publishes the primary port — the ALB forward target. */
+  primaryContainerName: string | null;
   /** Compose services that build from the repo (all share the one built ECR image). */
   buildServices: string[];
 }
@@ -120,6 +122,7 @@ export function composeToTaskDef(input: TaskDefBuildInput): TaskDefResult {
   const containers: EcsContainerDef[] = [];
   const buildServices: string[] = [];
   let primaryContainerPort: number | null = null;
+  let primaryContainerName: string | null = null;
 
   for (const [name, svcRaw] of Object.entries(services)) {
     const svc = (svcRaw ?? {}) as Record<string, unknown>;
@@ -132,7 +135,7 @@ export function composeToTaskDef(input: TaskDefBuildInput): TaskDefResult {
     }
     if (svc.volumes) warnings.push(`Service "${name}" declares volumes; Fargate host mounts aren't supported, so they were ignored.`);
     const cports = containerPorts(svc.ports, input.env);
-    if (primaryContainerPort == null && cports.length) primaryContainerPort = cports[0];
+    if (primaryContainerPort == null && cports.length) { primaryContainerPort = cports[0]; primaryContainerName = slug(name); }
     containers.push({
       name: slug(name),
       image,
@@ -168,5 +171,5 @@ export function composeToTaskDef(input: TaskDefBuildInput): TaskDefResult {
     containers,
     tags: input.tags,
   };
-  return { taskDef, warnings, primaryContainerPort, buildServices };
+  return { taskDef, warnings, primaryContainerPort, primaryContainerName, buildServices };
 }

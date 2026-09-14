@@ -25,27 +25,33 @@ translate the compose model into AWS primitives ourselves — that translation *
 
 Two decisions keep that translation tractable rather than "port the whole AWS console":
 
-### Decision 1 — Ingress via a `cloudflared` sidecar, **not** an ALB
+### Decision 1 — Ingress via a shared ALB + a Cloudflare DNS record (chosen 2026-09-14)
 
-The instinct — Fargate service → ALB → target group → listener → security-group ingress → CF CNAME
-to the ALB — forces us to build the single largest missing piece (ALB/target-group/listener
-creation) into the AWS connector, plus SG ingress rules, and it's the messiest thing to unwind on
-teardown.
+A DNS record must point at something **stable**, and Fargate tasks get **ephemeral** public IPs that
+change whenever ECS replaces the task — so a raw DNS-record-→-task-IP breaks silently on the next
+task recycle. The stable frontend is an **Application Load Balancer**:
 
-Instead we add a **`cloudflared` sidecar container to the task definition**, pointed at a named
-Cloudflare tunnel. Then:
+- **One shared ALB per AWS connector instance** (internet-facing, lazily created, tagged
+  `cerebro:managed=replicator-alb`) with a single HTTP:80 listener whose default action is a 404.
+  Sharing keeps it to ~one ALB's cost per connector rather than one per app.
+- **Per deployment:** an IP-type **target group** on the app's published container port, wired into
+  the ECS **service** (`loadBalancers`), so ECS auto-registers/deregisters task IPs. A **listener
+  rule** (host-header = the hostname → forward to that target group) makes the hostname reachable.
+- **Cloudflare:** a proxied **DNS CNAME** (`hostname → <alb>.elb.amazonaws.com`) via the CF
+  connector's existing `create-dns-record` op. CF terminates public TLS and forwards to the ALB on
+  HTTP:80, so no ACM certificate is needed on the ALB.
+- **Security groups:** the operator provides the ALB's SG (inbound 80) in the profile; Cerebro
+  ensures a targeted ingress rule so the ALB SG can reach the task SG on the container port
+  (idempotent, left in place on teardown as it's harmless and may be shared).
 
-- We **reuse the existing CF ingress path almost verbatim** — the same `tunnel-add-route` operation
-  the Docker target already calls, with `service: http://localhost:<containerPort>` (localhost
-  because the sidecar shares the task's network namespace with the app container).
-- **No ALB, no target group, no listener, no inbound security-group rules, no public IP.** The task
-  needs egress only. Cheaper, more secure, and teardown shrinks to a handful of deletes.
+Trade-off vs. the rejected `cloudflared`-sidecar model: a public endpoint exists (mitigated by CF
+proxy) and ~one ALB's cost per connector, but it's the standard AWS pattern, needs no per-deployment
+tunnel/token machinery, and reuses the CF connector's DNS op as-is.
 
-Trade-off: a small `cloudflared` sidecar per task and a tunnel token injected into the task. The
-user already runs CF tunnels, and the token is a vault secret.
-
-> NPM ingress is **not** offered for the ECS target — an NPM proxy host forwards to a routable
-> `host:port`, which a Fargate task behind a tunnel doesn't have. ECS ingress is Cloudflare-only.
+> A `cloudflared`-sidecar tunnel model (no ALB, no public IP) was considered and **rejected** — it
+> would have needed new CF connector capability (create-tunnel + fetch-token, absent today) and a
+> per-deployment tunnel for isolation. NPM ingress is also not offered for ECS (an NPM proxy host
+> needs a routable `host:port`).
 
 ### Decision 2 — Build & push the image on an **existing Docker host over SSH**
 
@@ -263,12 +269,16 @@ Docker.
 
 # Implementation plan (file-level)
 
-> **Build status (2026-09-12):** Phase 1 ✅ and Phase 2 ✅ built — server `tsc` + shared build green,
-> Prisma client regenerated, migration `0020_replicator_target` written. **Not committed, not
-> live-tested** (needs a real AWS account + a Docker builder host). Phase 3 (ingress + cost + web UI)
-> is next. Phase 2 landed the `dockerInstanceId` column *name* as-is (it holds the target instance id
-> for both kinds) rather than renaming it — additive columns only, to avoid a web/controller blast
-> radius.
+> **Build status (2026-09-14):** Phases 1 ✅, 2 ✅, and 3 ✅ built — web + server `tsc` + shared build
+> all green, Prisma regenerated, migrations `0020_replicator_target` + `0021_replicator_ingress_meta`
+> written. **Not committed, not live-tested** (needs a real AWS account + a Docker builder host).
+> Phase 3 implements the **ALB ingress** the user chose (see Decision 1) — not the rejected sidecar:
+> a shared ALB per connector, per-deployment target group wired into the service, host-header listener
+> rules + a proxied Cloudflare DNS CNAME per hostname, plus a Fargate cost estimate in the deploy
+> wizard and the ECS target picker / cpu-mem / ingress UI. Phase 2 kept the `dockerInstanceId` column
+> *name* (it holds the target instance id for both kinds) — additive columns only, no web/controller
+> blast radius. **The ECS-target arc (Phases 1–3) is code-complete.** A hands-on live-test script is
+> in [app-replicator-ecs-live-test.md](app-replicator-ecs-live-test.md).
 
 Three phases, each independently green + verifiable. Phase 1 is isolated (AWS connector only), so it
 lands and gets tested against a real account before any replicator code changes. Phase 2 is the

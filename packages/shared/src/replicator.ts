@@ -75,8 +75,13 @@ export interface EcsDeploymentProfile {
   cluster: string;
   /** Subnets for awsvpc networking (from the connector's existing subnet picker). */
   subnetIds: string[];
-  /** Security group(s) — egress-only is enough with the cloudflared sidecar. */
+  /** Security group(s) for the Fargate tasks. */
   securityGroupIds: string[];
+  /**
+   * Security group(s) for the shared ALB (inbound 80). Required to expose an ECS
+   * deployment publicly; without it the service runs but gets no load balancer.
+   */
+  albSecurityGroupIds: string[];
   /** Pre-provisioned task execution role (ECR pull + logs write). */
   taskExecutionRoleArn: string;
   /** Optional app-level task role. */
@@ -101,8 +106,18 @@ export interface EcsDeploymentRefs {
   logGroupName: string;
   /** The Docker connector instance the image was built on. */
   builderInstanceId: string;
-  /** Container port the cloudflared sidecar routes to (the app's published port). */
+  /** The app's primary published container port (the ALB target-group port). */
   routedContainerPort?: number;
+  /** Shared ALB ARN fronting this deployment (present when ingress is wired). */
+  albArn?: string;
+  /** The ALB's DNS name — the CNAME target for ingress DNS records. */
+  albDnsName?: string;
+  /** The ALB's HTTP:80 listener ARN — where host-header rules are added. */
+  albListenerArn?: string;
+  /** This deployment's target group ARN (deleted on teardown). */
+  targetGroupArn?: string;
+  /** The container the target group forwards to. */
+  targetContainerName?: string;
 }
 
 export type ReplicatorDeploymentStatus = 'pending' | 'deployed' | 'error' | 'updating' | 'stopped';
@@ -318,6 +333,39 @@ export interface AddIngressInput {
   certificateId?: number;
   /** NPM: force SSL when a cert is attached. */
   sslForced?: boolean;
+}
+
+/** A rough monthly cost estimate for an ECS/Fargate deployment. */
+export interface EcsCostEstimate {
+  /** Fargate task compute per month. */
+  taskUsd: number;
+  /** Public IPv4 address charge per month (AWS bills it since 2024). */
+  publicIpUsd: number;
+  total: number;
+  note: string;
+}
+
+/**
+ * Approximate monthly USD for a Fargate task at the given CPU/memory. Uses
+ * us-east-1 on-demand rates and excludes the shared ALB, data transfer, and
+ * ECR/logs storage — a deploy-wizard sanity figure, not a billing guarantee.
+ */
+export function estimateEcsMonthlyUsd(cpu: string, memoryMiB: string, opts?: { assignPublicIp?: boolean }): EcsCostEstimate {
+  const HOURS = 730;
+  const VCPU_HR = 0.04048;
+  const GB_HR = 0.004445;
+  const PUBLIC_IP_HR = 0.005;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const vcpu = (Number(cpu) || 256) / 1024;
+  const gb = (Number(memoryMiB) || 512) / 1024;
+  const taskUsd = round2((vcpu * VCPU_HR + gb * GB_HR) * HOURS);
+  const publicIpUsd = opts?.assignPublicIp === false ? 0 : round2(PUBLIC_IP_HR * HOURS);
+  return {
+    taskUsd,
+    publicIpUsd,
+    total: round2(taskUsd + publicIpUsd),
+    note: 'Approx us-east-1 Fargate rates; excludes the shared ALB (~$16+/mo per connector), data transfer, and ECR/logs storage.',
+  };
 }
 
 /** A connector instance eligible as a deploy target (Docker host or AWS/ECS). */

@@ -13,6 +13,7 @@ export function ecsProfileFrom(ctx: ConnectorContext): EcsDeploymentProfile | nu
   const cluster = str(ctx.config.ecsCluster).trim() || 'cerebro';
   const subnetIds = idList(ctx.config.ecsSubnetIds);
   const securityGroupIds = idList(ctx.config.ecsSecurityGroupIds);
+  const albSecurityGroupIds = idList(ctx.config.ecsAlbSecurityGroupIds);
   const taskExecutionRoleArn = str(ctx.config.ecsTaskExecutionRoleArn).trim();
   const taskRoleArn = str(ctx.config.ecsTaskRoleArn).trim() || undefined;
   // Default ENABLED so the task has egress for the ECR image pull + cloudflared on
@@ -25,7 +26,7 @@ export function ecsProfileFrom(ctx: ConnectorContext): EcsDeploymentProfile | nu
   // The minimum needed to register a task def and create a Fargate service.
   if (!subnetIds.length || !taskExecutionRoleArn) return null;
 
-  return { cluster, subnetIds, securityGroupIds, taskExecutionRoleArn, taskRoleArn, assignPublicIp, builderInstanceId, cloudflareInstanceId };
+  return { cluster, subnetIds, securityGroupIds, albSecurityGroupIds, taskExecutionRoleArn, taskRoleArn, assignPublicIp, builderInstanceId, cloudflareInstanceId };
 }
 
 /** The region an AWS connector instance manages (for display + ECR URIs). */

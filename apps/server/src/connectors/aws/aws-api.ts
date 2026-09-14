@@ -11,6 +11,7 @@ import {
   DescribeSubnetsCommand,
   DescribeSecurityGroupsCommand,
   RunInstancesCommand,
+  AuthorizeSecurityGroupIngressCommand,
   DescribeAddressesCommand,
   ReleaseAddressCommand,
   DescribeVolumesCommand,
@@ -32,7 +33,19 @@ import {
   DeleteDBSnapshotCommand,
 } from '@aws-sdk/client-rds';
 import { S3Client, ListBucketsCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3';
-import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand, DeleteLoadBalancerCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import {
+  ElasticLoadBalancingV2Client,
+  DescribeLoadBalancersCommand,
+  DeleteLoadBalancerCommand,
+  CreateLoadBalancerCommand,
+  CreateListenerCommand,
+  DescribeListenersCommand,
+  CreateTargetGroupCommand,
+  DeleteTargetGroupCommand,
+  CreateRuleCommand,
+  DeleteRuleCommand,
+  DescribeRulesCommand,
+} from '@aws-sdk/client-elastic-load-balancing-v2';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
 import {
   CloudFrontClient,
@@ -609,7 +622,42 @@ export interface EcsServiceInput {
   subnets: string[];
   securityGroups?: string[];
   assignPublicIp?: boolean;
+  /** Wire the service into an ALB target group so ECS registers task IPs. */
+  loadBalancers?: { targetGroupArn: string; containerName: string; containerPort: number }[];
+  /** Grace period before the ALB health check can fail a new task (seconds). */
+  healthCheckGracePeriodSeconds?: number;
   tags?: Record<string, string>;
+}
+
+/** Ensure/create the shared Application Load Balancer for App Replicator ECS ingress. */
+export interface EnsureAlbInput {
+  name: string;
+  subnetIds: string[];
+  securityGroupIds: string[];
+  tags?: Record<string, string>;
+}
+export interface EnsureAlbResult {
+  albArn: string;
+  dnsName: string;
+  vpcId: string;
+  /** ARN of the HTTP:80 listener host-header rules are added to. */
+  listenerArn: string;
+}
+
+export interface CreateTargetGroupInput {
+  name: string;
+  vpcId: string;
+  port: number;
+  healthCheckPath?: string;
+  tags?: Record<string, string>;
+}
+
+export interface CreateListenerRuleInput {
+  listenerArn: string;
+  hostname: string;
+  targetGroupArn: string;
+  /** Explicit priority; otherwise the next free one on the listener is chosen. */
+  priority?: number;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -617,6 +665,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /** AWS ECS tags use lower-case { key, value }; map a plain record to that shape. */
 function ecsTagList(tags?: Record<string, string>) {
   return tags ? Object.entries(tags).map(([key, value]) => ({ key, value })) : undefined;
+}
+
+/** ELBv2 / EC2 tags use capitalized { Key, Value }. */
+function capTagList(tags?: Record<string, string>) {
+  return tags ? Object.entries(tags).map(([Key, Value]) => ({ Key, Value })) : undefined;
 }
 
 /**
@@ -1442,6 +1495,151 @@ export class AwsApi {
     }
   }
 
+  // ── ALB ingress for the App Replicator ECS target (create/wire, beyond read+delete above) ──
+
+  /**
+   * Find the named ALB or create it (internet-facing, application), ensuring an
+   * HTTP:80 listener with a default 404 that host-header rules hang off. Returns
+   * the ARN, DNS name, VPC id, and listener ARN.
+   */
+  async ensureAlb(input: EnsureAlbInput): Promise<EnsureAlbResult> {
+    try {
+      let lb;
+      try {
+        const d = await this.elb.send(new DescribeLoadBalancersCommand({ Names: [input.name] }));
+        lb = d.LoadBalancers?.[0];
+      } catch (err) {
+        if ((err as { name?: string })?.name !== 'LoadBalancerNotFoundException') throw err;
+      }
+      if (!lb) {
+        const c = await this.elb.send(
+          new CreateLoadBalancerCommand({
+            Name: input.name,
+            Type: 'application',
+            Scheme: 'internet-facing',
+            IpAddressType: 'ipv4',
+            Subnets: input.subnetIds,
+            SecurityGroups: input.securityGroupIds,
+            Tags: capTagList(input.tags),
+          }),
+        );
+        lb = c.LoadBalancers?.[0];
+      }
+      if (!lb?.LoadBalancerArn || !lb.DNSName || !lb.VpcId) throw new Error('Could not resolve the load balancer.');
+
+      const ls = await this.elb.send(new DescribeListenersCommand({ LoadBalancerArn: lb.LoadBalancerArn }));
+      let listenerArn = ls.Listeners?.find((l) => l.Port === 80)?.ListenerArn;
+      if (!listenerArn) {
+        const cl = await this.elb.send(
+          new CreateListenerCommand({
+            LoadBalancerArn: lb.LoadBalancerArn,
+            Protocol: 'HTTP',
+            Port: 80,
+            DefaultActions: [{ Type: 'fixed-response', FixedResponseConfig: { StatusCode: '404', ContentType: 'text/plain', MessageBody: 'No route' } }],
+          }),
+        );
+        listenerArn = cl.Listeners?.[0]?.ListenerArn;
+      }
+      if (!listenerArn) throw new Error('Could not create the ALB HTTP listener.');
+      return { albArn: lb.LoadBalancerArn, dnsName: lb.DNSName, vpcId: lb.VpcId, listenerArn };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  /** Create an IP-target-type target group (for Fargate awsvpc tasks). */
+  async createTargetGroup(input: CreateTargetGroupInput): Promise<{ targetGroupArn: string }> {
+    try {
+      const r = await this.elb.send(
+        new CreateTargetGroupCommand({
+          Name: input.name,
+          Protocol: 'HTTP',
+          Port: input.port,
+          VpcId: input.vpcId,
+          TargetType: 'ip',
+          HealthCheckProtocol: 'HTTP',
+          HealthCheckPath: input.healthCheckPath || '/',
+          Matcher: { HttpCode: '200-399' },
+          Tags: capTagList(input.tags),
+        }),
+      );
+      const arn = r.TargetGroups?.[0]?.TargetGroupArn;
+      if (!arn) throw new Error('Target group was not created.');
+      return { targetGroupArn: arn };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async deleteTargetGroup(arn: string): Promise<void> {
+    try {
+      await this.elb.send(new DeleteTargetGroupCommand({ TargetGroupArn: arn }));
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'TargetGroupNotFoundException') return;
+      throw friendly(err);
+    }
+  }
+
+  /** Add a host-header rule (hostname → forward to target group) at the next free priority. */
+  async createListenerRule(input: CreateListenerRuleInput): Promise<{ ruleArn: string }> {
+    try {
+      const priority = input.priority ?? (await this.nextRulePriority(input.listenerArn));
+      const r = await this.elb.send(
+        new CreateRuleCommand({
+          ListenerArn: input.listenerArn,
+          Priority: priority,
+          Conditions: [{ Field: 'host-header', HostHeaderConfig: { Values: [input.hostname] } }],
+          Actions: [{ Type: 'forward', TargetGroupArn: input.targetGroupArn }],
+        }),
+      );
+      const arn = r.Rules?.[0]?.RuleArn;
+      if (!arn) throw new Error('Listener rule was not created.');
+      return { ruleArn: arn };
+    } catch (err) {
+      throw friendly(err);
+    }
+  }
+
+  async deleteListenerRule(ruleArn: string): Promise<void> {
+    try {
+      await this.elb.send(new DeleteRuleCommand({ RuleArn: ruleArn }));
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'RuleNotFoundException') return;
+      throw friendly(err);
+    }
+  }
+
+  private async nextRulePriority(listenerArn: string): Promise<number> {
+    const d = await this.elb.send(new DescribeRulesCommand({ ListenerArn: listenerArn }));
+    const used = new Set((d.Rules ?? []).map((r) => Number(r.Priority)).filter((n) => Number.isFinite(n)));
+    let p = 1;
+    while (used.has(p)) p++;
+    return p;
+  }
+
+  /**
+   * Ensure each task security group allows inbound from each ALB security group on
+   * the container port (idempotent — a duplicate rule is fine). Left in place on
+   * teardown since it may be shared and is harmless.
+   */
+  async authorizeTaskIngress(taskSgIds: string[], albSgIds: string[], port: number): Promise<void> {
+    for (const groupId of taskSgIds) {
+      for (const albSg of albSgIds) {
+        try {
+          await this.ec2.send(
+            new AuthorizeSecurityGroupIngressCommand({
+              GroupId: groupId,
+              IpPermissions: [{ IpProtocol: 'tcp', FromPort: port, ToPort: port, UserIdGroupPairs: [{ GroupId: albSg }] }],
+            }),
+          );
+        } catch (err) {
+          if ((err as { name?: string })?.name === 'InvalidPermission.Duplicate') continue;
+          throw friendly(err);
+        }
+      }
+    }
+  }
+
   // ── RDS Snapshots ──
   async listRdsSnapshots(): Promise<AwsRdsSnapshot[]> {
     try {
@@ -1946,6 +2144,12 @@ export class AwsApi {
               assignPublicIp: input.assignPublicIp ? 'ENABLED' : 'DISABLED',
             },
           },
+          ...(input.loadBalancers?.length
+            ? {
+                loadBalancers: input.loadBalancers.map((lb) => ({ targetGroupArn: lb.targetGroupArn, containerName: lb.containerName, containerPort: lb.containerPort })),
+                healthCheckGracePeriodSeconds: input.healthCheckGracePeriodSeconds ?? 60,
+              }
+            : {}),
           tags: ecsTagList(input.tags),
         }),
       );
@@ -1972,6 +2176,12 @@ export class AwsApi {
             taskDefinition: input.taskDefinition,
             desiredCount: input.desiredCount,
             forceNewDeployment: true,
+            ...(input.loadBalancers?.length
+              ? {
+                  loadBalancers: input.loadBalancers.map((lb) => ({ targetGroupArn: lb.targetGroupArn, containerName: lb.containerName, containerPort: lb.containerPort })),
+                  healthCheckGracePeriodSeconds: input.healthCheckGracePeriodSeconds ?? 60,
+                }
+              : {}),
           }),
         );
         return { arn: existing.serviceArn ?? '', name: input.serviceName, created: false };

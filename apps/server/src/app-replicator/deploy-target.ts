@@ -1,5 +1,7 @@
 import type { ReplicatorVariable, ReplicatorPort, EcsDeploymentRefs, TargetKind } from '@cerebro/shared';
 
+export type { EcsDeploymentRefs };
+
 /**
  * The deploy-target seam. The App Replicator materializes a deployment onto one of
  * two backends — a Docker host over SSH (DockerDeployTarget) or AWS Fargate
@@ -61,6 +63,8 @@ export interface DeploySpec {
   /** ECS only. */
   taskCpu?: string;
   taskMemory?: string;
+  /** ECS redeploy: the deployment's existing refs, so the ALB/target group are reused. */
+  existingEcs?: EcsDeploymentRefs | null;
 }
 
 export interface DeployOutcome {

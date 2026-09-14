@@ -16,7 +16,7 @@ import {
   AwsApi, AwsAuth, AwsInstance, AwsCostSummary, AwsEksCluster, AwsEcsCluster, AwsEcsService, AwsEcsTask,
   AwsElasticIp, AwsVolume, AwsRdsInstance, AwsS3Bucket,
   AwsNatGateway, AwsLoadBalancer, AwsEbsSnapshot, AwsRdsSnapshot, AwsLambdaFunction, AwsCloudFrontDistribution, AwsDynamoTable, AwsElastiCacheCluster,
-  EcsTaskDefInput, EcsServiceInput,
+  EcsTaskDefInput, EcsServiceInput, EnsureAlbInput, CreateTargetGroupInput, CreateListenerRuleInput,
 } from './aws-api';
 
 /**
@@ -40,6 +40,12 @@ const DEPLOY_OPS = new Set([
   'logs-create-group',
   'logs-delete-group',
   'tags-get-resources',
+  'alb-ensure',
+  'alb-create-target-group',
+  'alb-delete-target-group',
+  'alb-create-rule',
+  'alb-delete-rule',
+  'sg-authorize-task-ingress',
 ]);
 
 const EC2_KIND = 'ec2';
@@ -254,6 +260,13 @@ export class AwsConnector implements Connector {
         type: 'text',
         placeholder: 'sg-aaa',
         help: 'Comma-separated security groups for Fargate tasks. Egress-only is enough with the cloudflared sidecar.',
+      },
+      {
+        key: 'ecsAlbSecurityGroupIds',
+        label: 'ECS ALB security group IDs',
+        type: 'text',
+        placeholder: 'sg-alb',
+        help: 'Comma-separated security groups for the shared Application Load Balancer (inbound 80). Required to expose ECS deployments publicly.',
       },
       {
         key: 'ecsTaskExecutionRoleArn',
@@ -1650,6 +1663,57 @@ export class AwsConnector implements Connector {
           if (!key || !value) return { ok: false, message: 'Provide a tag key and value.' };
           const arns = await api.resourcesByTag(key, value);
           return { ok: true, message: `${arns.length} resource(s) tagged ${key}=${value}.`, data: { arns } };
+        }
+        case 'alb-ensure': {
+          const input = values.alb as EnsureAlbInput | undefined;
+          if (!input?.name || !(input.subnetIds?.length) || !(input.securityGroupIds?.length)) {
+            return { ok: false, message: 'alb requires name, subnetIds, and securityGroupIds.' };
+          }
+          onProgress(`Ensuring load balancer ${input.name}…`);
+          const res = await api.ensureAlb(input);
+          ctx.log('info', `AWS ALB ready: ${input.name} (${res.dnsName}).`);
+          return { ok: true, message: `Load balancer ${input.name} ready.`, createdResourceId: res.albArn, data: { ...res } };
+        }
+        case 'alb-create-target-group': {
+          const input = values.targetGroup as CreateTargetGroupInput | undefined;
+          if (!input?.name || !input.vpcId || !input.port) return { ok: false, message: 'targetGroup requires name, vpcId, and port.' };
+          onProgress(`Creating target group ${input.name}…`);
+          const res = await api.createTargetGroup(input);
+          return { ok: true, message: `Target group ${input.name} created.`, createdResourceId: res.targetGroupArn, data: { ...res } };
+        }
+        case 'alb-delete-target-group': {
+          const arn = str('targetGroupArn');
+          if (!arn) return { ok: false, message: 'Missing targetGroupArn.' };
+          onProgress('Deleting target group…');
+          await api.deleteTargetGroup(arn);
+          return { ok: true, message: 'Target group deleted.' };
+        }
+        case 'alb-create-rule': {
+          const input = values.rule as CreateListenerRuleInput | undefined;
+          if (!input?.listenerArn || !input.hostname || !input.targetGroupArn) {
+            return { ok: false, message: 'rule requires listenerArn, hostname, and targetGroupArn.' };
+          }
+          onProgress(`Adding listener rule for ${input.hostname}…`);
+          const res = await api.createListenerRule(input);
+          return { ok: true, message: `Listener rule for ${input.hostname} created.`, createdResourceId: res.ruleArn, data: { ...res } };
+        }
+        case 'alb-delete-rule': {
+          const arn = str('ruleArn');
+          if (!arn) return { ok: false, message: 'Missing ruleArn.' };
+          onProgress('Deleting listener rule…');
+          await api.deleteListenerRule(arn);
+          return { ok: true, message: 'Listener rule deleted.' };
+        }
+        case 'sg-authorize-task-ingress': {
+          const taskSgIds = (values.taskSgIds as string[] | undefined) ?? [];
+          const albSgIds = (values.albSgIds as string[] | undefined) ?? [];
+          const port = Number(values.port);
+          if (!taskSgIds.length || !albSgIds.length || !Number.isInteger(port)) {
+            return { ok: false, message: 'sg-authorize-task-ingress requires taskSgIds, albSgIds, and a port.' };
+          }
+          onProgress('Authorizing ALB → task security-group ingress…');
+          await api.authorizeTaskIngress(taskSgIds, albSgIds, port);
+          return { ok: true, message: 'Security-group ingress authorized.' };
         }
         default:
           return { ok: false, message: `Unknown operation "${operationId}".` };

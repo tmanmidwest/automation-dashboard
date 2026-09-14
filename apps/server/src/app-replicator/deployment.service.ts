@@ -243,7 +243,8 @@ export class DeploymentService {
     const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
     void this.runDeployment({
       deploymentId: row.id, app, variables, project: row.project, targetKind, targetInstanceId: row.dockerInstanceId,
-      portList, values: nonSecretValues, secrets, forceRebuild: !!opts.forceRebuild, actor, kind: 'redeploy',
+      portList, values: nonSecretValues, secrets, forceRebuild: !!opts.forceRebuild,
+      existingEcs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null, actor, kind: 'redeploy',
     });
     return this.map(updated, app.name);
   }
@@ -257,9 +258,9 @@ export class DeploymentService {
     deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string;
     targetKind: TargetKind; targetInstanceId: string;
     portList: ReplicatorPort[]; values: Record<string, string>; secrets: Record<string, string>;
-    forceRebuild: boolean; taskCpu?: string; taskMemory?: string; actor: ActorCtx; kind: 'deploy' | 'redeploy';
+    forceRebuild: boolean; taskCpu?: string; taskMemory?: string; existingEcs?: EcsDeploymentRefs | null; actor: ActorCtx; kind: 'deploy' | 'redeploy';
   }): Promise<void> {
-    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, forceRebuild, taskCpu, taskMemory, actor, kind } = args;
+    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, forceRebuild, taskCpu, taskMemory, existingEcs, actor, kind } = args;
     const setPhase = (phase: string | null) => {
       void this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { phase } }).catch(() => {});
       if (phase) void this.logging.info('replicator', `[${project}] ${phase}`);
@@ -274,7 +275,7 @@ export class DeploymentService {
         {
           deploymentId, targetInstanceId, project,
           source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey },
-          variables, portList, values, secrets, forceRebuild, taskCpu, taskMemory,
+          variables, portList, values, secrets, forceRebuild, taskCpu, taskMemory, existingEcs,
         },
         (phase) => setPhase(phase),
       );

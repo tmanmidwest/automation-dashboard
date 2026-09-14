@@ -3,8 +3,9 @@ import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wa
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
-  IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress,
+  IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
 } from '@cerebro/shared';
+import { estimateEcsMonthlyUsd } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -237,6 +238,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                   <div className="min-w-0">
                     <p className="font-medium truncate flex items-center gap-2">
                       {d.project}
+                      {d.targetKind === 'ecs' && (
+                        <span className="rounded-full bg-sky-400/15 text-sky-400 px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide">ECS</span>
+                      )}
                       {isInFlight(d) ? (
                         <span className="text-xs text-amber-400 inline-flex items-center gap-1">
                           <Loader2 className="h-3 w-3 animate-spin" /> {d.phase ?? d.status}
@@ -253,7 +257,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
                       {d.dockerInstanceName ?? d.dockerInstanceId}
-                      {d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
+                      {d.targetKind === 'ecs'
+                        ? (d.ecs?.cluster ? ` · cluster ${d.ecs.cluster}` : '')
+                        : d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
                       {d.deployedCommit && ` · ${d.deployedCommit.slice(0, 7)}`}
                     </p>
                     {d.lastMessage && d.status === 'error' && <p className="text-xs text-destructive truncate">{d.lastMessage}</p>}
@@ -508,31 +514,56 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
 
 // ── Deploy dialog (target → plan → variable form) ───────────────────
 
+const ECS_CPU = [
+  { value: '256', label: '0.25 vCPU' }, { value: '512', label: '0.5 vCPU' },
+  { value: '1024', label: '1 vCPU' }, { value: '2048', label: '2 vCPU' }, { value: '4096', label: '4 vCPU' },
+];
+const ECS_MEM = [
+  { value: '512', label: '0.5 GB' }, { value: '1024', label: '1 GB' }, { value: '2048', label: '2 GB' },
+  { value: '4096', label: '4 GB' }, { value: '8192', label: '8 GB' },
+];
+
 function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   app: ReplicatorApp; targets: ReplicatorTarget[]; onClose: () => void; onDeployed: () => void; setErr: (s: string | null) => void;
 }) {
   const deployable = targets.filter((t) => t.deployable);
-  const [dockerInstanceId, setDockerInstanceId] = useState(deployable[0]?.instanceId ?? '');
+  const [instanceId, setInstanceId] = useState(deployable[0]?.instanceId ?? '');
+  const selected = deployable.find((t) => t.instanceId === instanceId);
+  const targetKind: TargetKind = selected?.targetKind ?? 'docker';
+  const isEcs = targetKind === 'ecs';
+
   const [name, setName] = useState('');
   const [plan, setPlan] = useState<DeployTargetInfo | null>(null);
+  const [configured, setConfigured] = useState(false); // ECS: skips the port-preflight step
   const [values, setValues] = useState<Record<string, string>>({});
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [ports, setPorts] = useState<Record<string, number>>({});
+  const [taskCpu, setTaskCpu] = useState('256');
+  const [taskMemory, setTaskMemory] = useState('512');
   const [forceRebuild, setForceRebuild] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const formVars = app.variables.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name');
+  // ECS has no host ports/bind addresses — those roles are irrelevant on Fargate.
+  const formVars = app.variables.filter((v) =>
+    v.role !== 'image_tag' && v.role !== 'container_name' && (!isEcs || (v.role !== 'host_port' && v.role !== 'host_ip')));
 
-  async function loadPlan() {
-    if (!dockerInstanceId) return;
+  const ready = isEcs ? configured : !!plan;
+  const cost = isEcs ? estimateEcsMonthlyUsd(taskCpu, taskMemory) : null;
+
+  function seedValueDefaults() {
+    const v: Record<string, string> = {};
+    for (const fv of formVars) if ((fv.role === 'plain' || fv.role === 'host_ip') && fv.default != null) v[fv.name] = fv.default;
+    setValues(v);
+  }
+
+  async function next() {
+    if (isEcs) { seedValueDefaults(); setConfigured(true); return; }
+    if (!instanceId) return;
     setBusy(true); setErr(null);
     try {
-      const p = await api.post<DeployTargetInfo>(`/api/replicator/apps/${app.id}/plan`, { dockerInstanceId });
+      const p = await api.post<DeployTargetInfo>(`/api/replicator/apps/${app.id}/plan`, { dockerInstanceId: instanceId });
       setPlan(p);
-      // Seed defaults: plain from repo default; ports from suggestions.
-      const v: Record<string, string> = {};
-      for (const fv of formVars) if ((fv.role === 'plain' || fv.role === 'host_ip') && fv.default != null) v[fv.name] = fv.default;
-      setValues(v);
+      seedValueDefaults();
       const pr: Record<string, number> = {};
       for (const s of p.suggestions) pr[s.variable] = s.suggested;
       setPorts(pr);
@@ -543,46 +574,78 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   async function deploy() {
     setBusy(true); setErr(null);
     try {
-      await api.post(`/api/replicator/apps/${app.id}/deploy`, { dockerInstanceId, name, values, secrets, ports, forceRebuild });
+      await api.post(`/api/replicator/apps/${app.id}/deploy`, {
+        dockerInstanceId: instanceId, targetKind, name, values, secrets,
+        ports: isEcs ? {} : ports, forceRebuild,
+        ...(isEcs ? { taskCpu, taskMemory } : {}),
+      });
       onDeployed();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Deploy failed.'); setBusy(false); }
   }
 
   return (
     <Dialog open onClose={onClose} size="lg" title={`Deploy ${app.name}`}
-      description="Materialize a new isolated instance onto a Docker host."
+      description={isEcs ? 'Build the image, push to ECR, and run it on AWS Fargate.' : 'Materialize a new isolated instance onto a Docker host.'}
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          {plan
+          {ready
             ? <Button onClick={deploy} disabled={busy || !name.trim()}>{busy ? 'Starting…' : <><Rocket className="h-4 w-4" /> Deploy</>}</Button>
-            : <Button onClick={loadPlan} disabled={busy || !dockerInstanceId}>{busy ? 'Checking host…' : 'Next: check ports'}</Button>}
+            : <Button onClick={next} disabled={busy || !instanceId}>{busy ? 'Checking host…' : isEcs ? 'Next: configure' : 'Next: check ports'}</Button>}
         </>
       }>
       <div className="space-y-4">
         {deployable.length === 0 && (
-          <p className="text-sm text-amber-400">No deployable Docker connector — add one with SSH configured.</p>
+          <p className="text-sm text-amber-400">No deployable target — add a Docker connector with SSH, or an AWS connector with an ECS deployment profile.</p>
         )}
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <Label>Target host</Label>
-            <select className={selectCls} value={dockerInstanceId} disabled={!!plan} onChange={(e) => setDockerInstanceId(e.target.value)}>
-              {deployable.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name} ({t.hostIp})</option>)}
+            <Label>Target</Label>
+            <select className={selectCls} value={instanceId} disabled={ready} onChange={(e) => setInstanceId(e.target.value)}>
+              {deployable.map((t) => (
+                <option key={t.instanceId} value={t.instanceId}>
+                  {t.name} — {t.targetKind === 'ecs' ? `AWS ECS (${t.hostIp})` : `Docker (${t.hostIp})`}
+                </option>
+              ))}
             </select>
           </div>
           <div><Label>Deployment name</Label><Input value={name} placeholder="acme-poc" onChange={(e) => setName(e.target.value)} /></div>
         </div>
 
-        {plan && (
+        {ready && (
           <div className="space-y-3">
-            <p className="text-xs text-muted-foreground">
-              Host {plan.hostIp} · {plan.usedPorts.length} ports already in use. Reachable at {plan.hostIp}:&lt;host port&gt;.
-            </p>
+            {isEcs ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Task CPU</Label>
+                    <select className={selectCls} value={taskCpu} onChange={(e) => setTaskCpu(e.target.value)}>
+                      {ECS_CPU.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <Label>Task memory</Label>
+                    <select className={selectCls} value={taskMemory} onChange={(e) => setTaskMemory(e.target.value)}>
+                      {ECS_MEM.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+                {cost && (
+                  <p className="text-xs text-muted-foreground">
+                    Est. <span className="text-foreground font-medium">${cost.total.toFixed(2)}/mo</span> (task ${cost.taskUsd.toFixed(2)} + public IP ${cost.publicIpUsd.toFixed(2)}). {cost.note}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Host {plan!.hostIp} · {plan!.usedPorts.length} ports already in use. Reachable at {plan!.hostIp}:&lt;host port&gt;.
+              </p>
+            )}
             <div className="space-y-2">
               {formVars.map((v) => (
                 <VarField key={v.name} v={v}
                   value={v.role === 'host_port' ? String(ports[v.name] ?? '') : v.role === 'secret' ? (secrets[v.name] ?? '') : (values[v.name] ?? '')}
-                  usedPorts={plan.usedPorts}
+                  usedPorts={plan?.usedPorts ?? []}
                   onChange={(val) => {
                     if (v.role === 'host_port') setPorts((p) => ({ ...p, [v.name]: Number(val) }));
                     else if (v.role === 'secret') setSecrets((s) => ({ ...s, [v.name]: val }));
@@ -592,7 +655,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
             </div>
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
-              Force rebuild images (repos that build their own image)
+              Force rebuild image{isEcs ? '' : 's'} (repos that build their own image)
             </label>
           </div>
         )}
@@ -698,6 +761,18 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
   }, [list]);
 
   const exposed = routesByPort.size;
+  const isEcs = (deployment.targetKind ?? 'docker') === 'ecs';
+  const cfTargets = useMemo(() => targets.filter((t) => t.kind === 'cloudflare'), [targets]);
+
+  if (isEcs) {
+    return (
+      <Dialog open onClose={onClose} size="lg" title={`Ingress · ${deployment.project}`}
+        description="Expose this Fargate service on a hostname — a Cloudflare DNS record proxying to the deployment's load balancer."
+        footer={<Button variant="outline" onClick={onClose}>Done</Button>}>
+        <EcsIngressBody deployment={deployment} routes={list} targets={cfTargets} onChanged={refetch} setErr={setErr} />
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open onClose={onClose} size="lg" title={`Ingress · ${deployment.project}`}
@@ -726,6 +801,73 @@ function IngressDialog({ deployment, targets, onClose, onChanged, setErr }: {
         )}
       </div>
     </Dialog>
+  );
+}
+
+/** ECS ingress: hostnames routed to the deployment's ALB via a Cloudflare DNS record. */
+function EcsIngressBody({ deployment, routes, targets, onChanged, setErr }: {
+  deployment: ReplicatorDeployment; routes: ReplicatorIngress[]; targets: IngressTarget[];
+  onChanged: () => Promise<void>; setErr: (s: string | null) => void;
+}) {
+  const [instanceId, setInstanceId] = useState(targets[0]?.instanceId ?? '');
+  const [hostname, setHostname] = useState('');
+  const [busy, setBusy] = useState(false);
+  const hasLb = !!deployment.ecs?.albDnsName && !!deployment.ecs?.targetGroupArn;
+
+  async function add() {
+    setBusy(true); setErr(null);
+    try {
+      await api.post(`/api/replicator/deployments/${deployment.id}/ingress`, {
+        kind: 'cloudflare', instanceId, service: 'app', hostPort: deployment.ecs?.routedContainerPort ?? 0, hostname,
+      });
+      setHostname(''); await onChanged();
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not add ingress.'); }
+    finally { setBusy(false); }
+  }
+  async function remove(id: string) {
+    setBusy(true); setErr(null);
+    try { await api.delete(`/api/replicator/ingress/${id}`); await onChanged(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not remove ingress.'); }
+    finally { setBusy(false); }
+  }
+
+  if (!hasLb) {
+    return <p className="text-sm text-amber-400">This deployment has no load balancer — it needs a published port and an ALB security group configured on the AWS connector.</p>;
+  }
+  if (targets.length === 0) {
+    return <p className="text-sm text-amber-400">No Cloudflare connector available to create the DNS record.</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-muted-foreground">Routes to the shared ALB <code>{deployment.ecs?.albDnsName}</code> on container port {deployment.ecs?.routedContainerPort ?? '?'}.</p>
+      {routes.length > 0 && (
+        <div className="divide-y divide-border/60 rounded-md border border-border/50">
+          {routes.map((ing) => (
+            <div key={ing.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-sm">
+              <a href={ing.url} target="_blank" rel="noreferrer" className="font-medium truncate inline-flex items-center gap-1 hover:underline">
+                {ing.hostname} <ExternalLink className="h-3 w-3 opacity-60" />
+              </a>
+              <Button variant="ghost" size="icon" aria-label="Remove route" disabled={busy} onClick={() => remove(ing.id)}>
+                <X className="h-4 w-4 text-destructive" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <Label>Cloudflare connector</Label>
+          <select className={selectCls} value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
+            {targets.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name}</option>)}
+          </select>
+        </div>
+        <div><Label>Hostname</Label><Input value={hostname} placeholder="app.example.com" onChange={(e) => setHostname(e.target.value)} /></div>
+      </div>
+      <Button size="sm" onClick={add} disabled={busy || !instanceId || !hostname.trim()}>
+        {busy ? 'Adding…' : <><Plus className="h-4 w-4" /> Add hostname</>}
+      </Button>
+    </div>
   );
 }
 
