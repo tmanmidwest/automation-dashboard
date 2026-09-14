@@ -5,7 +5,6 @@ import type {
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
 } from '@cerebro/shared';
-import { estimateEcsMonthlyUsd } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -21,6 +20,31 @@ const STATUS_COLOR: Record<string, string> = {
   deployed: 'text-emerald-400', pending: 'text-amber-400', updating: 'text-amber-400',
   error: 'text-destructive', stopped: 'text-muted-foreground',
 };
+
+/**
+ * Approximate monthly USD for a Fargate task (us-east-1 rates; excludes the shared
+ * ALB, data transfer, and ECR/logs storage) — a deploy-wizard sanity figure. Kept
+ * local to the web because @cerebro/shared is consumed here as types only (its
+ * CommonJS barrel doesn't expose a runtime value through `export *`); the server
+ * uses the shared `estimateEcsMonthlyUsd`, and the two must stay in sync.
+ */
+function estimateEcsMonthlyUsd(cpu: string, memoryMiB: string, opts?: { assignPublicIp?: boolean }) {
+  const HOURS = 730;
+  const VCPU_HR = 0.04048;
+  const GB_HR = 0.004445;
+  const PUBLIC_IP_HR = 0.005;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const vcpu = (Number(cpu) || 256) / 1024;
+  const gb = (Number(memoryMiB) || 512) / 1024;
+  const taskUsd = round2((vcpu * VCPU_HR + gb * GB_HR) * HOURS);
+  const publicIpUsd = opts?.assignPublicIp === false ? 0 : round2(PUBLIC_IP_HR * HOURS);
+  return {
+    taskUsd,
+    publicIpUsd,
+    total: round2(taskUsd + publicIpUsd),
+    note: 'Approx us-east-1 Fargate rates; excludes the shared ALB (~$16+/mo per connector), data transfer, and ECR/logs storage.',
+  };
+}
 
 /** A URL-safe random secret for the "generate" affordance. */
 function randomSecret(bytes = 24): string {
