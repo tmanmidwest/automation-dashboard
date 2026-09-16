@@ -5,9 +5,10 @@ import type { SecretSummary, SecretUpsertInput, SessionUser } from '@cerebro/sha
 
 /**
  * The secrets vault management API. Metadata in, metadata out — a value can be
- * written but is NEVER read back to a client (there is no reveal endpoint). The
- * whole controller is session-only: secrets:* is not a grantable token scope, so
- * a bearer credential can never reach it. See docs/secrets-vault.md.
+ * written here but is only ever read back through the step-up reveal endpoint in
+ * {@link SecretsRevealModule}. The whole controller is session-only: secrets:* is
+ * not a grantable token scope, so a bearer credential can never reach it. See
+ * docs/secrets-vault.md.
  */
 @Controller('api/secrets')
 @SessionOnly()

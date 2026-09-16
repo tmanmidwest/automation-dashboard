@@ -53,3 +53,22 @@ export interface SecretUpsertInput extends SecretMetaInput {
   /** New plaintext value. Omit to edit metadata only. Never returned by any read. */
   value?: string;
 }
+
+/**
+ * Body for POST /api/secrets/:key/reveal — step-up re-authentication. Reveal is
+ * the only read path that returns a value to a client, so it re-verifies the
+ * caller's own credentials on EVERY call (nothing is cached): the account password
+ * (for local accounts) and a live TOTP code (when two-factor is enabled). See
+ * docs/secrets-vault.md.
+ */
+export interface RevealSecretInput {
+  /** The caller's own account password. Required for local accounts. */
+  password?: string;
+  /** A current 6-digit authenticator code. Required when the caller has TOTP enabled. */
+  totp?: string;
+}
+
+/** Response for a successful reveal — the decrypted plaintext, returned once. */
+export interface RevealSecretResult {
+  value: string;
+}

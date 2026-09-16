@@ -22,6 +22,7 @@ import { McpModule } from './mcp/mcp.module';
 import { OAuthModule } from './oauth/oauth.module';
 import { TimelineModule } from './timeline/timeline.module';
 import { SecretsModule } from './secrets/secrets.module';
+import { SecretsRevealModule } from './secrets/secrets-reveal.module';
 import { AutomationsModule } from './automations/automations.module';
 import { DockerFleetModule } from './docker-fleet/docker-fleet.module';
 import { SystemBackupModule } from './system-backup/system-backup.module';
@@ -60,6 +61,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     OAuthModule,
     TimelineModule,
     SecretsModule,
+    SecretsRevealModule,
     AutomationsModule,
     DockerFleetModule,
     SystemBackupModule,

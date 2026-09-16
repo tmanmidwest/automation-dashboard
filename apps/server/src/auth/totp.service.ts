@@ -108,6 +108,18 @@ export class TotpService {
     return false;
   }
 
+  /**
+   * Verify a live authenticator code for a step-up challenge (e.g. revealing a
+   * vault secret). Unlike {@link verifyForLogin} this accepts ONLY a current TOTP
+   * code — recovery codes are the lockout escape hatch and must not be burned to
+   * re-confirm a routine sensitive action. Returns false if TOTP is not enabled.
+   */
+  async verifyCode(userId: string, code: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.totpEnabledAt || !user.totpSecret) return false;
+    return this.verifyTotp(user.totpSecret, code);
+  }
+
   /** Turn TOTP off (step-up: requires a current code). Clears secret + recovery codes. */
   async disable(userId: string, code: string): Promise<{ ok: true }> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });

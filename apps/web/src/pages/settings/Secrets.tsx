@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock } from 'lucide-react';
-import type { SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput } from '@cerebro/shared';
+import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock, Eye, Copy, Check } from 'lucide-react';
+import type { RevealSecretResult, SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -37,12 +37,30 @@ function relative(iso: string | null | undefined): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+/** What the current user must supply to reveal a value (GET /api/secrets/reveal-requirements). */
+interface RevealRequirements {
+  password: boolean;
+  totp: boolean;
+  canReveal: boolean;
+}
+
 export function Secrets() {
   const { can } = useAuth();
   const canWrite = can('secrets:write');
+  const canRead = can('secrets:read');
 
   const [secrets, setSecrets] = useState<SecretSummary[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Reveal (step-up re-auth) dialog state. Nothing is cached: closing clears the
+  // value and the entered credentials, so the next reveal re-authenticates.
+  const [revealing, setRevealing] = useState<SecretSummary | null>(null);
+  const [revealReq, setRevealReq] = useState<RevealRequirements | null>(null);
+  const [revealForm, setRevealForm] = useState<{ password: string; totp: string }>({ password: '', totp: '' });
+  const [revealValue, setRevealValue] = useState<string | null>(null);
+  const [revealErr, setRevealErr] = useState<string | null>(null);
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Edit/rotate dialog state.
   const [editing, setEditing] = useState<SecretSummary | null>(null);
@@ -140,13 +158,84 @@ export function Secrets() {
     }
   }
 
+  async function openReveal(s: SecretSummary) {
+    setRevealing(s);
+    setRevealForm({ password: '', totp: '' });
+    setRevealValue(null);
+    setRevealErr(null);
+    setCopied(false);
+    // Load which factors this account must supply (same for every secret).
+    if (!revealReq) {
+      try {
+        setRevealReq(await api.get<RevealRequirements>('/api/secrets/reveal-requirements'));
+      } catch {
+        // Fall back to prompting for a password; the server still enforces the real rule.
+        setRevealReq({ password: true, totp: false, canReveal: true });
+      }
+    }
+  }
+
+  function closeReveal() {
+    setRevealing(null);
+    // Wipe the plaintext + credentials from memory immediately.
+    setRevealForm({ password: '', totp: '' });
+    setRevealValue(null);
+    setRevealErr(null);
+  }
+
+  async function submitReveal() {
+    if (!revealing) return;
+    setRevealBusy(true);
+    setRevealErr(null);
+    try {
+      const res = await api.post<RevealSecretResult>(
+        `/api/secrets/${encodeURIComponent(revealing.key)}/reveal`,
+        { password: revealForm.password || undefined, totp: revealForm.totp || undefined },
+      );
+      setRevealValue(res.value);
+    } catch (e) {
+      setRevealErr(e instanceof ApiError ? e.message : 'Failed to reveal secret');
+    } finally {
+      setRevealBusy(false);
+    }
+  }
+
+  async function copyValue() {
+    if (revealValue == null) return;
+    try {
+      await navigator.clipboard.writeText(revealValue);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be unavailable (insecure context) — ignore */
+    }
+  }
+
+  const revealReady =
+    !!revealReq &&
+    revealReq.canReveal &&
+    (!revealReq.password || revealForm.password.length > 0) &&
+    (!revealReq.totp || revealForm.totp.trim().length > 0);
+
+  /** Pretty-print a Git credential's JSON value; show everything else verbatim. */
+  function displayValue(s: SecretSummary, value: string): string {
+    if (s.kind === 'git') {
+      try {
+        return JSON.stringify(JSON.parse(value), null, 2);
+      } catch {
+        /* not valid JSON after all — fall through */
+      }
+    }
+    return value;
+  }
+
   const grouped = (cat: SecretCategory) => (secrets ?? []).filter((s) => s.category === cat);
 
   return (
     <>
       <PageHeader
         title="Secrets Vault"
-        description="Every stored credential, encrypted at rest. Values can be rotated but are never shown."
+        description="Every stored credential, encrypted at rest. Revealing a value re-verifies your identity every time."
         actions={canWrite ? <Button onClick={() => { setNewSecret({ key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '' }); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
       />
 
@@ -209,16 +298,23 @@ export function Secrets() {
                         <p>Rotated {s.ageDays === 0 ? 'today' : `${s.ageDays}d ago`}</p>
                         <p>{s.lastUsedAt ? `Used ${relative(s.lastUsedAt)}` : 'Never used'}</p>
                       </div>
-                      {canWrite && (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <Button variant="ghost" size="icon" onClick={() => openEdit(s)} aria-label={`Rotate ${s.label}`}>
-                            <RotateCcw className="h-4 w-4" />
+                      <div className="flex items-center gap-1 shrink-0">
+                        {canRead && (
+                          <Button variant="ghost" size="icon" onClick={() => openReveal(s)} aria-label={`Reveal ${s.label}`}>
+                            <Eye className="h-4 w-4" />
                           </Button>
-                          <Button variant="ghost" size="icon" onClick={() => remove(s)} aria-label={`Delete ${s.label}`}>
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </div>
-                      )}
+                        )}
+                        {canWrite && (
+                          <>
+                            <Button variant="ghost" size="icon" onClick={() => openEdit(s)} aria-label={`Rotate ${s.label}`}>
+                              <RotateCcw className="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon" onClick={() => remove(s)} aria-label={`Delete ${s.label}`}>
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -227,6 +323,96 @@ export function Secrets() {
           );
         })}
       </div>
+
+      {/* Reveal (step-up re-auth) dialog */}
+      <Dialog
+        open={!!revealing}
+        onClose={closeReveal}
+        title={revealing ? `Reveal ${revealing.label}` : ''}
+        description={
+          revealValue == null
+            ? 'Confirm your identity to view this value. Re-authentication is required every time.'
+            : 'This value is shown only now. Copy it if you need it, then close.'
+        }
+        footer={
+          revealValue == null ? (
+            <>
+              <Button variant="outline" onClick={closeReveal}>Cancel</Button>
+              <Button onClick={submitReveal} disabled={revealBusy || !revealReady}>
+                {revealBusy ? 'Verifying…' : 'Reveal'}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={copyValue}>
+                {copied ? <><Check className="h-4 w-4 mr-1.5" /> Copied</> : <><Copy className="h-4 w-4 mr-1.5" /> Copy</>}
+              </Button>
+              <Button onClick={closeReveal}>Done</Button>
+            </>
+          )
+        }
+      >
+        {revealErr && (
+          <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">
+            {revealErr}
+          </div>
+        )}
+
+        {revealValue == null ? (
+          revealReq && !revealReq.canReveal ? (
+            <div className="text-sm text-muted-foreground">
+              This account can't reveal secrets because it has no way to re-authenticate. Set an account
+              password or enable two-factor authentication, then try again.
+            </div>
+          ) : (
+            <form
+              className="space-y-4"
+              onSubmit={(e) => { e.preventDefault(); if (revealReady && !revealBusy) submitReveal(); }}
+            >
+              <p className="text-xs text-muted-foreground">
+                <code>{revealing?.key}</code>
+              </p>
+              {revealReq?.password && (
+                <div>
+                  <Label>Account password</Label>
+                  <Input
+                    type="password"
+                    autoComplete="current-password"
+                    autoFocus
+                    placeholder="••••••••"
+                    value={revealForm.password}
+                    onChange={(e) => setRevealForm((f) => ({ ...f, password: e.target.value }))}
+                  />
+                </div>
+              )}
+              {revealReq?.totp && (
+                <div>
+                  <Label>Authenticator code</Label>
+                  <Input
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoFocus={!revealReq.password}
+                    placeholder="123456"
+                    maxLength={6}
+                    value={revealForm.totp}
+                    onChange={(e) => setRevealForm((f) => ({ ...f, totp: e.target.value.replace(/\D/g, '') }))}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">The 6-digit code from your authenticator app.</p>
+                </div>
+              )}
+              {/* Submit on Enter without a visible extra button. */}
+              <button type="submit" className="hidden" aria-hidden />
+            </form>
+          )
+        ) : (
+          <div>
+            <Label>Value</Label>
+            <pre className="mt-1 max-h-60 overflow-auto rounded-md border border-input bg-muted/40 px-3 py-2 text-sm font-mono whitespace-pre-wrap break-all select-all">
+              {revealing ? displayValue(revealing, revealValue) : revealValue}
+            </pre>
+          </div>
+        )}
+      </Dialog>
 
       {/* New secret dialog */}
       <Dialog

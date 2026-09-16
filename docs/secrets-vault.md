@@ -31,16 +31,30 @@ cryptography.
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Store plaintext readable in UI? | **Never.** Set/replace only; the UI shows metadata, not values | A management console that can reveal every credential is the single worst breach target. Values flow *into* the vault and *into* connectors, never back to a screen. |
+| Store plaintext readable in UI? | **Only behind step-up re-auth.** The UI shows metadata; a value is returned solely by `POST /api/secrets/:key/reveal`, which re-verifies the caller's password + live TOTP on every call | A management console that can silently reveal every credential is the single worst breach target — so reveal is deliberately expensive: it re-authenticates the human each time (nothing cached), is `@SessionOnly` (never a bearer token), and is audited as `secret.revealed`. Values still flow *into* the vault and *into* connectors freely; flowing back *to a screen* is the guarded path. |
 | Metadata location | New **`SecretMeta`** table keyed by the same `key` as `Secret` | Keeps ciphertext untouched (no re-encryption/migration); 1:1 sidecar row. |
 | Access tracking | A single `SecretsService.reveal(key)` wrapper that stamps `lastUsedAt` | One choke point. Existing `getSecret` callers delegate to it; the plaintext path is unchanged. |
 
-> **As built — reveal does NOT audit.** The plan had `reveal()` emit an audit event per read. In
-> practice connector `buildContext` reveals secrets on *every* telemetry poll, so auditing reads
-> would flood the log/timeline, and there is deliberately no reveal-to-UI endpoint (every reveal is
-> a background/system read). So `reveal()` only stamps `lastUsedAt`, **throttled** (skipped if
-> stamped within ~5 min); only administrative **writes** (set/rotate/delete via the API) are
-> audited.
+> **As built — the two read paths differ on audit.** `SecretsService.reveal(key)` is the
+> *background/system* path (connector `buildContext`, mail, SSO). It reveals on *every* telemetry
+> poll, so auditing it would flood the log/timeline — it only stamps `lastUsedAt`, **throttled**
+> (skipped if stamped within ~5 min).
+>
+> `SecretsService.revealForActor(key, ctx)` is the *interactive* path behind the step-up endpoint.
+> A human deliberately viewing a plaintext credential is rare and security-relevant, so it **is**
+> audited (`secret.revealed`) in addition to stamping `lastUsedAt`. The step-up itself
+> (`SecretsRevealController.reveal`, in its own `SecretsRevealModule` — see below) re-checks the
+> caller's own password (`AuthService.verifyPassword`,
+> local accounts) and a live TOTP code (`TotpService.verifyCode` — live codes only; recovery codes
+> are the lockout escape hatch and are **not** accepted for routine reveals) on every request; an
+> SSO account with neither password nor TOTP cannot reveal and is told to enable a factor first.
+> Administrative **writes** (set/rotate/delete) remain audited as before.
+>
+> **Why a separate module.** Reveal needs `AuthModule` (to re-check password/TOTP), but
+> `AuthModule → SettingsModule → SecretsService` (global) already, so importing AuthModule into the
+> global `SecretsModule` would form a module cycle. The reveal controller therefore lives in its own
+> `SecretsRevealModule`, which imports AuthModule and reaches the vault through the global
+> `SecretsService` — one-directional, no cycle. `SecretsController` stays metadata-only.
 | Audit integration | Every reveal / set / rotate / delete → `AuditService.record` | Feeds straight into the [event timeline](./event-timeline.md); the two features join here. |
 | Rotation reminders | A daily cron compares `expiresAt`/age → fires a new `secret.rotation_due` alert | Reuses the notification catalog + pipeline already built. New alert category "Secrets". |
 | Permissions | `secrets:read` (list metadata) + `secrets:write` (set/rotate/delete) | New RBAC strings; **not** grantable as API-token scopes (never expose the vault to bearer tokens). |

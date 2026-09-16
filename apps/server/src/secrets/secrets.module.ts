@@ -7,7 +7,13 @@ import { SecretsController } from './secrets.controller';
 /**
  * The secrets vault. Global so SettingsService (and any future consumer) can
  * inject SecretsService without an import edge — the vault sits underneath the
- * config layer. See docs/secrets-vault.md.
+ * config layer.
+ *
+ * NB: the step-up **reveal** endpoint lives in its own {@link SecretsRevealModule},
+ * NOT here — it needs AuthModule (password/TOTP re-check), and AuthModule → Settings
+ * → SecretsService(global) already, so importing AuthModule here would form a module
+ * cycle. Keeping reveal in a separate module (that imports AuthModule and uses the
+ * global SecretsService) breaks the cycle. See docs/secrets-vault.md.
  */
 @Global()
 @Module({

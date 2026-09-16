@@ -54,6 +54,26 @@ export class SecretsService implements OnModuleInit {
     return value;
   }
 
+  /**
+   * Decrypt a secret for an INTERACTIVE viewer who has just passed a step-up
+   * re-auth challenge (see SecretsController.reveal). Unlike {@link reveal}, this
+   * IS audited — a human deliberately viewing a plaintext credential is a
+   * security-relevant event and must leave a trail. Returns null if absent.
+   */
+  async revealForActor(key: string, ctx: ActorCtx): Promise<string | null> {
+    const row = await this.prisma.secret.findUnique({ where: { key } });
+    if (!row) return null;
+    const value = this.crypto.decrypt(row.ciphertext);
+    void this.touch(key);
+    await this.audit.record({
+      actorId: ctx.actorId,
+      actorEmail: ctx.actorEmail,
+      action: 'secret.revealed',
+      target: key,
+    });
+    return value;
+  }
+
   async has(key: string): Promise<boolean> {
     const row = await this.prisma.secret.findUnique({ where: { key }, select: { key: true } });
     return !!row;

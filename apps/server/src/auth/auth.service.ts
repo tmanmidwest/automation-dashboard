@@ -32,6 +32,29 @@ export class AuthService {
     return user.id;
   }
 
+  /**
+   * Verify a password against an EXISTING user id — the step-up check for a
+   * sensitive action by an already-authenticated user (e.g. revealing a vault
+   * secret). Unlike {@link validateLocal} this takes the session's user id (not an
+   * email) and does not stamp lastLoginAt. False if the account has no password
+   * (SSO) or is disabled.
+   */
+  async verifyPassword(userId: string, password: string): Promise<boolean> {
+    if (!password) return false;
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.disabled || !user.passwordHash) return false;
+    return bcrypt.compare(password, user.passwordHash);
+  }
+
+  /** True when the account has a local password set (can be re-prompted for it). */
+  async hasPassword(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { passwordHash: true },
+    });
+    return !!user?.passwordHash;
+  }
+
   /** Load a full SessionUser (role + permissions) for a session. */
   async buildSessionUser(userId: string): Promise<SessionUser | null> {
     const user = await this.prisma.user.findUnique({
