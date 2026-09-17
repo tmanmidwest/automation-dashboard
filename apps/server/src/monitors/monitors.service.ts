@@ -54,6 +54,11 @@ export class MonitorsService {
 
   // ── Read ──────────────────────────────────────────────────
 
+  /** Probe-type manifests (id, label, config fields) for building a monitor. */
+  types() {
+    return this.probes.manifests();
+  }
+
   async list(): Promise<MonitorSummary[]> {
     const rows = await this.prisma.monitor.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] });
     const agg = await this.aggregates();

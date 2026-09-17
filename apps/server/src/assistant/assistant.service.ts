@@ -346,7 +346,7 @@ export class AssistantService implements AssistantAutomationPort {
     }
     try {
       const data = await tool.run(call.args);
-      if (tool.kind === 'action') await this.recordAudit(user, call.name, call.args);
+      if (tool.kind === 'action') await this.recordAudit(user, call.name, call.args, tool.redactKeys);
       return { ok: true, text: JSON.stringify(data) };
     } catch (err) {
       return { ok: false, text: `Error: ${err instanceof Error ? err.message : String(err)}` };
@@ -354,15 +354,18 @@ export class AssistantService implements AssistantAutomationPort {
   }
 
   /** Record an assistant-initiated action to the audit trail (services don't audit; controllers do). */
-  private async recordAudit(user: SessionUser, toolName: string, args: Record<string, unknown>) {
-    const target = String(args.resourceId ?? args.monitorId ?? args.ruleId ?? args.operationId ?? args.jobId ?? args.instanceId ?? '');
+  private async recordAudit(user: SessionUser, toolName: string, args: Record<string, unknown>, redactKeys?: string[]) {
+    // Never persist secret-bearing args (e.g. deploy secrets) to the audit trail.
+    const meta = { ...args } as Record<string, unknown>;
+    for (const key of redactKeys ?? []) delete meta[key];
+    const target = String(args.resourceId ?? args.monitorId ?? args.ruleId ?? args.operationId ?? args.jobId ?? args.instanceId ?? args.deploymentId ?? args.appId ?? '');
     await this.audit
       .record({
         actorId: user.id,
         actorEmail: user.email,
         action: `assistant.${toolName}`,
         target: target || null,
-        meta: { ...args, via: 'assistant' },
+        meta: { ...meta, via: 'assistant' },
       })
       .catch(() => undefined);
   }

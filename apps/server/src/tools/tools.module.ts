@@ -3,6 +3,8 @@ import { ConnectorsModule } from '../connectors/connectors.module';
 import { MonitorsModule } from '../monitors/monitors.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { AutomationsModule } from '../automations/automations.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { AppReplicatorModule } from '../app-replicator/app-replicator.module';
 import { ToolCatalogService } from './tool-catalog.service';
 
 /**
@@ -11,7 +13,7 @@ import { ToolCatalogService } from './tool-catalog.service';
  * bodies call into. See docs/assistant-computer.md.
  */
 @Module({
-  imports: [ConnectorsModule, MonitorsModule, TimelineModule, AutomationsModule],
+  imports: [ConnectorsModule, MonitorsModule, TimelineModule, AutomationsModule, NotificationsModule, AppReplicatorModule],
   providers: [ToolCatalogService],
   exports: [ToolCatalogService],
 })

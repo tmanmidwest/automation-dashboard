@@ -20,5 +20,8 @@ import { AppReplicatorController } from './app-replicator.controller';
   imports: [ConnectorsModule],
   controllers: [AppReplicatorController],
   providers: [ReplicatorService, DeploymentService, RepoIntrospectService, PortAllocatorService, IngressService, UpdateCheckService, DockerDeployTarget, EcsDeployTarget, EcsBuilderService],
+  // Exported so the shared tool catalog (assistant / MCP) can read apps, deployments, update
+  // status, and drive deploy / redeploy / teardown / ingress (Computer-only write tools).
+  exports: [ReplicatorService, DeploymentService, UpdateCheckService, IngressService],
 })
 export class AppReplicatorModule {}

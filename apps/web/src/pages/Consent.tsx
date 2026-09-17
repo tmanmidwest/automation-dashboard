@@ -23,8 +23,12 @@ const SCOPE_LABELS: Record<string, string> = {
   'audit:read': 'Read the audit trail',
   'users:read': 'Read user accounts',
   'settings:read': 'Read application settings',
+  'automations:read': 'Read automation rules and run history',
+  'replicator:read': 'Read App Replicator apps, deployments, and update status',
   'connectors:action': 'Perform connector actions — start/stop/reboot resources, run operations',
   'monitors:write': 'Manage monitors — pause, resume, and trigger checks',
+  'automations:write': 'Author, enable/disable, and test automation rules',
+  'notifications:send': 'Send notifications through the configured channels',
 };
 
 export function Consent() {

@@ -74,7 +74,7 @@ export class McpServerFactory {
     // tagged with the MCP origin, since these bypass the controllers that normally audit.
     const actionTool = (
       name: string,
-      config: { description: string; inputSchema: z.ZodRawShape; destructive?: boolean; confirm?: boolean },
+      config: { description: string; inputSchema: z.ZodRawShape; destructive?: boolean; confirm?: boolean; redactKeys?: string[] },
       run: (args: Record<string, unknown>) => Promise<unknown>,
     ) => {
       const needsConfirm = config.confirm !== false;
@@ -96,7 +96,7 @@ export class McpServerFactory {
         void this.logging.info('mcp', `action: ${name}`, { user: user.email });
         try {
           const data = await run(args);
-          await this.recordAudit(user, origin, name, args);
+          await this.recordAudit(user, origin, name, args, config.redactKeys);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -120,7 +120,7 @@ export class McpServerFactory {
       } else {
         actionTool(
           t.name,
-          { description: t.description, inputSchema: t.inputSchema, destructive: t.destructive, confirm: t.confirm },
+          { description: t.description, inputSchema: t.inputSchema, destructive: t.destructive, confirm: t.confirm, redactKeys: t.redactKeys },
           t.run,
         );
       }
@@ -130,9 +130,18 @@ export class McpServerFactory {
   }
 
   /** Record an MCP-initiated action to the audit trail (services don't audit; controllers do). */
-  private async recordAudit(user: SessionUser, origin: McpOrigin, toolName: string, args: Record<string, unknown>) {
-    const { confirm: _confirm, ...meta } = args;
-    const target = String(args.resourceId ?? args.monitorId ?? args.ruleId ?? args.operationId ?? args.jobId ?? args.instanceId ?? '');
+  private async recordAudit(
+    user: SessionUser,
+    origin: McpOrigin,
+    toolName: string,
+    args: Record<string, unknown>,
+    redactKeys?: string[],
+  ) {
+    const { confirm: _confirm, ...rest } = args;
+    // Never persist secret-bearing args (e.g. deploy secrets) to the audit trail.
+    const meta = rest as Record<string, unknown>;
+    for (const key of redactKeys ?? []) delete meta[key];
+    const target = String(args.resourceId ?? args.monitorId ?? args.ruleId ?? args.operationId ?? args.jobId ?? args.instanceId ?? args.deploymentId ?? args.appId ?? '');
     await this.audit
       .record({
         actorId: user.id,

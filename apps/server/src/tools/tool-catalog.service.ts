@@ -1,13 +1,27 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { ConnectorInstance } from '@prisma/client';
-import type { ConnectorInstanceSummary, Permission, SessionUser, TimelineKind } from '@cerebro/shared';
+import type {
+  AutomationRuleInput,
+  ConnectorInstanceSummary,
+  MonitorInput,
+  NotificationChannelId,
+  NotificationSeverity,
+  Permission,
+  SessionUser,
+  TimelineKind,
+} from '@cerebro/shared';
 import { TIMELINE_KINDS } from '@cerebro/shared';
 import { ConnectorRegistry } from '../connectors/connector-registry.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { MonitorsService } from '../monitors/monitors.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { AutomationsService } from '../automations/automations.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { ReplicatorService } from '../app-replicator/replicator.service';
+import { DeploymentService } from '../app-replicator/deployment.service';
+import { UpdateCheckService } from '../app-replicator/update-check.service';
+import { IngressService } from '../app-replicator/ingress.service';
 
 /**
  * One tool in the shared catalog: a name, an LLM-facing description, a zod input shape,
@@ -29,6 +43,9 @@ export interface CatalogTool {
   destructive?: boolean;
   /** action only: require an explicit confirm before running (default true). */
   confirm?: boolean;
+  /** action only: arg keys to strip before the call is written to the audit trail
+   *  (e.g. plaintext secrets). Honoured by both the MCP factory and the assistant. */
+  redactKeys?: string[];
   run: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -46,6 +63,11 @@ export class ToolCatalogService {
     private readonly monitors: MonitorsService,
     private readonly timeline: TimelineService,
     private readonly automations: AutomationsService,
+    private readonly notifications: NotificationsService,
+    private readonly replicator: ReplicatorService,
+    private readonly deployments: DeploymentService,
+    private readonly updateCheck: UpdateCheckService,
+    private readonly ingress: IngressService,
   ) {}
 
   /** Every tool the given user is permitted to use. */
@@ -223,10 +245,49 @@ export class ToolCatalogService {
         inputSchema: {},
         run: () => this.monitors.stats(),
       });
+
+      read({
+        name: 'list_monitor_types',
+        description:
+          'List the available monitor probe types (http, ping, tcp, dns, …) and each one\'s config fields. Use before create_monitor / update_monitor to build a valid `type` + `config`.',
+        permission: 'monitors:read',
+        inputSchema: {},
+        run: () => Promise.resolve(this.monitors.types()),
+      });
     }
 
     // ── Monitor management (monitors:write) ──
     if (has('monitors:write')) {
+      action({
+        name: 'create_monitor',
+        description:
+          'Create an uptime monitor. `type` is a probe id (e.g. "http", "ping", "tcp", "dns") and `config` holds that probe\'s fields — discover both with list_monitor_types. Interval/retry/timeout fields are optional and default sensibly.',
+        permission: 'monitors:write',
+        inputSchema: monitorInputShape(),
+        run: (a) => this.monitors.create(toMonitorInput(a)),
+      });
+
+      action({
+        name: 'update_monitor',
+        description:
+          'Update an uptime monitor. This replaces the monitor\'s settings (PUT semantics), so pass the full desired config — read the current one with get_monitor first.',
+        permission: 'monitors:write',
+        inputSchema: { monitorId: z.string().describe('Monitor id'), ...monitorInputShape() },
+        run: (a) => this.monitors.update(a.monitorId as string, toMonitorInput(a)),
+      });
+
+      action({
+        name: 'delete_monitor',
+        description: 'Delete an uptime monitor and its history. Irreversible.',
+        permission: 'monitors:write',
+        destructive: true,
+        inputSchema: { monitorId: z.string().describe('Monitor id') },
+        run: async ({ monitorId }) => {
+          await this.monitors.remove(monitorId as string);
+          return { ok: true };
+        },
+      });
+
       action({
         name: 'pause_monitor',
         description: 'Pause a monitor (stop probing it).',
@@ -330,6 +391,44 @@ export class ToolCatalogService {
 
     // ── Automation management (automations:write) ──
     if (has('automations:write')) {
+      const actor = { actorId: user.id, actorEmail: user.email };
+
+      action({
+        name: 'create_automation',
+        description:
+          'Create an automation rule: WHEN a trigger fires, IF conditions hold, DO actions. ' +
+          "trigger is either {type:'event', kinds?, severities?, source?, textContains?} or {type:'schedule', cron:'m h dom mon dow'}. " +
+          "actions is an array; each is one of: {type:'notify', title, body?}, {type:'connector_action', instanceId, kind, resourceId, actionId}, {type:'connector_operation', instanceId, operationId, resourceId?, values?}, {type:'pause_monitor', monitorId}, {type:'resume_monitor', monitorId}, {type:'webhook', url, method?, body?}, {type:'ask_computer', prompt, title?}. " +
+          "conditions (optional, AND'd) each: {type:'severity_at_least', severity}, {type:'time_window', start, end}, {type:'meta_threshold', path, op, value}, {type:'monitor_state', monitorId, state}. Discover connector ids/actions with list_connectors + list_actions.",
+        permission: 'automations:write',
+        inputSchema: automationInputShape(),
+        run: (a) => this.automations.create(toAutomationInput(a), actor),
+      });
+
+      action({
+        name: 'update_automation',
+        description:
+          'Update an automation rule. Only the fields you pass are changed; omit a field to leave it as-is. Pass a full replacement for `trigger`, `conditions`, or `actions` when you change them (they are not merged element-wise).',
+        permission: 'automations:write',
+        inputSchema: {
+          ruleId: z.string().describe('Automation rule id'),
+          ...automationInputShape({ partial: true }),
+        },
+        run: (a) => this.automations.update(a.ruleId as string, toAutomationInput(a), actor),
+      });
+
+      action({
+        name: 'delete_automation',
+        description: 'Delete an automation rule. Irreversible.',
+        permission: 'automations:write',
+        destructive: true,
+        inputSchema: { ruleId: z.string().describe('Automation rule id') },
+        run: async ({ ruleId }) => {
+          await this.automations.remove(ruleId as string, actor);
+          return { ok: true };
+        },
+      });
+
       action({
         name: 'set_automation_enabled',
         description: 'Enable or disable an automation rule.',
@@ -349,6 +448,248 @@ export class ToolCatalogService {
         destructive: true,
         inputSchema: { ruleId: z.string().describe('Automation rule id') },
         run: ({ ruleId }) => this.automations.test(ruleId as string),
+      });
+    }
+
+    // ── App Replicator (replicator:read) ──
+    if (has('replicator:read')) {
+      read({
+        name: 'list_replicator_apps',
+        description:
+          'List the apps registered in the App Replicator (a Git-repo app that can be materialized as many isolated instances), with their variable/port/secret schema.',
+        permission: 'replicator:read',
+        inputSchema: {},
+        run: () => this.replicator.listApps(),
+      });
+
+      read({
+        name: 'get_replicator_app',
+        description: 'Full detail for one registered App Replicator app: repo, compose schema, variables, ports, secrets, and deploy target.',
+        permission: 'replicator:read',
+        inputSchema: { appId: z.string().describe('Replicator app id') },
+        run: ({ appId }) => this.replicator.getApp(appId as string),
+      });
+
+      read({
+        name: 'list_replicator_deployments',
+        description:
+          'List App Replicator deployments (materialized instances) with their status, host, and update availability. Optionally filter to one app.',
+        permission: 'replicator:read',
+        inputSchema: { appId: z.string().optional().describe('Optional app id to filter by') },
+        run: ({ appId }) =>
+          appId ? this.deployments.listForApp(appId as string) : this.deployments.listAll(),
+      });
+
+      read({
+        name: 'check_replicator_update',
+        description:
+          "Check one deployment against its app's Git repo tip and report whether a newer commit is available to redeploy.",
+        permission: 'replicator:read',
+        inputSchema: { deploymentId: z.string().describe('Replicator deployment id') },
+        run: ({ deploymentId }) => this.updateCheck.checkOne(deploymentId as string),
+      });
+
+      read({
+        name: 'get_replicator_deployment',
+        description:
+          'Full detail for one App Replicator deployment — status, live phase, resolved values, ports, and ingress. Poll this after deploy/redeploy until status is "deployed" or "error".',
+        permission: 'replicator:read',
+        inputSchema: { deploymentId: z.string().describe('Replicator deployment id') },
+        run: async ({ deploymentId }) => {
+          const all = await this.deployments.listAll();
+          const dep = all.find((d) => d.id === deploymentId);
+          if (!dep) throw new Error('Deployment not found.');
+          return dep;
+        },
+      });
+
+      read({
+        name: 'list_replicator_targets',
+        description:
+          'List the deploy targets an app can be materialized onto (Docker hosts and AWS/ECS connector instances), with each target\'s reachability and whether it can accept a deploy.',
+        permission: 'replicator:read',
+        inputSchema: {},
+        run: () => this.replicator.listTargets(),
+      });
+
+      read({
+        name: 'get_replicator_deploy_plan',
+        description:
+          'Plan a deploy of an app onto a target: returns the host IP, ports already in use, and a suggested free host port per published-port variable. Use to pick ports before deploy_replicator_instance.',
+        permission: 'replicator:read',
+        inputSchema: {
+          appId: z.string().describe('Replicator app id'),
+          dockerInstanceId: z.string().describe('Target connector instance id (from list_replicator_targets)'),
+        },
+        run: async ({ appId, dockerInstanceId }) => {
+          const app = await this.replicator.getApp(appId as string);
+          return this.deployments.targetInfo(dockerInstanceId as string, app.variables);
+        },
+      });
+
+      read({
+        name: 'list_replicator_ingress_options',
+        description:
+          'For a Cloudflare or NPM connector instance, list the ingress options a deployment can be fronted with: Cloudflare tunnels and NPM certificates. Use before add_replicator_ingress.',
+        permission: 'replicator:read',
+        inputSchema: { instanceId: z.string().describe('Cloudflare or NPM connector instance id') },
+        run: async ({ instanceId }) => ({
+          tunnels: await this.ingress.listTunnels(instanceId as string),
+          certs: await this.ingress.listCerts(instanceId as string),
+        }),
+      });
+    }
+
+    // ── App Replicator writes (replicator:write) — Computer-only; deploying runs
+    //    infra, so this scope is deliberately NOT in GRANTABLE_TOKEN_SCOPES (no bearer
+    //    token holds it — only the owner's in-app assistant session does). ──
+    if (has('replicator:write')) {
+      const actor = { actorId: user.id, actorEmail: user.email };
+
+      action({
+        name: 'deploy_replicator_instance',
+        description:
+          'Deploy a registered app as a new isolated instance on a target host. Validates synchronously (name/port clash, missing required values) then builds in the background — poll get_replicator_deployment until status is "deployed" or "error". Discover ids with list_replicator_apps + list_replicator_targets, and free ports with get_replicator_deploy_plan.',
+        permission: 'replicator:write',
+        destructive: true,
+        redactKeys: ['secrets'],
+        inputSchema: {
+          appId: z.string().describe('Registered app id'),
+          dockerInstanceId: z.string().describe('Target connector instance id (Docker host, or AWS for an ECS deploy)'),
+          name: z.string().describe('Operator-chosen instance name (sanitized into the compose project name)'),
+          values: z.record(z.string()).optional().describe('Non-secret variable values keyed by name (omit → repo default)'),
+          secrets: z.record(z.string()).optional().describe('Secret variable values keyed by name (plaintext, one-time; stored encrypted in the vault)'),
+          ports: z.record(z.number()).optional().describe('Chosen host port per host_port variable name'),
+          forceRebuild: z.boolean().optional().describe('docker compose build --no-cache (for repos that build their own image)'),
+          targetKind: z.enum(['docker', 'ecs']).optional().describe("Deploy backend (default 'docker')"),
+          taskCpu: z.string().optional().describe('ECS only: Fargate task CPU units (default 256)'),
+          taskMemory: z.string().optional().describe('ECS only: Fargate task memory MiB (default 512)'),
+        },
+        run: (a) =>
+          this.deployments.deploy(
+            a.appId as string,
+            {
+              dockerInstanceId: a.dockerInstanceId as string,
+              name: a.name as string,
+              values: (a.values as Record<string, string>) ?? {},
+              secrets: (a.secrets as Record<string, string>) ?? {},
+              ports: (a.ports as Record<string, number>) ?? {},
+              forceRebuild: a.forceRebuild as boolean | undefined,
+              targetKind: a.targetKind as 'docker' | 'ecs' | undefined,
+              taskCpu: a.taskCpu as string | undefined,
+              taskMemory: a.taskMemory as string | undefined,
+            },
+            actor,
+          ),
+      });
+
+      action({
+        name: 'redeploy_replicator_deployment',
+        description:
+          'Redeploy an existing deployment. With edit omitted/false it re-runs the stored config (pull latest / rebuild) — the way to apply an available update. With edit:true the supplied maps are merged over the stored config first (change a value, rotate a secret, move a host port). Runs in the background; poll get_replicator_deployment.',
+        permission: 'replicator:write',
+        redactKeys: ['secrets'],
+        inputSchema: {
+          deploymentId: z.string().describe('Deployment id'),
+          forceRebuild: z.boolean().optional().describe('docker compose build --no-cache'),
+          edit: z.boolean().optional().describe('Apply the maps below before redeploying (an edit), rather than reusing the stored config'),
+          values: z.record(z.string()).optional().describe('Edited non-secret values (name→value); omit a key to keep the stored value'),
+          secrets: z.record(z.string()).optional().describe('Rotated secrets (name→value); omit or blank a key to keep the stored secret'),
+          ports: z.record(z.number()).optional().describe('Edited host ports (host_port var name→port); omit a key to keep the stored port'),
+        },
+        run: (a) =>
+          this.deployments.redeploy(
+            a.deploymentId as string,
+            {
+              forceRebuild: a.forceRebuild as boolean | undefined,
+              edit: a.edit as boolean | undefined,
+              values: a.values as Record<string, string> | undefined,
+              secrets: a.secrets as Record<string, string> | undefined,
+              ports: a.ports as Record<string, number> | undefined,
+            },
+            actor,
+          ),
+      });
+
+      action({
+        name: 'teardown_replicator_deployment',
+        description:
+          'Tear down a deployment: stops and removes the stack, removes any ingress routes fronting it, and deletes its vault secrets. Irreversible.',
+        permission: 'replicator:write',
+        destructive: true,
+        inputSchema: { deploymentId: z.string().describe('Deployment id') },
+        run: ({ deploymentId }) => this.deployments.remove(deploymentId as string, actor),
+      });
+
+      action({
+        name: 'add_replicator_ingress',
+        description:
+          'Expose a deployment\'s published port to the outside via a Cloudflare tunnel or an NPM proxy host. Discover the instanceId and its tunnels/certs with list_replicator_ingress_options; the service + hostPort come from the deployment\'s ports (get_replicator_deployment).',
+        permission: 'replicator:write',
+        inputSchema: {
+          deploymentId: z.string().describe('Deployment id'),
+          kind: z.enum(['cloudflare', 'npm']).describe('Ingress backend'),
+          instanceId: z.string().describe('Cloudflare or NPM connector instance id'),
+          service: z.string().describe('The compose service whose published port this fronts'),
+          hostPort: z.number().describe('The published host port to route to'),
+          hostname: z.string().describe('Public hostname, e.g. demo.example.com'),
+          tunnelId: z.string().optional().describe('Cloudflare: the tunnel to add the public-hostname route to'),
+          certificateId: z.number().optional().describe('NPM: existing certificate id (0/omitted = HTTP-only)'),
+          sslForced: z.boolean().optional().describe('NPM: force SSL when a cert is attached'),
+        },
+        run: (a) =>
+          this.ingress.add(
+            a.deploymentId as string,
+            {
+              kind: a.kind as 'cloudflare' | 'npm',
+              instanceId: a.instanceId as string,
+              service: a.service as string,
+              hostPort: a.hostPort as number,
+              hostname: a.hostname as string,
+              tunnelId: a.tunnelId as string | undefined,
+              certificateId: a.certificateId as number | undefined,
+              sslForced: a.sslForced as boolean | undefined,
+            },
+            actor,
+          ),
+      });
+
+      action({
+        name: 'remove_replicator_ingress',
+        description: 'Remove one ingress route fronting a deployment (Cloudflare tunnel route or NPM proxy host). Irreversible.',
+        permission: 'replicator:write',
+        destructive: true,
+        inputSchema: { ingressId: z.string().describe('Ingress route id (from get_replicator_deployment / list ingress)') },
+        run: ({ ingressId }) => this.ingress.remove(ingressId as string, actor),
+      });
+    }
+
+    // ── Notifications (notifications:send) ──
+    if (has('notifications:send')) {
+      action({
+        name: 'send_notification',
+        description:
+          "Send a notification with a custom title and body through Cerebro's configured channels (email / SMS / Signal). Honours channel enablement, quiet hours, and throttling. Use for a one-off message; for a recurring condition, create an automation rule instead.",
+        permission: 'notifications:send',
+        inputSchema: {
+          title: z.string().describe('Short notification title/subject'),
+          body: z.string().describe('Notification body text'),
+          severity: z
+            .enum(['info', 'success', 'warning', 'critical'])
+            .optional()
+            .describe('Severity (default info)'),
+          channels: z
+            .array(z.enum(['email', 'textbelt', 'signal']))
+            .optional()
+            .describe('Channels to send through (default: all configured). textbelt = SMS.'),
+        },
+        run: ({ title, body, severity, channels }) =>
+          this.notifications.sendMessage({
+            title: title as string,
+            body: body as string,
+            severity: severity as NotificationSeverity | undefined,
+            channels: channels as NotificationChannelId[] | undefined,
+          }),
       });
     }
 
@@ -395,4 +736,76 @@ export class ToolCatalogService {
         (inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30,
     };
   }
+}
+
+// ── Tool input helpers ────────────────────────────────────────────
+//
+// The structured payloads (monitor config, automation rule) are validated and
+// defaulted by their own services, so these zod shapes stay deliberately loose
+// (a `config` / `trigger` bag) with rich descriptions to guide the LLM. The
+// `to*Input` casts hand the args straight to the typed service methods.
+
+/** Zod shape for a monitor create/update payload. Numeric knobs are optional — the
+ *  service clamps and defaults them (see MonitorsService.normalize). */
+function monitorInputShape(): z.ZodRawShape {
+  return {
+    name: z.string().describe('Display name'),
+    type: z.string().describe('Probe type id from list_monitor_types, e.g. "http", "ping", "tcp", "dns"'),
+    config: z.record(z.unknown()).describe('Probe config — the fields that probe type declares (see list_monitor_types)'),
+    enabled: z.boolean().optional().describe('Start enabled (default true)'),
+    intervalSec: z.number().optional().describe('Seconds between checks (default 60)'),
+    retries: z.number().optional().describe('Retries before marking down (default 1)'),
+    retryIntervalSec: z.number().optional().describe('Seconds between retries (default 60)'),
+    timeoutSec: z.number().optional().describe('Per-check timeout in seconds (default 10)'),
+    resendEveryN: z.number().optional().describe('Re-alert every N repeated failures (0 = alert once)'),
+    upsideDown: z.boolean().optional().describe('Invert: treat a reachable target as down'),
+    description: z.string().optional(),
+    tags: z.array(z.string()).optional().describe('Free-form tags'),
+  };
+}
+
+/** Assemble a MonitorInput from validated tool args. Missing numeric knobs are left
+ *  undefined for the service to default; the cast satisfies the required-field type. */
+function toMonitorInput(a: Record<string, unknown>): MonitorInput {
+  return {
+    name: a.name as string,
+    type: a.type as string,
+    config: (a.config as Record<string, unknown>) ?? {},
+    enabled: a.enabled as boolean | undefined,
+    intervalSec: a.intervalSec as number,
+    retries: a.retries as number,
+    retryIntervalSec: a.retryIntervalSec as number,
+    timeoutSec: a.timeoutSec as number,
+    resendEveryN: a.resendEveryN as number,
+    upsideDown: a.upsideDown as boolean,
+    description: a.description as string | undefined,
+    tags: a.tags as string[] | undefined,
+  };
+}
+
+/** Zod shape for an automation rule. `partial` makes name/trigger optional for updates. */
+function automationInputShape(opts?: { partial?: boolean }): z.ZodRawShape {
+  const partial = opts?.partial ?? false;
+  const name = z.string().describe('Rule name');
+  const trigger = z
+    .record(z.unknown())
+    .describe("When to fire: {type:'event', kinds?, severities?, source?, textContains?} or {type:'schedule', cron}");
+  return {
+    name: partial ? name.optional() : name,
+    enabled: z.boolean().optional().describe('Whether the rule is active (default true)'),
+    trigger: partial ? trigger.optional() : trigger,
+    conditions: z.array(z.record(z.unknown())).optional().describe("Conditions (AND'd). See create_automation for shapes."),
+    actions: z.array(z.record(z.unknown())).optional().describe('Actions to run in order. See create_automation for shapes.'),
+    cooldownSec: z.number().optional().describe("Don't re-fire within this many seconds (default 60)"),
+  };
+}
+
+/** Copy only the defined rule fields from tool args. Safe for both create (schema
+ *  guarantees name+trigger) and update (the service applies only present keys). */
+function toAutomationInput(a: Record<string, unknown>): AutomationRuleInput {
+  const out: Record<string, unknown> = {};
+  for (const key of ['name', 'enabled', 'trigger', 'conditions', 'actions', 'cooldownSec']) {
+    if (a[key] !== undefined) out[key] = a[key];
+  }
+  return out as unknown as AutomationRuleInput;
 }

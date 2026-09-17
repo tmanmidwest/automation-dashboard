@@ -31,6 +31,8 @@ export type Permission =
   // Uptime monitors
   | 'monitors:read'
   | 'monitors:write' // add / edit / pause / delete monitors
+  // Notifications (send an ad-hoc alert through the configured channels)
+  | 'notifications:send'
   // The Computer — in-app LLM assistant (session-only; runs tools as the user)
   | 'assistant:use';
 
@@ -67,6 +69,7 @@ export const BUILTIN_ROLES = {
       'connectors:action',
       'monitors:read',
       'monitors:write',
+      'notifications:send',
       'secrets:read',
       'secrets:write',
       'automations:read',
@@ -102,10 +105,12 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   'users:read',
   'settings:read',
   'automations:read',
+  'replicator:read',
   // Write / action scopes:
   'connectors:action',
   'monitors:write',
   'automations:write',
+  'notifications:send',
 ];
 
 /** True for a grantable scope that lets a credential change state (not read-only). */

@@ -521,6 +521,34 @@ export class NotificationsService {
     this.lastSent.set(this.throttleKey(id, msg), Date.now());
   }
 
+  /**
+   * Send an ad-hoc notification with a custom title/body, not tied to a registered
+   * alert type. Used by the shared tool catalog (the in-app assistant and the MCP
+   * server) so a caller can push a one-off message. Routes to the given channels
+   * (default: all routable channels), honouring channel enablement, quiet hours and
+   * throttling. Never throws — per-channel failures are logged like any other alert.
+   */
+  async sendMessage(p: {
+    title: string;
+    body: string;
+    severity?: NotificationSeverity;
+    channels?: NotificationChannelId[];
+  }): Promise<{ ok: boolean; channels: RoutableChannelId[] }> {
+    const requested = p.channels && p.channels.length ? p.channels : ROUTABLE_CHANNELS;
+    const targets = requested.filter((c): c is RoutableChannelId =>
+      ROUTABLE_CHANNELS.includes(c as RoutableChannelId),
+    );
+    const msg: NotificationMessage = {
+      title: p.title.trim() || 'Cerebro notification',
+      body: p.body ?? '',
+      severity: p.severity ?? 'info',
+      source: 'assistant',
+      dedupeKey: `adhoc:${p.title}`,
+    };
+    await this.sendToChannels(msg, targets, { alertKey: 'adhoc' });
+    return { ok: true, channels: targets };
+  }
+
   // ── Test ──────────────────────────────────────────────────
 
   /** Manual test send from the settings UI. Bypasses alert rules and throttling. */
