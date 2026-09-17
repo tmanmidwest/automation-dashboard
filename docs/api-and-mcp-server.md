@@ -367,3 +367,76 @@ MCP tools; secret values should never be reachable by a long-lived token or an L
 Wiring: `McpModule` now imports `TimelineModule` + `AutomationsModule` (the latter gained
 `exports: [AutomationsService]`); the factory injects `TimelineService` + `AutomationsService`.
 No DB change, no new deps. Server + web + shared build clean.
+
+## Phase 6 — Tier-1 & Tier-2 catalog expansion (BUILT 2026-09-17)
+
+> **Architecture note (post-Phase-5):** the tool list now lives in a single **shared catalog**,
+> [`ToolCatalogService.build(user)`](../apps/server/src/tools/tool-catalog.service.ts), consumed by
+> **both** the MCP factory ([`mcp-server.factory.ts`](../apps/server/src/mcp/mcp-server.factory.ts))
+> **and** the in-app Computer assistant ([`assistant.service.ts`](../apps/server/src/assistant/assistant.service.ts)).
+> Add a tool once, there, and both surfaces get it (each consumer still owns its own transport,
+> confirm gate, and audit). Every tool is included only if the caller holds its permission, so a
+> tool is MCP-reachable only when its scope is also in `GRANTABLE_TOKEN_SCOPES`; the Computer runs as
+> the owner session and sees all of them. This phase closed the remaining feature gaps and, for the
+> App Replicator, added the first **first-class-feature write tools** (connector features still ride
+> the generic `run_action` / `run_operation`).
+
+### Tier-1 — reads + safe writes (grantable over MCP)
+
+| Tool | Scope | Notes |
+|---|---|---|
+| `list_replicator_apps`, `get_replicator_app`, `list_replicator_deployments`, `check_replicator_update` | `replicator:read` | App Replicator catalog + deployment status + git-update check |
+| `list_monitor_types` | `monitors:read` | probe manifests, so an agent can build a valid `type` + `config` |
+| `create_monitor`, `update_monitor`, `delete_monitor` | `monitors:write` | full monitor CRUD (`update` is PUT-replace; `delete` destructive) |
+| `create_automation`, `update_automation`, `delete_automation` | `automations:write` | **rule authoring** — see the Phase 5 reversal below |
+| `send_notification` | `notifications:send` | ad-hoc custom title/body through the configured channels |
+
+- **`replicator:read` added to `GRANTABLE_TOKEN_SCOPES`** — read-only, safe.
+- **New narrow `notifications:send` permission** (union + admin role + grantable). `send_notification`
+  is gated on it rather than the broad, deliberately UI-only `settings:write`, so a token can send a
+  notification without gaining every settings write. Backed by a new
+  `NotificationsService.sendMessage` (ad-hoc send that bypasses alert-type rules but honours channel
+  enablement, quiet hours, and throttling). The `BUILTIN_ROLES` boot reconcile
+  ([`seed.service.ts`](../apps/server/src/seed/seed.service.ts)) syncs the new permission onto the
+  admin role on the next **restart** — no migration.
+- **Reverses a Phase 5 decision:** rule *authoring* (create/update/delete) **is now exposed** via the
+  `automations:write` tools above. The automations REST controller stays `@SessionOnly()`; authoring
+  is reachable through the **MCP/Computer tools**, not REST.
+- Structured payloads (monitor `config`, automation `trigger`/`conditions`/`actions`) use loose zod
+  bags (`z.record` / `z.array`) with rich descriptions; the services validate and default.
+
+### Tier-2 — App Replicator writes (Computer-only)
+
+Deploying runs infrastructure on a Docker host, so **`replicator:write` is deliberately kept OUT of
+`GRANTABLE_TOKEN_SCOPES`** — no bearer/OAuth token can hold it (matching the `@SessionOnly()` intent
+of the REST routes). Only the owner's in-app **Computer** session, which holds `replicator:write`,
+can call these. No UI/scope-picker change was needed.
+
+| Tool | Scope | Notes |
+|---|---|---|
+| `deploy_replicator_instance` | `replicator:write` | destructive; `redactKeys: ['secrets']`. Validates synchronously then builds in the background |
+| `redeploy_replicator_deployment` | `replicator:write` | `redactKeys: ['secrets']`; `edit:true` merges value/secret/port changes first |
+| `teardown_replicator_deployment` | `replicator:write` | destructive — stops the stack, removes ingress, deletes vault secrets |
+| `add_replicator_ingress`, `remove_replicator_ingress` | `replicator:write` | Cloudflare tunnel / NPM proxy-host routes (`remove` destructive) |
+| `get_replicator_deployment`, `list_replicator_targets`, `get_replicator_deploy_plan`, `list_replicator_ingress_options` | `replicator:read` | read companions: poll a deployment, discover targets, pick free host ports, list tunnels/certs |
+
+- **Async model:** `deploy`/`redeploy` are fire-and-forget — the fast checks (name/port clash, missing
+  required values, generated-compose rejection) throw to the caller, then the clone/build/up runs in
+  the background. The tool returns the `pending` deployment row; poll `get_replicator_deployment`
+  until `status` is `deployed` or `error` (`phase` shows the live sub-step). There is no connector-style
+  job/`get_job` handle for the replicator — the deployment row *is* the handle.
+
+### Audit redaction (new `CatalogTool.redactKeys` contract)
+
+`deploy`/`redeploy` accept plaintext `secrets`, and both audit paths spread tool args into the audit
+`meta`. Added an optional **`redactKeys?: string[]`** to `CatalogTool`; the MCP factory's `recordAudit`
+and the assistant's `recordAudit` both strip those keys before writing, so deploy secrets never reach
+the Ship's Log. Both audit-target fallbacks also gained `deploymentId` / `appId`.
+
+**Still deliberately skipped:** the **vault/secrets** (`secrets:*` stays non-grantable, no MCP tools),
+and App Replicator **app registration** (introspect → register is an interactive review wizard, a poor
+headless fit). A future `DeployInput.secretRefs` vault-reference path — letting an agent name a secret
+it never sees — is the cleaner long-term answer to secrets-through-the-model, but it changes the deploy
+contract and is out of scope here.
+
+**Catalog size:** 22 → 43 tools. No DB migration, no new deps. Server + web + shared build clean.
