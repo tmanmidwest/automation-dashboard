@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound,
@@ -28,6 +28,38 @@ const STATUS: Record<FabricAgentStatus, { label: string; cls: string }> = {
   pending: { label: 'Awaiting enrollment', cls: 'text-amber-400' },
   revoked: { label: 'Revoked', cls: 'text-destructive' },
 };
+
+/** Version-agnostic uninstall one-liner for a machine's OS. */
+function uninstallCmd(os?: string | null): string {
+  const origin = location.origin;
+  return os === 'windows'
+    ? `iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`
+    : `curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo sh`;
+}
+
+/** Per-target remembered RDP options (this browser). */
+interface RdpPrefs {
+  resolution?: string;
+  colorDepth?: string;
+  security?: string;
+  consoleSession?: boolean;
+  enableEffects?: boolean;
+  enableAudio?: boolean;
+}
+function loadRdpPrefs(targetId: string): RdpPrefs {
+  try {
+    return JSON.parse(localStorage.getItem(`fabric.rdp.${targetId}`) || '{}') as RdpPrefs;
+  } catch {
+    return {};
+  }
+}
+function saveRdpPrefs(targetId: string, prefs: RdpPrefs): void {
+  try {
+    localStorage.setItem(`fabric.rdp.${targetId}`, JSON.stringify(prefs));
+  } catch {
+    /* storage blocked */
+  }
+}
 
 function relTime(iso?: string | null): string {
   if (!iso) return 'never';
@@ -71,6 +103,7 @@ export function Fabric() {
   const [adding, setAdding] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
+  const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
@@ -118,6 +151,8 @@ export function Fabric() {
     if (!confirm(`Delete "${a.name}" and its history? This cannot be undone.`)) return;
     try {
       await api.delete(`/api/fabric/agents/${a.id}`);
+      // An online v0.3.0+ agent self-uninstalls; anything else needs manual cleanup.
+      setDeletedHint({ name: a.name, os: a.os });
       await load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Delete failed.');
@@ -141,6 +176,24 @@ export function Fabric() {
       {err && (
         <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {err}
+        </div>
+      )}
+
+      {deletedHint && (
+        <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
+          <div className="flex items-start justify-between gap-2">
+            <div className="text-amber-300/90 min-w-0">
+              Deleted <span className="font-medium">{deletedHint.name}</span>. If the agent is still installed on that
+              machine (offline or an older version), remove it there:
+              <div className="mt-1 flex items-start gap-2">
+                <code className="flex-1 text-xs break-all font-mono">{uninstallCmd(deletedHint.os)}</code>
+                <CopyBtn text={uninstallCmd(deletedHint.os)} />
+              </div>
+            </div>
+            <button onClick={() => setDeletedHint(null)} className="text-muted-foreground hover:text-foreground shrink-0">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -762,13 +815,14 @@ function RdpConnectDialog({
   const [password, setPassword] = useState('');
   const [domain, setDomain] = useState('');
   const [save, setSave] = useState(false);
-  // Display / session options.
-  const [resolution, setResolution] = useState('fit');
-  const [colorDepth, setColorDepth] = useState('32');
-  const [security, setSecurity] = useState('any');
-  const [consoleSession, setConsoleSession] = useState(false);
-  const [enableEffects, setEnableEffects] = useState(false);
-  const [enableAudio, setEnableAudio] = useState(true);
+  // Display / session options, remembered per target in this browser.
+  const prefs = useMemo(() => loadRdpPrefs(target.id), [target.id]);
+  const [resolution, setResolution] = useState(prefs.resolution ?? 'fit');
+  const [colorDepth, setColorDepth] = useState(prefs.colorDepth ?? '32');
+  const [security, setSecurity] = useState(prefs.security ?? 'any');
+  const [consoleSession, setConsoleSession] = useState(prefs.consoleSession ?? false);
+  const [enableEffects, setEnableEffects] = useState(prefs.enableEffects ?? false);
+  const [enableAudio, setEnableAudio] = useState(prefs.enableAudio ?? true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -797,6 +851,7 @@ function RdpConnectDialog({
 
   const submit = async () => {
     setErr(null);
+    saveRdpPrefs(target.id, { resolution, colorDepth, security, consoleSession, enableEffects, enableAudio });
     const opts = options();
     let body: FabricRdpConnectInput;
     if (useSaved) {

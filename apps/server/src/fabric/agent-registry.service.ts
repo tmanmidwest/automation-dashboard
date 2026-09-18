@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import type { WebSocket } from 'ws';
 import {
   FABRIC_AGENT_VERSION,
@@ -37,6 +38,33 @@ export class AgentRegistryService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * Reconcile the DB against the live registry once a minute. Catches agents that
+   * are marked 'online' in the DB but hold no live connection and haven't been
+   * seen for a while — e.g. an agent that died while this process was restarting,
+   * so no in-memory offline transition ever fired. Marks them offline (which also
+   * raises the offline alert), reusing the normal path. The lastSeen grace avoids
+   * false positives while an agent is mid-reconnect right after a restart.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async reconcileOffline(): Promise<void> {
+    const staleBefore = new Date(Date.now() - 90_000);
+    let rows: { id: string; lastSeenAt: Date | null }[];
+    try {
+      rows = await this.prisma.agent.findMany({
+        where: { status: 'online' },
+        select: { id: true, lastSeenAt: true },
+      });
+    } catch {
+      return;
+    }
+    for (const a of rows) {
+      if (this.isOnline(a.id)) continue; // holds a live connection — fine
+      if (a.lastSeenAt && a.lastSeenAt > staleBefore) continue; // may be reconnecting; wait
+      await this.markOffline(a.id, 'no heartbeat (reconciled)');
+    }
+  }
 
   /** Verify a presented agent credential; returns the agent id or null. */
   async authenticate(credential: string): Promise<string | null> {

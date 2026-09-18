@@ -70,6 +70,41 @@ echo "cerebro-agent installed and started. It will appear in Cerebro shortly."
 `;
 }
 
+export function uninstallSh(): string {
+  return `#!/bin/sh
+# Cerebro Fabric agent uninstaller (Linux). Removes the agent regardless of how
+# it was installed. Safe to run on a machine already deleted from Cerebro.
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Please run as root (sudo)." >&2
+  exit 1
+fi
+
+systemctl disable --now cerebro-agent 2>/dev/null || true
+rm -f /etc/systemd/system/cerebro-agent.service /usr/local/bin/cerebro-agent
+rm -rf /etc/cerebro-agent /var/lib/cerebro-agent
+systemctl daemon-reload 2>/dev/null || true
+echo "cerebro-agent removed."
+`;
+}
+
+export function uninstallPs1(): string {
+  return `# Cerebro Fabric agent uninstaller (Windows). Run in an elevated PowerShell.
+$ErrorActionPreference = 'SilentlyContinue'
+
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+  throw 'Please run this in an elevated (Administrator) PowerShell.'
+}
+
+sc.exe stop CerebroAgent | Out-Null
+sc.exe delete CerebroAgent | Out-Null
+Remove-Item -Recurse -Force (Join-Path $env:ProgramData 'CerebroAgent')
+Write-Host 'cerebro-agent removed.'
+`;
+}
+
 export function installPs1(): string {
   return `# Cerebro Fabric agent installer (Windows). See docs/fabric-remote-access.md.
 $ErrorActionPreference = 'Stop'

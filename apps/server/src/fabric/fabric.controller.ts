@@ -19,7 +19,7 @@ import { CurrentUser, Public, RequirePermissions, SessionOnly } from '../auth/de
 import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
-import { installPs1, installSh } from './agent-installers';
+import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
 
 class CreateAgentDto {
   @IsString()
@@ -260,6 +260,20 @@ export class FabricController {
   @Header('Content-Type', 'text/plain; charset=utf-8')
   getInstallPs1() {
     return installPs1();
+  }
+
+  @Public()
+  @Get('uninstall.sh')
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  getUninstallSh() {
+    return uninstallSh();
+  }
+
+  @Public()
+  @Get('uninstall.ps1')
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  getUninstallPs1() {
+    return uninstallPs1();
   }
 
   @Public()
