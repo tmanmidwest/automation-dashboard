@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'crypto';
+import { lookup } from 'dns/promises';
 import { hostname, networkInterfaces } from 'os';
 import type { FabricSessionTicket } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -109,9 +110,12 @@ export class FabricGuacService {
     });
 
     // The address guacd will dial to reach our forward. An explicit env override
-    // wins; otherwise use this container's own Docker-network IP (always
-    // reachable by the guacd sidecar, no DNS needed); hostname() is a last resort.
-    const callbackHost = process.env.FABRIC_GUACD_CALLBACK_HOST || selfIp() || hostname();
+    // wins; otherwise use this container's IP ON THE SAME SUBNET AS guacd (the app
+    // may be on several Docker networks — e.g. a reverse-proxy network — and only
+    // one is shared with guacd); fall back to the first non-internal IP, then
+    // hostname. No DNS resolution is required of guacd this way.
+    const callbackHost =
+      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
     this.logger.log(`RDP session: forward on ${callbackHost}:${forward.port} -> ${d.host}:${d.port} via agent ${d.agentId}`);
 
     // guacd reads its connect args directly from `connection` (the flattened
@@ -141,6 +145,30 @@ export class FabricGuacService {
     for (const [k, v] of this.tickets) if (v.expiresAt < now) this.tickets.delete(k);
   }
 
+  /**
+   * This container's own IPv4 address on the same subnet as the guacd sidecar —
+   * the address guacd can actually route back to for the forward. Resolves
+   * GUACD_HOST to find guacd's network, then matches our interfaces against it.
+   */
+  private async guacdReachableIp(): Promise<string | null> {
+    const guacdHost = process.env.GUACD_HOST || 'guacd';
+    let guacdIp: string;
+    try {
+      guacdIp = (await lookup(guacdHost, { family: 4 })).address;
+    } catch {
+      return null;
+    }
+    const ifaces = networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const ni of ifaces[name] ?? []) {
+        if ((ni.family === 'IPv4' || (ni.family as unknown) === 4) && !ni.internal && sameSubnet(ni.address, ni.netmask, guacdIp)) {
+          return ni.address;
+        }
+      }
+    }
+    return null;
+  }
+
   /** Replicates guacamole-lite's Crypt.encrypt so its server can decrypt our token. */
   private encryptToken(payload: unknown): string {
     const iv = randomBytes(16);
@@ -164,4 +192,14 @@ function selfIp(): string | null {
     }
   }
   return null;
+}
+
+/** True when `a` and `b` share a subnet under IPv4 `mask` (dotted-quad). */
+function sameSubnet(a: string, mask: string, b: string): boolean {
+  const toInt = (ip: string) =>
+    ip.split('.').reduce((acc, oct) => ((acc << 8) + (parseInt(oct, 10) & 255)) >>> 0, 0) >>> 0;
+  const ai = toInt(a);
+  const bi = toInt(b);
+  const mi = toInt(mask);
+  return ((ai & mi) >>> 0) === ((bi & mi) >>> 0);
 }
