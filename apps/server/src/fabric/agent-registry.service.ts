@@ -10,6 +10,7 @@ import {
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { parseCredential, safeEqualHex, sha256 } from './fabric-credentials';
 import { StreamMux, type TunnelStream } from './stream-mux';
 
@@ -34,6 +35,7 @@ export class AgentRegistryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Verify a presented agent credential; returns the agent id or null. */
@@ -170,6 +172,16 @@ export class AgentRegistryService {
         target: agentId,
         meta: { name: before.name, hostname: frame.hostname, os: frame.os, agentVersion: frame.agentVersion },
       });
+      // Recovery alert only when it was actually offline (not first enrollment).
+      if (before.status === 'offline') {
+        await this.notifications
+          .dispatchAlert('fabric.agent_online', {
+            title: `Fabric agent back online: ${before.name}`,
+            body: `${before.name}${frame.hostname ? ` (${frame.hostname})` : ''} reconnected to Cerebro.`,
+            dedupeKey: `fabric-online:${agentId}`,
+          })
+          .catch(() => undefined);
+      }
     }
 
     this.send(agentId, {
@@ -293,5 +305,12 @@ export class AgentRegistryService {
       target: agentId,
       meta: { name: agent.name, reason },
     });
+    await this.notifications
+      .dispatchAlert('fabric.agent_offline', {
+        title: `Fabric agent offline: ${agent.name}`,
+        body: `${agent.name}${agent.hostname ? ` (${agent.hostname})` : ''} stopped checking in (${reason}).`,
+        dedupeKey: `fabric-offline:${agentId}`,
+      })
+      .catch(() => undefined);
   }
 }

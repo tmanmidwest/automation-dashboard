@@ -30,7 +30,7 @@ declare module 'guacamole-lite' {
   }
   interface Callbacks {
     processConnectionSettings?: (
-      settings: { connection: { type: string; settings: Record<string, unknown> } },
+      settings: { connection: Record<string, unknown> },
       callback: (err: unknown, settings?: unknown) => void,
     ) => void;
   }

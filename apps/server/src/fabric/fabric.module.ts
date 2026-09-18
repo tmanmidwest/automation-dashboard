@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { LoggingModule } from '../logging/logging.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { FabricController } from './fabric.controller';
 import { FabricService } from './fabric.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
@@ -15,7 +16,7 @@ import { FabricGuacService } from './fabric-guac.service';
  * See docs/fabric-remote-access.md.
  */
 @Module({
-  imports: [PrismaModule, LoggingModule],
+  imports: [PrismaModule, LoggingModule, NotificationsModule],
   controllers: [FabricController],
   providers: [FabricService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService],
   exports: [AgentRegistryService, FabricSessionService, FabricGuacService],

@@ -61,9 +61,15 @@ export class FabricGuacService {
    * the passed settings object (its `.connection.settings` becomes guacd's args).
    */
   async resolveConnection(settings: {
-    connection: { type: string; settings: Record<string, unknown> };
+    connection: Record<string, unknown>;
   }): Promise<typeof settings> {
-    const id = String(settings.connection?.settings?._ticket ?? '');
+    // guacamole-lite flattens the token's `connection.settings` onto `connection`
+    // before this callback, so the ticket arrives at `connection._ticket` (older
+    // versions used `connection.settings._ticket` — accept both).
+    const conn = (settings.connection ?? {}) as Record<string, unknown> & {
+      settings?: Record<string, unknown>;
+    };
+    const id = String(conn._ticket ?? conn.settings?._ticket ?? '');
     const entry = id ? this.tickets.get(id) : undefined;
     if (id) this.tickets.delete(id);
     if (!entry || entry.expiresAt < Date.now()) throw new Error('Invalid or expired RDP ticket.');
@@ -102,7 +108,9 @@ export class FabricGuacService {
       },
     });
 
-    settings.connection.settings = {
+    // guacd reads its connect args directly from `connection` (the flattened
+    // object), so replace it with the RDP settings pointing at the forward.
+    settings.connection = {
       hostname: process.env.FABRIC_GUACD_CALLBACK_HOST || hostname(),
       port: String(forward.port),
       username: d.username,
@@ -111,9 +119,9 @@ export class FabricGuacService {
       security: 'any',
       'ignore-cert': 'true',
       'resize-method': 'display-update',
-      width: 1024,
-      height: 768,
-      dpi: 96,
+      width: '1024',
+      height: '768',
+      dpi: '96',
     };
     return settings;
   }

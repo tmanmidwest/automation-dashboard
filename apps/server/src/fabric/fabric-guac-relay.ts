@@ -28,7 +28,7 @@ export function attachFabricGuacRelay(server: Server, guac: FabricGuacService): 
   };
   const callbacks = {
     processConnectionSettings: (
-      settings: { connection: { type: string; settings: Record<string, unknown> } },
+      settings: { connection: Record<string, unknown> },
       cb: (err: unknown, settings?: unknown) => void,
     ) => {
       guac

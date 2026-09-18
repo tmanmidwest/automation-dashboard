@@ -440,6 +440,27 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: false,
   },
+  // ── Fabric (remote-access agents) ────────────────────────
+  {
+    key: 'fabric.agent_offline',
+    label: 'Fabric agent offline',
+    description: 'A remote-access agent stopped checking in (missed its heartbeats or disconnected).',
+    category: 'Fabric',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'fabric.agent_online',
+    label: 'Fabric agent back online',
+    description: 'A remote-access agent reconnected after being offline.',
+    category: 'Fabric',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {
