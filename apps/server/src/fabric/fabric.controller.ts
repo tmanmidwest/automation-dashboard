@@ -188,6 +188,16 @@ export class FabricController {
     return this.fabric.listSessions(agentId);
   }
 
+  /** Stream a session's recording for playback (Guacamole recording format). */
+  @Get('recordings/:sessionId')
+  @RequirePermissions('fabric:read')
+  async getRecording(@Param('sessionId') sessionId: string, @Res() res: Response) {
+    const path = await this.fabric.recordingPath(sessionId);
+    if (!path) throw new NotFoundException('No recording for this session.');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.sendFile(path);
+  }
+
   /** Prove the tunnel to a target end-to-end (Phase 2). */
   @Post('agents/:id/targets/:targetId/probe')
   @SessionOnly()

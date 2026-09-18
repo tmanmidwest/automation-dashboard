@@ -52,6 +52,8 @@ export interface FabricSessionDto {
   endedAt?: string | null; // ISO
   bytesUp: number;
   bytesDown: number;
+  /** True when a playable session recording exists (RDP). */
+  hasRecording: boolean;
 }
 
 /**

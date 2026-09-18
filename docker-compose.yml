@@ -42,6 +42,9 @@ services:
       FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-}
     volumes:
       - cerebro_signal:/data/signal
+      # Fabric RDP session recordings — shared with the guacd sidecar (guacd writes,
+      # the app serves them back for playback). See docs/fabric-remote-access.md.
+      - cerebro_fabric_recordings:/recordings
     # ICMP for the uptime monitor's Ping probe (system `ping` needs a raw socket).
     cap_add:
       - NET_RAW
@@ -91,8 +94,12 @@ services:
     image: guacamole/guacd:1.5.5
     container_name: cerebro-guacd
     restart: unless-stopped
+    volumes:
+      # Same volume as the app — guacd writes recordings here for later playback.
+      - cerebro_fabric_recordings:/recordings
 
 volumes:
   cerebro_db:
   cerebro_redis:
   cerebro_signal:
+  cerebro_fabric_recordings:

@@ -1,4 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import type { Agent, AgentTarget } from '@prisma/client';
 import type {
   FabricAgentDto,
@@ -346,7 +348,20 @@ export class FabricService {
       endedAt: s.endedAt?.toISOString() ?? null,
       bytesUp: Number(s.bytesUp),
       bytesDown: Number(s.bytesDown),
+      hasRecording: !!s.recordPath,
     }));
+  }
+
+  /** Absolute path of a session's recording file, or null if none exists. */
+  async recordingPath(sessionId: string): Promise<string | null> {
+    const s = await this.prisma.fabricSession.findUnique({
+      where: { id: sessionId },
+      select: { recordPath: true },
+    });
+    if (!s?.recordPath) return null;
+    const dir = process.env.FABRIC_RECORDING_DIR || '/recordings';
+    const file = join(dir, s.recordPath);
+    return existsSync(file) ? file : null;
   }
 
   /**

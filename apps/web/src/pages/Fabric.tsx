@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
-  Server, CircleDot, TerminalSquare, X, KeyRound, Monitor,
+  Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -10,7 +10,7 @@ import Guacamole from 'guacamole-common-js';
 import RFB from '@novnc/novnc';
 import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
-  FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket,
+  FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket, FabricSessionDto,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -103,6 +103,7 @@ export function Fabric() {
   const [err, setErr] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [showCli, setShowCli] = useState(false);
+  const [showRecordings, setShowRecordings] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
@@ -184,6 +185,9 @@ export function Fabric() {
         description="Agent-brokered remote access. Machines dial out to Cerebro — no inbound RDP/SSH exposure."
         actions={
           <>
+            <Button variant="outline" onClick={() => setShowRecordings(true)}>
+              <Film className="h-4 w-4 mr-1" /> Recordings
+            </Button>
             {canConnect && (
               <Button variant="outline" onClick={() => setShowCli(true)}>
                 <TerminalSquare className="h-4 w-4 mr-1" /> Command line
@@ -367,6 +371,7 @@ export function Fabric() {
       )}
 
       {showCli && <CliDialog onClose={() => setShowCli(false)} />}
+      {showRecordings && <RecordingsDialog onClose={() => setShowRecordings(false)} />}
 
       {adding && (
         <AddMachineDialog
@@ -533,6 +538,163 @@ function EnrollmentDialog({
         </div>
       </div>
     </Dialog>
+  );
+}
+
+function fmtTime(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+function sessionDuration(s: FabricSessionDto): string {
+  if (!s.endedAt) return 'in progress';
+  return fmtTime(new Date(s.endedAt).getTime() - new Date(s.startedAt).getTime());
+}
+
+function RecordingsDialog({ onClose }: { onClose: () => void }) {
+  const [sessions, setSessions] = useState<FabricSessionDto[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<FabricSessionDto | null>(null);
+
+  useEffect(() => {
+    api
+      .get<FabricSessionDto[]>('/api/fabric/sessions')
+      .then((all) => setSessions(all.filter((s) => s.hasRecording)))
+      .catch((e) => setErr(e instanceof ApiError ? e.message : 'Failed to load recordings.'));
+  }, []);
+
+  return (
+    <>
+      <Dialog
+        open
+        onClose={onClose}
+        size="lg"
+        title="Session recordings"
+        description="Recorded RDP sessions. Click to play back."
+        footer={<Button onClick={onClose}>Close</Button>}
+      >
+        {err && <p className="text-sm text-destructive">{err}</p>}
+        {sessions === null ? (
+          <div className="flex items-center gap-2 text-muted-foreground text-sm py-6">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+          </div>
+        ) : sessions.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-6">
+            No recordings yet. RDP sessions are recorded automatically.
+          </p>
+        ) : (
+          <div className="divide-y divide-border/60 max-h-[60vh] overflow-y-auto">
+            {sessions.map((s) => (
+              <div key={s.id} className="flex items-center justify-between gap-2 py-2">
+                <div className="min-w-0 text-sm">
+                  <div className="truncate">
+                    {s.agentName ?? s.agentId}{' '}
+                    <span className="uppercase text-[0.65rem] text-muted-foreground">{s.targetKind}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {new Date(s.startedAt).toLocaleString()} · {sessionDuration(s)}
+                  </div>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => setPlaying(s)}>
+                  <Play className="h-4 w-4 mr-1" /> Play
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Dialog>
+      {playing && <RecordingPlayer session={playing} onClose={() => setPlaying(null)} />}
+    </>
+  );
+}
+
+function RecordingPlayer({ session, onClose }: { session: FabricSessionDto; onClose: () => void }) {
+  const screenRef = useRef<HTMLDivElement>(null);
+  const recRef = useRef<InstanceType<typeof Guacamole.SessionRecording> | null>(null);
+  const [ready, setReady] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [pos, setPos] = useState(0);
+  const [dur, setDur] = useState(0);
+
+  useEffect(() => {
+    if (!screenRef.current) return;
+    const host = screenRef.current;
+    const tunnel = new Guacamole.StaticHTTPTunnel(`/api/fabric/recordings/${session.id}`);
+    const rec = new Guacamole.SessionRecording(tunnel);
+    recRef.current = rec;
+    const displayEl = rec.getDisplay().getElement();
+    host.appendChild(displayEl);
+
+    rec.onprogress = (duration: number) => {
+      setDur(duration);
+      setReady(true);
+    };
+    rec.onplay = () => setPlaying(true);
+    rec.onpause = () => setPlaying(false);
+    rec.onseek = (p: number) => setPos(p);
+    rec.connect();
+
+    const iv = setInterval(() => {
+      if (recRef.current?.isPlaying()) setPos(recRef.current.getPosition());
+    }, 250);
+
+    return () => {
+      clearInterval(iv);
+      try {
+        rec.disconnect();
+      } catch {
+        /* ignore */
+      }
+      if (displayEl.parentNode === host) host.removeChild(displayEl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
+
+  const toggle = () => {
+    const r = recRef.current;
+    if (!r) return;
+    if (r.isPlaying()) r.pause();
+    else r.play();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black flex flex-col">
+      <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
+        <span className="text-sm inline-flex items-center gap-2">
+          <Film className="h-4 w-4 text-primary" />
+          <span className="text-muted-foreground">Recording ·</span> {session.agentName ?? session.agentId}
+        </span>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          <X className="h-4 w-4 mr-1" /> Close
+        </Button>
+      </div>
+      <div className="shrink-0 flex items-center gap-3 px-4 py-2 border-b border-border bg-sidebar/60">
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggle} disabled={!ready}>
+          {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+        </Button>
+        <span className="text-xs tabular-nums text-muted-foreground w-12 text-right">{fmtTime(pos)}</span>
+        <input
+          type="range"
+          min={0}
+          max={dur || 1}
+          value={Math.min(pos, dur)}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setPos(v);
+            recRef.current?.seek(v);
+          }}
+          className="flex-1 accent-[hsl(var(--primary))]"
+          disabled={!ready}
+        />
+        <span className="text-xs tabular-nums text-muted-foreground w-12">{fmtTime(dur)}</span>
+      </div>
+      <div ref={screenRef} className="flex-1 relative overflow-auto grid place-items-center">
+        {!ready && (
+          <div className="absolute inset-0 grid place-items-center text-muted-foreground pointer-events-none">
+            <Loader2 className="h-6 w-6 animate-spin" />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

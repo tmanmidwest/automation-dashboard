@@ -33,6 +33,25 @@ declare module 'guacamole-common-js' {
   export class WebSocketTunnel implements Tunnel {
     constructor(url: string);
   }
+  export class StaticHTTPTunnel implements Tunnel {
+    constructor(url: string, crossDomain?: boolean, extraTunnelHeaders?: Record<string, string>);
+  }
+  export class SessionRecording {
+    constructor(tunnel: Tunnel);
+    connect(data?: string): void;
+    disconnect(): void;
+    getDisplay(): Display;
+    play(): void;
+    pause(): void;
+    seek(position: number, callback?: () => void): void;
+    isPlaying(): boolean;
+    getPosition(): number;
+    getDuration(): number;
+    onplay: (() => void) | null;
+    onpause: (() => void) | null;
+    onseek: ((position: number) => void) | null;
+    onprogress: ((duration: number, current: number) => void) | null;
+  }
   export class Client {
     constructor(tunnel: Tunnel);
     getDisplay(): Display;
@@ -53,6 +72,8 @@ declare module 'guacamole-common-js' {
     Display: typeof Display;
     Status: typeof Status;
     WebSocketTunnel: typeof WebSocketTunnel;
+    StaticHTTPTunnel: typeof StaticHTTPTunnel;
+    SessionRecording: typeof SessionRecording;
   };
   export default Guacamole;
 }

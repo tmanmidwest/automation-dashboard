@@ -45,7 +45,7 @@ export class FabricGuacService {
   private readonly logger = new Logger(FabricGuacService.name);
   private readonly tickets = new Map<
     string,
-    { desc: RdpDescriptor; forward: TunnelForward; callbackHost: string; expiresAt: number }
+    { desc: RdpDescriptor; forward: TunnelForward; callbackHost: string; recordName?: string; expiresAt: number }
   >();
   /** 32-byte key shared with the guacamole-lite server (clientOptions.crypt.key). */
   readonly cryptKey = createHash('sha256')
@@ -74,12 +74,23 @@ export class FabricGuacService {
     const row = await this.prisma.fabricSession
       .create({ data: { agentId: desc.agentId, targetKind: 'rdp', userId: desc.userId }, select: { id: true } })
       .catch(() => null);
+
+    // Record the session (guacd writes it to the shared volume) unless disabled.
+    // recording-name is the session row id, so the recording maps 1:1 to it.
+    let recordName: string | undefined;
+    if (row?.id && !process.env.FABRIC_RECORDING_DISABLED) {
+      recordName = row.id;
+      await this.prisma.fabricSession
+        .update({ where: { id: row.id }, data: { recordPath: recordName } })
+        .catch(() => undefined);
+    }
+
     await this.audit.record({
       actorId: desc.userId,
       actorEmail: desc.userEmail,
       action: 'fabric.session.start',
       target: desc.agentId,
-      meta: { targetId: desc.targetId, kind: 'rdp', port: desc.port, username: desc.username },
+      meta: { targetId: desc.targetId, kind: 'rdp', port: desc.port, username: desc.username, recorded: !!recordName },
     });
 
     const forward = await openTunnelForward(this.registry, {
@@ -115,7 +126,7 @@ export class FabricGuacService {
       `RDP forward on ${callbackHost}:${forward.port} -> ${desc.host}:${desc.port} (agent ${desc.agentId})`,
     );
 
-    this.tickets.set(id, { desc, forward, callbackHost, expiresAt: Date.now() + ttlMs });
+    this.tickets.set(id, { desc, forward, callbackHost, recordName, expiresAt: Date.now() + ttlMs });
     const token = this.encryptToken({ connection: { type: 'rdp', settings: { _ticket: id } } });
     return { token, wsPath: GUAC_WS_PATH };
   }
@@ -151,6 +162,11 @@ export class FabricGuacService {
       width: String(d.width && d.width > 0 ? d.width : 1024),
       height: String(d.height && d.height > 0 ? d.height : 768),
     };
+    if (entry.recordName) {
+      args['recording-path'] = process.env.FABRIC_RECORDING_DIR || '/recordings';
+      args['recording-name'] = entry.recordName;
+      args['create-recording-path'] = 'true';
+    }
     if (d.colorDepth) args['color-depth'] = String(d.colorDepth);
     if (d.consoleSession) args['console'] = 'true';
     if (d.disableAudio) args['disable-audio'] = 'true';
