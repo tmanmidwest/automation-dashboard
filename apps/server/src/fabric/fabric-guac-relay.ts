@@ -23,8 +23,10 @@ export function attachFabricGuacRelay(server: Server, guac: FabricGuacService): 
     port: Number(process.env.GUACD_PORT || 4822),
   };
   const clientOptions = {
+    // GUAC_LOG_LEVEL (QUIET|ERRORS|NORMAL|VERBOSE|DEBUG) tunes guacd-tunnel logging
+    // in the app log; NORMAL surfaces connection open/close + errors for diagnosis.
     crypt: { cipher: 'AES-256-CBC', key: guac.cryptKey },
-    log: { level: 'ERRORS' },
+    log: { level: process.env.GUAC_LOG_LEVEL || 'NORMAL' },
   };
   const callbacks = {
     processConnectionSettings: (

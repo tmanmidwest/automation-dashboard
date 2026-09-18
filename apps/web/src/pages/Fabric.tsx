@@ -882,15 +882,38 @@ function RdpViewer({
     const displayEl = client.getDisplay().getElement();
     host.appendChild(displayEl);
 
+    // Guacamole client states: 0 IDLE 1 CONNECTING 2 WAITING 3 CONNECTED
+    // 4 DISCONNECTING 5 DISCONNECTED
+    const STATE_NAMES = ['idle', 'connecting', 'waiting', 'connected', 'disconnecting', 'disconnected'];
+    let everConnected = false;
+    let sawError = false;
     client.onstatechange = (state: number) => {
-      // 3 = CONNECTED, 5 = DISCONNECTED (Guacamole client states)
-      if (state === 3) setStatus('connected');
-      else if (state === 5) setStatus('disconnected');
+      // eslint-disable-next-line no-console
+      console.log('[RDP] client state:', state, STATE_NAMES[state] ?? '');
+      if (state === 3) {
+        everConnected = true;
+        setStatus('connected');
+      } else if (state === 5) {
+        setStatus('disconnected');
+        // Disconnected before ever rendering, with no explicit error, almost
+        // always means guacd could not reach the host or RDP was rejected.
+        if (!everConnected && !sawError) {
+          setError(
+            'The session ended before the desktop loaded. Usually guacd could not reach the host through the tunnel, or RDP was rejected (credentials / NLA / certificate). Check the guacd container logs.',
+          );
+        }
+      }
     };
-    client.onerror = (s: { message?: string }) => {
-      setError(s?.message || 'The RDP connection was closed.');
+    const onGuacError = (s: { code?: number; message?: string }, where: string) => {
+      sawError = true;
+      // eslint-disable-next-line no-console
+      console.error(`[RDP] ${where} error:`, s?.code, s?.message);
+      setError(s?.message ? `${s.message}${s.code != null ? ` (code ${s.code})` : ''}` : `RDP ${where} error (code ${s?.code ?? '?'}).`);
       setStatus('disconnected');
     };
+    client.onerror = (s) => onGuacError(s, 'client');
+    (tunnel as unknown as { onerror?: (s: { code?: number; message?: string }) => void }).onerror = (s) =>
+      onGuacError(s, 'tunnel');
 
     const sendSize = () => {
       const w = Math.max(640, Math.floor(host.clientWidth));
