@@ -816,24 +816,36 @@ function SshConnectDialog({
   onConnected: (ticket: FabricSessionTicket, win: Window | null) => void;
   onChanged: () => void;
 }) {
+  const ownKey = `fabric/${agent.id}/${target.id}`;
   const [savedExists, setSavedExists] = useState(target.hasCredential);
   const [pinnedExists, setPinnedExists] = useState(target.hostKeyPinned);
-  const [useSaved, setUseSaved] = useState(target.hasCredential);
+  const [credOptions, setCredOptions] = useState<{ key: string; label: string }[]>([]);
+  const [credSource, setCredSource] = useState(target.hasCredential ? ownKey : 'manual');
   const [username, setUsername] = useState('root');
   const [method, setMethod] = useState<'password' | 'key'>('password');
   const [password, setPassword] = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [save, setSave] = useState(false);
+  const [saveAs, setSaveAs] = useState('');
   const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const isManual = credSource === 'manual';
+
+  useEffect(() => {
+    api
+      .get<{ key: string; label: string }[]>('/api/fabric/credentials?kind=ssh')
+      .then((list) => setCredOptions(list.filter((c) => c.key !== ownKey)))
+      .catch(() => setCredOptions([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = async () => {
     setErr(null);
     let body: FabricSshConnectInput;
-    if (useSaved) {
-      body = { useSaved: true };
+    if (!isManual) {
+      body = { secretRef: credSource };
     } else {
       if (!username.trim()) {
         setErr('A username is required.');
@@ -843,10 +855,11 @@ function SshConnectDialog({
         setErr(method === 'password' ? 'Enter a password.' : 'Paste a private key.');
         return;
       }
+      const saving = save && canManage;
       body =
         method === 'password'
-          ? { username: username.trim(), password, save: save && canManage }
-          : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: save && canManage };
+          ? { username: username.trim(), password, save: saving, saveAs: saveAs.trim() || undefined }
+          : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: saving, saveAs: saveAs.trim() || undefined };
     }
     // Open the tab now (still inside the click) so popup blockers allow it.
     const win = newTab ? window.open('about:blank', '_blank') : null;
@@ -856,7 +869,7 @@ function SshConnectDialog({
         `/api/fabric/agents/${agent.id}/targets/${target.id}/session`,
         body,
       );
-      if (!useSaved && save && canManage) onChanged();
+      if (isManual && save && canManage) onChanged();
       onConnected(ticket, win);
     } catch (e) {
       win?.close();
@@ -870,7 +883,7 @@ function SshConnectDialog({
     try {
       await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/credential`);
       setSavedExists(false);
-      setUseSaved(false);
+      if (credSource === ownKey) setCredSource('manual');
       onChanged();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to remove credential.');
@@ -907,19 +920,23 @@ function SshConnectDialog({
       <div className="space-y-3">
         {err && <p className="text-sm text-destructive">{err}</p>}
 
-        {savedExists && (
-          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 space-y-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={useSaved} onChange={(e) => setUseSaved(e.target.checked)} />
-              Use the saved credential from the vault
-            </label>
-            {canManage && (
-              <button type="button" onClick={forget} className="text-xs text-destructive hover:underline">
-                Forget saved credential
-              </button>
-            )}
-          </div>
-        )}
+        <div>
+          <Label htmlFor="ssh-cred">Credential</Label>
+          <select id="ssh-cred" className={selectCls} value={credSource} onChange={(e) => setCredSource(e.target.value)}>
+            {savedExists && <option value={ownKey}>Saved for this machine</option>}
+            {credOptions.map((c) => (
+              <option key={c.key} value={c.key}>
+                {c.label} (vault)
+              </option>
+            ))}
+            <option value="manual">Enter manually…</option>
+          </select>
+          {savedExists && canManage && (
+            <button type="button" onClick={forget} className="mt-1 text-xs text-destructive hover:underline">
+              Forget this machine's saved credential
+            </button>
+          )}
+        </div>
 
         {pinnedExists && canManage && (
           <p className="text-xs text-muted-foreground">
@@ -931,7 +948,7 @@ function SshConnectDialog({
           </p>
         )}
 
-        {!useSaved && (
+        {isManual && (
           <>
             <div>
               <Label htmlFor="ssh-user">Username</Label>
@@ -973,10 +990,19 @@ function SshConnectDialog({
               </>
             )}
             {canManage && (
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
-                Save to the vault for next time
-              </label>
+              <div className="space-y-1.5">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+                  Save this credential to the vault
+                </label>
+                {save && (
+                  <Input
+                    value={saveAs}
+                    onChange={(e) => setSaveAs(e.target.value)}
+                    placeholder="Reusable name (leave blank to save just for this machine)"
+                  />
+                )}
+              </div>
             )}
           </>
         )}
@@ -1121,13 +1147,17 @@ function RdpConnectDialog({
   onConnected: (ticket: FabricSessionTicket, win: Window | null, opts: { dynamicResize: boolean }) => void;
   onChanged: () => void;
 }) {
+  const ownKey = `fabric/${agent.id}/${target.id}`;
   const [savedExists, setSavedExists] = useState(target.hasCredential);
-  const [useSaved, setUseSaved] = useState(target.hasCredential);
+  const [credOptions, setCredOptions] = useState<{ key: string; label: string }[]>([]);
+  const [credSource, setCredSource] = useState(target.hasCredential ? ownKey : 'manual');
+  const [saveAs, setSaveAs] = useState('');
   const [username, setUsername] = useState('Administrator');
   const [password, setPassword] = useState('');
   const [domain, setDomain] = useState('');
   const [save, setSave] = useState(false);
   const [newTab, setNewTab] = useState(prefNewTab());
+  const isManual = credSource === 'manual';
   // Display / session options, remembered per target in this browser.
   const prefs = useMemo(() => loadRdpPrefs(target.id), [target.id]);
   const [resolution, setResolution] = useState(prefs.resolution ?? 'fit');
@@ -1138,6 +1168,14 @@ function RdpConnectDialog({
   const [enableAudio, setEnableAudio] = useState(prefs.enableAudio ?? true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ key: string; label: string }[]>('/api/fabric/credentials?kind=rdp')
+      .then((list) => setCredOptions(list.filter((c) => c.key !== ownKey)))
+      .catch(() => setCredOptions([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const options = () => {
     // Resolution: "fit" → the current window; otherwise a fixed "WxH".
@@ -1167,8 +1205,8 @@ function RdpConnectDialog({
     saveRdpPrefs(target.id, { resolution, colorDepth, security, consoleSession, enableEffects, enableAudio });
     const opts = options();
     let body: FabricRdpConnectInput;
-    if (useSaved) {
-      body = { useSaved: true, ...opts };
+    if (!isManual) {
+      body = { secretRef: credSource, ...opts };
     } else {
       if (!username.trim()) {
         setErr('A username is required.');
@@ -1178,7 +1216,14 @@ function RdpConnectDialog({
         setErr('A password is required.');
         return;
       }
-      body = { username: username.trim(), password, domain: domain.trim() || undefined, save: save && canManage, ...opts };
+      body = {
+        username: username.trim(),
+        password,
+        domain: domain.trim() || undefined,
+        save: save && canManage,
+        saveAs: saveAs.trim() || undefined,
+        ...opts,
+      };
     }
     const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
@@ -1187,7 +1232,7 @@ function RdpConnectDialog({
         `/api/fabric/agents/${agent.id}/targets/${target.id}/rdp-session`,
         body,
       );
-      if (!useSaved && save && canManage) onChanged();
+      if (isManual && save && canManage) onChanged();
       onConnected(ticket, win, { dynamicResize: resolution === 'fit' });
     } catch (e) {
       win?.close();
@@ -1201,7 +1246,7 @@ function RdpConnectDialog({
     try {
       await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/credential`);
       setSavedExists(false);
-      setUseSaved(false);
+      if (credSource === ownKey) setCredSource('manual');
       onChanged();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to remove credential.');
@@ -1227,21 +1272,25 @@ function RdpConnectDialog({
       <div className="space-y-3">
         {err && <p className="text-sm text-destructive">{err}</p>}
 
-        {savedExists && (
-          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 space-y-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={useSaved} onChange={(e) => setUseSaved(e.target.checked)} />
-              Use the saved credential from the vault
-            </label>
-            {canManage && (
-              <button type="button" onClick={forget} className="text-xs text-destructive hover:underline">
-                Forget saved credential
-              </button>
-            )}
-          </div>
-        )}
+        <div>
+          <Label htmlFor="rdp-cred">Credential</Label>
+          <select id="rdp-cred" className={selectCls} value={credSource} onChange={(e) => setCredSource(e.target.value)}>
+            {savedExists && <option value={ownKey}>Saved for this machine</option>}
+            {credOptions.map((c) => (
+              <option key={c.key} value={c.key}>
+                {c.label} (vault)
+              </option>
+            ))}
+            <option value="manual">Enter manually…</option>
+          </select>
+          {savedExists && canManage && (
+            <button type="button" onClick={forget} className="mt-1 text-xs text-destructive hover:underline">
+              Forget this machine's saved credential
+            </button>
+          )}
+        </div>
 
-        {!useSaved && (
+        {isManual && (
           <>
             <div>
               <Label htmlFor="rdp-user">Username</Label>
@@ -1256,10 +1305,19 @@ function RdpConnectDialog({
               <Input id="rdp-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
             {canManage && (
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
-                Save to the vault for next time
-              </label>
+              <div className="space-y-1.5">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+                  Save this credential to the vault
+                </label>
+                {save && (
+                  <Input
+                    value={saveAs}
+                    onChange={(e) => setSaveAs(e.target.value)}
+                    placeholder="Reusable name (leave blank to save just for this machine)"
+                  />
+                )}
+              </div>
             )}
           </>
         )}

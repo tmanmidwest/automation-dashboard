@@ -48,6 +48,11 @@ class SshConnectDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(256)
+  secretRef?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(128)
   username?: string;
 
@@ -66,12 +71,22 @@ class SshConnectDto {
   @IsOptional()
   @IsBoolean()
   save?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  saveAs?: string;
 }
 
 class RdpConnectDto {
   @IsOptional()
   @IsBoolean()
   useSaved?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  secretRef?: string;
 
   @IsOptional()
   @IsString()
@@ -90,6 +105,11 @@ class RdpConnectDto {
   @IsOptional()
   @IsBoolean()
   save?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  saveAs?: string;
 
   @IsOptional()
   @IsInt()
@@ -186,6 +206,14 @@ export class FabricController {
   @RequirePermissions('fabric:read')
   listSessions(@Query('agentId') agentId?: string) {
     return this.fabric.listSessions(agentId);
+  }
+
+  /** Vault credentials selectable in the connect dialog (ssh/rdp). */
+  @Get('credentials')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  listCredentials(@Query('kind') kind?: string) {
+    return this.fabric.listCredentials(kind === 'rdp' ? 'rdp' : 'ssh');
   }
 
   /** Stream a session's recording for playback (Guacamole recording format). */

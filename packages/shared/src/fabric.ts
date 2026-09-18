@@ -176,18 +176,29 @@ export const FABRIC_HEARTBEAT_MS = 15_000;
 /** Missed this many heartbeats in a row ⇒ mark the agent offline. */
 export const FABRIC_MISSED_BEATS_OFFLINE = 3;
 
-/** Credentials for an SSH session. Either supply them, or set `useSaved` to
- * inject the target's vault-stored credential (operator never sees it). */
+/** Credentials for an SSH session. Provide one of: `useSaved` (the target's own
+ * vault credential), `secretRef` (any vault SSH credential), or manual fields. */
 export interface FabricSshConnectInput {
-  /** Use the credential attached to the target in the vault instead of the fields below. */
+  /** Use the credential attached to the target in the vault. */
   useSaved?: boolean;
+  /** Use a specific vault credential by key (this machine's, or a shared one). */
+  secretRef?: string;
   username?: string;
   /** Provide a password OR a private key. */
   password?: string;
   privateKey?: string;
   passphrase?: string;
-  /** Persist the supplied credential to the vault on the target (needs fabric:manage). */
+  /** Persist the supplied credential to the vault (needs fabric:manage). */
   save?: boolean;
+  /** When saving, a name creates/updates a reusable credential instead of this
+   * machine's own — it then appears in the picker for every machine. */
+  saveAs?: string;
+}
+
+/** One selectable vault credential (metadata only — never the value). */
+export interface FabricCredentialOption {
+  key: string;
+  label: string;
 }
 
 /** Minting an interactive session returns a one-time ticket; open the WS with it. */
@@ -197,14 +208,18 @@ export interface FabricSessionTicket {
   wsPath: string;
 }
 
-/** Credentials + display options for an RDP session. Either supply creds, or set `useSaved`. */
+/** Credentials + display options for an RDP session. */
 export interface FabricRdpConnectInput {
   useSaved?: boolean;
+  /** Use a specific vault credential by key (this machine's, or a shared one). */
+  secretRef?: string;
   username?: string;
   password?: string;
   domain?: string;
-  /** Persist the supplied credential to the vault on the target (needs fabric:manage). */
+  /** Persist the supplied credential to the vault (needs fabric:manage). */
   save?: boolean;
+  /** When saving, a name creates/updates a reusable credential (see SSH input). */
+  saveAs?: string;
 
   // --- Display / session options (not credentials; per-connection) ---
   /** Initial desktop width/height in px. Omit to fit the browser window. */

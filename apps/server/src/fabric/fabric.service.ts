@@ -56,14 +56,12 @@ export class FabricService {
     if (target.kind !== 'ssh') throw new BadRequestException('Only SSH sessions are supported yet (Phase 3).');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
 
+    // Credential source: a specific vault credential (secretRef), the target's
+    // own saved credential (useSaved), or manually-entered fields.
+    const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
     let creds: SshCredential;
-    if (input.useSaved) {
-      // Vault-injected: reveal the target's stored credential server-side. The
-      // operator never sees it and never typed it.
-      if (!target.secretRef) throw new BadRequestException('No saved credential for this target.');
-      const raw = await this.secrets.reveal(target.secretRef);
-      if (!raw) throw new BadRequestException('The saved credential is missing from the vault.');
-      creds = JSON.parse(raw) as SshCredential;
+    if (ref) {
+      creds = (await this.revealCredential(ref, 'ssh')) as SshCredential;
     } else {
       if (!input.username?.trim()) throw new BadRequestException('A username is required.');
       if (!input.password && !input.privateKey) throw new BadRequestException('Provide a password or a private key.');
@@ -75,7 +73,8 @@ export class FabricService {
       };
       if (input.save) {
         this.requireManage(user);
-        await this.saveTargetCredential(target, 'ssh', creds, user);
+        if (input.saveAs?.trim()) await this.saveNamedCredential('ssh', input.saveAs.trim(), creds, user);
+        else await this.saveTargetCredential(target, 'ssh', creds, user);
       }
     }
 
@@ -111,19 +110,18 @@ export class FabricService {
     if (target.kind !== 'rdp') throw new BadRequestException('This target is not an RDP endpoint.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
 
+    const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
     let creds: RdpCredential;
-    if (input.useSaved) {
-      if (!target.secretRef) throw new BadRequestException('No saved credential for this target.');
-      const raw = await this.secrets.reveal(target.secretRef);
-      if (!raw) throw new BadRequestException('The saved credential is missing from the vault.');
-      creds = JSON.parse(raw) as RdpCredential;
+    if (ref) {
+      creds = (await this.revealCredential(ref, 'rdp')) as RdpCredential;
     } else {
       if (!input.username?.trim()) throw new BadRequestException('A username is required.');
       if (!input.password) throw new BadRequestException('A password is required.');
       creds = { username: input.username.trim(), password: input.password, domain: input.domain };
       if (input.save) {
         this.requireManage(user);
-        await this.saveTargetCredential(target, 'rdp', creds, user);
+        if (input.saveAs?.trim()) await this.saveNamedCredential('rdp', input.saveAs.trim(), creds, user);
+        else await this.saveTargetCredential(target, 'rdp', creds, user);
       }
     }
 
@@ -187,6 +185,55 @@ export class FabricService {
     if (!user.permissions.includes('fabric:manage')) {
       throw new ForbiddenException('Saving a credential to the vault requires fabric:manage.');
     }
+  }
+
+  /**
+   * List reusable vault credentials of a kind (ssh/rdp) for the connect-dialog
+   * picker: named credentials (`fabric/cred/*`) and any non-Fabric ones, but not
+   * other machines' per-target entries (`fabric/<agentId>/<targetId>`), which are
+   * machine-specific and would clutter the list with ambiguous labels.
+   */
+  async listCredentials(kind: 'ssh' | 'rdp'): Promise<{ key: string; label: string }[]> {
+    const all = await this.secrets.list();
+    return all
+      .filter((s) => s.kind === kind)
+      .filter((s) => !s.key.startsWith('fabric/') || s.key.startsWith('fabric/cred/'))
+      .map((s) => ({ key: s.key, label: s.label }));
+  }
+
+  /** Reveal + parse a vault credential, verifying it is of the expected kind. */
+  private async revealCredential(key: string, kind: 'ssh' | 'rdp'): Promise<SshCredential | RdpCredential> {
+    const meta = await this.prisma.secretMeta.findUnique({ where: { key }, select: { kind: true } });
+    if (!meta || meta.kind !== kind) {
+      throw new BadRequestException(`That vault entry is not an ${kind.toUpperCase()} credential.`);
+    }
+    const raw = await this.secrets.reveal(key);
+    if (!raw) throw new BadRequestException('The credential is missing from the vault.');
+    return JSON.parse(raw) as SshCredential | RdpCredential;
+  }
+
+  /** Save a named, reusable credential (not tied to one machine) in the vault. */
+  private async saveNamedCredential(
+    kind: 'ssh' | 'rdp',
+    name: string,
+    value: SshCredential | RdpCredential,
+    user: SessionUser,
+  ): Promise<void> {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'cred';
+    const key = `fabric/cred/${slug}`;
+    await this.secrets.set(
+      key,
+      JSON.stringify(value),
+      { kind, category: 'manual', label: name, description: `Fabric ${kind.toUpperCase()} credential (reusable)` },
+      { actorId: user.id, actorEmail: user.email },
+    );
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.credential_saved',
+      target: key,
+      meta: { kind, name },
+    });
   }
 
   /** Store a target credential (SSH or RDP) in the vault and attach it to the target. */
