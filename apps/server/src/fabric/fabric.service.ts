@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import type { Agent, AgentTarget } from '@prisma/client';
 import type {
   FabricAgentDto,
@@ -9,9 +9,11 @@ import type {
   FabricSshConnectInput,
   FabricTargetDto,
   SessionUser,
+  SshCredential,
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
+import { SecretsService } from '../secrets/secrets.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
 import { generateEnrollToken } from './fabric-credentials';
@@ -29,6 +31,7 @@ export class FabricService {
     private readonly audit: AuditService,
     private readonly registry: AgentRegistryService,
     private readonly sessions: FabricSessionService,
+    private readonly secrets: SecretsService,
   ) {}
 
   /**
@@ -39,15 +42,38 @@ export class FabricService {
   async openSshSession(
     agentId: string,
     targetId: string,
-    creds: FabricSshConnectInput,
+    input: FabricSshConnectInput,
     user: SessionUser,
   ): Promise<FabricSessionTicket> {
     const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
     if (!target) throw new NotFoundException('Target not found.');
     if (target.kind !== 'ssh') throw new BadRequestException('Only SSH sessions are supported yet (Phase 3).');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
-    if (!creds.username?.trim()) throw new BadRequestException('A username is required.');
-    if (!creds.password && !creds.privateKey) throw new BadRequestException('Provide a password or a private key.');
+
+    let creds: SshCredential;
+    if (input.useSaved) {
+      // Vault-injected: reveal the target's stored credential server-side. The
+      // operator never sees it and never typed it.
+      if (!target.secretRef) throw new BadRequestException('No saved credential for this target.');
+      const raw = await this.secrets.reveal(target.secretRef);
+      if (!raw) throw new BadRequestException('The saved credential is missing from the vault.');
+      creds = JSON.parse(raw) as SshCredential;
+    } else {
+      if (!input.username?.trim()) throw new BadRequestException('A username is required.');
+      if (!input.password && !input.privateKey) throw new BadRequestException('Provide a password or a private key.');
+      creds = {
+        username: input.username.trim(),
+        password: input.password,
+        privateKey: input.privateKey,
+        passphrase: input.passphrase,
+      };
+      if (input.save) {
+        if (!user.permissions.includes('fabric:manage')) {
+          throw new ForbiddenException('Saving a credential to the vault requires fabric:manage.');
+        }
+        await this.saveTargetCredential(target, creds, user);
+      }
+    }
 
     const token = this.sessions.issue({
       agentId,
@@ -57,12 +83,53 @@ export class FabricService {
       host: target.host,
       port: target.port,
       kind: target.kind,
-      username: creds.username.trim(),
+      username: creds.username,
       password: creds.password,
       privateKey: creds.privateKey,
       passphrase: creds.passphrase,
     });
     return { token, wsPath: SESSION_WS_PATH };
+  }
+
+  /** Store an SSH credential in the vault and attach it to the target. */
+  private async saveTargetCredential(target: AgentTarget, creds: SshCredential, user: SessionUser): Promise<void> {
+    const key = `fabric/${target.agentId}/${target.id}`;
+    await this.secrets.set(
+      key,
+      JSON.stringify(creds),
+      {
+        kind: 'ssh',
+        category: 'manual',
+        label: `SSH · ${target.host}:${target.port}`,
+        description: `Fabric SSH credential for agent ${target.agentId}`,
+      },
+      { actorId: user.id, actorEmail: user.email },
+    );
+    await this.prisma.agentTarget.update({ where: { id: target.id }, data: { secretRef: key } });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.target.credential_saved',
+      target: target.agentId,
+      meta: { targetId: target.id },
+    });
+  }
+
+  /** Remove a target's vault credential (and detach it). */
+  async clearTargetCredential(agentId: string, targetId: string, user: SessionUser): Promise<void> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.secretRef) {
+      await this.secrets.remove(target.secretRef, { actorId: user.id, actorEmail: user.email }).catch(() => undefined);
+      await this.prisma.agentTarget.update({ where: { id: target.id }, data: { secretRef: null } });
+    }
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.target.credential_cleared',
+      target: agentId,
+      meta: { targetId },
+    });
   }
 
   /** All agents with their targets, statuses reconciled against live connections. */
@@ -140,6 +207,15 @@ export class FabricService {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
     if (!agent) throw new NotFoundException('Agent not found.');
     this.registry.disconnect(id);
+    // Remove any vault credentials attached to this agent's targets so they
+    // don't outlive the agent as orphans.
+    const withSecrets = await this.prisma.agentTarget.findMany({
+      where: { agentId: id, secretRef: { not: null } },
+      select: { secretRef: true },
+    });
+    for (const t of withSecrets) {
+      if (t.secretRef) await this.secrets.remove(t.secretRef, { actorId: user.id, actorEmail: user.email }).catch(() => undefined);
+    }
     await this.prisma.agent.delete({ where: { id } });
     await this.audit.record({
       actorId: user.id,
@@ -254,6 +330,7 @@ export class FabricService {
           host: t.host,
           port: t.port,
           label: t.label,
+          hasCredential: !!t.secretRef,
         }),
       ),
     };

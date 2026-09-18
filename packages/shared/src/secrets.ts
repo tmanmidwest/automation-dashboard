@@ -28,8 +28,8 @@ export interface SecretSummary {
 }
 
 /** Editable metadata fields (PUT /api/secrets/:key). */
-/** Shape of a stored secret value: a single string, or a structured Git credential (JSON). */
-export type SecretKind = 'generic' | 'git';
+/** Shape of a stored secret value: a single string, or a structured JSON credential. */
+export type SecretKind = 'generic' | 'git' | 'ssh';
 
 /** A Git credential's decoded value (stored as the secret's JSON plaintext, kind='git'). */
 export interface GitCredential {
@@ -37,6 +37,15 @@ export interface GitCredential {
   username?: string;
   /** A personal-access-token or a password — both authenticate as HTTPS username:secret. */
   secret: string;
+}
+
+/** An SSH credential's decoded value (stored as the secret's JSON plaintext, kind='ssh'). */
+export interface SshCredential {
+  username: string;
+  /** Provide a password OR a private key. */
+  password?: string;
+  privateKey?: string;
+  passphrase?: string;
 }
 
 export interface SecretMetaInput {

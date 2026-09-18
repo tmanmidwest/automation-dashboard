@@ -21,6 +21,8 @@ export interface FabricTargetDto {
   host: string; // almost always 127.0.0.1
   port: number; // 22 | 3389 | custom
   label?: string | null;
+  /** True when a vault credential is attached (server-injected at session time). */
+  hasCredential: boolean;
 }
 
 export interface FabricAgentDto {
@@ -156,13 +158,18 @@ export const FABRIC_HEARTBEAT_MS = 15_000;
 /** Missed this many heartbeats in a row ⇒ mark the agent offline. */
 export const FABRIC_MISSED_BEATS_OFFLINE = 3;
 
-/** Operator-supplied SSH credentials for a session (held server-side, one-time). */
+/** Credentials for an SSH session. Either supply them, or set `useSaved` to
+ * inject the target's vault-stored credential (operator never sees it). */
 export interface FabricSshConnectInput {
-  username: string;
+  /** Use the credential attached to the target in the vault instead of the fields below. */
+  useSaved?: boolean;
+  username?: string;
   /** Provide a password OR a private key. */
   password?: string;
   privateKey?: string;
   passphrase?: string;
+  /** Persist the supplied credential to the vault on the target (needs fabric:manage). */
+  save?: boolean;
 }
 
 /** Minting an interactive session returns a one-time ticket; open the WS with it. */

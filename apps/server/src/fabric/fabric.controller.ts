@@ -14,7 +14,7 @@ import {
 import type { Response } from 'express';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { IsArray, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
 import { CurrentUser, Public, RequirePermissions, SessionOnly } from '../auth/decorators';
 import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
@@ -42,9 +42,14 @@ class EnrollDto {
 }
 
 class SshConnectDto {
+  @IsOptional()
+  @IsBoolean()
+  useSaved?: boolean;
+
+  @IsOptional()
   @IsString()
   @MaxLength(128)
-  username!: string;
+  username?: string;
 
   @IsOptional()
   @IsString()
@@ -57,6 +62,10 @@ class SshConnectDto {
   @IsOptional()
   @IsString()
   passphrase?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  save?: boolean;
 }
 
 /** Where prebuilt agent binaries are served from (populated by CI / a release step). */
@@ -133,6 +142,19 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     return this.fabric.openSshSession(id, targetId, body, user);
+  }
+
+  /** Forget a target's vault-stored credential (Phase 3.5). */
+  @Delete('agents/:id/targets/:targetId/credential')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async clearCredential(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    await this.fabric.clearTargetCredential(id, targetId, user);
+    return { ok: true };
   }
 
   // --- Installer surface (public; token travels in the environment) ----------

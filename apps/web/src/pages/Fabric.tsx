@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
-  Server, CircleDot, TerminalSquare, X,
+  Server, CircleDot, TerminalSquare, X, KeyRound,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -240,10 +240,11 @@ export function Fabric() {
                                   type="button"
                                   disabled={!online}
                                   onClick={online ? () => setConnectFor({ agent: a, target: t }) : undefined}
-                                  title={online ? 'Open SSH session' : 'Agent offline'}
-                                  className={`px-1.5 py-0.5 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
+                                  title={online ? (t.hasCredential ? 'Open SSH session (vault credential saved)' : 'Open SSH session') : 'Agent offline'}
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
                                 >
                                   <TerminalSquare className="h-3 w-3" />
+                                  {t.hasCredential && <KeyRound className="h-2.5 w-2.5 opacity-70" />}
                                 </button>
                               )}
                             </span>
@@ -296,6 +297,8 @@ export function Fabric() {
         <SshConnectDialog
           agent={connectFor.agent}
           target={connectFor.target}
+          canManage={canManage}
+          onChanged={load}
           onClose={() => setConnectFor(null)}
           onConnected={(ticket) => {
             setSession({ ticket, title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}` });
@@ -420,46 +423,71 @@ function EnrollmentDialog({
 function SshConnectDialog({
   agent,
   target,
+  canManage,
   onClose,
   onConnected,
+  onChanged,
 }: {
   agent: FabricAgentDto;
   target: FabricTargetDto;
+  canManage: boolean;
   onClose: () => void;
   onConnected: (ticket: FabricSessionTicket) => void;
+  onChanged: () => void;
 }) {
+  const [savedExists, setSavedExists] = useState(target.hasCredential);
+  const [useSaved, setUseSaved] = useState(target.hasCredential);
   const [username, setUsername] = useState('root');
   const [method, setMethod] = useState<'password' | 'key'>('password');
   const [password, setPassword] = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [passphrase, setPassphrase] = useState('');
+  const [save, setSave] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!username.trim()) {
-      setErr('A username is required.');
-      return;
-    }
-    if (method === 'password' ? !password : !privateKey.trim()) {
-      setErr(method === 'password' ? 'Enter a password.' : 'Paste a private key.');
-      return;
+    setErr(null);
+    let body: FabricSshConnectInput;
+    if (useSaved) {
+      body = { useSaved: true };
+    } else {
+      if (!username.trim()) {
+        setErr('A username is required.');
+        return;
+      }
+      if (method === 'password' ? !password : !privateKey.trim()) {
+        setErr(method === 'password' ? 'Enter a password.' : 'Paste a private key.');
+        return;
+      }
+      body =
+        method === 'password'
+          ? { username: username.trim(), password, save: save && canManage }
+          : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: save && canManage };
     }
     setBusy(true);
-    setErr(null);
     try {
-      const body: FabricSshConnectInput =
-        method === 'password'
-          ? { username: username.trim(), password }
-          : { username: username.trim(), privateKey, passphrase: passphrase || undefined };
       const ticket = await api.post<FabricSessionTicket>(
         `/api/fabric/agents/${agent.id}/targets/${target.id}/session`,
         body,
       );
+      if (!useSaved && save && canManage) onChanged();
       onConnected(ticket);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
+    }
+  };
+
+  const forget = async () => {
+    if (!confirm('Forget the saved credential for this target?')) return;
+    try {
+      await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/credential`);
+      setSavedExists(false);
+      setUseSaved(false);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to remove credential.');
     }
   };
 
@@ -468,7 +496,7 @@ function SshConnectDialog({
       open
       onClose={onClose}
       title={`SSH · ${agent.name}`}
-      description={`Connect to ${target.host}:${target.port} through the tunnel. Credentials are used once and never stored.`}
+      description={`Connect to ${target.host}:${target.port} through the tunnel.`}
       footer={
         <>
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
@@ -481,43 +509,68 @@ function SshConnectDialog({
     >
       <div className="space-y-3">
         {err && <p className="text-sm text-destructive">{err}</p>}
-        <div>
-          <Label htmlFor="ssh-user">Username</Label>
-          <Input id="ssh-user" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
-        </div>
-        <div>
-          <Label htmlFor="ssh-method">Authentication</Label>
-          <select
-            id="ssh-method"
-            className={selectCls}
-            value={method}
-            onChange={(e) => setMethod(e.target.value as 'password' | 'key')}
-          >
-            <option value="password">Password</option>
-            <option value="key">Private key</option>
-          </select>
-        </div>
-        {method === 'password' ? (
-          <div>
-            <Label htmlFor="ssh-pass">Password</Label>
-            <Input id="ssh-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+
+        {savedExists && (
+          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 space-y-2">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={useSaved} onChange={(e) => setUseSaved(e.target.checked)} />
+              Use the saved credential from the vault
+            </label>
+            {canManage && (
+              <button type="button" onClick={forget} className="text-xs text-destructive hover:underline">
+                Forget saved credential
+              </button>
+            )}
           </div>
-        ) : (
+        )}
+
+        {!useSaved && (
           <>
             <div>
-              <Label htmlFor="ssh-key">Private key (PEM)</Label>
-              <textarea
-                id="ssh-key"
-                className="mt-1 w-full h-28 rounded-md border border-input bg-background/60 px-2 py-1 text-xs font-mono"
-                value={privateKey}
-                onChange={(e) => setPrivateKey(e.target.value)}
-                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-              />
+              <Label htmlFor="ssh-user">Username</Label>
+              <Input id="ssh-user" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
             </div>
             <div>
-              <Label htmlFor="ssh-phrase">Key passphrase (optional)</Label>
-              <Input id="ssh-phrase" type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
+              <Label htmlFor="ssh-method">Authentication</Label>
+              <select
+                id="ssh-method"
+                className={selectCls}
+                value={method}
+                onChange={(e) => setMethod(e.target.value as 'password' | 'key')}
+              >
+                <option value="password">Password</option>
+                <option value="key">Private key</option>
+              </select>
             </div>
+            {method === 'password' ? (
+              <div>
+                <Label htmlFor="ssh-pass">Password</Label>
+                <Input id="ssh-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              </div>
+            ) : (
+              <>
+                <div>
+                  <Label htmlFor="ssh-key">Private key (PEM)</Label>
+                  <textarea
+                    id="ssh-key"
+                    className="mt-1 w-full h-28 rounded-md border border-input bg-background/60 px-2 py-1 text-xs font-mono"
+                    value={privateKey}
+                    onChange={(e) => setPrivateKey(e.target.value)}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="ssh-phrase">Key passphrase (optional)</Label>
+                  <Input id="ssh-phrase" type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
+                </div>
+              </>
+            )}
+            {canManage && (
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+                Save to the vault for next time
+              </label>
+            )}
           </>
         )}
       </div>

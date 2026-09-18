@@ -11,7 +11,7 @@ The mental model is **Cloudflare Tunnel + Teleport-lite, self-hosted**: reverse 
 broker, per-session RBAC, full audit — but living inside Cerebro's LCARS UI and reusing its
 existing relay, vault, crypto, RBAC, and timeline plumbing.
 
-> Status: **Phases 1–3 BUILT** (2026-09-18) — control plane + tunnel data path + in-browser SSH.
+> Status: **Phases 1–3.5 BUILT** (2026-09-18) — control plane + tunnel + in-browser SSH + vault creds.
 > Phase 1: control plane, enrollment, Go agent, `/fabric` screen.
 > `tsc`/`vite` green; the Go agent **cross-compiles inside the Docker image build** (`agent-build`
 > stage → all three binaries verified) so no manual Go step is needed — a normal image build produces
@@ -24,7 +24,11 @@ existing relay, vault, crypto, RBAC, and timeline plumbing.
 > `TunnelStream` to a Node Duplex) ⟷ `127.0.0.1:22` on the box. The Go agent is unchanged — SSH is
 > just bytes over the Phase-2 stream. Phase 3 uses **operator-supplied credentials** (entered in the
 > connect dialog, held server-side in a 30s one-time ticket, never in a URL); **vault credential
-> injection** (`AgentTarget.secretRef`) is a **Phase 3.5** fast-follow. Host keys are not yet pinned
+> injection** (`AgentTarget.secretRef`) landed in **Phase 3.5** — an SSH credential (vault kind
+> `ssh`, JSON `{username,password?,privateKey?,passphrase?}`) is stored under `fabric/<agentId>/<targetId>`
+> and revealed server-side at connect time via `SecretsService.reveal`, so an operator with only
+> `fabric:connect` clicks **Use saved credential** and never sees the secret; saving/forgetting needs
+> `fabric:manage`; deleting an agent removes its target secrets. Host keys are not yet pinned
 > (the tunnel authenticates the box via the agent). Each session is recorded to `FabricSession` +
 > Ship's Log (`fabric.session.start`/`end`, byte counts).
 >
@@ -281,7 +285,8 @@ CJS-barrel gotcha).
 |---|---|---|
 | **1 — Control plane + enrollment** ✅ **BUILT** | Go agent (`agent/`); enrollment token → bearer-credential exchange; `/api/fabric/agent/ws` control server (bearer auth); `Agent`/`AgentTarget`/`FabricSession` tables (migration `0022`); heartbeat + online/offline; `/fabric` screen + **Add machine** wizard + `install.sh`/`install.ps1` + binary-serve route. **No tunnels yet.** | A real cloud VM's agent dials home, enrolls, and shows **online** in the UI with zero inbound rules. |
 | **2 — Tunnel data path** ✅ **BUILT** | WS-framed mux (`stream-mux.ts` on the broker; single-writer session in the Go agent) — `open-stream`/`stream-opened`/`stream-error`/`close-stream` + binary data frames; agent-side **allow-list** (only declared targets + loopback 22/3389); **Test tunnel** probe end to end. `tsc`/`vet` green; agent compiled in Docker. | Bytes flow through the tunnel; a probe reads the live SSH banner; allow-list enforced. |
-| **3 — SSH in browser** ✅ **BUILT** | `xterm.js` ⟷ session WS relay (`fabric-session-relay.ts`) ⟷ `ssh2` over the tunnel (`TunnelSocket`); one-time session ticket (`FabricSessionService`); operator-supplied creds; `FabricSession` + Ship's Log audit. `tsc`/`vite` green. *Vault injection = Phase 3.5; host-key pinning + guacd/RDP = Phase 4.* | First real interactive session, fully in LCARS, audited. |
+| **3 — SSH in browser** ✅ **BUILT** | `xterm.js` ⟷ session WS relay (`fabric-session-relay.ts`) ⟷ `ssh2` over the tunnel (`TunnelSocket`); one-time session ticket (`FabricSessionService`); operator-supplied creds; `FabricSession` + Ship's Log audit. | First real interactive session, fully in LCARS, audited. |
+| **3.5 — Vault SSH creds** ✅ **BUILT** | `ssh` vault kind; per-target credential stored at `fabric/<agentId>/<targetId>`, revealed server-side at connect (**Use saved credential** — operator never sees it); save/forget gated on `fabric:manage`; orphan cleanup on agent delete. `tsc`/`vite` green. | Connect with one click; secrets never leave the server. |
 | **4 — RDP in browser** | guacd RDP; Windows agent as a service; credential injection; connection quality / resize. | Windows RDP in the browser through the tunnel. |
 | **5 — Native client + hardening** | `cerebro access tcp` CLI; agent offline monitors + notifications; session recording; optional approval gate; agent self-update. | Power-user path + enterprise-grade controls. |
 
