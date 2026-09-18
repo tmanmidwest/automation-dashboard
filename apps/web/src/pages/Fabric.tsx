@@ -62,6 +62,23 @@ function saveRdpPrefs(targetId: string, prefs: RdpPrefs): void {
   }
 }
 
+/** Whether new sessions open in a new browser tab (default) vs. an in-page overlay. */
+const NEWTAB_PREF = 'fabric.openInNewTab';
+function prefNewTab(): boolean {
+  try {
+    return localStorage.getItem(NEWTAB_PREF) !== '0';
+  } catch {
+    return true;
+  }
+}
+function setPrefNewTab(v: boolean): void {
+  try {
+    localStorage.setItem(NEWTAB_PREF, v ? '1' : '0');
+  } catch {
+    /* storage blocked */
+  }
+}
+
 function relTime(iso?: string | null): string {
   if (!iso) return 'never';
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -112,14 +129,44 @@ export function Fabric() {
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
   const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
 
+  /**
+   * Launch a session either in a new tab (default) or an in-page overlay. `win`
+   * is a blank tab already opened during the user gesture (to dodge popup
+   * blockers); we hand it the ticket via localStorage and point it at the
+   * session route. Null `win` (blocked or preference off) → overlay.
+   */
+  const launchViewer = (
+    kind: 'ssh' | 'rdp' | 'vnc',
+    ticket: FabricSessionTicket,
+    title: string,
+    win: Window | null,
+    extra?: { dynamicResize?: boolean },
+  ) => {
+    if (win) {
+      const key = `fabric.session.${Math.random().toString(36).slice(2)}`;
+      try {
+        localStorage.setItem(key, JSON.stringify({ kind, ticket, title, dynamicResize: extra?.dynamicResize }));
+      } catch {
+        /* storage blocked — fall through to overlay */
+      }
+      win.location.href = `${location.origin}/fabric/session?k=${encodeURIComponent(key)}`;
+      return;
+    }
+    if (kind === 'ssh') setSession({ ticket, title });
+    else if (kind === 'rdp') setRdpSession({ ticket, title, dynamicResize: !!extra?.dynamicResize });
+    else setVncSession({ ticket, title });
+  };
+
   const openConnect = async (agent: FabricAgentDto, t: FabricTargetDto) => {
     // VNC needs no credential dialog (noVNC prompts for the Screen Sharing
     // password itself), so connect straight through.
     if (t.kind === 'vnc') {
+      const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
       try {
         const ticket = await api.post<FabricSessionTicket>(`/api/fabric/agents/${agent.id}/targets/${t.id}/vnc-session`);
-        setVncSession({ ticket, title: `${agent.name} · ${t.host}:${t.port}` });
+        launchViewer('vnc', ticket, `${agent.name} · ${t.host}:${t.port}`, win);
       } catch (e) {
+        win?.close();
         setErr(e instanceof ApiError ? e.message : 'Failed to open VNC session.');
       }
       return;
@@ -393,10 +440,8 @@ export function Fabric() {
           canManage={canManage}
           onChanged={load}
           onClose={() => setConnectFor(null)}
-          onConnected={(ticket, opts) => {
-            setRdpSession({
-              ticket,
-              title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`,
+          onConnected={(ticket, win, opts) => {
+            launchViewer('rdp', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win, {
               dynamicResize: opts.dynamicResize,
             });
             setConnectFor(null);
@@ -411,8 +456,8 @@ export function Fabric() {
           canManage={canManage}
           onChanged={load}
           onClose={() => setConnectFor(null)}
-          onConnected={(ticket) => {
-            setSession({ ticket, title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}` });
+          onConnected={(ticket, win) => {
+            launchViewer('ssh', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win);
             setConnectFor(null);
           }}
         />
@@ -768,7 +813,7 @@ function SshConnectDialog({
   target: FabricTargetDto;
   canManage: boolean;
   onClose: () => void;
-  onConnected: (ticket: FabricSessionTicket) => void;
+  onConnected: (ticket: FabricSessionTicket, win: Window | null) => void;
   onChanged: () => void;
 }) {
   const [savedExists, setSavedExists] = useState(target.hasCredential);
@@ -780,6 +825,7 @@ function SshConnectDialog({
   const [privateKey, setPrivateKey] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [save, setSave] = useState(false);
+  const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -802,6 +848,8 @@ function SshConnectDialog({
           ? { username: username.trim(), password, save: save && canManage }
           : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: save && canManage };
     }
+    // Open the tab now (still inside the click) so popup blockers allow it.
+    const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
       const ticket = await api.post<FabricSessionTicket>(
@@ -809,8 +857,9 @@ function SshConnectDialog({
         body,
       );
       if (!useSaved && save && canManage) onChanged();
-      onConnected(ticket);
+      onConnected(ticket, win);
     } catch (e) {
+      win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
     }
@@ -931,12 +980,24 @@ function SshConnectDialog({
             )}
           </>
         )}
+
+        <label className="flex items-center gap-2 text-sm cursor-pointer pt-1 border-t border-border/50">
+          <input
+            type="checkbox"
+            checked={newTab}
+            onChange={(e) => {
+              setNewTab(e.target.checked);
+              setPrefNewTab(e.target.checked);
+            }}
+          />
+          Open in a new browser tab
+        </label>
       </div>
     </Dialog>
   );
 }
 
-function SshTerminal({
+export function SshTerminal({
   session,
   title,
   onClose,
@@ -1057,7 +1118,7 @@ function RdpConnectDialog({
   target: FabricTargetDto;
   canManage: boolean;
   onClose: () => void;
-  onConnected: (ticket: FabricSessionTicket, opts: { dynamicResize: boolean }) => void;
+  onConnected: (ticket: FabricSessionTicket, win: Window | null, opts: { dynamicResize: boolean }) => void;
   onChanged: () => void;
 }) {
   const [savedExists, setSavedExists] = useState(target.hasCredential);
@@ -1066,6 +1127,7 @@ function RdpConnectDialog({
   const [password, setPassword] = useState('');
   const [domain, setDomain] = useState('');
   const [save, setSave] = useState(false);
+  const [newTab, setNewTab] = useState(prefNewTab());
   // Display / session options, remembered per target in this browser.
   const prefs = useMemo(() => loadRdpPrefs(target.id), [target.id]);
   const [resolution, setResolution] = useState(prefs.resolution ?? 'fit');
@@ -1118,6 +1180,7 @@ function RdpConnectDialog({
       }
       body = { username: username.trim(), password, domain: domain.trim() || undefined, save: save && canManage, ...opts };
     }
+    const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
       const ticket = await api.post<FabricSessionTicket>(
@@ -1125,8 +1188,9 @@ function RdpConnectDialog({
         body,
       );
       if (!useSaved && save && canManage) onChanged();
-      onConnected(ticket, { dynamicResize: resolution === 'fit' });
+      onConnected(ticket, win, { dynamicResize: resolution === 'fit' });
     } catch (e) {
+      win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
     }
@@ -1245,6 +1309,17 @@ function RdpConnectDialog({
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={consoleSession} onChange={(e) => setConsoleSession(e.target.checked)} /> Connect to admin / console session
             </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={newTab}
+                onChange={(e) => {
+                  setNewTab(e.target.checked);
+                  setPrefNewTab(e.target.checked);
+                }}
+              />
+              Open in a new browser tab
+            </label>
           </div>
         </div>
       </div>
@@ -1252,7 +1327,7 @@ function RdpConnectDialog({
   );
 }
 
-function RdpViewer({
+export function RdpViewer({
   session,
   title,
   dynamicResize,
@@ -1410,7 +1485,7 @@ function RdpViewer({
   );
 }
 
-function VncViewer({
+export function VncViewer({
   session,
   title,
   onClose,

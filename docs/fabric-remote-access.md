@@ -11,6 +11,12 @@ The mental model is **Cloudflare Tunnel + Teleport-lite, self-hosted**: reverse 
 broker, per-session RBAC, full audit — but living inside Cerebro's LCARS UI and reusing its
 existing relay, vault, crypto, RBAC, and timeline plumbing.
 
+> **Sessions open in a new browser tab by default** (`/fabric/session`), so several can run at once;
+> the one-time ticket is handed over via same-origin localStorage (never in the URL), the blank tab is
+> opened during the click to dodge popup blockers, and an "Open in a new browser tab" toggle (remembered)
+> falls back to an in-page overlay. The `SshTerminal`/`RdpViewer`/`VncViewer` components are exported
+> from `Fabric.tsx` and reused by the standalone session page.
+>
 > Status: **Phases 1–5 (native client) BUILT + RDP/SSH live** (2026-09-18) — control plane, tunnel,
 > in-browser SSH + RDP + **VNC (macOS Screen Sharing)**, vault creds, full agent lifecycle
 > (self-uninstall, Windows service, host-key pinning, self-update), the native `cerebro access` CLI,
