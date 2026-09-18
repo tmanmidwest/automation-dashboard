@@ -5,6 +5,7 @@ import { hostname, networkInterfaces } from 'os';
 import type { FabricSessionTicket } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
+import { LoggingService } from '../logging/logging.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { openTunnelForward } from './tunnel-forward';
 
@@ -45,6 +46,7 @@ export class FabricGuacService {
     private readonly registry: AgentRegistryService,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly logging: LoggingService,
   ) {}
 
   /** Mint an encrypted RDP token the browser opens the guac WS with. */
@@ -116,7 +118,11 @@ export class FabricGuacService {
     // hostname. No DNS resolution is required of guacd this way.
     const callbackHost =
       process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
-    this.logger.log(`RDP session: forward on ${callbackHost}:${forward.port} -> ${d.host}:${d.port} via agent ${d.agentId}`);
+    // Route through the DB logger so it lands in the Ship's Log (readable remotely).
+    this.logging.info(
+      'fabric',
+      `RDP forward on ${callbackHost}:${forward.port} -> ${d.host}:${d.port} (agent ${d.agentId})`,
+    );
 
     // guacd reads its connect args directly from `connection` (the flattened
     // object), so replace it with the RDP settings pointing at the forward.
@@ -156,7 +162,7 @@ export class FabricGuacService {
     try {
       guacdIp = (await lookup(guacdHost, { family: 4 })).address;
     } catch (e) {
-      this.logger.warn(`Could not resolve GUACD_HOST "${guacdHost}": ${e instanceof Error ? e.message : e}`);
+      this.logging.warn('fabric', `Could not resolve GUACD_HOST "${guacdHost}": ${e instanceof Error ? e.message : e}`);
     }
     const ifaces = networkInterfaces();
     const candidates: string[] = [];
@@ -169,7 +175,8 @@ export class FabricGuacService {
         }
       }
     }
-    this.logger.log(
+    this.logging.info(
+      'fabric',
       `guacd(${guacdHost})=${guacdIp ?? '?'}; app IPv4 ${candidates.join(', ') || '(none)'}; picked ${match ?? '(none — will fall back)'}`,
     );
     return match;
