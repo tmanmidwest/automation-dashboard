@@ -12,7 +12,12 @@ const logger = new Logger('FabricGuacRelay');
  * guacd itself runs as a sidecar (GUACD_HOST:GUACD_PORT).
  */
 export function attachFabricGuacRelay(server: Server, guac: FabricGuacService): void {
-  const websocketOptions = { server, path: guac.wsPath };
+  // IMPORTANT: run guacamole-lite in `noServer` mode and route only its own path
+  // to it. In `{ server }` mode the underlying `ws` server attaches a global
+  // upgrade listener that aborts EVERY upgrade whose path doesn't match — which
+  // would kill the agent, session, and console WebSockets. `port: null` cancels
+  // guacamole-lite's default `port: 8080` merge so nothing binds a port.
+  const websocketOptions = { noServer: true, port: null };
   const guacdOptions = {
     host: process.env.GUACD_HOST || 'guacd',
     port: Number(process.env.GUACD_PORT || 4822),
@@ -33,7 +38,20 @@ export function attachFabricGuacRelay(server: Server, guac: FabricGuacService): 
     },
   };
 
-  // eslint-disable-next-line no-new
-  new GuacamoleLite(websocketOptions, guacdOptions, clientOptions, callbacks);
+  const guacServer = new GuacamoleLite(websocketOptions, guacdOptions, clientOptions, callbacks);
+
+  server.on('upgrade', (req, socket, head) => {
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '', 'http://localhost');
+    } catch {
+      return;
+    }
+    if (url.pathname !== guac.wsPath) return; // not ours — leave it for the other relays
+    guacServer.webSocketServer.handleUpgrade(req, socket, head, (ws) => {
+      guacServer.webSocketServer.emit('connection', ws, req);
+    });
+  });
+
   logger.log(`Fabric guac (RDP) relay listening on ${guac.wsPath} → guacd ${guacdOptions.host}:${guacdOptions.port}`);
 }

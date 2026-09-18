@@ -1,9 +1,22 @@
 declare module 'guacamole-lite' {
-  import type { Server as HttpServer } from 'http';
+  import type { IncomingMessage, Server as HttpServer } from 'http';
+  import type { Duplex } from 'stream';
 
   interface WebsocketOptions {
     server?: HttpServer;
     path?: string;
+    noServer?: boolean;
+    port?: number | null;
+  }
+
+  interface WsUpgradeServer {
+    handleUpgrade(
+      req: IncomingMessage,
+      socket: Duplex,
+      head: Buffer,
+      cb: (ws: unknown, req: IncomingMessage) => void,
+    ): void;
+    emit(event: string, ...args: unknown[]): boolean;
   }
   interface GuacdOptions {
     host?: string;
@@ -29,6 +42,7 @@ declare module 'guacamole-lite' {
       clientOptions: ClientOptions,
       callbacks?: Callbacks,
     );
+    webSocketServer: WsUpgradeServer;
     on(event: string, listener: (...args: unknown[]) => void): void;
     close(): void;
   }
