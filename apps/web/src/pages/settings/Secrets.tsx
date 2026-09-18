@@ -44,6 +44,47 @@ interface RevealRequirements {
   canReveal: boolean;
 }
 
+interface NewSecret {
+  key: string;
+  label: string;
+  category: SecretCategory;
+  value: string;
+  kind: 'generic' | 'git' | 'ssh' | 'rdp';
+  gitHost: string;
+  gitUsername: string;
+  sshUsername: string;
+  sshMethod: 'password' | 'key';
+  sshPrivateKey: string;
+  sshPassphrase: string;
+  rdpUsername: string;
+  rdpDomain: string;
+}
+/** Whether the create form has enough to submit (fields vary by kind). */
+function canCreateSecret(n: NewSecret): boolean {
+  if (!n.key.trim()) return false;
+  if (n.kind === 'ssh') {
+    return n.sshUsername.trim() !== '' && (n.sshMethod === 'password' ? n.value !== '' : n.sshPrivateKey.trim() !== '');
+  }
+  if (n.kind === 'rdp') return n.rdpUsername.trim() !== '' && n.value !== '';
+  return n.value !== '';
+}
+
+const emptyNewSecret = (): NewSecret => ({
+  key: '',
+  label: '',
+  category: 'manual',
+  value: '',
+  kind: 'generic',
+  gitHost: '',
+  gitUsername: '',
+  sshUsername: '',
+  sshMethod: 'password',
+  sshPrivateKey: '',
+  sshPassphrase: '',
+  rdpUsername: '',
+  rdpDomain: '',
+});
+
 export function Secrets() {
   const { can } = useAuth();
   const canWrite = can('secrets:write');
@@ -69,9 +110,7 @@ export function Secrets() {
 
   // Create-new-secret dialog state.
   const [creating, setCreating] = useState(false);
-  const [newSecret, setNewSecret] = useState<{ key: string; label: string; category: SecretCategory; value: string; kind: 'generic' | 'git'; gitHost: string; gitUsername: string }>({
-    key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '',
-  });
+  const [newSecret, setNewSecret] = useState<NewSecret>(emptyNewSecret());
 
   async function load() {
     try {
@@ -120,14 +159,33 @@ export function Secrets() {
 
   async function submitCreate() {
     const key = newSecret.key.trim();
-    if (!key || !newSecret.value) return;
+    if (!key) return;
     setBusy(true);
     setErr(null);
     try {
-      // Git credentials are stored as one JSON value {host, username, secret}, kind='git'.
-      const value = newSecret.kind === 'git'
-        ? JSON.stringify({ host: newSecret.gitHost.trim(), username: newSecret.gitUsername.trim(), secret: newSecret.value })
-        : newSecret.value;
+      // Typed credentials are stored as one JSON value; generic is the raw string.
+      let value: string;
+      if (newSecret.kind === 'git') {
+        value = JSON.stringify({ host: newSecret.gitHost.trim(), username: newSecret.gitUsername.trim(), secret: newSecret.value });
+      } else if (newSecret.kind === 'ssh') {
+        value = JSON.stringify(
+          newSecret.sshMethod === 'password'
+            ? { username: newSecret.sshUsername.trim(), password: newSecret.value }
+            : {
+                username: newSecret.sshUsername.trim(),
+                privateKey: newSecret.sshPrivateKey,
+                passphrase: newSecret.sshPassphrase || undefined,
+              },
+        );
+      } else if (newSecret.kind === 'rdp') {
+        value = JSON.stringify({
+          username: newSecret.rdpUsername.trim(),
+          password: newSecret.value,
+          domain: newSecret.rdpDomain.trim() || undefined,
+        });
+      } else {
+        value = newSecret.value;
+      }
       await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
         value,
         label: newSecret.label.trim() || key,
@@ -135,7 +193,7 @@ export function Secrets() {
         category: newSecret.category,
       });
       setCreating(false);
-      setNewSecret({ key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '' });
+      setNewSecret(emptyNewSecret());
       await load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to create secret');
@@ -217,9 +275,9 @@ export function Secrets() {
     (!revealReq.password || revealForm.password.length > 0) &&
     (!revealReq.totp || revealForm.totp.trim().length > 0);
 
-  /** Pretty-print a Git credential's JSON value; show everything else verbatim. */
+  /** Pretty-print a structured (git/ssh/rdp) JSON credential; show others verbatim. */
   function displayValue(s: SecretSummary, value: string): string {
-    if (s.kind === 'git') {
+    if (s.kind === 'git' || s.kind === 'ssh' || s.kind === 'rdp') {
       try {
         return JSON.stringify(JSON.parse(value), null, 2);
       } catch {
@@ -236,7 +294,7 @@ export function Secrets() {
       <PageHeader
         title="Secrets Vault"
         description="Every stored credential, encrypted at rest. Revealing a value re-verifies your identity every time."
-        actions={canWrite ? <Button onClick={() => { setNewSecret({ key: '', label: '', category: 'manual', value: '', kind: 'generic', gitHost: '', gitUsername: '' }); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
+        actions={canWrite ? <Button onClick={() => { setNewSecret(emptyNewSecret()); setErr(null); setCreating(true); }}>New secret</Button> : undefined}
       />
 
       {err && !editing && !creating && (
@@ -419,11 +477,11 @@ export function Secrets() {
         open={creating}
         onClose={() => setCreating(false)}
         title="New secret"
-        description="Create a shared credential you can reference from connectors (e.g. an SSH password used across hosts)."
+        description="Create a reusable credential you can reference from connectors and Fabric sessions — an SSH or RDP credential appears in the Fabric connect picker."
         footer={
           <>
             <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
-            <Button onClick={submitCreate} disabled={busy || !newSecret.key.trim() || !newSecret.value}>
+            <Button onClick={submitCreate} disabled={busy || !canCreateSecret(newSecret)}>
               {busy ? 'Saving…' : 'Create'}
             </Button>
           </>
@@ -437,11 +495,13 @@ export function Secrets() {
             <Label>Type</Label>
             <select
               value={newSecret.kind}
-              onChange={(e) => setNewSecret((s) => ({ ...s, kind: e.target.value as 'generic' | 'git' }))}
+              onChange={(e) => setNewSecret((s) => ({ ...s, kind: e.target.value as NewSecret['kind'] }))}
               className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
             >
               <option value="generic">Generic secret</option>
               <option value="git">Git credential</option>
+              <option value="ssh">SSH credential</option>
+              <option value="rdp">RDP credential</option>
             </select>
           </div>
           <div>
@@ -469,6 +529,58 @@ export function Secrets() {
               </div>
             </div>
           )}
+          {newSecret.kind === 'ssh' && (
+            <>
+              <div>
+                <Label>Username</Label>
+                <Input value={newSecret.sshUsername} placeholder="root"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, sshUsername: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Authentication</Label>
+                <select
+                  value={newSecret.sshMethod}
+                  onChange={(e) => setNewSecret((s) => ({ ...s, sshMethod: e.target.value as 'password' | 'key' }))}
+                  className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
+                >
+                  <option value="password">Password</option>
+                  <option value="key">Private key</option>
+                </select>
+              </div>
+              {newSecret.sshMethod === 'key' && (
+                <>
+                  <div>
+                    <Label>Private key (PEM)</Label>
+                    <textarea
+                      className="mt-1 w-full h-28 rounded-md border border-input bg-background/60 px-2 py-1 text-xs font-mono"
+                      value={newSecret.sshPrivateKey}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      onChange={(e) => setNewSecret((s) => ({ ...s, sshPrivateKey: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <Label>Key passphrase (optional)</Label>
+                    <Input type="password" autoComplete="new-password" value={newSecret.sshPassphrase}
+                      onChange={(e) => setNewSecret((s) => ({ ...s, sshPassphrase: e.target.value }))} />
+                  </div>
+                </>
+              )}
+            </>
+          )}
+          {newSecret.kind === 'rdp' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Username</Label>
+                <Input value={newSecret.rdpUsername} placeholder="Administrator"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, rdpUsername: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Domain (optional)</Label>
+                <Input value={newSecret.rdpDomain} placeholder="WORKGROUP"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, rdpDomain: e.target.value }))} />
+              </div>
+            </div>
+          )}
           {newSecret.kind === 'generic' && (
             <div>
               <Label>Category</Label>
@@ -484,14 +596,24 @@ export function Secrets() {
               </select>
             </div>
           )}
-          <div>
-            <Label>{newSecret.kind === 'git' ? 'Token / Password' : 'Value'}</Label>
-            <Input type="password" autoComplete="new-password" placeholder="••••••••" value={newSecret.value}
-              onChange={(e) => setNewSecret((s) => ({ ...s, value: e.target.value }))} />
-            <p className="mt-1 text-xs text-muted-foreground">
-              {newSecret.kind === 'git' ? 'A personal-access-token or password. Stored encrypted with the host/username as one credential.' : 'Stored encrypted; never shown again after this.'}
-            </p>
-          </div>
+          {!(newSecret.kind === 'ssh' && newSecret.sshMethod === 'key') && (
+            <div>
+              <Label>
+                {newSecret.kind === 'git'
+                  ? 'Token / Password'
+                  : newSecret.kind === 'ssh' || newSecret.kind === 'rdp'
+                    ? 'Password'
+                    : 'Value'}
+              </Label>
+              <Input type="password" autoComplete="new-password" placeholder="••••••••" value={newSecret.value}
+                onChange={(e) => setNewSecret((s) => ({ ...s, value: e.target.value }))} />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {newSecret.kind === 'git'
+                  ? 'A personal-access-token or password. Stored encrypted with the host/username as one credential.'
+                  : 'Stored encrypted; never shown again after this.'}
+              </p>
+            </div>
+          )}
         </div>
       </Dialog>
 
