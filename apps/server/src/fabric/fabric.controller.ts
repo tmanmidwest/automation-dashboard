@@ -14,7 +14,7 @@ import {
 import type { Response } from 'express';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { IsArray, IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 import { CurrentUser, Public, RequirePermissions, SessionOnly } from '../auth/decorators';
 import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
@@ -90,6 +90,39 @@ class RdpConnectDto {
   @IsOptional()
   @IsBoolean()
   save?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(320)
+  @Max(7680)
+  width?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(240)
+  @Max(4320)
+  height?: number;
+
+  @IsOptional()
+  @IsInt()
+  colorDepth?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  security?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  consoleSession?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  enableEffects?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  disableAudio?: boolean;
 }
 
 /** Where prebuilt agent binaries are served from (populated by CI / a release step). */

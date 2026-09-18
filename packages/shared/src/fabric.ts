@@ -195,7 +195,7 @@ export interface FabricSessionTicket {
   wsPath: string;
 }
 
-/** Credentials for an RDP session. Either supply them, or set `useSaved`. */
+/** Credentials + display options for an RDP session. Either supply creds, or set `useSaved`. */
 export interface FabricRdpConnectInput {
   useSaved?: boolean;
   username?: string;
@@ -203,7 +203,25 @@ export interface FabricRdpConnectInput {
   domain?: string;
   /** Persist the supplied credential to the vault on the target (needs fabric:manage). */
   save?: boolean;
+
+  // --- Display / session options (not credentials; per-connection) ---
+  /** Initial desktop width/height in px. Omit to fit the browser window. */
+  width?: number;
+  height?: number;
+  /** 8 | 16 | 24 | 32. */
+  colorDepth?: number;
+  /** RDP security mode: 'any' | 'nla' | 'tls' | 'rdp' | 'vmconnect'. */
+  security?: string;
+  /** Connect to the admin/console session. */
+  consoleSession?: boolean;
+  /** Enable wallpaper/themes/animations (nicer, but slower). */
+  enableEffects?: boolean;
+  /** Disable audio redirection. */
+  disableAudio?: boolean;
 }
+
+/** RDP security modes guacd accepts. */
+export const FABRIC_RDP_SECURITY = ['any', 'nla', 'tls', 'rdp', 'vmconnect'] as const;
 
 /** Result of a tunnel reachability probe (the Phase-2 end-to-end acceptance check). */
 export interface FabricProbeResult {

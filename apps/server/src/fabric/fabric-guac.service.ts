@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'crypto';
 import { lookup } from 'dns/promises';
 import { hostname, networkInterfaces } from 'os';
-import type { FabricSessionTicket } from '@cerebro/shared';
+import { FABRIC_RDP_SECURITY, type FabricSessionTicket } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
@@ -23,6 +23,14 @@ export interface RdpDescriptor {
   username: string;
   password: string;
   domain?: string;
+  // Display / session options.
+  width?: number;
+  height?: number;
+  colorDepth?: number;
+  security?: string;
+  consoleSession?: boolean;
+  enableEffects?: boolean;
+  disableAudio?: boolean;
 }
 
 /**
@@ -129,21 +137,33 @@ export class FabricGuacService {
     if (!entry || entry.expiresAt < Date.now()) throw new Error('Invalid or expired RDP ticket.');
     const d = entry.desc;
 
-    settings.connection = {
-      ...conn,
+    const args: Record<string, string> = {
+      ...(conn as Record<string, string>),
       hostname: entry.callbackHost,
       port: String(entry.forward.port),
       username: d.username,
       password: d.password,
       domain: d.domain || '',
-      security: 'any',
+      security: d.security && FABRIC_RDP_SECURITY.includes(d.security as never) ? d.security : 'any',
       'ignore-cert': 'true',
       'resize-method': 'display-update',
-      width: '1024',
-      height: '768',
       dpi: '96',
+      width: String(d.width && d.width > 0 ? d.width : 1024),
+      height: String(d.height && d.height > 0 ? d.height : 768),
     };
-    delete (settings.connection as Record<string, unknown>)._ticket;
+    if (d.colorDepth) args['color-depth'] = String(d.colorDepth);
+    if (d.consoleSession) args['console'] = 'true';
+    if (d.disableAudio) args['disable-audio'] = 'true';
+    if (d.enableEffects) {
+      args['enable-wallpaper'] = 'true';
+      args['enable-theming'] = 'true';
+      args['enable-font-smoothing'] = 'true';
+      args['enable-full-window-drag'] = 'true';
+      args['enable-desktop-composition'] = 'true';
+      args['enable-menu-animations'] = 'true';
+    }
+    delete args._ticket;
+    settings.connection = args;
     return settings;
   }
 

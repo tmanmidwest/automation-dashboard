@@ -135,6 +135,13 @@ export class FabricService {
       username: creds.username,
       password: creds.password,
       domain: creds.domain,
+      width: input.width,
+      height: input.height,
+      colorDepth: input.colorDepth,
+      security: input.security,
+      consoleSession: input.consoleSession,
+      enableEffects: input.enableEffects,
+      disableAudio: input.disableAudio,
     });
   }
 

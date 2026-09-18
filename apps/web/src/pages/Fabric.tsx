@@ -73,7 +73,7 @@ export function Fabric() {
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
-  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
+  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
 
   const runProbe = async (agentId: string, t: FabricTargetDto) => {
     setProbe((p) => ({ ...p, [t.id]: { loading: true } }));
@@ -306,8 +306,12 @@ export function Fabric() {
           canManage={canManage}
           onChanged={load}
           onClose={() => setConnectFor(null)}
-          onConnected={(ticket) => {
-            setRdpSession({ ticket, title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}` });
+          onConnected={(ticket, opts) => {
+            setRdpSession({
+              ticket,
+              title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`,
+              dynamicResize: opts.dynamicResize,
+            });
             setConnectFor(null);
           }}
         />
@@ -328,7 +332,14 @@ export function Fabric() {
       )}
 
       {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} />}
-      {rdpSession && <RdpViewer session={rdpSession.ticket} title={rdpSession.title} onClose={() => setRdpSession(null)} />}
+      {rdpSession && (
+        <RdpViewer
+          session={rdpSession.ticket}
+          title={rdpSession.title}
+          dynamicResize={rdpSession.dynamicResize}
+          onClose={() => setRdpSession(null)}
+        />
+      )}
     </div>
   );
 }
@@ -742,7 +753,7 @@ function RdpConnectDialog({
   target: FabricTargetDto;
   canManage: boolean;
   onClose: () => void;
-  onConnected: (ticket: FabricSessionTicket) => void;
+  onConnected: (ticket: FabricSessionTicket, opts: { dynamicResize: boolean }) => void;
   onChanged: () => void;
 }) {
   const [savedExists, setSavedExists] = useState(target.hasCredential);
@@ -751,14 +762,45 @@ function RdpConnectDialog({
   const [password, setPassword] = useState('');
   const [domain, setDomain] = useState('');
   const [save, setSave] = useState(false);
+  // Display / session options.
+  const [resolution, setResolution] = useState('fit');
+  const [colorDepth, setColorDepth] = useState('32');
+  const [security, setSecurity] = useState('any');
+  const [consoleSession, setConsoleSession] = useState(false);
+  const [enableEffects, setEnableEffects] = useState(false);
+  const [enableAudio, setEnableAudio] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const options = () => {
+    // Resolution: "fit" → the current window; otherwise a fixed "WxH".
+    let width: number | undefined;
+    let height: number | undefined;
+    if (resolution === 'fit') {
+      width = Math.round(window.innerWidth);
+      height = Math.max(240, Math.round(window.innerHeight - 48));
+    } else {
+      const [w, h] = resolution.split('x').map((n) => parseInt(n, 10));
+      width = w;
+      height = h;
+    }
+    return {
+      width,
+      height,
+      colorDepth: parseInt(colorDepth, 10),
+      security,
+      consoleSession,
+      enableEffects,
+      disableAudio: !enableAudio,
+    };
+  };
+
   const submit = async () => {
     setErr(null);
+    const opts = options();
     let body: FabricRdpConnectInput;
     if (useSaved) {
-      body = { useSaved: true };
+      body = { useSaved: true, ...opts };
     } else {
       if (!username.trim()) {
         setErr('A username is required.');
@@ -768,7 +810,7 @@ function RdpConnectDialog({
         setErr('A password is required.');
         return;
       }
-      body = { username: username.trim(), password, domain: domain.trim() || undefined, save: save && canManage };
+      body = { username: username.trim(), password, domain: domain.trim() || undefined, save: save && canManage, ...opts };
     }
     setBusy(true);
     try {
@@ -777,7 +819,7 @@ function RdpConnectDialog({
         body,
       );
       if (!useSaved && save && canManage) onChanged();
-      onConnected(ticket);
+      onConnected(ticket, { dynamicResize: resolution === 'fit' });
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
@@ -851,6 +893,54 @@ function RdpConnectDialog({
             )}
           </>
         )}
+
+        <div className="pt-1 mt-1 border-t border-border/50 space-y-3">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Display &amp; session</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="rdp-res">Resolution</Label>
+              <select id="rdp-res" className={selectCls} value={resolution} onChange={(e) => setResolution(e.target.value)}>
+                <option value="fit">Fit to window</option>
+                <option value="1920x1080">1920 × 1080</option>
+                <option value="1600x900">1600 × 900</option>
+                <option value="1440x900">1440 × 900</option>
+                <option value="1366x768">1366 × 768</option>
+                <option value="1280x720">1280 × 720</option>
+                <option value="1024x768">1024 × 768</option>
+              </select>
+            </div>
+            <div>
+              <Label htmlFor="rdp-color">Color depth</Label>
+              <select id="rdp-color" className={selectCls} value={colorDepth} onChange={(e) => setColorDepth(e.target.value)}>
+                <option value="32">True color (32-bit)</option>
+                <option value="24">24-bit</option>
+                <option value="16">High color (16-bit)</option>
+                <option value="8">256 color (8-bit)</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <Label htmlFor="rdp-sec">Security mode</Label>
+              <select id="rdp-sec" className={selectCls} value={security} onChange={(e) => setSecurity(e.target.value)}>
+                <option value="any">Automatic (negotiate)</option>
+                <option value="nla">NLA</option>
+                <option value="tls">TLS</option>
+                <option value="rdp">RDP (legacy)</option>
+                <option value="vmconnect">Hyper-V console</option>
+              </select>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={enableAudio} onChange={(e) => setEnableAudio(e.target.checked)} /> Audio
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={enableEffects} onChange={(e) => setEnableEffects(e.target.checked)} /> Visual effects (wallpaper, themes, animations)
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={consoleSession} onChange={(e) => setConsoleSession(e.target.checked)} /> Connect to admin / console session
+            </label>
+          </div>
+        </div>
       </div>
     </Dialog>
   );
@@ -859,10 +949,12 @@ function RdpConnectDialog({
 function RdpViewer({
   session,
   title,
+  dynamicResize,
   onClose,
 }: {
   session: FabricSessionTicket;
   title: string;
+  dynamicResize: boolean;
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -941,13 +1033,19 @@ function RdpViewer({
       client.sendKeyEvent(0, keysym);
     };
 
-    const ro = new ResizeObserver(() => sendSize());
-    ro.observe(host);
-    const sizeTimer = setTimeout(sendSize, 500);
+    // Only track the window when "fit to window" was chosen; for a fixed
+    // resolution, leave the desktop at the size the server requested.
+    let ro: ResizeObserver | undefined;
+    let sizeTimer: ReturnType<typeof setTimeout> | undefined;
+    if (dynamicResize) {
+      ro = new ResizeObserver(() => sendSize());
+      ro.observe(host);
+      sizeTimer = setTimeout(sendSize, 500);
+    }
 
     return () => {
-      clearTimeout(sizeTimer);
-      ro.disconnect();
+      if (sizeTimer) clearTimeout(sizeTimer);
+      ro?.disconnect();
       try {
         keyboard.reset();
       } catch {
