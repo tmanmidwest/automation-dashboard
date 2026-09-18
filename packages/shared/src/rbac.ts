@@ -119,6 +119,10 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   'monitors:write',
   'automations:write',
   'notifications:send',
+  // Fabric: read (list agents) + connect (open a tunnel) — enables the native
+  // `cerebro access` CLI. `fabric:manage` stays session-only (enroll/revoke).
+  'fabric:read',
+  'fabric:connect',
 ];
 
 /** True for a grantable scope that lets a credential change state (not read-only). */

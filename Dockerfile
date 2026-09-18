@@ -46,6 +46,19 @@ RUN CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" 
  && CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-linux-arm64 . \
  && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-windows-amd64.exe .
 
+# 2c) Build the `cerebro` CLI binaries (Go). Served at /api/fabric/cli/binary
+# (FABRIC_CLI_DIST_DIR=/app/cli-dist). See docs/fabric-remote-access.md (Phase 5).
+FROM golang:1.22-bookworm AS cli-build
+WORKDIR /cli
+COPY cli/go.mod cli/go.sum* ./
+RUN go mod download
+COPY cli/ ./
+RUN CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /cli-dist/cerebro-linux-amd64 . \
+ && CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /cli-dist/cerebro-linux-arm64 . \
+ && CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /cli-dist/cerebro-darwin-amd64 . \
+ && CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /cli-dist/cerebro-darwin-arm64 . \
+ && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /cli-dist/cerebro-windows-amd64.exe .
+
 # 3) Runtime — only production deps + built output
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -107,6 +120,9 @@ COPY --from=build /app/packages/shared/package.json ./packages/shared/package.js
 # Fabric agent binaries, served to installers by /api/fabric/agent/binary.
 ENV FABRIC_AGENT_DIST_DIR=/app/agent-dist
 COPY --from=agent-build /agent-dist ./agent-dist
+# `cerebro` CLI binaries, served by /api/fabric/cli/binary.
+ENV FABRIC_CLI_DIST_DIR=/app/cli-dist
+COPY --from=cli-build /cli-dist ./cli-dist
 COPY docker/entrypoint.sh ./docker/entrypoint.sh
 RUN chmod +x ./docker/entrypoint.sh
 EXPOSE 3000

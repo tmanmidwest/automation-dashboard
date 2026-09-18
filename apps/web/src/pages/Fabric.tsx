@@ -101,6 +101,7 @@ export function Fabric() {
   const [agents, setAgents] = useState<FabricAgentDto[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [showCli, setShowCli] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
@@ -165,11 +166,18 @@ export function Fabric() {
         title="Fabric"
         description="Agent-brokered remote access. Machines dial out to Cerebro — no inbound RDP/SSH exposure."
         actions={
-          canManage ? (
-            <Button onClick={() => setAdding(true)}>
-              <Plus className="h-4 w-4 mr-1" /> Add machine
-            </Button>
-          ) : undefined
+          <>
+            {canConnect && (
+              <Button variant="outline" onClick={() => setShowCli(true)}>
+                <TerminalSquare className="h-4 w-4 mr-1" /> Command line
+              </Button>
+            )}
+            {canManage && (
+              <Button onClick={() => setAdding(true)}>
+                <Plus className="h-4 w-4 mr-1" /> Add machine
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -339,6 +347,8 @@ export function Fabric() {
         </div>
       )}
 
+      {showCli && <CliDialog onClose={() => setShowCli(false)} />}
+
       {adding && (
         <AddMachineDialog
           onClose={() => setAdding(false)}
@@ -499,6 +509,64 @@ function EnrollmentDialog({
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300/90">
           The agent connects outbound only — no inbound firewall rule is needed. You can safely deny inbound 22/3389 on
           this machine's security group.
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+function CliDialog({ onClose }: { onClose: () => void }) {
+  const origin = location.origin;
+  const isWin = /Windows/i.test(navigator.userAgent);
+  const isMac = /Mac/i.test(navigator.userAgent);
+  const os = isWin ? 'windows' : isMac ? 'darwin' : 'linux';
+  const arch = isMac ? 'arm64' : 'amd64';
+
+  const download = isWin
+    ? `iwr "${origin}/api/fabric/cli/binary?os=windows&arch=amd64" -OutFile cerebro.exe`
+    : `curl -fsSL "${origin}/api/fabric/cli/binary?os=${os}&arch=${arch}" -o cerebro && chmod +x cerebro && sudo mv cerebro /usr/local/bin/`;
+  const configure = isWin
+    ? `$env:CEREBRO_URL='${origin}'; $env:CEREBRO_TOKEN='cbro_your_token'`
+    : `export CEREBRO_URL=${origin}\nexport CEREBRO_TOKEN=cbro_your_token`;
+
+  const Cmd = ({ text }: { text: string }) => (
+    <div className="mt-1 flex items-start gap-2 rounded-md border border-input bg-background/60 p-2">
+      <code className="flex-1 text-xs break-all font-mono whitespace-pre-wrap">{text}</code>
+      <CopyBtn text={text} />
+    </div>
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title="Command-line access"
+      description="Use your own ssh / scp / mstsc through the tunnel — the box still needs no inbound rule."
+      footer={<Button onClick={onClose}>Done</Button>}
+    >
+      <div className="space-y-4 text-sm">
+        <div>
+          <p className="font-medium">1. Create an API token</p>
+          <p className="text-muted-foreground text-xs mt-0.5">
+            In <a href="/settings/api-tokens" className="text-primary hover:underline">Settings → API Tokens</a>, create
+            a token with the <code>fabric:read</code> and <code>fabric:connect</code> scopes.
+          </p>
+        </div>
+        <div>
+          <p className="font-medium">2. Install the CLI ({os}/{arch})</p>
+          <Cmd text={download} />
+        </div>
+        <div>
+          <p className="font-medium">3. Point it at Cerebro</p>
+          <Cmd text={configure} />
+        </div>
+        <div>
+          <p className="font-medium">4. Connect</p>
+          <Cmd text={`cerebro ls\ncerebro access <machine> ssh\ncerebro access <machine> rdp`} />
+          <p className="text-muted-foreground text-xs mt-1">
+            Prints a local address + connect hint, then forwards until Ctrl+C.
+          </p>
         </div>
       </div>
     </Dialog>

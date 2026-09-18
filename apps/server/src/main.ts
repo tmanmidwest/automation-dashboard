@@ -15,6 +15,10 @@ import { FabricSessionService } from './fabric/fabric-session.service';
 import { attachFabricSessionRelay } from './fabric/fabric-session-relay';
 import { FabricGuacService } from './fabric/fabric-guac.service';
 import { attachFabricGuacRelay } from './fabric/fabric-guac-relay';
+import { attachFabricAccessRelay } from './fabric/fabric-access-relay';
+import { TokenAuthService } from './auth/token-auth.service';
+import { PrismaService } from './prisma/prisma.service';
+import { AuditService } from './logging/audit.service';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -59,6 +63,14 @@ async function bootstrap() {
 
   // Fabric guac relay (in-browser RDP via the guacd sidecar).
   attachFabricGuacRelay(app.getHttpServer(), app.get(FabricGuacService));
+
+  // Fabric access relay (raw TCP over WS for the native `cerebro access` CLI).
+  attachFabricAccessRelay(app.getHttpServer(), {
+    tokenAuth: app.get(TokenAuthService),
+    registry: app.get(AgentRegistryService),
+    prisma: app.get(PrismaService),
+    audit: app.get(AuditService),
+  });
 
   const port = parseInt(process.env.PORT ?? '3000', 10);
   await app.listen(port, '0.0.0.0');

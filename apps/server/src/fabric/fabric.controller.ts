@@ -133,6 +133,16 @@ const AGENT_ARTIFACTS: Record<string, { file: string; contentType: string; downl
   'windows/amd64': { file: 'cerebro-agent-windows-amd64.exe', contentType: 'application/octet-stream', download: 'cerebro-agent.exe' },
 };
 
+/** Where prebuilt `cerebro` CLI binaries are served from. */
+const CLI_DIST_DIR = process.env.FABRIC_CLI_DIST_DIR || '/app/cli-dist';
+const CLI_ARTIFACTS: Record<string, { file: string; download: string }> = {
+  'linux/amd64': { file: 'cerebro-linux-amd64', download: 'cerebro' },
+  'linux/arm64': { file: 'cerebro-linux-arm64', download: 'cerebro' },
+  'darwin/amd64': { file: 'cerebro-darwin-amd64', download: 'cerebro' },
+  'darwin/arm64': { file: 'cerebro-darwin-arm64', download: 'cerebro' },
+  'windows/amd64': { file: 'cerebro-windows-amd64.exe', download: 'cerebro.exe' },
+};
+
 @Controller('api/fabric')
 export class FabricController {
   constructor(
@@ -293,6 +303,23 @@ export class FabricController {
       );
     }
     res.setHeader('Content-Type', artifact.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${artifact.download}"`);
+    res.sendFile(path);
+  }
+
+  @Public()
+  @Get('cli/binary')
+  getCliBinary(@Query('os') os: string, @Query('arch') arch: string, @Res() res: Response) {
+    const key = `${(os || '').toLowerCase()}/${(arch || '').toLowerCase()}`;
+    const artifact = CLI_ARTIFACTS[key];
+    if (!artifact) throw new BadRequestException('Unknown os/arch.');
+    const path = join(CLI_DIST_DIR, artifact.file);
+    if (!existsSync(path)) {
+      throw new NotFoundException(
+        `The cerebro CLI for ${key} is not available on this server yet. Build it (cli/) and place it in ${CLI_DIST_DIR}.`,
+      );
+    }
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${artifact.download}"`);
     res.sendFile(path);
   }
