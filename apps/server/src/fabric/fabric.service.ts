@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, type OnModuleInit } from '@nestjs/common';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { Agent, AgentTarget } from '@prisma/client';
@@ -30,7 +30,7 @@ const ENROLL_TTL_MS = 60 * 60 * 1000; // 1h to run the installer
 
 /** Management surface for the /fabric screen (session-gated). */
 @Injectable()
-export class FabricService {
+export class FabricService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -39,6 +39,39 @@ export class FabricService {
     private readonly guac: FabricGuacService,
     private readonly secrets: SecretsService,
   ) {}
+
+  /**
+   * One-time backfill: give existing per-machine Fabric credentials a label that
+   * names the machine (older ones were labelled "SSH · 127.0.0.1:22" with an
+   * opaque agent id, indistinguishable in the vault). Idempotent.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      for (const s of await this.secrets.list()) {
+        if (s.kind !== 'ssh' && s.kind !== 'rdp') continue;
+        const m = s.key.match(/^fabric\/([^/]+)\/([^/]+)$/);
+        if (!m || m[1] === 'cred') continue; // per-target credentials only
+        const agent = await this.prisma.agent
+          .findUnique({ where: { id: m[1] }, select: { name: true, hostname: true } })
+          .catch(() => null);
+        if (!agent) continue;
+        const kind = s.kind.toUpperCase();
+        const label = `Fabric · ${agent.name} · ${kind}`;
+        if (s.label === label) continue;
+        const target = await this.prisma.agentTarget
+          .findUnique({ where: { id: m[2] }, select: { host: true, port: true } })
+          .catch(() => null);
+        await this.secrets
+          .updateMeta(s.key, {
+            label,
+            description: `Fabric ${kind} credential for ${agent.name}${agent.hostname ? ` (${agent.hostname})` : ''}${target ? ` — ${target.host}:${target.port}` : ''}`,
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
 
   /**
    * Mint a one-time ticket for an interactive SSH session to a target. The
@@ -244,14 +277,19 @@ export class FabricService {
     user: SessionUser,
   ): Promise<void> {
     const key = `fabric/${target.agentId}/${target.id}`;
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: target.agentId },
+      select: { name: true, hostname: true },
+    });
+    const machine = agent?.name || target.agentId;
     await this.secrets.set(
       key,
       JSON.stringify(value),
       {
         kind,
         category: 'manual',
-        label: `${kind.toUpperCase()} · ${target.host}:${target.port}`,
-        description: `Fabric ${kind.toUpperCase()} credential for agent ${target.agentId}`,
+        label: `Fabric · ${machine} · ${kind.toUpperCase()}`,
+        description: `Fabric ${kind.toUpperCase()} credential for ${machine}${agent?.hostname ? ` (${agent.hostname})` : ''} — ${target.host}:${target.port}`,
       },
       { actorId: user.id, actorEmail: user.email },
     );
