@@ -162,13 +162,25 @@ export class SecretsService implements OnModuleInit {
 
   /** All vault entries as metadata-only summaries (never the value). */
   async list(): Promise<SecretSummary[]> {
-    const [secrets, metas] = await Promise.all([
+    const [secrets, metas, connectors] = await Promise.all([
       this.prisma.secret.findMany({ select: { key: true, updatedAt: true } }),
       this.prisma.secretMeta.findMany(),
+      this.prisma.connectorInstance.findMany({ select: { id: true, name: true } }).catch(() => []),
     ]);
     const metaByKey = new Map(metas.map((m) => [m.key, m]));
+    const connectorName = new Map(connectors.map((c) => [c.id, c.name]));
     return secrets
-      .map((s) => this.toSummary(s.key, metaByKey.get(s.key), s.updatedAt))
+      .map((s) => {
+        const summary = this.toSummary(s.key, metaByKey.get(s.key), s.updatedAt);
+        // Connector secrets are keyed `connector:<id>:<field>` and auto-labelled
+        // with the opaque id. If we have no custom label, show the connector's
+        // name instead so it's identifiable in the vault.
+        if (summary.owningConnectorId && s.key.startsWith('connector:') && !metaByKey.get(s.key)?.label) {
+          const name = connectorName.get(summary.owningConnectorId);
+          if (name) summary.label = `${name} · ${humanize(s.key.split(':')[2] ?? 'secret')}`;
+        }
+        return summary;
+      })
       .sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
   }
 
@@ -264,6 +276,9 @@ function inferMeta(key: string): { label: string; category: SecretCategory; owni
       category: 'connector',
       owningConnectorId: connectorId,
     };
+  }
+  if (key.startsWith('fabric/')) {
+    return { label: humanize(key), category: 'fabric' };
   }
   if (key === 'smtp.password') return { label: 'SMTP password', category: 'notification' };
   if (key.startsWith('notify.')) return { label: humanize(key), category: 'notification' };

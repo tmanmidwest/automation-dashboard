@@ -48,25 +48,29 @@ export class FabricService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     try {
       for (const s of await this.secrets.list()) {
-        if (s.kind !== 'ssh' && s.kind !== 'rdp') continue;
+        if ((s.kind !== 'ssh' && s.kind !== 'rdp') || !s.key.startsWith('fabric/')) continue;
+        const patch: { category?: 'fabric'; label?: string; description?: string } = {};
+        if (s.category !== 'fabric') patch.category = 'fabric';
+
+        // Per-target credentials: relabel with the machine name.
         const m = s.key.match(/^fabric\/([^/]+)\/([^/]+)$/);
-        if (!m || m[1] === 'cred') continue; // per-target credentials only
-        const agent = await this.prisma.agent
-          .findUnique({ where: { id: m[1] }, select: { name: true, hostname: true } })
-          .catch(() => null);
-        if (!agent) continue;
-        const kind = s.kind.toUpperCase();
-        const label = `Fabric · ${agent.name} · ${kind}`;
-        if (s.label === label) continue;
-        const target = await this.prisma.agentTarget
-          .findUnique({ where: { id: m[2] }, select: { host: true, port: true } })
-          .catch(() => null);
-        await this.secrets
-          .updateMeta(s.key, {
-            label,
-            description: `Fabric ${kind} credential for ${agent.name}${agent.hostname ? ` (${agent.hostname})` : ''}${target ? ` — ${target.host}:${target.port}` : ''}`,
-          })
-          .catch(() => undefined);
+        if (m && m[1] !== 'cred') {
+          const agent = await this.prisma.agent
+            .findUnique({ where: { id: m[1] }, select: { name: true, hostname: true } })
+            .catch(() => null);
+          if (agent) {
+            const kind = s.kind.toUpperCase();
+            const label = `Fabric · ${agent.name} · ${kind}`;
+            if (s.label !== label) {
+              const target = await this.prisma.agentTarget
+                .findUnique({ where: { id: m[2] }, select: { host: true, port: true } })
+                .catch(() => null);
+              patch.label = label;
+              patch.description = `Fabric ${kind} credential for ${agent.name}${agent.hostname ? ` (${agent.hostname})` : ''}${target ? ` — ${target.host}:${target.port}` : ''}`;
+            }
+          }
+        }
+        if (Object.keys(patch).length > 0) await this.secrets.updateMeta(s.key, patch).catch(() => undefined);
       }
     } catch {
       /* best-effort */
@@ -257,7 +261,7 @@ export class FabricService implements OnModuleInit {
     await this.secrets.set(
       key,
       JSON.stringify(value),
-      { kind, category: 'manual', label: name, description: `Fabric ${kind.toUpperCase()} credential (reusable)` },
+      { kind, category: 'fabric', label: name, description: `Fabric ${kind.toUpperCase()} credential (reusable)` },
       { actorId: user.id, actorEmail: user.email },
     );
     await this.audit.record({
@@ -287,7 +291,7 @@ export class FabricService implements OnModuleInit {
       JSON.stringify(value),
       {
         kind,
-        category: 'manual',
+        category: 'fabric',
         label: `Fabric · ${machine} · ${kind.toUpperCase()}`,
         description: `Fabric ${kind.toUpperCase()} credential for ${machine}${agent?.hostname ? ` (${agent.hostname})` : ''} — ${target.host}:${target.port}`,
       },

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock, Eye, Copy, Check } from 'lucide-react';
+import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock, Eye, Copy, Check, Radio } from 'lucide-react';
 import type { RevealSecretResult, SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 // Category display order + chrome. Defined locally (web imports only types from shared).
 const CATEGORIES: { id: SecretCategory; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'connector', label: 'Connectors', icon: Puzzle },
+  { id: 'fabric', label: 'Fabric', icon: Radio },
   { id: 'notification', label: 'Notifications', icon: Bell },
   { id: 'api', label: 'API & Authentication', icon: ShieldCheck },
   { id: 'manual', label: 'Manual', icon: Lock },
@@ -186,11 +187,13 @@ export function Secrets() {
       } else {
         value = newSecret.value;
       }
+      // SSH/RDP credentials belong in the Fabric group.
+      const category = newSecret.kind === 'ssh' || newSecret.kind === 'rdp' ? 'fabric' : newSecret.category;
       await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
         value,
         label: newSecret.label.trim() || key,
         kind: newSecret.kind,
-        category: newSecret.category,
+        category,
       });
       setCreating(false);
       setNewSecret(emptyNewSecret());

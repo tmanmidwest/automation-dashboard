@@ -2,9 +2,9 @@
 // Secret store. Metadata only ever crosses the wire; the ciphertext/value never
 // leaves the server. See docs/secrets-vault.md.
 
-export type SecretCategory = 'connector' | 'notification' | 'api' | 'manual';
+export type SecretCategory = 'connector' | 'fabric' | 'notification' | 'api' | 'manual';
 
-export const SECRET_CATEGORIES: SecretCategory[] = ['connector', 'notification', 'api', 'manual'];
+export const SECRET_CATEGORIES: SecretCategory[] = ['connector', 'fabric', 'notification', 'api', 'manual'];
 
 /** Health derived server-side from the rotation policy + age. */
 export type SecretHealth = 'ok' | 'due' | 'expired';
