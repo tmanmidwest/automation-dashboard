@@ -11,8 +11,36 @@ The mental model is **Cloudflare Tunnel + Teleport-lite, self-hosted**: reverse 
 broker, per-session RBAC, full audit — but living inside Cerebro's LCARS UI and reusing its
 existing relay, vault, crypto, RBAC, and timeline plumbing.
 
-> Status: **Phases 1–3.5 BUILT** (2026-09-18) — control plane + tunnel + in-browser SSH + vault creds.
-> Phase 1: control plane, enrollment, Go agent, `/fabric` screen.
+> Status: **Phases 1–4 COMPLETE** (2026-09-18) — control plane + tunnel + in-browser SSH + vault creds
+> + in-browser RDP + full agent lifecycle (self-uninstall, Windows service, SSH host-key pinning,
+> self-update). Phase 1: control plane, enrollment, Go agent, `/fabric` screen. Only **Phase 5**
+> (native `cerebro access tcp` CLI, session recording, approval gate) remains. Not yet live-tested.
+>
+> **Phase-4b note:** deleting a machine in `/fabric` now sends an **`uninstall`** control frame to a
+> still-connected agent, which **self-uninstalls** (stops + removes its service and files, via a
+> detached remover that outlives it) — no more zombie retrying after delete. Only reaches an *online*
+> agent; an offline one still needs a manual uninstall. The agent is now a **proper Windows service**
+> (`golang.org/x/sys/windows/svc`) so it survives under `sc.exe`; the Linux systemd unit now **runs as
+> root** (removed `DynamicUser`) so the agent can remove its own files on uninstall — it still only
+> tunnels to `127.0.0.1` targets. Agent is **v0.3.0**, split into `main.go` + `agent_unix.go` +
+> `agent_windows.go` (build-tagged). **4b complete:** SSH host-key pinning (TOFU, `AgentTarget.hostKey`,
+> migration 0023, reset in the SSH dialog) and agent self-update (`FABRIC_AGENT_VERSION` in hello-ack —
+> keep in sync with `agentVersion` in `agent/main.go`; `CEREBRO_NO_AUTO_UPDATE` disables). RDP cert
+> pinning is n/a — guacd owns the RDP TLS session.
+>
+> **Phase-4a RDP note:** in-browser RDP is **guacamole-common-js** (browser canvas/keyboard/mouse)
+> ⟷ **guacamole-lite** on Cerebro (`/api/fabric/guac/ws`) ⟷ the **guacd sidecar**
+> (`guacamole/guacd`, added to `docker-compose.yml`) ⟷ a per-session **ephemeral TCP forward**
+> (`tunnel-forward.ts`) that rides the tunnel ⟷ `127.0.0.1:3389`. guacd needs a real host:port, so
+> the forward is the "ephemeral local forward" foreseen in Phase 2 (and the basis for the Phase-5
+> native CLI). The session token is an **encrypted guacamole-lite token** wrapping a one-time
+> server-side ticket (`FabricGuacService`, crypto **verified byte-compatible** with guacamole-lite's
+> `Crypt`); credentials (vault-injected or supplied, `rdp` vault kind) never reach the browser. New
+> compose env: `GUACD_HOST`/`GUACD_PORT` and `FABRIC_GUACD_CALLBACK_HOST` (the app's service name, so
+> guacd can dial the forward). The **Go agent is unchanged** — RDP is bytes over the Phase-2 stream
+> and `3389` is already in its allow-list. **Windows-agent-as-a-service + host-key pinning = Phase 4b**
+> (until then, run the agent in a foreground Administrator shell on Windows to live-test — a plain exe
+> under `sc.exe` is killed by the SCM).
 > `tsc`/`vite` green; the Go agent **cross-compiles inside the Docker image build** (`agent-build`
 > stage → all three binaries verified) so no manual Go step is needed — a normal image build produces
 > and ships them at `/app/agent-dist`. NOT committed / not live-tested. Later phases follow the same convention as
@@ -287,7 +315,8 @@ CJS-barrel gotcha).
 | **2 — Tunnel data path** ✅ **BUILT** | WS-framed mux (`stream-mux.ts` on the broker; single-writer session in the Go agent) — `open-stream`/`stream-opened`/`stream-error`/`close-stream` + binary data frames; agent-side **allow-list** (only declared targets + loopback 22/3389); **Test tunnel** probe end to end. `tsc`/`vet` green; agent compiled in Docker. | Bytes flow through the tunnel; a probe reads the live SSH banner; allow-list enforced. |
 | **3 — SSH in browser** ✅ **BUILT** | `xterm.js` ⟷ session WS relay (`fabric-session-relay.ts`) ⟷ `ssh2` over the tunnel (`TunnelSocket`); one-time session ticket (`FabricSessionService`); operator-supplied creds; `FabricSession` + Ship's Log audit. | First real interactive session, fully in LCARS, audited. |
 | **3.5 — Vault SSH creds** ✅ **BUILT** | `ssh` vault kind; per-target credential stored at `fabric/<agentId>/<targetId>`, revealed server-side at connect (**Use saved credential** — operator never sees it); save/forget gated on `fabric:manage`; orphan cleanup on agent delete. `tsc`/`vite` green. | Connect with one click; secrets never leave the server. |
-| **4 — RDP in browser** | guacd RDP; Windows agent as a service; credential injection; connection quality / resize. | Windows RDP in the browser through the tunnel. |
+| **4a — RDP in browser** ✅ **BUILT** | guacd sidecar; `guacamole-lite` relay + encrypted ticket (`FabricGuacService`); ephemeral tunnel forward (`tunnel-forward.ts`); `guacamole-common-js` viewer (canvas/mouse/keyboard/resize); `rdp` vault kind + vault-injected creds; `FabricSession` audit. `tsc`/`vite` green; token crypto verified vs guacamole-lite; compose valid. *Live RDP render needs guacd + a real host.* | Windows RDP in the browser through the tunnel. |
+| **4b — Agent lifecycle** ✅ **BUILT** | Self-uninstall on delete (`uninstall` frame → detached remover); Windows-agent-as-a-service (`x/sys/windows/svc`, Linux unit runs as root); **SSH host-key pinning (TOFU)** — learn on first connect, refuse a changed key, reset in the UI (`AgentTarget.hostKey`, migration 0023); **self-update** — broker advertises `latestAgentVersion` in hello-ack, older agent swaps its binary (systemd/Windows-failure-action restart; `CEREBRO_NO_AUTO_UPDATE` to disable). All three targets cross-compile green. *RDP cert pinning n/a — guacd terminates the RDP TLS itself.* | Clean delete removes the agent from the box; survives as a real Windows service; MITM-resistant SSH; fleet self-updates. |
 | **5 — Native client + hardening** | `cerebro access tcp` CLI; agent offline monitors + notifications; session recording; optional approval gate; agent self-update. | Power-user path + enterprise-grade controls. |
 
 ---

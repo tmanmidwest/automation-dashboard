@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { WebSocket } from 'ws';
 import {
+  FABRIC_AGENT_VERSION,
   FABRIC_HEARTBEAT_MS,
   FABRIC_MISSED_BEATS_OFFLINE,
   type FabricAgentStatus,
@@ -171,7 +172,12 @@ export class AgentRegistryService {
       });
     }
 
-    this.send(agentId, { t: 'hello-ack', agentId, heartbeatMs: FABRIC_HEARTBEAT_MS });
+    this.send(agentId, {
+      t: 'hello-ack',
+      agentId,
+      heartbeatMs: FABRIC_HEARTBEAT_MS,
+      latestAgentVersion: FABRIC_AGENT_VERSION,
+    });
   }
 
   private onHeartbeat(agentId: string): void {
@@ -204,6 +210,24 @@ export class AgentRegistryService {
         })
         .catch(() => undefined);
     }
+  }
+
+  /**
+   * Ask a currently-connected agent to uninstall itself (stop its service and
+   * remove its files), then drop the connection shortly after so the frame
+   * flushes. Best-effort: only reaches an online agent. Returns whether the
+   * agent was online to receive it.
+   */
+  requestUninstall(agentId: string): boolean {
+    const entry = this.live.get(agentId);
+    if (!entry) return false;
+    try {
+      entry.ws.send(JSON.stringify({ t: 'uninstall' }));
+    } catch {
+      /* socket gone */
+    }
+    setTimeout(() => this.disconnect(agentId, 4003, 'uninstalled'), 3000);
+    return true;
   }
 
   /** Force-disconnect an agent (used on revoke/delete). */

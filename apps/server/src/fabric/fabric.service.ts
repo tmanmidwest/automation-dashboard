@@ -4,10 +4,12 @@ import type {
   FabricAgentDto,
   FabricEnrollmentDto,
   FabricProbeResult,
+  FabricRdpConnectInput,
   FabricSessionDto,
   FabricSessionTicket,
   FabricSshConnectInput,
   FabricTargetDto,
+  RdpCredential,
   SessionUser,
   SshCredential,
 } from '@cerebro/shared';
@@ -16,6 +18,7 @@ import { AuditService } from '../logging/audit.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
+import { FabricGuacService } from './fabric-guac.service';
 import { generateEnrollToken } from './fabric-credentials';
 import { baseUrl } from './fabric-enrollment.service';
 
@@ -31,6 +34,7 @@ export class FabricService {
     private readonly audit: AuditService,
     private readonly registry: AgentRegistryService,
     private readonly sessions: FabricSessionService,
+    private readonly guac: FabricGuacService,
     private readonly secrets: SecretsService,
   ) {}
 
@@ -68,10 +72,8 @@ export class FabricService {
         passphrase: input.passphrase,
       };
       if (input.save) {
-        if (!user.permissions.includes('fabric:manage')) {
-          throw new ForbiddenException('Saving a credential to the vault requires fabric:manage.');
-        }
-        await this.saveTargetCredential(target, creds, user);
+        this.requireManage(user);
+        await this.saveTargetCredential(target, 'ssh', creds, user);
       }
     }
 
@@ -91,17 +93,87 @@ export class FabricService {
     return { token, wsPath: SESSION_WS_PATH };
   }
 
-  /** Store an SSH credential in the vault and attach it to the target. */
-  private async saveTargetCredential(target: AgentTarget, creds: SshCredential, user: SessionUser): Promise<void> {
+  /**
+   * Mint an encrypted guac token for an in-browser RDP session (Phase 4). Same
+   * credential model as SSH: supply them, save them, or use the target's saved
+   * vault credential (never seen by the operator).
+   */
+  async openRdpSession(
+    agentId: string,
+    targetId: string,
+    input: FabricRdpConnectInput,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.kind !== 'rdp') throw new BadRequestException('This target is not an RDP endpoint.');
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+
+    let creds: RdpCredential;
+    if (input.useSaved) {
+      if (!target.secretRef) throw new BadRequestException('No saved credential for this target.');
+      const raw = await this.secrets.reveal(target.secretRef);
+      if (!raw) throw new BadRequestException('The saved credential is missing from the vault.');
+      creds = JSON.parse(raw) as RdpCredential;
+    } else {
+      if (!input.username?.trim()) throw new BadRequestException('A username is required.');
+      if (!input.password) throw new BadRequestException('A password is required.');
+      creds = { username: input.username.trim(), password: input.password, domain: input.domain };
+      if (input.save) {
+        this.requireManage(user);
+        await this.saveTargetCredential(target, 'rdp', creds, user);
+      }
+    }
+
+    return this.guac.issue({
+      agentId,
+      targetId,
+      userId: user.id,
+      userEmail: user.email,
+      host: target.host,
+      port: target.port,
+      username: creds.username,
+      password: creds.password,
+      domain: creds.domain,
+    });
+  }
+
+  /** Clear a target's pinned SSH host key (e.g. after the host was rebuilt). */
+  async clearHostKey(agentId: string, targetId: string, user: SessionUser): Promise<void> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    await this.prisma.agentTarget.update({ where: { id: target.id }, data: { hostKey: null } });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.hostkey.cleared',
+      target: agentId,
+      meta: { targetId },
+    });
+  }
+
+  private requireManage(user: SessionUser): void {
+    if (!user.permissions.includes('fabric:manage')) {
+      throw new ForbiddenException('Saving a credential to the vault requires fabric:manage.');
+    }
+  }
+
+  /** Store a target credential (SSH or RDP) in the vault and attach it to the target. */
+  private async saveTargetCredential(
+    target: AgentTarget,
+    kind: 'ssh' | 'rdp',
+    value: SshCredential | RdpCredential,
+    user: SessionUser,
+  ): Promise<void> {
     const key = `fabric/${target.agentId}/${target.id}`;
     await this.secrets.set(
       key,
-      JSON.stringify(creds),
+      JSON.stringify(value),
       {
-        kind: 'ssh',
+        kind,
         category: 'manual',
-        label: `SSH · ${target.host}:${target.port}`,
-        description: `Fabric SSH credential for agent ${target.agentId}`,
+        label: `${kind.toUpperCase()} · ${target.host}:${target.port}`,
+        description: `Fabric ${kind.toUpperCase()} credential for agent ${target.agentId}`,
       },
       { actorId: user.id, actorEmail: user.email },
     );
@@ -111,7 +183,7 @@ export class FabricService {
       actorEmail: user.email,
       action: 'fabric.target.credential_saved',
       target: target.agentId,
-      meta: { targetId: target.id },
+      meta: { targetId: target.id, kind },
     });
   }
 
@@ -206,7 +278,9 @@ export class FabricService {
   async deleteAgent(id: string, user: SessionUser): Promise<void> {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
     if (!agent) throw new NotFoundException('Agent not found.');
-    this.registry.disconnect(id);
+    // If it's online, ask it to uninstall itself before we drop it; otherwise
+    // just disconnect (a manual uninstall on the box is then needed).
+    if (!this.registry.requestUninstall(id)) this.registry.disconnect(id);
     // Remove any vault credentials attached to this agent's targets so they
     // don't outlive the agent as orphans.
     const withSecrets = await this.prisma.agentTarget.findMany({
@@ -331,6 +405,7 @@ export class FabricService {
           port: t.port,
           label: t.label,
           hasCredential: !!t.secretRef,
+          hostKeyPinned: !!t.hostKey,
         }),
       ),
     };

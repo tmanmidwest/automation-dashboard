@@ -14,20 +14,23 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.2.0"
+const agentVersion = "0.3.0"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -40,24 +43,43 @@ type config struct {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
+	// runAgent is OS-specific: on Windows it runs under the Service Control
+	// Manager when launched as a service; elsewhere it runs in the foreground.
+	// Both call agentMain with a stop channel.
+	runAgent()
+}
+
+// agentMain enrolls (if needed) then holds the reconnect loop until stop is
+// closed (a service Stop) — or the process exits on an uninstall command.
+func agentMain(stop <-chan struct{}) {
 	cfg := loadConfig()
 	if cfg.URL == "" {
-		log.Fatal("CEREBRO_URL is not set (env or config.env).")
+		log.Print("CEREBRO_URL is not set (env or config.env).")
+		return
 	}
-
 	cred, err := ensureCredential(cfg)
 	if err != nil {
-		log.Fatalf("enrollment failed: %v", err)
+		log.Printf("enrollment failed: %v", err)
+		return
 	}
 	log.Printf("cerebro-agent v%s starting; endpoint=%s", agentVersion, cfg.URL)
 
 	backoff := time.Second
 	for {
-		if err := run(cfg, cred); err != nil {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if err := run(cfg, cred, stop); err != nil {
 			log.Printf("connection ended: %v", err)
 		}
 		jitter := time.Duration(time.Now().UnixNano()%int64(time.Second)) / 2
-		time.Sleep(backoff + jitter)
+		select {
+		case <-stop:
+			return
+		case <-time.After(backoff + jitter):
+		}
 		if backoff < 30*time.Second {
 			backoff *= 2
 			if backoff > 30*time.Second {
@@ -71,7 +93,7 @@ func main() {
 // so main can reconnect with backoff. It carries both the control channel
 // (JSON text frames) and the tunnel data plane (binary frames), multiplexed by
 // a per-connection session.
-func run(cfg config, cred string) error {
+func run(cfg config, cred string, stop <-chan struct{}) error {
 	wsURL := toWS(cfg.URL) + "/api/fabric/agent/ws"
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+cred)
@@ -89,7 +111,7 @@ func run(cfg config, cred string) error {
 	log.Printf("connected to %s", wsURL)
 
 	targets := detectTargets()
-	sess := newSession(conn, allowSet(targets))
+	sess := newSession(conn, allowSet(targets), cfg)
 	defer sess.closeAll()
 
 	writerDone := make(chan struct{})
@@ -125,6 +147,10 @@ func run(cfg config, cred string) error {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-stop:
+			sess.stop()
+			<-writerDone
+			return nil
 		case err := <-readErr:
 			sess.stop()
 			<-writerDone
@@ -150,6 +176,7 @@ type outMsg struct {
 type session struct {
 	conn     *websocket.Conn
 	allow    map[string]bool
+	cfg      config
 	out      chan outMsg
 	quit     chan struct{}
 	quitOnce sync.Once
@@ -157,10 +184,11 @@ type session struct {
 	streams  map[uint32]net.Conn
 }
 
-func newSession(conn *websocket.Conn, allow map[string]bool) *session {
+func newSession(conn *websocket.Conn, allow map[string]bool, cfg config) *session {
 	return &session{
 		conn:    conn,
 		allow:   allow,
+		cfg:     cfg,
 		out:     make(chan outMsg, 128),
 		quit:    make(chan struct{}),
 		streams: map[uint32]net.Conn{},
@@ -205,10 +233,11 @@ func (s *session) writeJSON(v any) {
 func (s *session) writeBinary(b []byte) { s.enqueue(outMsg{websocket.BinaryMessage, b}) }
 
 type ctrlFrame struct {
-	T        string `json:"t"`
-	StreamID uint32 `json:"streamId"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
+	T                  string `json:"t"`
+	StreamID           uint32 `json:"streamId"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	LatestAgentVersion string `json:"latestAgentVersion"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -221,7 +250,15 @@ func (s *session) onControl(msg []byte) {
 		go s.openStream(c.StreamID, c.Host, c.Port)
 	case "close-stream":
 		s.closeStream(c.StreamID, false)
-	case "hello-ack", "ping":
+	case "uninstall":
+		log.Print("received uninstall command from Cerebro — removing this agent")
+		selfUninstall() // OS-specific; spawns a detached remover and exits
+	case "hello-ack":
+		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
+			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)
+			go trySelfUpdate(s.cfg)
+		}
+	case "ping":
 		// no action
 	}
 }
@@ -503,4 +540,78 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// --- Self-update ------------------------------------------------------------
+//
+// The broker advertises its latest agent version in hello-ack; an older agent
+// downloads the matching binary and swaps itself out (doSelfUpdate is
+// OS-specific, since replacing a running executable differs on Windows). One
+// attempt at a time; disabled by CEREBRO_NO_AUTO_UPDATE.
+
+var updating atomic.Bool
+
+func autoUpdateDisabled() bool {
+	v := os.Getenv("CEREBRO_NO_AUTO_UPDATE")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+func trySelfUpdate(cfg config) {
+	if !updating.CompareAndSwap(false, true) {
+		return
+	}
+	if err := doSelfUpdate(cfg); err != nil {
+		log.Printf("self-update failed: %v", err)
+		updating.Store(false) // allow a retry on a later hello-ack
+	}
+}
+
+// downloadAgentBinary fetches the current agent binary for this OS/arch to dest.
+func downloadAgentBinary(cfg config, dest string) error {
+	url := strings.TrimRight(cfg.URL, "/") + "/api/fabric/agent/binary?os=" + runtime.GOOS + "&arch=" + runtime.GOARCH
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("download: %s", resp.Status)
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return err
+	}
+	if n < 1024 {
+		return fmt.Errorf("downloaded binary is implausibly small (%d bytes)", n)
+	}
+	return nil
+}
+
+// versionLess reports whether dotted version a is older than b (e.g. 0.2.0 < 0.3.0).
+func versionLess(a, b string) bool {
+	pa, pb := parseVer(a), parseVer(b)
+	for i := 0; i < 3; i++ {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	return false
+}
+
+func parseVer(s string) [3]int {
+	var out [3]int
+	for i, part := range strings.SplitN(s, ".", 3) {
+		if i >= 3 {
+			break
+		}
+		n, _ := strconv.Atoi(strings.TrimSpace(part))
+		out[i] = n
+	}
+	return out
 }

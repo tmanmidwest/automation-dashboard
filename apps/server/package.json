@@ -49,6 +49,7 @@
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "guacamole-lite": "^1.2.0",
     "ssh2": "^1.17.0",
     "ws": "^8.18.0",
     "zod": "^3.25.76"

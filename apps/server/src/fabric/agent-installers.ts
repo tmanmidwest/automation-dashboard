@@ -56,8 +56,9 @@ EnvironmentFile=/etc/cerebro-agent/config.env
 ExecStart=/usr/local/bin/cerebro-agent
 Restart=always
 RestartSec=5
-DynamicUser=yes
-StateDirectory=cerebro-agent
+# Runs as root so the agent can self-uninstall (stop its service + remove its
+# files) when the machine is deleted from Cerebro. It only ever tunnels to
+# 127.0.0.1 targets on this host.
 
 [Install]
 WantedBy=multi-user.target
@@ -95,6 +96,8 @@ $cfg = Join-Path $dir 'config.env'
 # Register + start a Windows service. The agent reads config.env next to its exe.
 sc.exe create CerebroAgent binPath= "\`"$bin\`"" start= auto DisplayName= "Cerebro Fabric Agent" | Out-Null
 sc.exe description CerebroAgent "Cerebro Fabric Agent — outbound remote-access tunnel" | Out-Null
+# Restart on unexpected exit — this is also how a self-update relaunches on the new binary.
+sc.exe failure CerebroAgent reset= 86400 actions= restart/5000 | Out-Null
 sc.exe start CerebroAgent | Out-Null
 Write-Host 'cerebro-agent installed and started. It will appear in Cerebro shortly.'
 `;

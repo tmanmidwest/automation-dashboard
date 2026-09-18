@@ -23,6 +23,8 @@ export interface FabricTargetDto {
   label?: string | null;
   /** True when a vault credential is attached (server-injected at session time). */
   hasCredential: boolean;
+  /** True when an SSH host key has been pinned for this target (TOFU). */
+  hostKeyPinned: boolean;
 }
 
 export interface FabricAgentDto {
@@ -101,11 +103,19 @@ export interface FabricHelloAckFrame {
   agentId: string;
   /** Interval (ms) the broker wants heartbeats at. */
   heartbeatMs: number;
+  /** Latest agent version the broker serves; an older agent self-updates. */
+  latestAgentVersion?: string;
 }
 
 /** broker → agent: keep-alive / liveness probe. */
 export interface FabricPingFrame {
   t: 'ping';
+}
+
+/** broker → agent: the agent has been deleted — stop the service and remove
+ * itself from the machine (best-effort; only reaches a currently-online agent). */
+export interface FabricUninstallFrame {
+  t: 'uninstall';
 }
 
 // --- Stream lifecycle (Phase 2). streamId is broker-allocated per connection. ---
@@ -147,11 +157,17 @@ export type FabricBrokerToAgent =
   | FabricHelloAckFrame
   | FabricPingFrame
   | FabricOpenStreamFrame
-  | FabricCloseStreamFrame;
+  | FabricCloseStreamFrame
+  | FabricUninstallFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */
 export const FABRIC_STREAM_HEADER_BYTES = 4;
+
+/** Latest agent version the broker serves. **Keep in sync with `agentVersion`
+ * in agent/main.go** — the broker sends this in hello-ack and an older agent
+ * self-updates from `/api/fabric/agent/binary`. */
+export const FABRIC_AGENT_VERSION = '0.3.0';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;
@@ -177,6 +193,16 @@ export interface FabricSessionTicket {
   token: string;
   /** WebSocket path to open, e.g. `/api/fabric/session/ws`. */
   wsPath: string;
+}
+
+/** Credentials for an RDP session. Either supply them, or set `useSaved`. */
+export interface FabricRdpConnectInput {
+  useSaved?: boolean;
+  username?: string;
+  password?: string;
+  domain?: string;
+  /** Persist the supplied credential to the vault on the target (needs fabric:manage). */
+  save?: boolean;
 }
 
 /** Result of a tunnel reachability probe (the Phase-2 end-to-end acceptance check). */

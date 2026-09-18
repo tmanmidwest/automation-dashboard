@@ -68,6 +68,30 @@ class SshConnectDto {
   save?: boolean;
 }
 
+class RdpConnectDto {
+  @IsOptional()
+  @IsBoolean()
+  useSaved?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  username?: string;
+
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  domain?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  save?: boolean;
+}
+
 /** Where prebuilt agent binaries are served from (populated by CI / a release step). */
 const AGENT_DIST_DIR = process.env.FABRIC_AGENT_DIST_DIR || '/app/agent-dist';
 const AGENT_ARTIFACTS: Record<string, { file: string; contentType: string; download: string }> = {
@@ -144,6 +168,19 @@ export class FabricController {
     return this.fabric.openSshSession(id, targetId, body, user);
   }
 
+  /** Mint an encrypted token for an in-browser RDP session (Phase 4). */
+  @Post('agents/:id/targets/:targetId/rdp-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openRdpSession(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @Body() body: RdpConnectDto,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.fabric.openRdpSession(id, targetId, body, user);
+  }
+
   /** Forget a target's vault-stored credential (Phase 3.5). */
   @Delete('agents/:id/targets/:targetId/credential')
   @SessionOnly()
@@ -154,6 +191,19 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     await this.fabric.clearTargetCredential(id, targetId, user);
+    return { ok: true };
+  }
+
+  /** Reset a target's pinned SSH host key — TOFU re-learns on next connect (Phase 4b). */
+  @Delete('agents/:id/targets/:targetId/hostkey')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async clearHostKey(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    await this.fabric.clearHostKey(id, targetId, user);
     return { ok: true };
   }
 

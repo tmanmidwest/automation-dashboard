@@ -680,6 +680,8 @@ model AgentTarget {
   label     String?
   /// Vault key for credentials injected server-side at session time (Phase 3+).
   secretRef String?
+  /// Pinned SSH host-key fingerprint (sha256, base64) — TOFU. Null until first seen.
+  hostKey   String?
 
   @@unique([agentId, kind, host, port])
   @@index([agentId])

@@ -33,6 +33,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       # Persistent home for signal-cli account state (--data-dir; see volume below).
       SIGNAL_CLI_DATA_DIR: /data/signal
+      # Fabric RDP: where the app reaches the guacd sidecar, and the hostname guacd
+      # uses to reach the app's ephemeral RDP forward (this service's name).
+      GUACD_HOST: ${GUACD_HOST:-guacd}
+      GUACD_PORT: ${GUACD_PORT:-4822}
+      FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-app}
     volumes:
       - cerebro_signal:/data/signal
     # ICMP for the uptime monitor's Ping probe (system `ping` needs a raw socket).
@@ -75,6 +80,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Apache Guacamole daemon — renders RDP (and VNC) to the browser for Fabric.
+  # Only used when opening an RDP session; the app talks to it at guacd:4822 and
+  # points it back at a per-session ephemeral forward that rides the agent tunnel.
+  # See docs/fabric-remote-access.md (Phase 4).
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: cerebro-guacd
+    restart: unless-stopped
 
 volumes:
   cerebro_db:

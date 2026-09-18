@@ -51,3 +51,16 @@ CEREBRO_URL=http://localhost:3000 ENROLL=cbroenroll_… ./cerebro-agent
 
 Authentication is a bearer credential over TLS (sha256-stored server-side, like a
 Cerebro API token). mTLS is the Phase-5 hardening target.
+
+## Lifecycle (Phase 4b)
+
+- **Windows service** — runs under the Service Control Manager (`golang.org/x/sys/windows/svc`);
+  runs in the foreground when launched manually.
+- **Self-uninstall** — on delete from Cerebro, the (online) agent stops and removes its own service
+  and files via a detached remover.
+- **Self-update** — the broker advertises its latest version in `hello-ack`; an older agent downloads
+  the matching binary and swaps itself out (systemd restart on Linux; service failure-action restart
+  on Windows). Set `CEREBRO_NO_AUTO_UPDATE=1` to disable.
+
+`agentVersion` in `main.go` must stay in sync with `FABRIC_AGENT_VERSION` in
+`packages/shared/src/fabric.ts` (the broker compares them).

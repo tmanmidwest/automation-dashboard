@@ -6,6 +6,7 @@ import { FabricService } from './fabric.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
+import { FabricGuacService } from './fabric-guac.service';
 
 /**
  * Fabric — agent-brokered remote access (RDP / SSH). Phase 1: control plane.
@@ -16,7 +17,7 @@ import { FabricSessionService } from './fabric-session.service';
 @Module({
   imports: [PrismaModule, LoggingModule],
   controllers: [FabricController],
-  providers: [FabricService, FabricEnrollmentService, AgentRegistryService, FabricSessionService],
-  exports: [AgentRegistryService, FabricSessionService],
+  providers: [FabricService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService],
+  exports: [AgentRegistryService, FabricSessionService, FabricGuacService],
 })
 export class FabricModule {}

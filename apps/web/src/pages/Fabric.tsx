@@ -6,9 +6,10 @@ import {
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import Guacamole from 'guacamole-common-js';
 import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
-  FabricSshConnectInput, FabricSessionTicket,
+  FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -72,6 +73,7 @@ export function Fabric() {
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
+  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
 
   const runProbe = async (agentId: string, t: FabricTargetDto) => {
     setProbe((p) => ({ ...p, [t.id]: { loading: true } }));
@@ -235,12 +237,16 @@ export function Fabric() {
                                 )}
                                 {t.kind.toUpperCase()} :{t.port}
                               </button>
-                              {t.kind === 'ssh' && canConnect && (
+                              {canConnect && (
                                 <button
                                   type="button"
                                   disabled={!online}
                                   onClick={online ? () => setConnectFor({ agent: a, target: t }) : undefined}
-                                  title={online ? (t.hasCredential ? 'Open SSH session (vault credential saved)' : 'Open SSH session') : 'Agent offline'}
+                                  title={
+                                    online
+                                      ? `${t.kind === 'rdp' ? 'Open RDP session' : 'Open SSH session'}${t.hasCredential ? ' (vault credential saved)' : ''}`
+                                      : 'Agent offline'
+                                  }
                                   className={`inline-flex items-center gap-1 px-1.5 py-0.5 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
                                 >
                                   <TerminalSquare className="h-3 w-3" />
@@ -293,7 +299,21 @@ export function Fabric() {
 
       {enrollment && <EnrollmentDialog enrollment={enrollment} onClose={() => setEnrollment(null)} />}
 
-      {connectFor && (
+      {connectFor && connectFor.target.kind === 'rdp' && (
+        <RdpConnectDialog
+          agent={connectFor.agent}
+          target={connectFor.target}
+          canManage={canManage}
+          onChanged={load}
+          onClose={() => setConnectFor(null)}
+          onConnected={(ticket) => {
+            setRdpSession({ ticket, title: `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}` });
+            setConnectFor(null);
+          }}
+        />
+      )}
+
+      {connectFor && connectFor.target.kind === 'ssh' && (
         <SshConnectDialog
           agent={connectFor.agent}
           target={connectFor.target}
@@ -308,6 +328,7 @@ export function Fabric() {
       )}
 
       {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} />}
+      {rdpSession && <RdpViewer session={rdpSession.ticket} title={rdpSession.title} onClose={() => setRdpSession(null)} />}
     </div>
   );
 }
@@ -436,6 +457,7 @@ function SshConnectDialog({
   onChanged: () => void;
 }) {
   const [savedExists, setSavedExists] = useState(target.hasCredential);
+  const [pinnedExists, setPinnedExists] = useState(target.hostKeyPinned);
   const [useSaved, setUseSaved] = useState(target.hasCredential);
   const [username, setUsername] = useState('root');
   const [method, setMethod] = useState<'password' | 'key'>('password');
@@ -491,6 +513,17 @@ function SshConnectDialog({
     }
   };
 
+  const resetHostKey = async () => {
+    if (!confirm('Reset the pinned host key? The next connection will trust and re-pin the host.')) return;
+    try {
+      await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/hostkey`);
+      setPinnedExists(false);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to reset host key.');
+    }
+  };
+
   return (
     <Dialog
       open
@@ -522,6 +555,16 @@ function SshConnectDialog({
               </button>
             )}
           </div>
+        )}
+
+        {pinnedExists && canManage && (
+          <p className="text-xs text-muted-foreground">
+            Host key pinned.{' '}
+            <button type="button" onClick={resetHostKey} className="text-destructive hover:underline">
+              Reset
+            </button>{' '}
+            if this host was rebuilt.
+          </p>
         )}
 
         {!useSaved && (
@@ -683,6 +726,259 @@ function SshTerminal({
       <div className="flex-1 relative overflow-hidden">
         <div ref={screenRef} className="w-full h-full p-2" />
       </div>
+    </div>
+  );
+}
+
+function RdpConnectDialog({
+  agent,
+  target,
+  canManage,
+  onClose,
+  onConnected,
+  onChanged,
+}: {
+  agent: FabricAgentDto;
+  target: FabricTargetDto;
+  canManage: boolean;
+  onClose: () => void;
+  onConnected: (ticket: FabricSessionTicket) => void;
+  onChanged: () => void;
+}) {
+  const [savedExists, setSavedExists] = useState(target.hasCredential);
+  const [useSaved, setUseSaved] = useState(target.hasCredential);
+  const [username, setUsername] = useState('Administrator');
+  const [password, setPassword] = useState('');
+  const [domain, setDomain] = useState('');
+  const [save, setSave] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setErr(null);
+    let body: FabricRdpConnectInput;
+    if (useSaved) {
+      body = { useSaved: true };
+    } else {
+      if (!username.trim()) {
+        setErr('A username is required.');
+        return;
+      }
+      if (!password) {
+        setErr('A password is required.');
+        return;
+      }
+      body = { username: username.trim(), password, domain: domain.trim() || undefined, save: save && canManage };
+    }
+    setBusy(true);
+    try {
+      const ticket = await api.post<FabricSessionTicket>(
+        `/api/fabric/agents/${agent.id}/targets/${target.id}/rdp-session`,
+        body,
+      );
+      if (!useSaved && save && canManage) onChanged();
+      onConnected(ticket);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
+      setBusy(false);
+    }
+  };
+
+  const forget = async () => {
+    if (!confirm('Forget the saved credential for this target?')) return;
+    try {
+      await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/credential`);
+      setSavedExists(false);
+      setUseSaved(false);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to remove credential.');
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`RDP · ${agent.name}`}
+      description={`Connect to ${target.host}:${target.port} through the tunnel.`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <MonitorSmartphone className="h-4 w-4 mr-1" />}
+            Connect
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {err && <p className="text-sm text-destructive">{err}</p>}
+
+        {savedExists && (
+          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 space-y-2">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={useSaved} onChange={(e) => setUseSaved(e.target.checked)} />
+              Use the saved credential from the vault
+            </label>
+            {canManage && (
+              <button type="button" onClick={forget} className="text-xs text-destructive hover:underline">
+                Forget saved credential
+              </button>
+            )}
+          </div>
+        )}
+
+        {!useSaved && (
+          <>
+            <div>
+              <Label htmlFor="rdp-user">Username</Label>
+              <Input id="rdp-user" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+            </div>
+            <div>
+              <Label htmlFor="rdp-domain">Domain (optional)</Label>
+              <Input id="rdp-domain" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="WORKGROUP" />
+            </div>
+            <div>
+              <Label htmlFor="rdp-pass">Password</Label>
+              <Input id="rdp-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+            {canManage && (
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+                Save to the vault for next time
+              </label>
+            )}
+          </>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+function RdpViewer({
+  session,
+  title,
+  onClose,
+}: {
+  session: FabricSessionTicket;
+  title: string;
+  onClose: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!hostRef.current) return;
+    const host = hostRef.current;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // WebSocketTunnel appends `?<connectData>` to this URL, so keep it query-less
+    // and pass the token as the connect data below (→ `…/ws?token=…`).
+    const url = `${proto}//${location.host}${session.wsPath}`;
+
+    const tunnel = new Guacamole.WebSocketTunnel(url);
+    const client = new Guacamole.Client(tunnel);
+    const displayEl = client.getDisplay().getElement();
+    host.appendChild(displayEl);
+
+    client.onstatechange = (state: number) => {
+      // 3 = CONNECTED, 5 = DISCONNECTED (Guacamole client states)
+      if (state === 3) setStatus('connected');
+      else if (state === 5) setStatus('disconnected');
+    };
+    client.onerror = (s: { message?: string }) => {
+      setError(s?.message || 'The RDP connection was closed.');
+      setStatus('disconnected');
+    };
+
+    const sendSize = () => {
+      const w = Math.max(640, Math.floor(host.clientWidth));
+      const h = Math.max(480, Math.floor(host.clientHeight));
+      try {
+        client.sendSize(w, h);
+      } catch {
+        /* not connected yet */
+      }
+    };
+
+    client.connect(`token=${encodeURIComponent(session.token)}`);
+
+    // Mouse
+    const mouse = new Guacamole.Mouse(displayEl);
+    mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = () => client.sendMouseState(mouse.currentState);
+    // Keyboard (scoped to the viewer element, which we focus)
+    host.tabIndex = 0;
+    host.focus();
+    const keyboard = new Guacamole.Keyboard(host);
+    keyboard.onkeydown = (keysym: number) => {
+      client.sendKeyEvent(1, keysym);
+    };
+    keyboard.onkeyup = (keysym: number) => {
+      client.sendKeyEvent(0, keysym);
+    };
+
+    const ro = new ResizeObserver(() => sendSize());
+    ro.observe(host);
+    const sizeTimer = setTimeout(sendSize, 500);
+
+    return () => {
+      clearTimeout(sizeTimer);
+      ro.disconnect();
+      try {
+        keyboard.reset();
+      } catch {
+        /* ignore */
+      }
+      try {
+        client.disconnect();
+      } catch {
+        /* ignore */
+      }
+      if (displayEl.parentNode === host) host.removeChild(displayEl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.token]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
+        <span className="text-sm inline-flex items-center gap-2">
+          <MonitorSmartphone className="h-4 w-4 text-primary" />
+          <span className="text-muted-foreground">RDP ·</span> {title}
+        </span>
+        <div className="flex items-center gap-3 text-sm">
+          <span
+            className={`inline-flex items-center gap-1.5 ${
+              status === 'connected'
+                ? 'text-emerald-400'
+                : status === 'connecting'
+                  ? 'text-amber-400'
+                  : 'text-muted-foreground'
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                status === 'connected'
+                  ? 'bg-emerald-400'
+                  : status === 'connecting'
+                    ? 'bg-amber-400 animate-pulse'
+                    : 'bg-muted-foreground'
+              }`}
+            />
+            {status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
+          </span>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            <X className="h-4 w-4 mr-1" /> Close
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="m-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">
+          {error}
+        </div>
+      )}
+      <div ref={hostRef} className="flex-1 relative overflow-auto outline-none grid place-items-center" />
     </div>
   );
 }

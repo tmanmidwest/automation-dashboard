@@ -13,6 +13,8 @@ import { AgentRegistryService } from './fabric/agent-registry.service';
 import { attachFabricAgentRelay } from './fabric/fabric-agent-relay';
 import { FabricSessionService } from './fabric/fabric-session.service';
 import { attachFabricSessionRelay } from './fabric/fabric-session-relay';
+import { FabricGuacService } from './fabric/fabric-guac.service';
+import { attachFabricGuacRelay } from './fabric/fabric-guac-relay';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -54,6 +56,9 @@ async function bootstrap() {
 
   // Fabric browser session relay (in-browser SSH over the tunnel).
   attachFabricSessionRelay(app.getHttpServer(), app.get(FabricSessionService));
+
+  // Fabric guac relay (in-browser RDP via the guacd sidecar).
+  attachFabricGuacRelay(app.getHttpServer(), app.get(FabricGuacService));
 
   const port = parseInt(process.env.PORT ?? '3000', 10);
   await app.listen(port, '0.0.0.0');

@@ -29,7 +29,7 @@ export interface SecretSummary {
 
 /** Editable metadata fields (PUT /api/secrets/:key). */
 /** Shape of a stored secret value: a single string, or a structured JSON credential. */
-export type SecretKind = 'generic' | 'git' | 'ssh';
+export type SecretKind = 'generic' | 'git' | 'ssh' | 'rdp';
 
 /** A Git credential's decoded value (stored as the secret's JSON plaintext, kind='git'). */
 export interface GitCredential {
@@ -46,6 +46,13 @@ export interface SshCredential {
   password?: string;
   privateKey?: string;
   passphrase?: string;
+}
+
+/** An RDP credential's decoded value (stored as the secret's JSON plaintext, kind='rdp'). */
+export interface RdpCredential {
+  username: string;
+  password: string;
+  domain?: string;
 }
 
 export interface SecretMetaInput {
