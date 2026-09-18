@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'crypto';
-import { hostname } from 'os';
+import { hostname, networkInterfaces } from 'os';
 import type { FabricSessionTicket } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
@@ -108,10 +108,16 @@ export class FabricGuacService {
       },
     });
 
+    // The address guacd will dial to reach our forward. An explicit env override
+    // wins; otherwise use this container's own Docker-network IP (always
+    // reachable by the guacd sidecar, no DNS needed); hostname() is a last resort.
+    const callbackHost = process.env.FABRIC_GUACD_CALLBACK_HOST || selfIp() || hostname();
+    this.logger.log(`RDP session: forward on ${callbackHost}:${forward.port} -> ${d.host}:${d.port} via agent ${d.agentId}`);
+
     // guacd reads its connect args directly from `connection` (the flattened
     // object), so replace it with the RDP settings pointing at the forward.
     settings.connection = {
-      hostname: process.env.FABRIC_GUACD_CALLBACK_HOST || hostname(),
+      hostname: callbackHost,
       port: String(forward.port),
       username: d.username,
       password: d.password,
@@ -147,4 +153,15 @@ export class FabricGuacService {
     };
     return Buffer.from(JSON.stringify(data), 'ascii').toString('base64');
   }
+}
+
+/** This container's first non-internal IPv4 address (its Docker-network IP), or null. */
+function selfIp(): string | null {
+  const ifaces = networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const ni of ifaces[name] ?? []) {
+      if (ni.family === 'IPv4' && !ni.internal) return ni.address;
+    }
+  }
+  return null;
 }

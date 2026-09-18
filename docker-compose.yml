@@ -33,11 +33,13 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       # Persistent home for signal-cli account state (--data-dir; see volume below).
       SIGNAL_CLI_DATA_DIR: /data/signal
-      # Fabric RDP: where the app reaches the guacd sidecar, and the hostname guacd
-      # uses to reach the app's ephemeral RDP forward (this service's name).
+      # Fabric RDP: where the app reaches the guacd sidecar. FABRIC_GUACD_CALLBACK_HOST
+      # is the address guacd dials to reach the app's ephemeral RDP forward — leave it
+      # unset and the app auto-detects its own Docker-network IP (no DNS needed); set it
+      # only to override with a specific hostname.
       GUACD_HOST: ${GUACD_HOST:-guacd}
       GUACD_PORT: ${GUACD_PORT:-4822}
-      FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-app}
+      FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-}
     volumes:
       - cerebro_signal:/data/signal
     # ICMP for the uptime monitor's Ping probe (system `ping` needs a raw socket).
