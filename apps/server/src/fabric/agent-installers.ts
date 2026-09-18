@@ -11,7 +11,8 @@
 
 export function installSh(): string {
   return `#!/bin/sh
-# Cerebro Fabric agent installer (Linux). See docs/fabric-remote-access.md.
+# Cerebro Fabric agent installer (Linux + macOS — auto-detected).
+# See docs/fabric-remote-access.md.
 set -eu
 
 : "\${CEREBRO_URL:?Set CEREBRO_URL, e.g. https://cerebro.example}"
@@ -29,11 +30,14 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
+OS="linux"
+[ "$(uname)" = "Darwin" ] && OS="darwin"
+
 BIN=/usr/local/bin/cerebro-agent
 CFG=/etc/cerebro-agent
 
-echo "Downloading cerebro-agent (linux/$GOARCH)..."
-curl -fsSL "\${CEREBRO_URL}/api/fabric/agent/binary?os=linux&arch=\${GOARCH}" -o "$BIN"
+echo "Downloading cerebro-agent ($OS/$GOARCH)..."
+curl -fsSL "\${CEREBRO_URL}/api/fabric/agent/binary?os=\${OS}&arch=\${GOARCH}" -o "$BIN"
 chmod 0755 "$BIN"
 
 mkdir -p "$CFG"
@@ -43,6 +47,31 @@ CEREBRO_URL=\${CEREBRO_URL}
 ENROLL=\${ENROLL}
 EOF
 chmod 0600 "$CFG/config.env"
+
+if [ "$OS" = "darwin" ]; then
+  PLIST=/Library/LaunchDaemons/com.cerebro.agent.plist
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.cerebro.agent</string>
+  <key>ProgramArguments</key><array><string>/usr/local/bin/cerebro-agent</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>CEREBRO_URL</key><string>\${CEREBRO_URL}</string>
+    <key>ENROLL</key><string>\${ENROLL}</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/var/log/cerebro-agent.log</string>
+  <key>StandardOutPath</key><string>/var/log/cerebro-agent.log</string>
+</dict></plist>
+EOF
+  chmod 0644 "$PLIST"
+  launchctl bootout system "$PLIST" 2>/dev/null || true
+  launchctl bootstrap system "$PLIST"
+  echo "cerebro-agent installed and started (launchd). It will appear in Cerebro shortly."
+  exit 0
+fi
 
 cat > /etc/systemd/system/cerebro-agent.service <<EOF
 [Unit]
@@ -72,8 +101,8 @@ echo "cerebro-agent installed and started. It will appear in Cerebro shortly."
 
 export function uninstallSh(): string {
   return `#!/bin/sh
-# Cerebro Fabric agent uninstaller (Linux). Removes the agent regardless of how
-# it was installed. Safe to run on a machine already deleted from Cerebro.
+# Cerebro Fabric agent uninstaller (Linux + macOS — auto-detected). Removes the
+# agent regardless of how it was installed. Safe on a machine already deleted.
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -81,10 +110,17 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-systemctl disable --now cerebro-agent 2>/dev/null || true
-rm -f /etc/systemd/system/cerebro-agent.service /usr/local/bin/cerebro-agent
-rm -rf /etc/cerebro-agent /var/lib/cerebro-agent
-systemctl daemon-reload 2>/dev/null || true
+if [ "$(uname)" = "Darwin" ]; then
+  PLIST=/Library/LaunchDaemons/com.cerebro.agent.plist
+  launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+  rm -f "$PLIST" /usr/local/bin/cerebro-agent
+  rm -rf /etc/cerebro-agent
+else
+  systemctl disable --now cerebro-agent 2>/dev/null || true
+  rm -f /etc/systemd/system/cerebro-agent.service /usr/local/bin/cerebro-agent
+  rm -rf /etc/cerebro-agent /var/lib/cerebro-agent
+  systemctl daemon-reload 2>/dev/null || true
+fi
 echo "cerebro-agent removed."
 `;
 }

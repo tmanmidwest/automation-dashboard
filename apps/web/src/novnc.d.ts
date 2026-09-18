@@ -14,6 +14,7 @@ declare module '@novnc/novnc' {
     blur(): void;
     disconnect(): void;
     sendCtrlAltDel(): void;
+    sendCredentials(credentials: { username?: string; password?: string; target?: string }): void;
     machineReboot(): void;
   }
 }

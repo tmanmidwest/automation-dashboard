@@ -44,6 +44,8 @@ RUN go mod download
 COPY agent/ ./
 RUN CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-linux-amd64 . \
  && CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-linux-arm64 . \
+ && CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-darwin-amd64 . \
+ && CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-darwin-arm64 . \
  && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /agent-dist/cerebro-agent-windows-amd64.exe .
 
 # 2c) Build the `cerebro` CLI binaries (Go). Served at /api/fabric/cli/binary

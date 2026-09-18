@@ -11,10 +11,19 @@ The mental model is **Cloudflare Tunnel + Teleport-lite, self-hosted**: reverse 
 broker, per-session RBAC, full audit — but living inside Cerebro's LCARS UI and reusing its
 existing relay, vault, crypto, RBAC, and timeline plumbing.
 
-> Status: **Phases 1–4 COMPLETE** (2026-09-18) — control plane + tunnel + in-browser SSH + vault creds
-> + in-browser RDP + full agent lifecycle (self-uninstall, Windows service, SSH host-key pinning,
-> self-update). Phase 1: control plane, enrollment, Go agent, `/fabric` screen. Only **Phase 5**
-> (native `cerebro access tcp` CLI, session recording, approval gate) remains. Not yet live-tested.
+> Status: **Phases 1–5 (native client) BUILT + RDP/SSH live** (2026-09-18) — control plane, tunnel,
+> in-browser SSH + RDP + **VNC (macOS Screen Sharing)**, vault creds, full agent lifecycle
+> (self-uninstall, Windows service, host-key pinning, self-update), the native `cerebro access` CLI,
+> and **agents for Linux, Windows, and macOS**. Remaining: session recording, approval gate.
+>
+> **macOS + VNC note:** the Go agent also targets **darwin** (amd64/arm64, built + served). The unix
+> `install.sh`/`uninstall.sh` self-detect macOS and use **launchd** (`/Library/LaunchDaemons/
+> com.cerebro.agent.plist`) instead of systemd; agent OS files are split
+> `agent_unix.go`(shared) + `agent_linux.go`(systemd) + `agent_darwin.go`(launchd) + `agent_windows.go`.
+> Target detection adds **VNC :5900**. In-browser VNC is **noVNC** ⟷ the session WS (a raw byte pipe,
+> `FabricSessionService.pipeRawSession`, no ssh2) ⟷ tunnel ⟷ `127.0.0.1:5900`; `POST …/vnc-session`
+> mints the ticket, noVNC handles the Screen-Sharing password client-side. (Enable "VNC viewers may
+> control screen with password" in macOS Screen Sharing for standard VNC auth.)
 >
 > **Phase-4b note:** deleting a machine in `/fabric` now sends an **`uninstall`** control frame to a
 > still-connected agent, which **self-uninstalls** (stops + removes its service and files, via a

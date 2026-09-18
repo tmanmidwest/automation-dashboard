@@ -13,7 +13,7 @@
 export type FabricAgentStatus = 'pending' | 'online' | 'offline' | 'revoked';
 
 /** A local endpoint on the box that the agent is willing to proxy to. */
-export type FabricTargetKind = 'ssh' | 'rdp';
+export type FabricTargetKind = 'ssh' | 'rdp' | 'vnc';
 
 export interface FabricTargetDto {
   id: string;
@@ -222,6 +222,12 @@ export interface FabricRdpConnectInput {
 
 /** RDP security modes guacd accepts. */
 export const FABRIC_RDP_SECURITY = ['any', 'nla', 'tls', 'rdp', 'vmconnect'] as const;
+
+/** Options for a VNC (macOS Screen Sharing) session. Password is optional — noVNC
+ * prompts if the server requires one. */
+export interface FabricVncConnectInput {
+  password?: string;
+}
 
 /** Result of a tunnel reachability probe (the Phase-2 end-to-end acceptance check). */
 export interface FabricProbeResult {

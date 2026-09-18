@@ -145,6 +145,28 @@ export class FabricService {
     });
   }
 
+  /**
+   * Mint a one-time ticket for an in-browser VNC session (macOS Screen Sharing
+   * or any VNC). noVNC speaks RFB straight through the tunnel to :5900; the VNC
+   * password (if any) is handled client-side by noVNC.
+   */
+  async openVncSession(agentId: string, targetId: string, user: SessionUser): Promise<FabricSessionTicket> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.kind !== 'vnc') throw new BadRequestException('This target is not a VNC endpoint.');
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+    const token = this.sessions.issue({
+      agentId,
+      targetId,
+      userId: user.id,
+      userEmail: user.email,
+      host: target.host,
+      port: target.port,
+      kind: 'vnc',
+    });
+    return { token, wsPath: SESSION_WS_PATH };
+  }
+
   /** Clear a target's pinned SSH host key (e.g. after the host was rebuilt). */
   async clearHostKey(agentId: string, targetId: string, user: SessionUser): Promise<void> {
     const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });

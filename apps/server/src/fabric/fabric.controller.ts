@@ -130,6 +130,8 @@ const AGENT_DIST_DIR = process.env.FABRIC_AGENT_DIST_DIR || '/app/agent-dist';
 const AGENT_ARTIFACTS: Record<string, { file: string; contentType: string; download: string }> = {
   'linux/amd64': { file: 'cerebro-agent-linux-amd64', contentType: 'application/octet-stream', download: 'cerebro-agent' },
   'linux/arm64': { file: 'cerebro-agent-linux-arm64', contentType: 'application/octet-stream', download: 'cerebro-agent' },
+  'darwin/amd64': { file: 'cerebro-agent-darwin-amd64', contentType: 'application/octet-stream', download: 'cerebro-agent' },
+  'darwin/arm64': { file: 'cerebro-agent-darwin-arm64', contentType: 'application/octet-stream', download: 'cerebro-agent' },
   'windows/amd64': { file: 'cerebro-agent-windows-amd64.exe', contentType: 'application/octet-stream', download: 'cerebro-agent.exe' },
 };
 
@@ -222,6 +224,18 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     return this.fabric.openRdpSession(id, targetId, body, user);
+  }
+
+  /** Mint a one-time ticket for an in-browser VNC session (macOS Screen Sharing). */
+  @Post('agents/:id/targets/:targetId/vnc-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openVncSession(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.fabric.openVncSession(id, targetId, user);
   }
 
   /** Forget a target's vault-stored credential (Phase 3.5). */

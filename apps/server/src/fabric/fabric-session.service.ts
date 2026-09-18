@@ -15,8 +15,8 @@ export interface FabricSessionDescriptor {
   userEmail?: string | null;
   host: string;
   port: number;
-  kind: string; // 'ssh' (Phase 3)
-  username: string;
+  kind: string; // 'ssh' | 'vnc'
+  username?: string; // ssh only
   password?: string;
   privateKey?: string;
   passphrase?: string;
@@ -67,6 +67,13 @@ export class FabricSessionService {
    */
   async handleSession(ws: WebSocket, desc: FabricSessionDescriptor): Promise<void> {
     ws.binaryType = 'nodebuffer';
+
+    // VNC (macOS Screen Sharing / any VNC) is a raw byte pipe — noVNC speaks RFB
+    // straight to the tunnel; no ssh2 in the middle.
+    if (desc.kind === 'vnc') {
+      await this.pipeRawSession(ws, desc);
+      return;
+    }
 
     let stream;
     try {
@@ -205,6 +212,77 @@ export class FabricSessionService {
       this.term(ws, `Connect failed: ${msg(e)}`);
       void cleanup();
     }
+  }
+
+  /**
+   * Raw byte pipe between the browser WS and a tunnel stream — used for VNC
+   * (noVNC ⟷ tunnel ⟷ 127.0.0.1:5900). Records the session like the others.
+   */
+  private async pipeRawSession(ws: WebSocket, desc: FabricSessionDescriptor): Promise<void> {
+    let stream;
+    try {
+      stream = await this.registry.openStream(desc.agentId, desc.host, desc.port);
+    } catch {
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
+      return;
+    }
+    const row = await this.prisma.fabricSession
+      .create({ data: { agentId: desc.agentId, targetKind: desc.kind, userId: desc.userId }, select: { id: true } })
+      .catch(() => null);
+    await this.audit.record({
+      actorId: desc.userId,
+      actorEmail: desc.userEmail,
+      action: 'fabric.session.start',
+      target: desc.agentId,
+      meta: { targetId: desc.targetId, kind: desc.kind, port: desc.port },
+    });
+
+    let up = 0;
+    let down = 0;
+    let cleaning = false;
+    const cleanup = async () => {
+      if (cleaning) return;
+      cleaning = true;
+      try {
+        stream.close();
+      } catch {
+        /* noop */
+      }
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
+      if (row?.id) {
+        await this.prisma.fabricSession
+          .update({ where: { id: row.id }, data: { endedAt: new Date(), bytesUp: BigInt(up), bytesDown: BigInt(down) } })
+          .catch(() => undefined);
+      }
+      await this.audit.record({
+        actorId: desc.userId,
+        actorEmail: desc.userEmail,
+        action: 'fabric.session.end',
+        target: desc.agentId,
+        meta: { targetId: desc.targetId, kind: desc.kind, bytesUp: up, bytesDown: down },
+      });
+    };
+
+    stream.onData = (b: Buffer) => {
+      down += b.length;
+      if (ws.readyState === ws.OPEN) ws.send(b);
+    };
+    stream.onClose = () => void cleanup();
+    ws.on('message', (data) => {
+      const buf = data as Buffer;
+      up += buf.length;
+      stream.write(buf);
+    });
+    ws.on('close', () => void cleanup());
+    ws.on('error', () => void cleanup());
   }
 
   /**

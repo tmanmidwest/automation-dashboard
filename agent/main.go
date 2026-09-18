@@ -413,6 +413,9 @@ func detectTargets() []target {
 	if portOpen(3389) {
 		add("rdp", 3389)
 	}
+	if portOpen(5900) {
+		add("vnc", 5900) // VNC / macOS Screen Sharing
+	}
 	if len(out) == 0 {
 		if runtime.GOOS == "windows" {
 			add("rdp", 3389)
@@ -430,6 +433,7 @@ func allowSet(ts []target) map[string]bool {
 	m := map[string]bool{
 		"127.0.0.1:22":   true,
 		"127.0.0.1:3389": true,
+		"127.0.0.1:5900": true,
 	}
 	for _, t := range ts {
 		m[fmt.Sprintf("%s:%d", t.Host, t.Port)] = true

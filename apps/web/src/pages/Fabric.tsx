@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
-  Server, CircleDot, TerminalSquare, X, KeyRound,
+  Server, CircleDot, TerminalSquare, X, KeyRound, Monitor,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import Guacamole from 'guacamole-common-js';
+import RFB from '@novnc/novnc';
 import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
   FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket,
@@ -108,6 +109,22 @@ export function Fabric() {
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
+  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
+
+  const openConnect = async (agent: FabricAgentDto, t: FabricTargetDto) => {
+    // VNC needs no credential dialog (noVNC prompts for the Screen Sharing
+    // password itself), so connect straight through.
+    if (t.kind === 'vnc') {
+      try {
+        const ticket = await api.post<FabricSessionTicket>(`/api/fabric/agents/${agent.id}/targets/${t.id}/vnc-session`);
+        setVncSession({ ticket, title: `${agent.name} · ${t.host}:${t.port}` });
+      } catch (e) {
+        setErr(e instanceof ApiError ? e.message : 'Failed to open VNC session.');
+      }
+      return;
+    }
+    setConnectFor({ agent, target: t });
+  };
 
   const runProbe = async (agentId: string, t: FabricTargetDto) => {
     setProbe((p) => ({ ...p, [t.id]: { loading: true } }));
@@ -293,6 +310,8 @@ export function Fabric() {
                                   <Loader2 className="h-3 w-3 animate-spin" />
                                 ) : t.kind === 'rdp' ? (
                                   <MonitorSmartphone className="h-3 w-3" />
+                                ) : t.kind === 'vnc' ? (
+                                  <Monitor className="h-3 w-3" />
                                 ) : (
                                   <Terminal className="h-3 w-3" />
                                 )}
@@ -302,10 +321,10 @@ export function Fabric() {
                                 <button
                                   type="button"
                                   disabled={!online}
-                                  onClick={online ? () => setConnectFor({ agent: a, target: t }) : undefined}
+                                  onClick={online ? () => openConnect(a, t) : undefined}
                                   title={
                                     online
-                                      ? `${t.kind === 'rdp' ? 'Open RDP session' : 'Open SSH session'}${t.hasCredential ? ' (vault credential saved)' : ''}`
+                                      ? `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}`
                                       : 'Agent offline'
                                   }
                                   className={`inline-flex items-center gap-1 px-1.5 py-0.5 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
@@ -403,6 +422,7 @@ export function Fabric() {
           onClose={() => setRdpSession(null)}
         />
       )}
+      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} onClose={() => setVncSession(null)} />}
     </div>
   );
 }
@@ -461,6 +481,7 @@ function AddMachineDialog({
           <Label htmlFor="fab-os">Operating system</Label>
           <select id="fab-os" className={selectCls} value={os} onChange={(e) => setOs(e.target.value)}>
             <option value="linux">Linux</option>
+            <option value="macos">macOS</option>
             <option value="windows">Windows</option>
           </select>
         </div>
@@ -491,7 +512,7 @@ function EnrollmentDialog({
     >
       <div className="space-y-4">
         <div>
-          <Label>Install command ({enrollment.agent.os === 'windows' ? 'Windows PowerShell (admin)' : 'Linux (root)'})</Label>
+          <Label>Install command ({enrollment.agent.os === 'windows' ? 'Windows PowerShell (admin)' : 'Linux / macOS (sudo)'})</Label>
           <div className="mt-1 flex items-start gap-2 rounded-md border border-input bg-background/60 p-2">
             <code className="flex-1 text-xs break-all font-mono">{cmd}</code>
             <CopyBtn text={cmd} />
@@ -1223,6 +1244,98 @@ function RdpViewer({
         </div>
       )}
       <div ref={hostRef} className="flex-1 relative overflow-auto outline-none grid place-items-center" />
+    </div>
+  );
+}
+
+function VncViewer({
+  session,
+  title,
+  onClose,
+}: {
+  session: FabricSessionTicket;
+  title: string;
+  onClose: () => void;
+}) {
+  const screenRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!screenRef.current) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}${session.wsPath}?token=${encodeURIComponent(session.token)}`;
+    let rfb: RFB | null = null;
+    try {
+      rfb = new RFB(screenRef.current, url);
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+      rfb.addEventListener('connect', () => setStatus('connected'));
+      rfb.addEventListener('disconnect', (e) => {
+        setStatus('disconnected');
+        const d = (e as CustomEvent).detail;
+        if (d && !d.clean) setError('The screen-sharing connection was closed.');
+      });
+      rfb.addEventListener('credentialsrequired', () => {
+        const password = window.prompt('Screen Sharing password:') || '';
+        rfb?.sendCredentials({ password });
+      });
+      rfb.addEventListener('securityfailure', (e) => {
+        const d = (e as CustomEvent).detail;
+        setError(`Authentication failed${d?.reason ? `: ${d.reason}` : ''}.`);
+      });
+    } catch {
+      setError('Failed to start the screen-sharing session.');
+    }
+    return () => {
+      try {
+        rfb?.disconnect();
+      } catch {
+        /* ignore */
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.token]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
+        <span className="text-sm inline-flex items-center gap-2">
+          <Monitor className="h-4 w-4 text-primary" />
+          <span className="text-muted-foreground">VNC ·</span> {title}
+        </span>
+        <div className="flex items-center gap-3 text-sm">
+          <span
+            className={`inline-flex items-center gap-1.5 ${
+              status === 'connected'
+                ? 'text-emerald-400'
+                : status === 'connecting'
+                  ? 'text-amber-400'
+                  : 'text-muted-foreground'
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                status === 'connected'
+                  ? 'bg-emerald-400'
+                  : status === 'connecting'
+                    ? 'bg-amber-400 animate-pulse'
+                    : 'bg-muted-foreground'
+              }`}
+            />
+            {status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
+          </span>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            <X className="h-4 w-4 mr-1" /> Close
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="m-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">
+          {error}
+        </div>
+      )}
+      <div ref={screenRef} className="flex-1 relative overflow-auto grid place-items-center" />
     </div>
   );
 }
