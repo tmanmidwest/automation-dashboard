@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
 import { AgentRegistryService } from './agent-registry.service';
-import { openTunnelForward } from './tunnel-forward';
+import { openTunnelForward, type TunnelForward } from './tunnel-forward';
 
 const GUAC_WS_PATH = '/api/fabric/guac/ws';
 const GUAC_CIPHER = 'AES-256-CBC';
@@ -35,7 +35,10 @@ export interface RdpDescriptor {
 @Injectable()
 export class FabricGuacService {
   private readonly logger = new Logger(FabricGuacService.name);
-  private readonly tickets = new Map<string, { desc: RdpDescriptor; expiresAt: number }>();
+  private readonly tickets = new Map<
+    string,
+    { desc: RdpDescriptor; forward: TunnelForward; callbackHost: string; expiresAt: number }
+  >();
   /** 32-byte key shared with the guacamole-lite server (clientOptions.crypt.key). */
   readonly cryptKey = createHash('sha256')
     .update(process.env.APP_ENCRYPTION_KEY ?? '')
@@ -49,26 +52,74 @@ export class FabricGuacService {
     private readonly logging: LoggingService,
   ) {}
 
-  /** Mint an encrypted RDP token the browser opens the guac WS with. */
-  issue(desc: RdpDescriptor, ttlMs = 30_000): FabricSessionTicket {
+  /**
+   * Mint an encrypted RDP token the browser opens the guac WS with. All async
+   * work (open the tunnel forward, resolve guacd's callback address, record the
+   * session) happens HERE — because guacamole-lite calls the guacd connection
+   * SYNCHRONOUSLY and does not await our processConnectionSettings hook, so
+   * resolveConnection must be able to return the real settings synchronously.
+   */
+  async issue(desc: RdpDescriptor, ttlMs = 30_000): Promise<FabricSessionTicket> {
     const id = randomUUID();
-    this.tickets.set(id, { desc, expiresAt: Date.now() + ttlMs });
     this.prune();
+
+    const row = await this.prisma.fabricSession
+      .create({ data: { agentId: desc.agentId, targetKind: 'rdp', userId: desc.userId }, select: { id: true } })
+      .catch(() => null);
+    await this.audit.record({
+      actorId: desc.userId,
+      actorEmail: desc.userEmail,
+      action: 'fabric.session.start',
+      target: desc.agentId,
+      meta: { targetId: desc.targetId, kind: 'rdp', port: desc.port, username: desc.username },
+    });
+
+    const forward = await openTunnelForward(this.registry, {
+      agentId: desc.agentId,
+      host: desc.host,
+      port: desc.port,
+      bindHost: '0.0.0.0',
+      // A little slack so guacd has time to dial after the browser opens the WS.
+      idleTimeoutMs: 45_000,
+      logger: this.logger,
+      onClosed: () => {
+        if (row?.id) {
+          void this.prisma.fabricSession
+            .update({ where: { id: row.id }, data: { endedAt: new Date() } })
+            .catch(() => undefined);
+        }
+        void this.audit.record({
+          actorId: desc.userId,
+          actorEmail: desc.userEmail,
+          action: 'fabric.session.end',
+          target: desc.agentId,
+          meta: { targetId: desc.targetId, kind: 'rdp' },
+        });
+      },
+    });
+
+    // The address guacd dials to reach our forward: explicit override, else this
+    // container's IP on guacd's subnet, else first non-internal IP, else hostname.
+    const callbackHost =
+      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
+    this.logging.info(
+      'fabric',
+      `RDP forward on ${callbackHost}:${forward.port} -> ${desc.host}:${desc.port} (agent ${desc.agentId})`,
+    );
+
+    this.tickets.set(id, { desc, forward, callbackHost, expiresAt: Date.now() + ttlMs });
     const token = this.encryptToken({ connection: { type: 'rdp', settings: { _ticket: id } } });
     return { token, wsPath: GUAC_WS_PATH };
   }
 
   /**
-   * guacamole-lite hook: redeem the ticket, open a forward through the tunnel,
-   * and return the real guacd RDP settings pointing at it. Mutates and returns
-   * the passed settings object (its `.connection.settings` becomes guacd's args).
+   * guacamole-lite hook (SYNCHRONOUS — see issue()): redeem the ticket and fill
+   * in guacd's RDP connect args pointing at the already-open forward. guacd reads
+   * these directly from `connection` (the flattened settings object).
    */
-  async resolveConnection(settings: {
-    connection: Record<string, unknown>;
-  }): Promise<typeof settings> {
-    // guacamole-lite flattens the token's `connection.settings` onto `connection`
-    // before this callback, so the ticket arrives at `connection._ticket` (older
-    // versions used `connection.settings._ticket` — accept both).
+  resolveConnection(settings: { connection: Record<string, unknown> }): typeof settings {
+    // guacamole-lite flattens the token's `connection.settings` onto `connection`,
+    // so the ticket arrives at `connection._ticket` (accept the legacy path too).
     const conn = (settings.connection ?? {}) as Record<string, unknown> & {
       settings?: Record<string, unknown>;
     };
@@ -78,57 +129,10 @@ export class FabricGuacService {
     if (!entry || entry.expiresAt < Date.now()) throw new Error('Invalid or expired RDP ticket.');
     const d = entry.desc;
 
-    const row = await this.prisma.fabricSession
-      .create({ data: { agentId: d.agentId, targetKind: 'rdp', userId: d.userId }, select: { id: true } })
-      .catch(() => null);
-    await this.audit.record({
-      actorId: d.userId,
-      actorEmail: d.userEmail,
-      action: 'fabric.session.start',
-      target: d.agentId,
-      meta: { targetId: d.targetId, kind: 'rdp', port: d.port, username: d.username },
-    });
-
-    const forward = await openTunnelForward(this.registry, {
-      agentId: d.agentId,
-      host: d.host,
-      port: d.port,
-      bindHost: '0.0.0.0',
-      logger: this.logger,
-      onClosed: () => {
-        if (row?.id) {
-          void this.prisma.fabricSession
-            .update({ where: { id: row.id }, data: { endedAt: new Date() } })
-            .catch(() => undefined);
-        }
-        void this.audit.record({
-          actorId: d.userId,
-          actorEmail: d.userEmail,
-          action: 'fabric.session.end',
-          target: d.agentId,
-          meta: { targetId: d.targetId, kind: 'rdp' },
-        });
-      },
-    });
-
-    // The address guacd will dial to reach our forward. An explicit env override
-    // wins; otherwise use this container's IP ON THE SAME SUBNET AS guacd (the app
-    // may be on several Docker networks — e.g. a reverse-proxy network — and only
-    // one is shared with guacd); fall back to the first non-internal IP, then
-    // hostname. No DNS resolution is required of guacd this way.
-    const callbackHost =
-      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
-    // Route through the DB logger so it lands in the Ship's Log (readable remotely).
-    this.logging.info(
-      'fabric',
-      `RDP forward on ${callbackHost}:${forward.port} -> ${d.host}:${d.port} (agent ${d.agentId})`,
-    );
-
-    // guacd reads its connect args directly from `connection` (the flattened
-    // object), so replace it with the RDP settings pointing at the forward.
     settings.connection = {
-      hostname: callbackHost,
-      port: String(forward.port),
+      ...conn,
+      hostname: entry.callbackHost,
+      port: String(entry.forward.port),
       username: d.username,
       password: d.password,
       domain: d.domain || '',
@@ -139,6 +143,7 @@ export class FabricGuacService {
       height: '768',
       dpi: '96',
     };
+    delete (settings.connection as Record<string, unknown>)._ticket;
     return settings;
   }
 

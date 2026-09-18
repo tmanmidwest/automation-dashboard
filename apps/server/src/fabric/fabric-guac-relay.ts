@@ -29,14 +29,17 @@ export function attachFabricGuacRelay(server: Server, guac: FabricGuacService): 
     log: { level: process.env.GUAC_LOG_LEVEL || 'NORMAL' },
   };
   const callbacks = {
+    // Must resolve SYNCHRONOUSLY — guacamole-lite dials guacd immediately after
+    // this returns and does not await it (all async work is done at issue time).
     processConnectionSettings: (
       settings: { connection: Record<string, unknown> },
       cb: (err: unknown, settings?: unknown) => void,
     ) => {
-      guac
-        .resolveConnection(settings)
-        .then((s) => cb(null, s))
-        .catch((e) => cb(e));
+      try {
+        cb(null, guac.resolveConnection(settings));
+      } catch (e) {
+        cb(e);
+      }
     },
   };
 
