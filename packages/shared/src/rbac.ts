@@ -33,6 +33,10 @@ export type Permission =
   | 'monitors:write' // add / edit / pause / delete monitors
   // Notifications (send an ad-hoc alert through the configured channels)
   | 'notifications:send'
+  // Fabric — agent-brokered remote access (session-only; brokers interactive RDP/SSH)
+  | 'fabric:read' // list agents / sessions
+  | 'fabric:connect' // open an RDP/SSH session to an agent
+  | 'fabric:manage' // enroll / revoke agents, edit targets
   // The Computer — in-app LLM assistant (session-only; runs tools as the user)
   | 'assistant:use';
 
@@ -50,6 +54,7 @@ export const BUILTIN_ROLES = {
       'connectors:read',
       'monitors:read',
       'replicator:read',
+      'fabric:read',
       'assistant:use',
     ] as Permission[],
   },
@@ -76,6 +81,9 @@ export const BUILTIN_ROLES = {
       'automations:write',
       'replicator:read',
       'replicator:write',
+      'fabric:read',
+      'fabric:connect',
+      'fabric:manage',
       'assistant:use',
     ] as Permission[],
   },

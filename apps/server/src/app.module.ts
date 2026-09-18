@@ -28,6 +28,7 @@ import { DockerFleetModule } from './docker-fleet/docker-fleet.module';
 import { SystemBackupModule } from './system-backup/system-backup.module';
 import { SearchModule } from './search/search.module';
 import { AppReplicatorModule } from './app-replicator/app-replicator.module';
+import { FabricModule } from './fabric/fabric.module';
 import { ToolsModule } from './tools/tools.module';
 import { AssistantModule } from './assistant/assistant.module';
 
@@ -67,6 +68,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     SystemBackupModule,
     SearchModule,
     AppReplicatorModule,
+    FabricModule,
     ToolsModule,
     AssistantModule,
   ],

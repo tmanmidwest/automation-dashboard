@@ -27,33 +27,33 @@ model Role {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  displayName  String
+  id                 String                   @id @default(cuid())
+  email              String                   @unique
+  displayName        String
   /// Null for users that only authenticate via an external provider.
-  passwordHash String?
+  passwordHash       String?
   /// How the account was created: 'local' or 'oidc' (informational).
-  authProvider String    @default("local")
+  authProvider       String                   @default("local")
   /// AES-256-GCM ciphertext (CryptoService) of the TOTP shared secret. Null = no TOTP set up.
-  totpSecret    String?
+  totpSecret         String?
   /// Set when TOTP enrollment is confirmed; null while pending or disabled. Enforcement key.
-  totpEnabledAt DateTime?
+  totpEnabledAt      DateTime?
   /// Single-use TOTP recovery codes (bcrypt-hashed).
-  recoveryCodes UserRecoveryCode[]
-  disabled     Boolean   @default(false)
-  role         Role      @relation(fields: [roleId], references: [id])
-  roleId       String
+  recoveryCodes      UserRecoveryCode[]
+  disabled           Boolean                  @default(false)
+  role               Role                     @relation(fields: [roleId], references: [id])
+  roleId             String
   /// Linked external identities (Google, Entra, Authentik, ...). A user may have several.
-  identities   UserIdentity[]
+  identities         UserIdentity[]
   /// Programmatic API tokens minted by this user (bearer auth for API/MCP clients).
-  apiTokens    ApiToken[]
+  apiTokens          ApiToken[]
   /// OAuth artifacts owned by this user (auth codes, remembered consents, refresh tokens).
   oauthCodes         OAuthAuthorizationCode[]
   oauthGrants        OAuthGrant[]
   oauthRefreshTokens OAuthRefreshToken[]
-  lastLoginAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  lastLoginAt        DateTime?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
 
   @@index([roleId])
 }
@@ -74,28 +74,28 @@ model UserRecoveryCode {
 /// A configured single-sign-on provider. Multiple can exist, each independently
 /// labeled and enabled. Client secrets live in the encrypted vault (key idp:<id>:clientSecret).
 model IdentityProvider {
-  id              String   @id @default(cuid())
+  id              String         @id @default(cuid())
   /// Stable short id used in callback URLs (/api/auth/sso/<slug>/callback).
-  slug            String   @unique
+  slug            String         @unique
   label           String
   /// Protocol. Only 'oidc' for now (discovery-based).
-  type            String   @default("oidc")
+  type            String         @default("oidc")
   issuer          String
   clientId        String
-  buttonLabel     String   @default("Sign in with SSO")
+  buttonLabel     String         @default("Sign in with SSO")
   /// UI icon key: google | microsoft | authentik | generic.
-  icon            String   @default("generic")
-  scopes          String   @default("openid email profile")
-  enabled         Boolean  @default(false)
+  icon            String         @default("generic")
+  scopes          String         @default("openid email profile")
+  enabled         Boolean        @default(false)
   /// Provisioning policy (per-provider, per the design decision).
-  autoCreateUsers Boolean  @default(false)
-  defaultRoleSlug String   @default("viewer")
+  autoCreateUsers Boolean        @default(false)
+  defaultRoleSlug String         @default("viewer")
   /// If non-empty, only emails in these domains may sign in / be provisioned.
   allowedDomains  String[]
-  sortOrder       Int      @default(0)
+  sortOrder       Int            @default(0)
   identities      UserIdentity[]
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
 
 /// Links a Cerebro user to a subject at a specific provider. Unique per (provider, subject).
@@ -231,10 +231,10 @@ model Setting {
 
 /// The encrypted secrets vault. Ciphertext only — plaintext never touches the DB.
 model Secret {
-  key       String   @id
+  key        String   @id
   /// AES-256-GCM: iv:authTag:ciphertext (base64), see CryptoService.
   ciphertext String
-  updatedAt DateTime @updatedAt
+  updatedAt  DateTime @updatedAt
 }
 
 /// Management metadata for a vault entry. 1:1 with Secret by key. Never holds
@@ -268,13 +268,13 @@ model SecretMeta {
 /// A compose stack Cerebro manages on a Docker host (Phase 5). Cerebro is the
 /// versioned store for the compose file; deploys run via SSH `docker compose`.
 model DockerStack {
-  id                  String   @id @default(cuid())
+  id                  String    @id @default(cuid())
   /// The Docker ConnectorInstance this stack belongs to.
   connectorInstanceId String
   /// Compose project name (lowercased, unique per connector).
   name                String
   /// Where the compose comes from: 'compose' (stored YAML) | 'git' (a repo).
-  source              String   @default("compose")
+  source              String    @default("compose")
   /// The compose YAML (source of truth for source='compose'; empty for git).
   compose             String
   /// Optional `.env` file contents (KEY=value lines), written beside the compose.
@@ -286,11 +286,11 @@ model DockerStack {
   /// Vault secret key (kind='git') used to authenticate a private repo; null = public.
   gitCredKey          String?
   /// Outcome of the last deploy: never | success | error.
-  lastStatus          String   @default("never")
+  lastStatus          String    @default("never")
   lastMessage         String?
   lastDeployedAt      DateTime?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@unique([connectorInstanceId, name])
   @@index([connectorInstanceId])
@@ -322,19 +322,19 @@ model DockerStackRevision {
 /// repo's compose file (Compose's own `${VAR:-default}` interpolation is the
 /// manifest). See docs/app-replicator.md.
 model ReplicatorApp {
-  id                   String   @id @default(cuid())
+  id                   String                 @id @default(cuid())
   name                 String
   gitUrl               String
-  gitRef               String   @default("main")
+  gitRef               String                 @default("main")
   gitPath              String?
   /// Vault secret key (kind='git') to authenticate a private repo; null = public.
   gitCredKey           String?
   /// Detected + reviewed variable schema (ReplicatorVariable[]) as JSON.
-  variables            Json     @default("[]")
+  variables            Json                   @default("[]")
   /// True when the repo had only a Dockerfile and Cerebro generated a compose wrapper.
-  usesGeneratedCompose Boolean  @default(false)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  usesGeneratedCompose Boolean                @default(false)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
   deployments          ReplicatorDeployment[]
 }
 
@@ -344,12 +344,12 @@ model ReplicatorApp {
 /// this row holds the higher-level record — which app, resolved values, the vault
 /// secret names, and the published ports.
 model ReplicatorDeployment {
-  id               String        @id @default(cuid())
+  id               String              @id @default(cuid())
   appId            String
-  app              ReplicatorApp @relation(fields: [appId], references: [id], onDelete: Cascade)
+  app              ReplicatorApp       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// Which backend this deployment runs on: 'docker' (compose over SSH) or 'ecs'
   /// (AWS Fargate). See docs/app-replicator-ecs-target.md.
-  targetKind       String        @default("docker")
+  targetKind       String              @default("docker")
   /// The target ConnectorInstance. Named for Docker (the original target); for an
   /// 'ecs' deployment this is the AWS connector instance.
   dockerInstanceId String
@@ -358,25 +358,25 @@ model ReplicatorDeployment {
   /// Sanitized compose project name (matches the managed DockerStack.name).
   project          String
   /// Non-secret resolved variable values as JSON ({ VAR: value }).
-  values           Json          @default("{}")
+  values           Json                @default("{}")
   /// Names of variables whose values live in the vault (deployment:<id>:<name>).
-  secretVars       String[]      @default([])
+  secretVars       String[]            @default([])
   /// Published ports (ReplicatorPort[]) as JSON.
-  ports            Json          @default("[]")
-  status           String        @default("pending")
+  ports            Json                @default("[]")
+  status           String              @default("pending")
   /// Live sub-step while a deploy/redeploy runs in the background (e.g. "Building
   /// images…"); null when settled. Drives the progress shown on the row.
   phase            String?
   lastMessage      String?
   deployedCommit   String?
   /// Phase 3: set by the update-check sweep when the repo's ref has moved ahead.
-  updateAvailable  Boolean       @default(false)
+  updateAvailable  Boolean             @default(false)
   /// The remote tip commit that's available but not yet deployed (Phase 3).
   availableCommit  String?
   /// ECS teardown handles (EcsDeploymentRefs) as JSON; null for a Docker deployment.
   ecs              Json?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
   ingress          ReplicatorIngress[]
 
   @@index([appId])
@@ -411,20 +411,20 @@ model ReplicatorIngress {
 
 /// An installed connector instance (e.g. a specific Proxmox server).
 model ConnectorInstance {
-  id           String   @id @default(cuid())
+  id                 String   @id @default(cuid())
   /// Manifest id, e.g. "proxmox".
-  connectorId  String
+  connectorId        String
   /// User-facing label, e.g. "Home Proxmox".
-  name         String
-  enabled      Boolean  @default(true)
+  name               String
+  enabled            Boolean  @default(true)
   /// Non-secret config values as JSON. Secret fields are stored in Secret as `connector:<id>:<field>`.
-  config       Json     @default("{}")
+  config             Json     @default("{}")
   /// How often (seconds) background telemetry re-queries this connector's external system.
-  refreshIntervalSec Int  @default(30)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  refreshIntervalSec Int      @default(30)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  telemetry    ConnectorTelemetrySnapshot?
+  telemetry ConnectorTelemetrySnapshot?
 
   @@index([connectorId])
 }
@@ -476,7 +476,7 @@ model BackupRun {
 
 model AppLog {
   id        String   @id @default(cuid())
-  level     String   // debug | info | warn | error
+  level     String // debug | info | warn | error
   context   String
   message   String
   meta      Json?
@@ -506,10 +506,10 @@ model NotificationLog {
   /// Alert type key (e.g. 'backup.failure'); null for manual test sends.
   alertKey    String?
   title       String
-  severity    String   // info | warning | critical
+  severity    String // info | warning | critical
   source      String?
-  channel     String   // email | textbelt | signal
-  status      String   // sent | failed | held | throttled
+  channel     String // email | textbelt | signal
+  status      String // sent | failed | held | throttled
   recipients  Int      @default(0)
   connectorId String?
   /// Error text or extra context.
@@ -583,17 +583,17 @@ model Monitor {
   sortOrder        Int      @default(0)
 
   // Last-known state (mirrors the newest heartbeat).
-  status         String    @default("pending") // up | down | pending | paused
-  lastChangeAt   DateTime?
-  lastCheckAt    DateTime?
-  lastLatencyMs  Int?
-  lastMessage    String?
-  certExpiresAt  DateTime?
+  status        String    @default("pending") // up | down | pending | paused
+  lastChangeAt  DateTime?
+  lastCheckAt   DateTime?
+  lastLatencyMs Int?
+  lastMessage   String?
+  certExpiresAt DateTime?
 
   heartbeats MonitorHeartbeat[]
   rollups    MonitorRollup[]
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
 }
 
 /// Raw check results. Pruned after the raw retention window (default 7 days).
@@ -601,7 +601,7 @@ model MonitorHeartbeat {
   id        Int      @id @default(autoincrement())
   monitor   Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
   monitorId String
-  status    String   // up | down | pending
+  status    String // up | down | pending
   latencyMs Int?
   message   String?
   /// Status changed with this beat — shown in the events list.
@@ -629,4 +629,75 @@ model MonitorRollup {
 
   @@unique([monitorId, bucket])
   @@index([bucket])
+}
+
+// ---------------------------------------------------------------------------
+// Fabric — agent-brokered remote access (RDP / SSH). See docs/fabric-remote-access.md.
+// Phase 1: control plane only (enroll + persistent agent connection + liveness).
+// ---------------------------------------------------------------------------
+
+/// One installed Cerebro Agent on one machine. Dials out to Cerebro (no inbound
+/// firewall rule needed) and holds a persistent connection. Authenticated by a
+/// per-agent bearer credential (sha256-stored, like an API token); mTLS is a
+/// Phase-5 hardening follow-up.
+model Agent {
+  id           String   @id @default(cuid())
+  name         String
+  hostname     String?
+  os           String? // "linux" | "windows"
+  osVersion    String?
+  agentVersion String?
+  /// Free-form tags for grouping / per-tag grants later.
+  tags         String[]
+  /// pending | online | offline | revoked
+  status       String   @default("pending")
+
+  /// One-time enrollment: sha256 of the enrollment token, cleared once exchanged.
+  enrollHash    String?   @unique
+  enrollExpires DateTime?
+  /// Long-lived agent credential: public lookup prefix + sha256(secret). Set at
+  /// enrollment; the plaintext is returned to the installer exactly once.
+  credPrefix    String?   @unique
+  credHash      String?
+
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  targets  AgentTarget[]
+  sessions FabricSession[]
+}
+
+/// A local endpoint on the box the agent will proxy to (Phase 2+). Discovered by
+/// the agent on connect and/or curated by an operator.
+model AgentTarget {
+  id        String  @id @default(cuid())
+  agent     Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId   String
+  kind      String // "ssh" | "rdp"
+  host      String  @default("127.0.0.1")
+  port      Int
+  label     String?
+  /// Vault key for credentials injected server-side at session time (Phase 3+).
+  secretRef String?
+
+  @@unique([agentId, kind, host, port])
+  @@index([agentId])
+}
+
+/// One brokered RDP/SSH session (audit). Populated from Phase 3 on; the table
+/// exists in Phase 1 so history is append-only from day one.
+model FabricSession {
+  id         String    @id @default(cuid())
+  agent      Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId    String
+  targetKind String // "ssh" | "rdp"
+  userId     String
+  startedAt  DateTime  @default(now())
+  endedAt    DateTime?
+  bytesUp    BigInt    @default(0)
+  bytesDown  BigInt    @default(0)
+  recordPath String?
+
+  @@index([agentId, startedAt])
 }

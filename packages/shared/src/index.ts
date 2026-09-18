@@ -9,3 +9,4 @@ export * from './automations';
 export * from './docker-fleet';
 export * from './replicator';
 export * from './assistant';
+export * from './fabric';

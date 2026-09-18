@@ -9,6 +9,10 @@ import { Redis } from 'ioredis';
 import { AppModule } from './app.module';
 import { ConsoleService } from './connectors/console.service';
 import { attachConsoleRelay } from './connectors/console-relay';
+import { AgentRegistryService } from './fabric/agent-registry.service';
+import { attachFabricAgentRelay } from './fabric/fabric-agent-relay';
+import { FabricSessionService } from './fabric/fabric-session.service';
+import { attachFabricSessionRelay } from './fabric/fabric-session-relay';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -44,6 +48,12 @@ async function bootstrap() {
 
   // Raw WebSocket relay for interactive consoles (noVNC, etc.).
   attachConsoleRelay(app.getHttpServer(), app.get(ConsoleService));
+
+  // Fabric agent control-plane relay (agents dial out and hold this open).
+  attachFabricAgentRelay(app.getHttpServer(), app.get(AgentRegistryService));
+
+  // Fabric browser session relay (in-browser SSH over the tunnel).
+  attachFabricSessionRelay(app.getHttpServer(), app.get(FabricSessionService));
 
   const port = parseInt(process.env.PORT ?? '3000', 10);
   await app.listen(port, '0.0.0.0');

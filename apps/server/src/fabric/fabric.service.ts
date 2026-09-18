@@ -1,0 +1,261 @@
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Agent, AgentTarget } from '@prisma/client';
+import type {
+  FabricAgentDto,
+  FabricEnrollmentDto,
+  FabricProbeResult,
+  FabricSessionDto,
+  FabricSessionTicket,
+  FabricSshConnectInput,
+  FabricTargetDto,
+  SessionUser,
+} from '@cerebro/shared';
+import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../logging/audit.service';
+import { AgentRegistryService } from './agent-registry.service';
+import { FabricSessionService } from './fabric-session.service';
+import { generateEnrollToken } from './fabric-credentials';
+import { baseUrl } from './fabric-enrollment.service';
+
+const SESSION_WS_PATH = '/api/fabric/session/ws';
+
+const ENROLL_TTL_MS = 60 * 60 * 1000; // 1h to run the installer
+
+/** Management surface for the /fabric screen (session-gated). */
+@Injectable()
+export class FabricService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+    private readonly registry: AgentRegistryService,
+    private readonly sessions: FabricSessionService,
+  ) {}
+
+  /**
+   * Mint a one-time ticket for an interactive SSH session to a target. The
+   * browser opens the session WebSocket with the returned token; credentials are
+   * held server-side and never travel in the URL. Phase 3 = SSH only.
+   */
+  async openSshSession(
+    agentId: string,
+    targetId: string,
+    creds: FabricSshConnectInput,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.kind !== 'ssh') throw new BadRequestException('Only SSH sessions are supported yet (Phase 3).');
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+    if (!creds.username?.trim()) throw new BadRequestException('A username is required.');
+    if (!creds.password && !creds.privateKey) throw new BadRequestException('Provide a password or a private key.');
+
+    const token = this.sessions.issue({
+      agentId,
+      targetId,
+      userId: user.id,
+      userEmail: user.email,
+      host: target.host,
+      port: target.port,
+      kind: target.kind,
+      username: creds.username.trim(),
+      password: creds.password,
+      privateKey: creds.privateKey,
+      passphrase: creds.passphrase,
+    });
+    return { token, wsPath: SESSION_WS_PATH };
+  }
+
+  /** All agents with their targets, statuses reconciled against live connections. */
+  async listAgents(): Promise<FabricAgentDto[]> {
+    const agents = await this.prisma.agent.findMany({
+      include: { targets: { orderBy: [{ kind: 'asc' }, { port: 'asc' }] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return agents.map((a) => this.toAgentDto(a, a.targets));
+  }
+
+  /**
+   * Register a new machine: create a pending agent and mint a one-time
+   * enrollment token. Returns the token (shown once) plus copy-paste installers.
+   */
+  async createAgent(
+    input: { name: string; os?: string | null; tags?: string[] },
+    user: SessionUser,
+  ): Promise<FabricEnrollmentDto> {
+    const enroll = generateEnrollToken();
+    const expires = new Date(Date.now() + ENROLL_TTL_MS);
+    const agent = await this.prisma.agent.create({
+      data: {
+        name: input.name.trim() || 'Unnamed machine',
+        os: input.os ?? null,
+        tags: input.tags ?? [],
+        status: 'pending',
+        enrollHash: enroll.hash,
+        enrollExpires: expires,
+      },
+      include: { targets: true },
+    });
+
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.created',
+      target: agent.id,
+      meta: { name: agent.name, os: agent.os },
+    });
+
+    const url = baseUrl();
+    return {
+      agent: this.toAgentDto(agent, agent.targets),
+      enrollToken: enroll.plaintext,
+      enrollExpiresAt: expires.toISOString(),
+      url,
+      installLinux: `curl -fsSL ${url}/api/fabric/install.sh | sudo CEREBRO_URL=${url} ENROLL=${enroll.plaintext} sh`,
+      installWindows: `$env:CEREBRO_URL='${url}'; $env:ENROLL='${enroll.plaintext}'; iwr ${url}/api/fabric/install.ps1 -UseBasicParsing | iex`,
+    };
+  }
+
+  /** Revoke an agent: kill its credential and drop any live connection. */
+  async revokeAgent(id: string, user: SessionUser): Promise<FabricAgentDto> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    this.registry.disconnect(id);
+    const updated = await this.prisma.agent.update({
+      where: { id },
+      data: { status: 'revoked', credPrefix: null, credHash: null, enrollHash: null, enrollExpires: null },
+      include: { targets: true },
+    });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.revoked',
+      target: id,
+      meta: { name: agent.name },
+    });
+    return this.toAgentDto(updated, updated.targets);
+  }
+
+  /** Delete an agent and its history. */
+  async deleteAgent(id: string, user: SessionUser): Promise<void> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    this.registry.disconnect(id);
+    await this.prisma.agent.delete({ where: { id } });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.deleted',
+      target: id,
+      meta: { name: agent.name },
+    });
+  }
+
+  async listSessions(agentId?: string): Promise<FabricSessionDto[]> {
+    const rows = await this.prisma.fabricSession.findMany({
+      where: agentId ? { agentId } : undefined,
+      include: { agent: { select: { name: true } } },
+      orderBy: { startedAt: 'desc' },
+      take: 200,
+    });
+    return rows.map((s) => ({
+      id: s.id,
+      agentId: s.agentId,
+      agentName: s.agent?.name,
+      targetKind: s.targetKind as FabricSessionDto['targetKind'],
+      userId: s.userId,
+      startedAt: s.startedAt.toISOString(),
+      endedAt: s.endedAt?.toISOString() ?? null,
+      bytesUp: Number(s.bytesUp),
+      bytesDown: Number(s.bytesDown),
+    }));
+  }
+
+  /**
+   * Prove the tunnel end-to-end: open a stream to the target through the agent,
+   * measure the connect, and capture the first line the target speaks (an SSH
+   * banner, say). Exercises the whole data path — broker → agent → 127.0.0.1 →
+   * back — without needing a browser terminal. This is the Phase-2 check.
+   */
+  async probeTarget(agentId: string, targetId: string, user: SessionUser): Promise<FabricProbeResult> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (!this.registry.isOnline(agentId)) return { ok: false, error: 'Agent is offline.' };
+
+    const start = Date.now();
+    let stream;
+    try {
+      stream = await this.registry.openStream(agentId, target.host, target.port);
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'tunnel failed';
+      await this.audit.record({
+        actorId: user.id,
+        actorEmail: user.email,
+        action: 'fabric.tunnel.probe',
+        target: agentId,
+        meta: { targetId, kind: target.kind, port: target.port, ok: false, error },
+      });
+      return { ok: false, latencyMs: Date.now() - start, error };
+    }
+    const latencyMs = Date.now() - start;
+
+    // Read whatever the target volunteers on connect for up to ~800ms. Servers
+    // that speak first (SSH) give a banner; ones that wait (RDP) just confirm the
+    // TCP path is live.
+    const banner = await new Promise<string | undefined>((resolve) => {
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const firstLine = () => {
+        const text = Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0] ?? '';
+        const printable = text.replace(/[^\x20-\x7e]/g, '').trim();
+        return printable || undefined;
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        stream.close();
+        resolve(firstLine());
+      };
+      const timer = setTimeout(finish, 800);
+      timer.unref?.();
+      stream.onData = (d: Buffer) => {
+        chunks.push(d);
+        if (Buffer.concat(chunks).includes(0x0a) || Buffer.concat(chunks).length >= 256) finish();
+      };
+      stream.onClose = finish;
+    });
+
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.tunnel.probe',
+      target: agentId,
+      meta: { targetId, kind: target.kind, port: target.port, ok: true, latencyMs },
+    });
+    return { ok: true, latencyMs, banner };
+  }
+
+  private toAgentDto(agent: Agent, targets: AgentTarget[]): FabricAgentDto {
+    return {
+      id: agent.id,
+      name: agent.name,
+      hostname: agent.hostname,
+      os: agent.os,
+      osVersion: agent.osVersion,
+      agentVersion: agent.agentVersion,
+      tags: agent.tags,
+      status: this.registry.statusOf(agent.id, agent.status),
+      lastSeenAt: agent.lastSeenAt?.toISOString() ?? null,
+      createdAt: agent.createdAt.toISOString(),
+      targets: targets.map(
+        (t): FabricTargetDto => ({
+          id: t.id,
+          kind: t.kind as FabricTargetDto['kind'],
+          host: t.host,
+          port: t.port,
+          label: t.label,
+        }),
+      ),
+    };
+  }
+}
