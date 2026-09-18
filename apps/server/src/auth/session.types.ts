@@ -7,6 +7,19 @@ declare module 'express-session' {
     /** Transient state for an in-flight SSO auth-code flow. */
     sso?: { providerId: string; state: string; nonce: string; codeVerifier: string };
     /**
+     * Transient state for an in-flight SSO *re-authentication* (step-up) flow — a
+     * fresh IdP round-trip demanded before a sensitive action (e.g. revealing a
+     * vault secret) by a user who signs in via SSO and therefore has no password
+     * or TOTP to re-check. Kept separate from `sso` so a step-up can never be
+     * mistaken for a login and never mints a new session.
+     */
+    ssoReauth?: { providerId: string; state: string; nonce: string; codeVerifier: string };
+    /**
+     * When the current user last completed an SSO step-up re-authentication (epoch
+     * ms). Sensitive endpoints treat it as valid only within a short window.
+     */
+    reauthAt?: number;
+    /**
      * Half-authenticated state between a correct password and TOTP verification.
      * The session has NO `userId` while this is set, so SessionAuthGuard treats it
      * as unauthenticated — protected routes stay unreachable until the second factor.

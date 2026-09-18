@@ -75,6 +75,87 @@ export class SsoService {
     });
   }
 
+  /**
+   * Build the authorization URL for a step-up **re-authentication** — the user is
+   * already logged in; we force a fresh IdP credential check (`prompt=login` +
+   * `max_age=0`) so revealing a secret proves live presence, the SSO equivalent of
+   * re-entering a password. State lives in `ssoReauth` (never `sso`) so the
+   * callback can tell a step-up from a login and never mint a new session.
+   */
+  async buildReauthUrl(req: Request, slug: string): Promise<string> {
+    const provider = await this.providers.getBySlug(slug);
+    if (!provider || !provider.enabled) throw new NotFoundException('Unknown or disabled provider.');
+    const client = await this.buildClient(provider);
+
+    const state = generators.state();
+    const nonce = generators.nonce();
+    const codeVerifier = generators.codeVerifier();
+    const codeChallenge = generators.codeChallenge(codeVerifier);
+    req.session.ssoReauth = { providerId: provider.id, state, nonce, codeVerifier };
+
+    return client.authorizationUrl({
+      scope: provider.scopes || 'openid email profile',
+      state,
+      nonce,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+      // Force a fresh credential prompt. `prompt=login` is the OIDC lever; `max_age=0`
+      // is the fallback providers that ignore `prompt` still honour (e.g. Google).
+      prompt: 'login',
+      max_age: 0,
+    });
+  }
+
+  /**
+   * Complete a step-up re-auth. Verifies the returned identity is the SAME account
+   * as the current session (subject must match a linked identity of `currentUserId`)
+   * and does NOT touch `userId` or regenerate the session. Reuses the login redirect
+   * URI (disambiguated by the `ssoReauth` session key) so no extra callback URL has
+   * to be registered with the provider.
+   */
+  async handleReauthCallback(req: Request, slug: string, currentUserId: string): Promise<void> {
+    const provider = await this.providers.getBySlug(slug);
+    if (!provider || !provider.enabled) throw new NotFoundException('Unknown or disabled provider.');
+
+    const stored = req.session.ssoReauth;
+    if (!stored || stored.providerId !== provider.id) {
+      throw new BadRequestException('Missing or mismatched re-authentication state — restart the step-up.');
+    }
+    delete req.session.ssoReauth;
+
+    const client = await this.buildClient(provider);
+    const params = client.callbackParams(req);
+    // Freshness is demanded in the authorization request (prompt=login + max_age=0);
+    // we don't re-assert max_age here because not every OIDC provider returns the
+    // `auth_time` claim that check would require, and the subject match below plus the
+    // completed round-trip are what bind this step-up to the right live user.
+    const tokenSet = await client.callback(this.providers.redirectUri(provider.slug), params, {
+      state: stored.state,
+      nonce: stored.nonce,
+      code_verifier: stored.codeVerifier,
+    });
+    const subject = tokenSet.claims().sub;
+
+    const identity = await this.prisma.userIdentity.findUnique({
+      where: { providerId_subject: { providerId: provider.id, subject } },
+    });
+    if (!identity || identity.userId !== currentUserId) {
+      await this.audit.record({
+        actorId: currentUserId,
+        action: 'auth.reauth_identity_mismatch',
+        target: provider.label,
+      });
+      throw new ForbiddenException('Re-authenticated as a different account. Sign in as yourself and try again.');
+    }
+
+    await this.audit.record({
+      actorId: currentUserId,
+      actorEmail: identity.email,
+      action: 'auth.reauth_verified',
+      target: provider.label,
+    });
+  }
+
   /** Completes the flow, applies the provider's provisioning policy, returns the user id. */
   async handleCallback(req: Request, slug: string): Promise<string> {
     const provider = await this.providers.getBySlug(slug);

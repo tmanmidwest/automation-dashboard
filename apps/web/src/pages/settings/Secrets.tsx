@@ -42,6 +42,12 @@ function relative(iso: string | null | undefined): string {
 interface RevealRequirements {
   password: boolean;
   totp: boolean;
+  /** SSO account: re-authenticate with the identity provider instead of a field. */
+  oidc: boolean;
+  oidcProviderSlug?: string;
+  oidcProviderLabel?: string;
+  /** A recent SSO step-up is still valid — a reveal can proceed now. */
+  reauthFresh: boolean;
   canReveal: boolean;
 }
 
@@ -103,6 +109,9 @@ export function Secrets() {
   const [revealErr, setRevealErr] = useState<string | null>(null);
   const [revealBusy, setRevealBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  // SSO step-up: true once a re-auth popup has completed (or a recent one is still valid).
+  const [reauthOk, setReauthOk] = useState(false);
+  const [reauthBusy, setReauthBusy] = useState(false);
 
   // Edit/rotate dialog state.
   const [editing, setEditing] = useState<SecretSummary | null>(null);
@@ -225,14 +234,16 @@ export function Secrets() {
     setRevealValue(null);
     setRevealErr(null);
     setCopied(false);
-    // Load which factors this account must supply (same for every secret).
-    if (!revealReq) {
-      try {
-        setRevealReq(await api.get<RevealRequirements>('/api/secrets/reveal-requirements'));
-      } catch {
-        // Fall back to prompting for a password; the server still enforces the real rule.
-        setRevealReq({ password: true, totp: false, canReveal: true });
-      }
+    setReauthOk(false);
+    // Load which factors this account must supply. Re-fetched each open so an SSO
+    // step-up window (reauthFresh) reflects reality rather than a stale first read.
+    try {
+      const req = await api.get<RevealRequirements>('/api/secrets/reveal-requirements');
+      setRevealReq(req);
+      setReauthOk(req.reauthFresh);
+    } catch {
+      // Fall back to prompting for a password; the server still enforces the real rule.
+      setRevealReq({ password: true, totp: false, oidc: false, reauthFresh: false, canReveal: true });
     }
   }
 
@@ -242,6 +253,44 @@ export function Secrets() {
     setRevealForm({ password: '', totp: '' });
     setRevealValue(null);
     setRevealErr(null);
+    setReauthOk(false);
+    setReauthBusy(false);
+  }
+
+  /** Open the SSO provider in a popup to re-authenticate; the popup messages us back. */
+  function startReauth() {
+    const slug = revealReq?.oidcProviderSlug;
+    if (!slug) return;
+    setRevealErr(null);
+    setReauthBusy(true);
+    const popup = window.open(
+      `/api/auth/sso/${encodeURIComponent(slug)}/reauth`,
+      'cerebro-reauth',
+      'width=520,height=680',
+    );
+    if (!popup) {
+      setReauthBusy(false);
+      setRevealErr('Your browser blocked the sign-in pop-up. Allow pop-ups for Cerebro and try again.');
+      return;
+    }
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data as { type?: string; ok?: boolean; message?: string } | null;
+      if (!d || d.type !== 'cerebro-reauth') return;
+      cleanup();
+      setReauthBusy(false);
+      if (d.ok) setReauthOk(true);
+      else setRevealErr(d.message || 'Re-authentication failed.');
+      try { popup.close(); } catch { /* already closed */ }
+    };
+    const timer = window.setInterval(() => {
+      if (popup.closed) { cleanup(); setReauthBusy(false); }
+    }, 500);
+    function cleanup() {
+      window.removeEventListener('message', onMessage);
+      window.clearInterval(timer);
+    }
+    window.addEventListener('message', onMessage);
   }
 
   async function submitReveal() {
@@ -276,7 +325,8 @@ export function Secrets() {
     !!revealReq &&
     revealReq.canReveal &&
     (!revealReq.password || revealForm.password.length > 0) &&
-    (!revealReq.totp || revealForm.totp.trim().length > 0);
+    (!revealReq.totp || revealForm.totp.trim().length > 0) &&
+    (!revealReq.oidc || reauthOk);
 
   /** Pretty-print a structured (git/ssh/rdp) JSON credential; show others verbatim. */
   function displayValue(s: SecretSummary, value: string): string {
@@ -423,7 +473,7 @@ export function Secrets() {
           revealReq && !revealReq.canReveal ? (
             <div className="text-sm text-muted-foreground">
               This account can't reveal secrets because it has no way to re-authenticate. Set an account
-              password or enable two-factor authentication, then try again.
+              password, enable two-factor authentication, or link a single sign-on provider, then try again.
             </div>
           ) : (
             <form
@@ -459,6 +509,27 @@ export function Secrets() {
                     onChange={(e) => setRevealForm((f) => ({ ...f, totp: e.target.value.replace(/\D/g, '') }))}
                   />
                   <p className="mt-1 text-xs text-muted-foreground">The 6-digit code from your authenticator app.</p>
+                </div>
+              )}
+              {revealReq?.oidc && (
+                <div>
+                  <Label>Identity verification</Label>
+                  {reauthOk ? (
+                    <div className="mt-1 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-400">
+                      <ShieldCheck className="h-4 w-4 shrink-0" />
+                      Re-authenticated with {revealReq.oidcProviderLabel || 'your provider'}. You can reveal now.
+                    </div>
+                  ) : (
+                    <>
+                      <Button type="button" variant="outline" className="mt-1 w-full" onClick={startReauth} disabled={reauthBusy}>
+                        <ShieldCheck className="h-4 w-4 mr-1.5" />
+                        {reauthBusy ? 'Waiting for sign-in…' : `Re-authenticate with ${revealReq.oidcProviderLabel || 'your provider'}`}
+                      </Button>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Opens a sign-in window. Confirm your identity there, then reveal the value.
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
               {/* Submit on Enter without a visible extra button. */}

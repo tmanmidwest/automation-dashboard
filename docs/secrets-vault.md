@@ -46,9 +46,21 @@ cryptography.
 > (`SecretsRevealController.reveal`, in its own `SecretsRevealModule` — see below) re-checks the
 > caller's own password (`AuthService.verifyPassword`,
 > local accounts) and a live TOTP code (`TotpService.verifyCode` — live codes only; recovery codes
-> are the lockout escape hatch and are **not** accepted for routine reveals) on every request; an
-> SSO account with neither password nor TOTP cannot reveal and is told to enable a factor first.
+> are the lockout escape hatch and are **not** accepted for routine reveals) on every request.
 > Administrative **writes** (set/rotate/delete) remain audited as before.
+>
+> **SSO accounts step up through their identity provider.** A user who signs in via SSO has no
+> password and cannot enrol TOTP (`TotpService.beginEnrollment` refuses a password-less account), so
+> the reveal challenge instead sends them on a fresh round-trip to their IdP. `reveal-requirements`
+> returns `oidc: true` with the provider's slug/label; the dialog opens
+> `GET /api/auth/sso/:slug/reauth` in a popup, which authorizes with `prompt=login` + `max_age=0` to
+> force a live credential check. The shared callback (`SsoController.callback`, disambiguated by the
+> `ssoReauth` session key so a step-up can never become a login) verifies the returned `sub` matches
+> the current session user's linked identity, stamps `session.reauthAt`, and messages the opener.
+> Reveal then accepts any request inside a short `REAUTH_WINDOW_MS` (5 min) sudo-style window —
+> re-authentications are audited (`auth.reauth_verified` / `auth.reauth_identity_mismatch`). An
+> account with **no** password, TOTP, or linked-and-enabled SSO provider still cannot reveal and is
+> told to add a factor first.
 >
 > **Why a separate module.** Reveal needs `AuthModule` (to re-check password/TOTP), but
 > `AuthModule → SettingsModule → SecretsService` (global) already, so importing AuthModule into the
