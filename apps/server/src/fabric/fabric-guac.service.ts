@@ -152,21 +152,27 @@ export class FabricGuacService {
    */
   private async guacdReachableIp(): Promise<string | null> {
     const guacdHost = process.env.GUACD_HOST || 'guacd';
-    let guacdIp: string;
+    let guacdIp: string | null = null;
     try {
       guacdIp = (await lookup(guacdHost, { family: 4 })).address;
-    } catch {
-      return null;
+    } catch (e) {
+      this.logger.warn(`Could not resolve GUACD_HOST "${guacdHost}": ${e instanceof Error ? e.message : e}`);
     }
     const ifaces = networkInterfaces();
+    const candidates: string[] = [];
+    let match: string | null = null;
     for (const name of Object.keys(ifaces)) {
       for (const ni of ifaces[name] ?? []) {
-        if ((ni.family === 'IPv4' || (ni.family as unknown) === 4) && !ni.internal && sameSubnet(ni.address, ni.netmask, guacdIp)) {
-          return ni.address;
+        if ((ni.family === 'IPv4' || (ni.family as unknown) === 4) && !ni.internal) {
+          candidates.push(`${ni.address}/${ni.netmask}`);
+          if (guacdIp && !match && sameSubnet(ni.address, ni.netmask, guacdIp)) match = ni.address;
         }
       }
     }
-    return null;
+    this.logger.log(
+      `guacd(${guacdHost})=${guacdIp ?? '?'}; app IPv4 ${candidates.join(', ') || '(none)'}; picked ${match ?? '(none — will fall back)'}`,
+    );
+    return match;
   }
 
   /** Replicates guacamole-lite's Crypt.encrypt so its server can decrypt our token. */
