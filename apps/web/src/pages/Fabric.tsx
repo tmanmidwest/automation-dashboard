@@ -836,6 +836,56 @@ function CliDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+type SaveScope = 'machine' | 'reusable';
+
+/**
+ * Shared "save this credential" control for the connect dialogs. The scope is an
+ * explicit choice — "this machine" (attaches to the target, shows the key icon on
+ * its chip) vs "reusable" (a named vault credential offered for every machine) —
+ * so naming a credential can't silently change where it's stored.
+ */
+function SaveCredentialFields({
+  save,
+  setSave,
+  scope,
+  setScope,
+  saveAs,
+  setSaveAs,
+  idPrefix,
+}: {
+  save: boolean;
+  setSave: (v: boolean) => void;
+  scope: SaveScope;
+  setScope: (v: SaveScope) => void;
+  saveAs: string;
+  setSaveAs: (v: string) => void;
+  idPrefix: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+        Save this credential to the vault
+      </label>
+      {save && (
+        <div className="ml-6 space-y-1.5 text-sm">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name={`${idPrefix}-scope`} checked={scope === 'machine'} onChange={() => setScope('machine')} />
+            For this machine only
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name={`${idPrefix}-scope`} checked={scope === 'reusable'} onChange={() => setScope('reusable')} />
+            Reusable (shows in the picker for every machine)
+          </label>
+          {scope === 'reusable' && (
+            <Input value={saveAs} onChange={(e) => setSaveAs(e.target.value)} placeholder="Credential name" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SshConnectDialog({
   agent,
   target,
@@ -863,6 +913,7 @@ function SshConnectDialog({
   const [passphrase, setPassphrase] = useState('');
   const [save, setSave] = useState(false);
   const [saveAs, setSaveAs] = useState('');
+  const [saveScope, setSaveScope] = useState<SaveScope>('machine');
   const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -893,8 +944,8 @@ function SshConnectDialog({
       const saving = save && canManage;
       body =
         method === 'password'
-          ? { username: username.trim(), password, save: saving, saveAs: saveAs.trim() || undefined }
-          : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: saving, saveAs: saveAs.trim() || undefined };
+          ? { username: username.trim(), password, save: saving, saveAs: saveScope === 'reusable' ? saveAs.trim() || undefined : undefined }
+          : { username: username.trim(), privateKey, passphrase: passphrase || undefined, save: saving, saveAs: saveScope === 'reusable' ? saveAs.trim() || undefined : undefined };
     }
     // Open the tab now (still inside the click) so popup blockers allow it.
     const win = newTab ? window.open('about:blank', '_blank') : null;
@@ -1025,19 +1076,12 @@ function SshConnectDialog({
               </>
             )}
             {canManage && (
-              <div className="space-y-1.5">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
-                  Save this credential to the vault
-                </label>
-                {save && (
-                  <Input
-                    value={saveAs}
-                    onChange={(e) => setSaveAs(e.target.value)}
-                    placeholder="Reusable name (leave blank to save just for this machine)"
-                  />
-                )}
-              </div>
+              <SaveCredentialFields
+                save={save} setSave={setSave}
+                scope={saveScope} setScope={setSaveScope}
+                saveAs={saveAs} setSaveAs={setSaveAs}
+                idPrefix="ssh"
+              />
             )}
           </>
         )}
@@ -1187,6 +1231,7 @@ function RdpConnectDialog({
   const [credOptions, setCredOptions] = useState<{ key: string; label: string }[]>([]);
   const [credSource, setCredSource] = useState(target.hasCredential ? ownKey : 'manual');
   const [saveAs, setSaveAs] = useState('');
+  const [saveScope, setSaveScope] = useState<SaveScope>('machine');
   const [username, setUsername] = useState('Administrator');
   const [password, setPassword] = useState('');
   const [domain, setDomain] = useState('');
@@ -1256,7 +1301,7 @@ function RdpConnectDialog({
         password,
         domain: domain.trim() || undefined,
         save: save && canManage,
-        saveAs: saveAs.trim() || undefined,
+        saveAs: saveScope === 'reusable' ? saveAs.trim() || undefined : undefined,
         ...opts,
       };
     }
@@ -1340,19 +1385,12 @@ function RdpConnectDialog({
               <Input id="rdp-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
             {canManage && (
-              <div className="space-y-1.5">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
-                  Save this credential to the vault
-                </label>
-                {save && (
-                  <Input
-                    value={saveAs}
-                    onChange={(e) => setSaveAs(e.target.value)}
-                    placeholder="Reusable name (leave blank to save just for this machine)"
-                  />
-                )}
-              </div>
+              <SaveCredentialFields
+                save={save} setSave={setSave}
+                scope={saveScope} setScope={setSaveScope}
+                saveAs={saveAs} setSaveAs={setSaveAs}
+                idPrefix="rdp"
+              />
             )}
           </>
         )}
@@ -1814,6 +1852,7 @@ function VncConnectDialog({
   const [password, setPassword] = useState('');
   const [save, setSave] = useState(false);
   const [saveAs, setSaveAs] = useState('');
+  const [saveScope, setSaveScope] = useState<SaveScope>('machine');
   const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1838,7 +1877,7 @@ function VncConnectDialog({
         username: username.trim() || undefined,
         password: password || undefined,
         save: saving,
-        saveAs: saveAs.trim() || undefined,
+        saveAs: saveScope === 'reusable' ? saveAs.trim() || undefined : undefined,
       };
     }
     const win = newTab ? window.open('about:blank', '_blank') : null;
@@ -1920,19 +1959,12 @@ function VncConnectDialog({
               <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
             {canManage && password && (
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
-                  Save this credential to the vault
-                </label>
-                {save && (
-                  <Input
-                    placeholder="Reusable name (optional) — blank saves for this machine only"
-                    value={saveAs}
-                    onChange={(e) => setSaveAs(e.target.value)}
-                  />
-                )}
-              </div>
+              <SaveCredentialFields
+                save={save} setSave={setSave}
+                scope={saveScope} setScope={setSaveScope}
+                saveAs={saveAs} setSaveAs={setSaveAs}
+                idPrefix="vnc"
+              />
             )}
           </>
         )}
