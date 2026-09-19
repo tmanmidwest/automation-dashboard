@@ -4,6 +4,10 @@
 // it through Cerebro to the machine's agent, so you can use your own ssh / scp /
 // mstsc / RDP client over the same outbound tunnel the browser uses.
 //
+// `cerebro proxy <machine>` is the stdin/stdout variant for SSH's ProxyCommand,
+// and `cerebro ssh <machine>` is a convenience wrapper that launches your own ssh
+// through the tunnel — both let you "bring your own client" with your own keys.
+//
 // Config (first non-empty wins): --url/--token flags, CEREBRO_URL/CEREBRO_TOKEN
 // env, or ~/.cerebro/config.json {"url":"…","token":"cbro_…"}. The token is a
 // Cerebro API token with the fabric:read + fabric:connect scopes.
@@ -18,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -58,6 +63,10 @@ func main() {
 		cmdLs(args[1:])
 	case "access":
 		cmdAccess(args[1:])
+	case "proxy":
+		cmdProxy(args[1:])
+	case "ssh":
+		cmdSSH(args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -73,11 +82,23 @@ func usage() {
 Usage:
   cerebro ls
   cerebro access <machine> [ssh|rdp] [--listen 127.0.0.1:PORT]
+  cerebro proxy  <machine> [ssh|rdp]            (SSH ProxyCommand — stdio)
+  cerebro ssh    [user@]<machine> [ssh args…]   (launch your own ssh client)
 
 Options:
   --url    <url>     Cerebro base URL          (or CEREBRO_URL)
   --token  <token>   Cerebro API token         (or CEREBRO_TOKEN)
   --listen <addr>    Local listen address      (default 127.0.0.1:0)
+
+Bring your own SSH client:
+  # one-off, using the wrapper (your keys, your config):
+  cerebro ssh ember@my-mac
+
+  # or wire it into ~/.ssh/config once, then use plain ssh/scp/sftp:
+  #   Host my-mac.fabric
+  #       ProxyCommand cerebro proxy my-mac
+  #       User ember
+  ssh my-mac.fabric
 
 The token needs the fabric:read and fabric:connect scopes (Settings → API Tokens).
 Config file: ~/.cerebro/config.json  {"url":"https://cerebro…","token":"cbro_…"}
@@ -117,25 +138,7 @@ func cmdAccess(args []string) {
 		kind = strings.ToLower(pos[1])
 	}
 	cfg := mustConfig(urlFlag, tokenFlag)
-
-	var agentName string
-	var target *targetInfo
-	for _, a := range fetchAgents(cfg) {
-		if strings.EqualFold(a.Name, machine) {
-			agentName = a.Name
-			target = pickTarget(a.Targets, kind)
-			if a.Status != "online" {
-				fmt.Fprintf(os.Stderr, "warning: %s is %s\n", a.Name, a.Status)
-			}
-			break
-		}
-	}
-	if agentName == "" {
-		log.Fatalf("machine %q not found (try: cerebro ls)", machine)
-	}
-	if target == nil {
-		log.Fatalf("no matching target on %q", machine)
-	}
+	agentName, target := resolveTarget(cfg, machine, kind)
 
 	if listen == "" {
 		listen = "127.0.0.1:0"
@@ -155,6 +158,121 @@ func cmdAccess(args []string) {
 		}
 		go bridge(conn, cfg, target.ID)
 	}
+}
+
+// cmdProxy bridges stdin/stdout to a target — the shape SSH's ProxyCommand wants,
+// so `ssh -o ProxyCommand="cerebro proxy <machine>" …` (or a ~/.ssh/config Host)
+// tunnels your own ssh/scp/sftp with your own keys. All diagnostics go to stderr;
+// stdout carries only the SSH byte stream.
+func cmdProxy(args []string) {
+	var urlFlag, tokenFlag string
+	pos := parseFlags(args, map[string]*string{"url": &urlFlag, "token": &tokenFlag})
+	if len(pos) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: cerebro proxy <machine> [ssh|rdp]")
+		os.Exit(2)
+	}
+	kind := "ssh"
+	if len(pos) >= 2 {
+		kind = strings.ToLower(pos[1])
+	}
+	cfg := mustConfig(urlFlag, tokenFlag)
+	_, target := resolveTarget(cfg, pos[0], kind)
+	proxyStdio(cfg, target.ID)
+}
+
+// cmdSSH sets up a temporary local forward and launches the system ssh client at
+// it, passing through any extra ssh args. A stable HostKeyAlias keeps known_hosts
+// from churning as the ephemeral local port changes between runs.
+func cmdSSH(args []string) {
+	var urlFlag, tokenFlag string
+	pos := parseFlags(args, map[string]*string{"url": &urlFlag, "token": &tokenFlag})
+	if len(pos) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: cerebro ssh [user@]<machine> [ssh args…]")
+		os.Exit(2)
+	}
+	spec, extra := pos[0], pos[1:]
+	user, machine := "", spec
+	if at := strings.LastIndexByte(spec, '@'); at >= 0 {
+		user, machine = spec[:at], spec[at+1:]
+	}
+
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		log.Fatal("no 'ssh' client found on PATH — install OpenSSH, or use `cerebro access` and connect manually")
+	}
+	cfg := mustConfig(urlFlag, tokenFlag)
+	name, target := resolveTarget(cfg, machine, "ssh")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go bridge(conn, cfg, target.ID)
+		}
+	}()
+
+	dest := "127.0.0.1"
+	if user != "" {
+		dest = user + "@127.0.0.1"
+	}
+	sshArgs := []string{"-p", port, "-o", "HostKeyAlias=cerebro." + slug(name)}
+	sshArgs = append(sshArgs, extra...)
+	sshArgs = append(sshArgs, dest)
+
+	fmt.Fprintf(os.Stderr, "Connecting to %s over Cerebro…\n", name)
+	cmd := exec.Command(sshBin, sshArgs...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		log.Fatalf("ssh: %v", err)
+	}
+}
+
+// resolveTarget finds a machine by name and picks a target of `kind` (or the
+// default order). Fatal if the machine or a matching target is missing; warns to
+// stderr if the agent is offline.
+func resolveTarget(cfg config, machine, kind string) (string, *targetInfo) {
+	for _, a := range fetchAgents(cfg) {
+		if strings.EqualFold(a.Name, machine) {
+			if a.Status != "online" {
+				fmt.Fprintf(os.Stderr, "warning: %s is %s\n", a.Name, a.Status)
+			}
+			t := pickTarget(a.Targets, kind)
+			if t == nil {
+				log.Fatalf("no matching target on %q", machine)
+			}
+			return a.Name, t
+		}
+	}
+	log.Fatalf("machine %q not found (try: cerebro ls)", machine)
+	return "", nil
+}
+
+// slug reduces a machine name to a stable token for HostKeyAlias.
+func slug(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "host"
+	}
+	return out
 }
 
 func pickTarget(targets []targetInfo, kind string) *targetInfo {
@@ -195,6 +313,54 @@ func hint(kind, addr string) string {
 }
 
 // --- tunnel bridge ----------------------------------------------------------
+
+// proxyStdio pipes stdin/stdout to a target over the access tunnel (ProxyCommand
+// mode). Exits as soon as either direction closes, so ssh sees a clean EOF.
+func proxyStdio(cfg config, targetID string) {
+	wsURL := toWS(cfg.URL) + "/api/fabric/access/ws?target=" + url.QueryEscape(targetID)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+cfg.Token)
+	d := *websocket.DefaultDialer
+	d.HandshakeTimeout = 15 * time.Second
+	ws, resp, err := d.Dial(wsURL, header)
+	if err != nil {
+		if resp != nil {
+			log.Fatalf("tunnel rejected: %s", resp.Status)
+		}
+		log.Fatalf("tunnel error: %v", err)
+	}
+	defer ws.Close()
+
+	ended := make(chan struct{}, 2)
+	go func() { // ws -> stdout
+		for {
+			_, msg, err := ws.ReadMessage()
+			if err != nil {
+				break
+			}
+			if _, werr := os.Stdout.Write(msg); werr != nil {
+				break
+			}
+		}
+		ended <- struct{}{}
+	}()
+	go func() { // stdin -> ws (sole ws writer)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				if werr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		ended <- struct{}{}
+	}()
+	<-ended // first side to close ends the session
+}
 
 func bridge(local net.Conn, cfg config, targetID string) {
 	defer local.Close()

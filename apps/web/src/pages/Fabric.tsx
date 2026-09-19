@@ -836,9 +836,21 @@ function CliDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div>
           <p className="font-medium">4. Connect</p>
-          <Cmd text={`cerebro ls\ncerebro access <machine> ssh\ncerebro access <machine> rdp`} />
+          <Cmd text={`cerebro ls\ncerebro access <machine> ssh    # local port for any client\ncerebro access <machine> rdp`} />
           <p className="text-muted-foreground text-xs mt-1">
             Prints a local address + connect hint, then forwards until Ctrl+C.
+          </p>
+        </div>
+        <div>
+          <p className="font-medium">Bring your own SSH client</p>
+          <Cmd text={`cerebro ssh <user>@<machine>`} />
+          <p className="text-muted-foreground text-xs mt-1">
+            Launches your own <code>ssh</code> (your keys, agent forwarding) through the tunnel. Or wire it into{' '}
+            <code>~/.ssh/config</code> once for plain <code>ssh</code>/<code>scp</code>/<code>sftp</code>:
+          </p>
+          <Cmd text={`Host <machine>.fabric\n    ProxyCommand cerebro proxy <machine>\n    User <user>`} />
+          <p className="text-muted-foreground text-xs mt-1">
+            Then just <code>ssh &lt;machine&gt;.fabric</code>.
           </p>
         </div>
       </div>

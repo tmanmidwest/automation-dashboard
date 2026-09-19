@@ -45,3 +45,36 @@ $ cerebro access web01 ssh
 Forwarding 127.0.0.1:53512 -> web01 (ssh :22) through Cerebro. Ctrl+C to stop.
   Connect: ssh -p 53512 <user>@127.0.0.1
 ```
+
+## Bring your own SSH client
+
+Two ways to use your own `ssh` (with your own keys, agent forwarding, `scp`,
+`sftp`, `rsync`) instead of the browser terminal. Cerebro only moves the bytes —
+your client does the SSH auth end-to-end, and host-key checking uses your own
+`known_hosts`.
+
+**Wrapper** — one-off, no config:
+
+```sh
+cerebro ssh ember@my-mac            # launches your ssh through the tunnel
+cerebro ssh ember@my-mac -v         # extra args pass through to ssh
+```
+
+**ProxyCommand** — wire it into `~/.ssh/config` once, then use plain tools:
+
+```sshconfig
+Host my-mac.fabric
+    ProxyCommand cerebro proxy my-mac
+    User ember
+```
+
+```sh
+ssh my-mac.fabric
+scp file my-mac.fabric:~/
+sftp my-mac.fabric
+```
+
+`cerebro proxy <machine>` bridges stdin/stdout to the target (no local port), which
+is exactly what SSH's `ProxyCommand` expects. Pass the machine name explicitly (as
+above); or, if you name the `Host` entry exactly after the machine, you can use
+SSH's `%h` token: `ProxyCommand cerebro proxy %h`.
