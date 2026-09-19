@@ -820,6 +820,7 @@ interface CaStatus {
   ttlMinutes: number;
   hostSetupLinux?: string;
   hostSetupWindows?: string;
+  clientTrustLine?: string;
 }
 
 function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
@@ -906,6 +907,15 @@ function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => v
             <p className="text-muted-foreground text-xs mt-1">
               Generates an ephemeral key, gets a {status.ttlMinutes}-minute cert signed, and launches your <code>ssh</code>.
             </p>
+          </div>
+          <div>
+            <p className="font-medium">Host verification (no TOFU prompts)</p>
+            <p className="text-muted-foreground text-xs mb-1">
+              Using the per-host <span className="text-foreground">Trust CA</span> button (shield icon on an online agent)
+              also signs that box's host key, so clients verify it via the CA. <code>cerebro ssh --ca</code> trusts host
+              certs automatically; to verify from a raw <code>ssh</code>, add this to your <code>known_hosts</code>:
+            </p>
+            <Cmd text={status.clientTrustLine ?? ''} />
           </div>
 
           {canManage && (

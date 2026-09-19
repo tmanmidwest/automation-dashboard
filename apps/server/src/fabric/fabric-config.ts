@@ -34,4 +34,8 @@ export const fabricConfig = {
   get caTtlMinutes(): number {
     return envInt('FABRIC_CA_TTL_MINUTES', 5);
   },
+  /** Lifetime (weeks) of an SSH host certificate — long; renewed on re-trust. */
+  get caHostTtlWeeks(): number {
+    return envInt('FABRIC_CA_HOST_TTL_WEEKS', 26);
+  },
 };

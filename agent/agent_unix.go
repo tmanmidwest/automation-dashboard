@@ -64,6 +64,11 @@ func sshdPath() string {
 	return ""
 }
 
+// Paths for host-certificate install (shared logic lives in main.go).
+func sshdConfigPath() string          { return "/etc/ssh/sshd_config" }
+func sshHostKeyBase(kt string) string { return "/etc/ssh/ssh_host_" + kt + "_key" }
+func hostCertLine(certPath string) string { return "HostCertificate " + certPath }
+
 func reloadSshd() {
 	if runtime.GOOS == "darwin" {
 		return // macOS Remote Login re-reads config on each new connection

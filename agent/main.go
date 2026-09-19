@@ -31,7 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.3"
+const agentVersion = "0.3.4"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -184,7 +184,8 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 }
 
 // installCA installs an SSH CA public key into the host's sshd trust (best-effort,
-// OS-specific), then reports the outcome back to the broker.
+// OS-specific), reports the outcome, and — on success — offers the box's host key
+// for a host certificate so clients can verify the host via the CA.
 func (s *session) installCA(caPub string) {
 	err := configureSshdTrustCA(strings.TrimSpace(caPub))
 	if err != nil {
@@ -194,6 +195,58 @@ func (s *session) installCA(caPub string) {
 	}
 	log.Print("installed SSH CA into sshd trust")
 	s.writeJSON(map[string]any{"t": "ca-result", "ok": true})
+
+	if pub, keyType, herr := readHostKey(); herr == nil {
+		s.writeJSON(map[string]any{"t": "host-key", "publicKey": pub, "keyType": keyType})
+	} else {
+		log.Printf("no host key to certify: %v", herr)
+	}
+}
+
+// installHostCert writes a broker-signed host certificate and points sshd at it
+// (HostCertificate), validating before reload and reverting on failure.
+func (s *session) installHostCert(cert, keyType string) {
+	if err := installHostCertFile(strings.TrimSpace(cert), keyType); err != nil {
+		log.Printf("install host-cert failed: %v", err)
+		return
+	}
+	log.Print("installed SSH host certificate")
+}
+
+// readHostKey returns the box's preferred SSH host public key + its type.
+func readHostKey() (pub string, keyType string, err error) {
+	for _, kt := range []string{"ed25519", "ecdsa", "rsa"} {
+		if b, e := os.ReadFile(sshHostKeyBase(kt) + ".pub"); e == nil {
+			return strings.TrimSpace(string(b)), kt, nil
+		}
+	}
+	return "", "", fmt.Errorf("no host public key found")
+}
+
+// installHostCertFile writes <hostkey>-cert.pub and ensures a HostCertificate line
+// in sshd_config; validates with sshd -t and reverts on failure, then reloads.
+func installHostCertFile(cert, keyType string) error {
+	if cert == "" {
+		return fmt.Errorf("empty certificate")
+	}
+	certPath := sshHostKeyBase(keyType) + "-cert.pub"
+	if err := os.WriteFile(certPath, []byte(cert+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", certPath, err)
+	}
+	cfg := sshdConfigPath()
+	backup, err := os.ReadFile(cfg)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", cfg, err)
+	}
+	if _, err := ensureLineInFile(cfg, hostCertLine(certPath)); err != nil {
+		return fmt.Errorf("edit %s: %w", cfg, err)
+	}
+	if err := validateSshd(); err != nil {
+		_ = os.WriteFile(cfg, backup, 0o644)
+		return fmt.Errorf("sshd config invalid, reverted: %w", err)
+	}
+	reloadSshd()
+	return nil
 }
 
 // ensureLineInFile appends `line` to the file if an exact-line match is absent.
@@ -311,6 +364,8 @@ type ctrlFrame struct {
 	LatestAgentVersion string `json:"latestAgentVersion"`
 	HeartbeatMs        int64  `json:"heartbeatMs"`
 	CaPublicKey        string `json:"caPublicKey"`
+	Certificate        string `json:"certificate"`
+	KeyType            string `json:"keyType"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -328,6 +383,8 @@ func (s *session) onControl(msg []byte) {
 		selfUninstall() // OS-specific; spawns a detached remover and exits
 	case "install-ca":
 		go s.installCA(c.CaPublicKey)
+	case "host-cert":
+		go s.installHostCert(c.Certificate, c.KeyType)
 	case "hello-ack":
 		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)

@@ -149,6 +149,40 @@ export interface FabricCaResultFrame {
   error?: string;
 }
 
+/**
+ * agent → broker: the box's SSH host public key, offered for signing into a host
+ * certificate so clients can verify the host via the CA (no TOFU prompts). Sent
+ * as part of the `install-ca` flow.
+ */
+export interface FabricHostKeyFrame {
+  t: 'host-key';
+  publicKey: string;
+  /** e.g. 'ed25519' — the agent maps this back to the host key file to certify. */
+  keyType: string;
+}
+
+/** broker → agent: the signed host certificate to install (HostCertificate). */
+export interface FabricHostCertFrame {
+  t: 'host-cert';
+  certificate: string;
+  keyType: string;
+}
+
+/** Prefix + slug for the host-cert principal / SSH HostKeyAlias, so the CLI's
+ *  `HostKeyAlias=cerebro.<slug>` matches the host cert the broker signs. Keep the
+ *  slug rules in sync with `slug()` in cli/main.go. */
+export const FABRIC_HOST_ALIAS_PREFIX = 'cerebro.';
+export function fabricSlug(name: string): string {
+  const out = (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return out || 'host';
+}
+export function fabricHostAlias(name: string): string {
+  return FABRIC_HOST_ALIAS_PREFIX + fabricSlug(name);
+}
+
 // --- Stream lifecycle (Phase 2). streamId is broker-allocated per connection. ---
 
 /** broker → agent: dial a local target and attach a new data stream. */
@@ -183,6 +217,7 @@ export type FabricAgentToBroker =
   | FabricHeartbeatFrame
   | FabricTargetsFrame
   | FabricCaResultFrame
+  | FabricHostKeyFrame
   | FabricStreamOpenedFrame
   | FabricStreamErrorFrame
   | FabricCloseStreamFrame;
@@ -192,7 +227,8 @@ export type FabricBrokerToAgent =
   | FabricOpenStreamFrame
   | FabricCloseStreamFrame
   | FabricUninstallFrame
-  | FabricInstallCaFrame;
+  | FabricInstallCaFrame
+  | FabricHostCertFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */
@@ -201,7 +237,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.3.3';
+export const FABRIC_AGENT_VERSION = '0.3.4';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

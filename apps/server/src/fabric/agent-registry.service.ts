@@ -10,9 +10,11 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { fabricHostAlias } from '@cerebro/shared';
 import { parseCredential, safeEqualHex, sha256 } from './fabric-credentials';
 import { StreamMux, type TunnelStream } from './stream-mux';
 import { fabricConfig } from './fabric-config';
+import { FabricCaService } from './fabric-ca.service';
 
 interface LiveAgent {
   ws: WebSocket;
@@ -36,6 +38,7 @@ export class AgentRegistryService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly ca: FabricCaService,
   ) {}
 
   /**
@@ -169,6 +172,9 @@ export class AgentRegistryService {
           meta: frame.ok ? {} : { error: frame.error },
         });
         break;
+      case 'host-key':
+        await this.signHostCertFor(agentId, frame.publicKey, frame.keyType);
+        break;
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':
@@ -288,6 +294,23 @@ export class AgentRegistryService {
     if (!entry) return false;
     this.send(agentId, { t: 'install-ca', caPublicKey });
     return true;
+  }
+
+  /** Sign an agent's offered host key into a host cert and send it back. The
+   *  principal is `cerebro.<slug(name)>` — the same alias the CLI verifies against. */
+  private async signHostCertFor(agentId: string, publicKey: string, keyType: string): Promise<void> {
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId }, select: { name: true } });
+    if (!agent) return;
+    try {
+      const { certificate } = await this.ca.signHostCert(publicKey, fabricHostAlias(agent.name), agent.name);
+      this.send(agentId, { t: 'host-cert', certificate, keyType });
+    } catch (e) {
+      await this.audit.record({
+        action: 'fabric.ca.host_cert_failed',
+        target: agentId,
+        meta: { error: e instanceof Error ? e.message : String(e) },
+      });
+    }
   }
 
   /** Force-disconnect an agent (used on revoke/delete). */

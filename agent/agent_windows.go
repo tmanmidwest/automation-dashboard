@@ -63,6 +63,38 @@ func windowsSshdPath() string {
 	return ""
 }
 
+func windowsSshDir() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "ssh")
+}
+
+// Paths + reload for host-certificate install (shared logic lives in main.go).
+func sshdConfigPath() string          { return filepath.Join(windowsSshDir(), "sshd_config") }
+func sshHostKeyBase(kt string) string { return filepath.Join(windowsSshDir(), "ssh_host_"+kt+"_key") }
+
+// sshd_config on Windows resolves __PROGRAMDATA__; use it so the path is stable.
+func hostCertLine(certPath string) string {
+	return `HostCertificate __PROGRAMDATA__\ssh\` + filepath.Base(certPath)
+}
+
+func validateSshd() error {
+	bin := windowsSshdPath()
+	if bin == "" {
+		return nil
+	}
+	if out, err := exec.Command(bin, "-t").CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, string(out))
+	}
+	return nil
+}
+
+func reloadSshd() {
+	_ = exec.Command("powershell", "-NoProfile", "-Command", "Restart-Service", "sshd").Run()
+}
+
 const serviceName = "CerebroAgent"
 
 type serviceHandler struct{}

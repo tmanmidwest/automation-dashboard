@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 import type { SessionUser } from '@cerebro/shared';
+import { FABRIC_HOST_ALIAS_PREFIX } from '@cerebro/shared';
 import { SettingsService } from '../settings/settings.service';
 import { AuditService } from '../logging/audit.service';
 import { fabricConfig } from './fabric-config';
@@ -34,7 +35,12 @@ export interface CaStatus {
   /** Copy-paste one-liners to make a host trust this CA. */
   hostSetupLinux?: string;
   hostSetupWindows?: string;
+  /** known_hosts line a client adds once to verify hosts via the CA (host certs). */
+  clientTrustLine?: string;
 }
+
+/** Host-cert principal must be `cerebro.<slug>` (matches the CLI's HostKeyAlias). */
+const HOST_PRINCIPAL_RE = /^cerebro\.[a-z0-9-]{1,64}$/;
 
 /** A username principal on a target box: POSIX-ish, no injection into ssh-keygen args. */
 const PRINCIPAL_RE = /^[a-z_][a-z0-9_-]{0,31}$/i;
@@ -69,6 +75,7 @@ export class FabricCaService {
       ttlMinutes,
       hostSetupLinux: hostSetupLinux(meta.publicKey),
       hostSetupWindows: hostSetupWindows(meta.publicKey),
+      clientTrustLine: `@cert-authority ${FABRIC_HOST_ALIAS_PREFIX}* ${meta.publicKey}`,
     };
   }
 
@@ -168,6 +175,58 @@ export class FabricCaService {
       return { certificate, ttlMinutes, serial, principal };
     } catch (e) {
       throw new BadRequestException(`Signing failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Sign a box's SSH host key into a host certificate for principal
+   * `cerebro.<slug>` (matches the CLI's HostKeyAlias), so clients that trust the
+   * CA verify the host with no TOFU prompt. Long TTL; renewed on each re-trust.
+   */
+  async signHostCert(
+    hostPublicKey: string,
+    principal: string,
+    machineLabel: string,
+  ): Promise<{ certificate: string }> {
+    const meta = await this.settings.get<CaMeta>(CA_META_KEY);
+    if (!meta?.publicKey) throw new BadRequestException('The SSH CA is not enabled.');
+    const priv = await this.settings.getSecret(CA_PRIV_SECRET);
+    if (!priv) throw new BadRequestException('The CA private key is missing.');
+
+    const pub = (hostPublicKey || '').trim();
+    if (!PUBKEY_RE.test(pub)) throw new BadRequestException('That does not look like an OpenSSH host key.');
+    if (!HOST_PRINCIPAL_RE.test(principal)) throw new BadRequestException('Invalid host principal.');
+
+    const weeks = fabricConfig.caHostTtlWeeks;
+    const serial = BigInt(`0x${randomBytes(6).toString('hex')}`).toString();
+    const identity = `${(machineLabel || 'host').replace(/\s+/g, '_')}@cerebro`;
+
+    const dir = await mkdtemp(join(tmpdir(), 'cbrohost-'));
+    try {
+      const caPath = join(dir, 'ca');
+      await writeFile(caPath, priv.endsWith('\n') ? priv : `${priv}\n`, { mode: 0o600 });
+      const pubPath = join(dir, 'host.pub');
+      await writeFile(pubPath, `${pub}\n`, { mode: 0o644 });
+      await execFileP('ssh-keygen', [
+        '-s', caPath,
+        '-h', // host certificate
+        '-I', identity,
+        '-n', principal,
+        '-V', `+${weeks}w`,
+        '-z', serial,
+        pubPath,
+      ]);
+      const certificate = (await readFile(join(dir, 'host-cert.pub'), 'utf8')).trim();
+      await this.audit.record({
+        action: 'fabric.ca.host_cert_issued',
+        target: machineLabel,
+        meta: { principal, serial, weeks },
+      });
+      return { certificate };
+    } catch (e) {
+      throw new BadRequestException(`Host signing failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }

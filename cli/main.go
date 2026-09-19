@@ -246,6 +246,13 @@ func cmdSSH(args []string) {
 		certDir := issueCert(cfg, user, name)
 		defer os.RemoveAll(certDir)
 		sshArgs = append(sshArgs, "-i", filepath.Join(certDir, "id"), "-o", "IdentitiesOnly=yes")
+		// Trust host certificates signed by the CA (no TOFU prompt, MITM-safe).
+		if khs := caKnownHostsFile(cfg); khs != "" {
+			home, _ := os.UserHomeDir()
+			sshArgs = append(sshArgs,
+				"-o", fmt.Sprintf("UserKnownHostsFile=%s %s", filepath.Join(home, ".ssh", "known_hosts"), khs),
+				"-o", "StrictHostKeyChecking=accept-new")
+		}
 	}
 	sshArgs = append(sshArgs, extra...)
 	sshArgs = append(sshArgs, dest)
@@ -273,6 +280,7 @@ func cmdCa(args []string) {
 		TTLMinutes       int    `json:"ttlMinutes"`
 		HostSetupLinux   string `json:"hostSetupLinux"`
 		HostSetupWindows string `json:"hostSetupWindows"`
+		ClientTrustLine  string `json:"clientTrustLine"`
 	}
 	_ = json.Unmarshal(b, &s)
 	if !s.Enabled {
@@ -286,8 +294,53 @@ func cmdCa(args []string) {
 	fmt.Println(s.HostSetupLinux)
 	fmt.Println("\n# Trust this CA on a Windows host (elevated PowerShell):")
 	fmt.Println(s.HostSetupWindows)
+	fmt.Println("\n# Verify hosts via the CA — add to your known_hosts (cerebro ssh --ca does this for you):")
+	fmt.Println(s.ClientTrustLine)
 	fmt.Println("\n# Then connect with a signed cert (no key setup):")
 	fmt.Println("  cerebro ssh --ca <user>@<machine>")
+}
+
+// caKnownHostsFile writes the CA's @cert-authority line to ~/.cerebro/known_hosts
+// (so ssh verifies host certificates) and returns the path — or "" if the CA is off.
+func caKnownHostsFile(cfg config) string {
+	b := apiGet(cfg, "/api/fabric/ca")
+	var s struct {
+		Enabled         bool   `json:"enabled"`
+		ClientTrustLine string `json:"clientTrustLine"`
+	}
+	if json.Unmarshal(b, &s) != nil || !s.Enabled || s.ClientTrustLine == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".cerebro")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "known_hosts")
+	if err := ensureLineInFile(path, s.ClientTrustLine); err != nil {
+		return ""
+	}
+	return path
+}
+
+// ensureLineInFile appends line to path (creating it) unless already present.
+func ensureLineInFile(path, line string) error {
+	existing, _ := os.ReadFile(path)
+	for _, l := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(l) == strings.TrimSpace(line) {
+			return nil
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(line + "\n")
+	return err
 }
 
 // issueCert generates an ephemeral keypair, gets it signed by the Cerebro CA for
