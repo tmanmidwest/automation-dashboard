@@ -1690,8 +1690,10 @@ export function VncViewer({
           {error}
         </div>
       )}
-      <div className="flex-1 relative overflow-auto grid place-items-center">
-        <div ref={screenRef} className="grid place-items-center" />
+      <div className="flex-1 relative overflow-hidden">
+        {/* The RFB canvas mounts here — must fill the pane so noVNC's scaleViewport
+            has real dimensions to scale into (an unsized container renders black). */}
+        <div ref={screenRef} className="absolute inset-0 overflow-auto grid place-items-center" />
         {credTypes && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
             <form
