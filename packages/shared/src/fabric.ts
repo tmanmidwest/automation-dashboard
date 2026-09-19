@@ -258,6 +258,37 @@ export interface FabricVncConnectInput {
   password?: string;
 }
 
+// ---------------------------------------------------------------------------
+// SFTP file browser (Phase: file transfer). Rides the same SSH connection over
+// the tunnel — a stateful session is opened once (open), then browsed/transferred
+// by its id. Works for any agent with an SSH target (Linux, macOS Remote Login,
+// Windows OpenSSH). See docs/fabric-remote-access.md.
+// ---------------------------------------------------------------------------
+
+/** One entry in a remote directory listing. */
+export interface FabricSftpEntry {
+  name: string;
+  /** 'dir' | 'file' | 'link' | 'other'. Symlinks are reported as 'link'. */
+  type: 'dir' | 'file' | 'link' | 'other';
+  size: number;
+  /** Modified time (epoch ms). */
+  mtime: number;
+  /** POSIX mode bits (for a `rwxr-xr-x`-style display). */
+  mode: number;
+}
+
+/** A listing of one directory: the resolved absolute path + its entries. */
+export interface FabricSftpListing {
+  path: string;
+  entries: FabricSftpEntry[];
+}
+
+/** Opening an SFTP session returns its id and the initial (home) directory listing. */
+export interface FabricSftpOpenResult {
+  sessionId: string;
+  listing: FabricSftpListing;
+}
+
 /** Result of a tunnel reachability probe (the Phase-2 end-to-end acceptance check). */
 export interface FabricProbeResult {
   ok: boolean;

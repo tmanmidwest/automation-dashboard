@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { Client } from 'ssh2';
 import type { WebSocket } from 'ws';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { TunnelSocket } from './tunnel-socket';
+import { checkHostKey } from './fabric-hostkey';
 
 /** Everything needed to establish one interactive session, held for one use. */
 export interface FabricSessionDescriptor {
@@ -204,8 +205,7 @@ export class FabricSessionService {
         // Trust-on-first-use host-key pinning: learn the key on the first
         // connection, then refuse a changed key (possible MITM).
         hostVerifier: (key: Buffer, verify: (ok: boolean) => void) => {
-          const fp = createHash('sha256').update(key).digest('base64');
-          void this.verifyHostKey(desc, fp, ws).then(verify);
+          void this.verifyHostKey(desc, key, ws).then(verify);
         },
       });
     } catch (e) {
@@ -286,43 +286,14 @@ export class FabricSessionService {
   }
 
   /**
-   * TOFU host-key check: learn the fingerprint on first connect, accept a match,
-   * refuse a mismatch. A rebuilt host needs its pinned key cleared in Cerebro.
+   * TOFU host-key check (shared with the SFTP browser via {@link checkHostKey}):
+   * learn on first connect, accept a match, refuse a mismatch. On refusal, also
+   * write the reason into the browser terminal.
    */
-  private async verifyHostKey(desc: FabricSessionDescriptor, fp: string, ws: WebSocket): Promise<boolean> {
-    const target = await this.prisma.agentTarget
-      .findUnique({ where: { id: desc.targetId }, select: { hostKey: true } })
-      .catch(() => null);
-    const stored = target?.hostKey ?? null;
-
-    if (!stored) {
-      await this.prisma.agentTarget
-        .update({ where: { id: desc.targetId }, data: { hostKey: fp } })
-        .catch(() => undefined);
-      await this.audit.record({
-        actorId: desc.userId,
-        actorEmail: desc.userEmail,
-        action: 'fabric.hostkey.pinned',
-        target: desc.agentId,
-        meta: { targetId: desc.targetId, fingerprint: fp },
-      });
-      return true;
-    }
-    if (stored === fp) return true;
-
-    await this.audit.record({
-      actorId: desc.userId,
-      actorEmail: desc.userEmail,
-      action: 'fabric.hostkey.mismatch',
-      target: desc.agentId,
-      meta: { targetId: desc.targetId, expected: stored, got: fp },
-    });
-    this.term(
-      ws,
-      'Host key mismatch — refusing to connect (possible MITM, or the host was rebuilt). ' +
-        'If the host is legitimately new, reset its pinned key in Cerebro and reconnect.',
-    );
-    return false;
+  private async verifyHostKey(desc: FabricSessionDescriptor, key: Buffer, ws: WebSocket): Promise<boolean> {
+    const { ok, reason } = await checkHostKey(this.prisma, this.audit, desc, key);
+    if (!ok && reason) this.term(ws, reason);
+    return ok;
   }
 
   /** Write a red status line into the browser terminal (text WS frame). */

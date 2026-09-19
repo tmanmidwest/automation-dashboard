@@ -7,6 +7,7 @@ import { FabricService } from './fabric.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
+import { FabricSftpService } from './fabric-sftp.service';
 import { FabricGuacService } from './fabric-guac.service';
 
 /**
@@ -18,7 +19,7 @@ import { FabricGuacService } from './fabric-guac.service';
 @Module({
   imports: [PrismaModule, LoggingModule, NotificationsModule],
   controllers: [FabricController],
-  providers: [FabricService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService],
+  providers: [FabricService, FabricSftpService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService],
   exports: [AgentRegistryService, FabricSessionService, FabricGuacService],
 })
 export class FabricModule {}

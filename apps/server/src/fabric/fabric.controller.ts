@@ -9,15 +9,17 @@ import {
   Param,
   Post,
   Query,
+  Req,
   Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { IsArray, IsBoolean, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 import { CurrentUser, Public, RequirePermissions, SessionOnly } from '../auth/decorators';
 import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
+import { FabricSftpService } from './fabric-sftp.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
 
@@ -145,6 +147,32 @@ class RdpConnectDto {
   disableAudio?: boolean;
 }
 
+class SftpPathDto {
+  @IsString()
+  @MaxLength(4096)
+  path!: string;
+}
+
+class SftpRenameDto {
+  @IsString()
+  @MaxLength(4096)
+  from!: string;
+
+  @IsString()
+  @MaxLength(4096)
+  to!: string;
+}
+
+class SftpRemoveDto {
+  @IsString()
+  @MaxLength(4096)
+  path!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  dir?: boolean;
+}
+
 /** Where prebuilt agent binaries are served from (populated by CI / a release step). */
 const AGENT_DIST_DIR = process.env.FABRIC_AGENT_DIST_DIR || '/app/agent-dist';
 const AGENT_ARTIFACTS: Record<string, { file: string; contentType: string; download: string }> = {
@@ -169,6 +197,7 @@ const CLI_ARTIFACTS: Record<string, { file: string; download: string }> = {
 export class FabricController {
   constructor(
     private readonly fabric: FabricService,
+    private readonly sftp: FabricSftpService,
     private readonly enrollment: FabricEnrollmentService,
   ) {}
 
@@ -274,6 +303,98 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     return this.fabric.openVncSession(id, targetId, user);
+  }
+
+  // --- SFTP file browser (over the SSH target) -------------------------------
+
+  /** Open an SFTP session to a host's SSH target; returns its id + home listing. */
+  @Post('agents/:id/targets/:targetId/sftp/open')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openSftp(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @Body() body: SshConnectDto,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.sftp.open(id, targetId, body, user);
+  }
+
+  @Post('sftp/:sessionId/ls')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  sftpList(@Param('sessionId') sessionId: string, @Body() body: SftpPathDto, @CurrentUser() user: SessionUser) {
+    return this.sftp.list(sessionId, user, body.path);
+  }
+
+  @Post('sftp/:sessionId/mkdir')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  async sftpMkdir(@Param('sessionId') sessionId: string, @Body() body: SftpPathDto, @CurrentUser() user: SessionUser) {
+    await this.sftp.mkdir(sessionId, user, body.path);
+    return { ok: true };
+  }
+
+  @Post('sftp/:sessionId/rename')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  async sftpRename(@Param('sessionId') sessionId: string, @Body() body: SftpRenameDto, @CurrentUser() user: SessionUser) {
+    await this.sftp.rename(sessionId, user, body.from, body.to);
+    return { ok: true };
+  }
+
+  @Post('sftp/:sessionId/rm')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  async sftpRemove(@Param('sessionId') sessionId: string, @Body() body: SftpRemoveDto, @CurrentUser() user: SessionUser) {
+    await this.sftp.remove(sessionId, user, body.path, !!body.dir);
+    return { ok: true };
+  }
+
+  /** Stream a remote file down to the browser. */
+  @Get('sftp/:sessionId/download')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  async sftpDownload(
+    @Param('sessionId') sessionId: string,
+    @Query('path') path: string,
+    @CurrentUser() user: SessionUser,
+    @Res() res: Response,
+  ) {
+    if (!path) throw new BadRequestException('A path is required.');
+    const { stream, name, size } = await this.sftp.download(sessionId, user, path);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(size));
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(name)}"`);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(502);
+      res.end();
+    });
+    stream.pipe(res);
+  }
+
+  /** Stream an uploaded file (raw request body) into a remote directory. */
+  @Post('sftp/:sessionId/upload')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  async sftpUpload(
+    @Param('sessionId') sessionId: string,
+    @Query('dir') dir: string,
+    @Query('name') name: string,
+    @CurrentUser() user: SessionUser,
+    @Req() req: Request,
+  ) {
+    if (!dir || !name) throw new BadRequestException('A target directory and filename are required.');
+    await this.sftp.upload(sessionId, user, dir, name, req);
+    return { ok: true };
+  }
+
+  @Post('sftp/:sessionId/close')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  sftpClose(@Param('sessionId') sessionId: string, @CurrentUser() user: SessionUser) {
+    this.sftp.close(sessionId, user);
+    return { ok: true };
   }
 
   /** Forget a target's vault-stored credential (Phase 3.5). */

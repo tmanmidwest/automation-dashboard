@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
+  FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -11,6 +12,7 @@ import RFB from '@novnc/novnc';
 import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
   FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket, FabricSessionDto,
+  FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -125,6 +127,7 @@ export function Fabric() {
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
+  const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
   const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
@@ -400,6 +403,22 @@ export function Fabric() {
                           </p>
                         );
                       })}
+                      {canConnect && (() => {
+                        const ssh = a.targets.find((t) => t.kind === 'ssh');
+                        if (!ssh) return null;
+                        const online = a.status === 'online';
+                        return (
+                          <button
+                            type="button"
+                            disabled={!online}
+                            onClick={online ? () => setFilesFor({ agent: a, target: ssh }) : undefined}
+                            title={online ? 'Browse & transfer files over SFTP' : 'Agent offline'}
+                            className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 text-[0.7rem] ${online ? 'hover:bg-muted cursor-pointer' : 'opacity-40 cursor-default'}`}
+                          >
+                            <FolderOpen className="h-3 w-3" /> Files
+                          </button>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -460,6 +479,14 @@ export function Fabric() {
             launchViewer('ssh', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win);
             setConnectFor(null);
           }}
+        />
+      )}
+
+      {filesFor && (
+        <FilesBrowser
+          agent={filesFor.agent}
+          target={filesFor.target}
+          onClose={() => setFilesFor(null)}
         />
       )}
 
@@ -1729,6 +1756,369 @@ export function VncViewer({
             </form>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── SFTP file browser ────────────────────────────────────────────────────────
+
+function joinPath(dir: string, name: string): string {
+  if (dir === '/') return `/${name}`;
+  return `${dir.replace(/\/+$/, '')}/${name}`;
+}
+
+function parentPath(p: string): string {
+  const s = p.replace(/\/+$/, '');
+  const i = s.lastIndexOf('/');
+  return i <= 0 ? '/' : s.slice(0, i);
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+/**
+ * A file browser + transfer panel for a host, over SFTP (the same SSH connection
+ * the terminal uses, tunnelled through the agent). Step 1 authenticates (reusing
+ * the credential picker); step 2 browses/uploads/downloads.
+ */
+function FilesBrowser({
+  agent,
+  target,
+  onClose,
+}: {
+  agent: FabricAgentDto;
+  target: FabricTargetDto;
+  onClose: () => void;
+}) {
+  const ownKey = `fabric/${agent.id}/${target.id}`;
+  const [phase, setPhase] = useState<'connect' | 'browsing'>('connect');
+  // connect state (mirrors SshConnectDialog)
+  const [credOptions, setCredOptions] = useState<{ key: string; label: string }[]>([]);
+  const [credSource, setCredSource] = useState(target.hasCredential ? ownKey : 'manual');
+  const [username, setUsername] = useState('root');
+  const [method, setMethod] = useState<'password' | 'key'>('password');
+  const [password, setPassword] = useState('');
+  const [privateKey, setPrivateKey] = useState('');
+  const [passphrase, setPassphrase] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const isManual = credSource === 'manual';
+  // browse state
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [listing, setListing] = useState<FabricSftpListing | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    api
+      .get<{ key: string; label: string }[]>('/api/fabric/credentials?kind=ssh')
+      .then((list) => setCredOptions(list.filter((c) => c.key !== ownKey)))
+      .catch(() => setCredOptions([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Best-effort close the SFTP session when the panel unmounts.
+  const sessionRef = useRef<string | null>(null);
+  useEffect(() => { sessionRef.current = sessionId; }, [sessionId]);
+  useEffect(
+    () => () => {
+      const id = sessionRef.current;
+      if (id) api.post(`/api/fabric/sftp/${id}/close`).catch(() => {});
+    },
+    [],
+  );
+
+  const connect = async () => {
+    setErr(null);
+    let body: FabricSshConnectInput;
+    if (!isManual) {
+      body = credSource === ownKey ? { useSaved: true } : { secretRef: credSource };
+    } else {
+      if (!username.trim()) return setErr('A username is required.');
+      if (method === 'password' ? !password : !privateKey.trim()) {
+        return setErr(method === 'password' ? 'Enter a password.' : 'Paste a private key.');
+      }
+      body =
+        method === 'password'
+          ? { username: username.trim(), password }
+          : { username: username.trim(), privateKey, passphrase: passphrase || undefined };
+    }
+    setBusy(true);
+    try {
+      const res = await api.post<FabricSftpOpenResult>(
+        `/api/fabric/agents/${agent.id}/targets/${target.id}/sftp/open`,
+        body,
+      );
+      setSessionId(res.sessionId);
+      setListing(res.listing);
+      setPhase('browsing');
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to open the file session.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const navigate = async (path: string) => {
+    if (!sessionId) return;
+    setLoadingList(true);
+    setErr(null);
+    try {
+      setListing(await api.post<FabricSftpListing>(`/api/fabric/sftp/${sessionId}/ls`, { path }));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to list directory.');
+    } finally {
+      setLoadingList(false);
+    }
+  };
+
+  const openEntry = (e: FabricSftpEntry) => {
+    if (!listing) return;
+    if (e.type === 'dir' || e.type === 'link') navigate(joinPath(listing.path, e.name));
+  };
+
+  const download = (e: FabricSftpEntry) => {
+    if (!listing || !sessionId) return;
+    const url = `/api/fabric/sftp/${sessionId}/download?path=${encodeURIComponent(joinPath(listing.path, e.name))}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const doUpload = async (files: FileList | null) => {
+    if (!files || !files.length || !listing || !sessionId) return;
+    setUploading(true);
+    setErr(null);
+    try {
+      for (const f of Array.from(files)) {
+        const res = await fetch(
+          `/api/fabric/sftp/${sessionId}/upload?dir=${encodeURIComponent(listing.path)}&name=${encodeURIComponent(f.name)}`,
+          { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' }, body: f },
+        );
+        if (!res.ok) {
+          const t = await res.text().catch(() => '');
+          throw new Error(t ? (JSON.parse(t).message ?? res.statusText) : res.statusText);
+        }
+      }
+      await navigate(listing.path);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Upload failed.');
+    } finally {
+      setUploading(false);
+      if (fileInput.current) fileInput.current.value = '';
+    }
+  };
+
+  const mkdir = async () => {
+    if (!listing || !sessionId) return;
+    const name = window.prompt('New folder name:');
+    if (!name?.trim()) return;
+    try {
+      await api.post(`/api/fabric/sftp/${sessionId}/mkdir`, { path: joinPath(listing.path, name.trim()) });
+      await navigate(listing.path);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to create folder.');
+    }
+  };
+
+  const rename = async (e: FabricSftpEntry) => {
+    if (!listing || !sessionId) return;
+    const next = window.prompt(`Rename "${e.name}" to:`, e.name);
+    if (!next?.trim() || next === e.name) return;
+    try {
+      await api.post(`/api/fabric/sftp/${sessionId}/rename`, {
+        from: joinPath(listing.path, e.name),
+        to: joinPath(listing.path, next.trim()),
+      });
+      await navigate(listing.path);
+    } catch (err2) {
+      setErr(err2 instanceof ApiError ? err2.message : 'Rename failed.');
+    }
+  };
+
+  const remove = async (e: FabricSftpEntry) => {
+    if (!listing || !sessionId) return;
+    if (!confirm(`Delete "${e.name}"? This cannot be undone.`)) return;
+    try {
+      await api.post(`/api/fabric/sftp/${sessionId}/rm`, {
+        path: joinPath(listing.path, e.name),
+        dir: e.type === 'dir',
+      });
+      await navigate(listing.path);
+    } catch (err2) {
+      setErr(err2 instanceof ApiError ? err2.message : 'Delete failed.');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex flex-col">
+      <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
+        <span className="text-sm inline-flex items-center gap-2 min-w-0">
+          <FolderOpen className="h-4 w-4 text-primary shrink-0" />
+          <span className="text-muted-foreground">Files ·</span>
+          <span className="truncate">{agent.name}</span>
+        </span>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          <X className="h-4 w-4 mr-1" /> Close
+        </Button>
+      </div>
+
+      <div className="flex-1 overflow-auto p-4">
+        <div className="mx-auto max-w-3xl">
+          {err && (
+            <div className="mb-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">
+              {err}
+            </div>
+          )}
+
+          {phase === 'connect' ? (
+            <Card>
+              <CardContent className="p-5 space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  Connect over SFTP to <code className="text-foreground/80">{target.host}:{target.port}</code> to browse and transfer files.
+                </p>
+                <div>
+                  <Label>Credential</Label>
+                  <select className={selectCls} value={credSource} onChange={(e) => setCredSource(e.target.value)}>
+                    {target.hasCredential && <option value={ownKey}>Saved for this machine</option>}
+                    {credOptions.map((c) => (
+                      <option key={c.key} value={c.key}>{c.label}</option>
+                    ))}
+                    <option value="manual">Enter manually…</option>
+                  </select>
+                </div>
+                {isManual && (
+                  <>
+                    <div>
+                      <Label>Username</Label>
+                      <Input value={username} onChange={(e) => setUsername(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>Authentication</Label>
+                      <select className={selectCls} value={method} onChange={(e) => setMethod(e.target.value as 'password' | 'key')}>
+                        <option value="password">Password</option>
+                        <option value="key">Private key</option>
+                      </select>
+                    </div>
+                    {method === 'password' ? (
+                      <div>
+                        <Label>Password</Label>
+                        <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <Label>Private key</Label>
+                          <textarea
+                            className="mt-1 w-full h-28 rounded-md border border-input bg-background/60 px-2 py-1.5 text-xs font-mono"
+                            value={privateKey}
+                            onChange={(e) => setPrivateKey(e.target.value)}
+                            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                          />
+                        </div>
+                        <div>
+                          <Label>Passphrase (optional)</Label>
+                          <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+                  <Button onClick={connect} disabled={busy}>
+                    {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <FolderOpen className="h-4 w-4 mr-1" />}
+                    Open files
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            <div>
+              {/* Toolbar */}
+              <div className="flex items-center gap-2 mb-3">
+                <Button variant="outline" size="icon" className="h-8 w-8" title="Up a level"
+                  onClick={() => listing && navigate(parentPath(listing.path))}
+                  disabled={loadingList || listing?.path === '/'}>
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8" title="Refresh"
+                  onClick={() => listing && navigate(listing.path)} disabled={loadingList}>
+                  {loadingList ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                </Button>
+                <code className="flex-1 min-w-0 truncate text-xs bg-muted/40 rounded px-2 py-1.5 border border-border/60">
+                  {listing?.path}
+                </code>
+                <Button variant="outline" size="sm" onClick={mkdir} disabled={loadingList}>
+                  <FolderPlus className="h-4 w-4 mr-1" /> New folder
+                </Button>
+                <Button size="sm" onClick={() => fileInput.current?.click()} disabled={uploading || loadingList}>
+                  {uploading ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Upload className="h-4 w-4 mr-1" />}
+                  Upload
+                </Button>
+                <input ref={fileInput} type="file" multiple className="hidden" onChange={(e) => doUpload(e.target.files)} />
+              </div>
+
+              <div className="rounded-md border border-border/60 divide-y divide-border/60 bg-card/40">
+                {listing && listing.entries.length === 0 && (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">Empty directory</div>
+                )}
+                {listing?.entries.map((e) => {
+                  const navigable = e.type === 'dir' || e.type === 'link';
+                  return (
+                    <div key={e.name} className="flex items-center gap-3 px-3 py-1.5 text-sm group">
+                      <button
+                        type="button"
+                        className={`flex items-center gap-2 min-w-0 flex-1 text-left ${navigable ? 'cursor-pointer hover:text-primary' : 'cursor-default'}`}
+                        onClick={() => navigable && openEntry(e)}
+                        disabled={!navigable}
+                      >
+                        {e.type === 'dir' ? (
+                          <Folder className="h-4 w-4 shrink-0 text-primary" />
+                        ) : e.type === 'link' ? (
+                          <FileSymlink className="h-4 w-4 shrink-0 text-accent" />
+                        ) : (
+                          <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="truncate">{e.name}</span>
+                      </button>
+                      <span className="text-xs text-muted-foreground shrink-0 w-20 text-right hidden sm:block">
+                        {e.type === 'file' ? fmtSize(e.size) : ''}
+                      </span>
+                      <span className="text-xs text-muted-foreground shrink-0 w-36 text-right hidden md:block">
+                        {e.mtime ? new Date(e.mtime).toLocaleString() : ''}
+                      </span>
+                      <span className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {e.type === 'file' && (
+                          <button type="button" title="Download" className="p-1 hover:text-primary" onClick={() => download(e)}>
+                            <Download className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button type="button" title="Rename" className="p-1 hover:text-primary" onClick={() => rename(e)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button type="button" title="Delete" className="p-1 hover:text-destructive" onClick={() => remove(e)}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

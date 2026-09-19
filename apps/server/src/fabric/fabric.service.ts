@@ -93,27 +93,7 @@ export class FabricService implements OnModuleInit {
     if (target.kind !== 'ssh') throw new BadRequestException('Only SSH sessions are supported yet (Phase 3).');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
 
-    // Credential source: a specific vault credential (secretRef), the target's
-    // own saved credential (useSaved), or manually-entered fields.
-    const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
-    let creds: SshCredential;
-    if (ref) {
-      creds = (await this.revealCredential(ref, 'ssh')) as SshCredential;
-    } else {
-      if (!input.username?.trim()) throw new BadRequestException('A username is required.');
-      if (!input.password && !input.privateKey) throw new BadRequestException('Provide a password or a private key.');
-      creds = {
-        username: input.username.trim(),
-        password: input.password,
-        privateKey: input.privateKey,
-        passphrase: input.passphrase,
-      };
-      if (input.save) {
-        this.requireManage(user);
-        if (input.saveAs?.trim()) await this.saveNamedCredential('ssh', input.saveAs.trim(), creds, user);
-        else await this.saveTargetCredential(target, 'ssh', creds, user);
-      }
-    }
+    const creds = await this.resolveSshCreds(target, input, user);
 
     const token = this.sessions.issue({
       agentId,
@@ -216,6 +196,36 @@ export class FabricService implements OnModuleInit {
       target: agentId,
       meta: { targetId },
     });
+  }
+
+  /**
+   * Resolve SSH credentials for a target from the connect input — a specific vault
+   * credential (secretRef), the target's own saved credential (useSaved), or
+   * manually-entered fields (optionally saved to the vault). Shared by the SSH
+   * terminal and the SFTP file browser.
+   */
+  async resolveSshCreds(
+    target: AgentTarget,
+    input: FabricSshConnectInput,
+    user: SessionUser,
+  ): Promise<SshCredential> {
+    const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
+    if (ref) return (await this.revealCredential(ref, 'ssh')) as SshCredential;
+
+    if (!input.username?.trim()) throw new BadRequestException('A username is required.');
+    if (!input.password && !input.privateKey) throw new BadRequestException('Provide a password or a private key.');
+    const creds: SshCredential = {
+      username: input.username.trim(),
+      password: input.password,
+      privateKey: input.privateKey,
+      passphrase: input.passphrase,
+    };
+    if (input.save) {
+      this.requireManage(user);
+      if (input.saveAs?.trim()) await this.saveNamedCredential('ssh', input.saveAs.trim(), creds, user);
+      else await this.saveTargetCredential(target, 'ssh', creds, user);
+    }
+    return creds;
   }
 
   private requireManage(user: SessionUser): void {
