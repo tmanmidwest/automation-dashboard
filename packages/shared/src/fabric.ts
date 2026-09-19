@@ -99,6 +99,17 @@ export interface FabricHeartbeatFrame {
   t: 'heartbeat';
 }
 
+/**
+ * agent → broker: the set of locally-reachable targets changed since `hello`
+ * (e.g. the operator turned on Screen Sharing / Remote Login after the agent
+ * connected). The broker reconciles these exactly like a hello's targets, so a
+ * newly-enabled service appears without restarting the agent.
+ */
+export interface FabricTargetsFrame {
+  t: 'targets';
+  targets: Array<{ kind: FabricTargetKind; host: string; port: number; label?: string }>;
+}
+
 /** broker → agent: acknowledges `hello`, echoes the resolved agent id. */
 export interface FabricHelloAckFrame {
   t: 'hello-ack';
@@ -152,6 +163,7 @@ export interface FabricCloseStreamFrame {
 export type FabricAgentToBroker =
   | FabricHelloFrame
   | FabricHeartbeatFrame
+  | FabricTargetsFrame
   | FabricStreamOpenedFrame
   | FabricStreamErrorFrame
   | FabricCloseStreamFrame;
@@ -169,7 +181,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.3.0';
+export const FABRIC_AGENT_VERSION = '0.3.1';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

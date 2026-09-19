@@ -158,6 +158,11 @@ export class AgentRegistryService {
       case 'heartbeat':
         this.onHeartbeat(agentId);
         break;
+      case 'targets':
+        // The agent re-probed its ports and the reachable set changed — reconcile
+        // the same way as hello, so a newly-enabled service appears live.
+        await this.syncTargets(agentId, frame.targets ?? []);
+        break;
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':

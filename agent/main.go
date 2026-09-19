@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,10 +31,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.0"
+const agentVersion = "0.3.1"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
+
+// How often to re-probe local ports so a service enabled after connect (e.g. the
+// operator turning on Screen Sharing) is announced without restarting the agent.
+const targetProbeInterval = 60 * time.Second
 
 type config struct {
 	URL      string
@@ -145,6 +150,9 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
+	probe := time.NewTicker(targetProbeInterval)
+	defer probe.Stop()
+	lastTargets := targetsSig(targets)
 	for {
 		select {
 		case <-stop:
@@ -157,8 +165,28 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 			return err
 		case <-ticker.C:
 			sess.writeJSON(map[string]string{"t": "heartbeat"})
+		case <-probe.C:
+			// Re-announce only when the reachable set actually changed. The allow-list
+			// already covers loopback 22/3389/5900 (the ports detectTargets probes), so
+			// no allow-list update is needed for the broker to dial a new target.
+			cur := detectTargets()
+			if sig := targetsSig(cur); sig != lastTargets {
+				lastTargets = sig
+				log.Printf("local targets changed — re-announcing (%s)", sig)
+				sess.writeJSON(map[string]any{"t": "targets", "targets": cur})
+			}
 		}
 	}
+}
+
+// targetsSig is an order-independent signature of a target set, for change detection.
+func targetsSig(ts []target) string {
+	keys := make([]string, 0, len(ts))
+	for _, t := range ts {
+		keys = append(keys, fmt.Sprintf("%s/%s:%d", t.Kind, t.Host, t.Port))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // --- Tunnel multiplexer ----------------------------------------------------

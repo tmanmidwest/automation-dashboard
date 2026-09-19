@@ -1553,8 +1553,17 @@ export function VncViewer({
   onClose: () => void;
 }) {
   const screenRef = useRef<HTMLDivElement>(null);
+  const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<string | null>(null);
+  // Which credentials the server asked for (null = no prompt showing). macOS
+  // Screen Sharing (Apple RA2) needs username+password; legacy VNC just password.
+  const [credTypes, setCredTypes] = useState<string[] | null>(null);
+  const [credForm, setCredForm] = useState<{ username: string; password: string; target: string }>({
+    username: '',
+    password: '',
+    target: '',
+  });
 
   useEffect(() => {
     if (!screenRef.current) return;
@@ -1563,40 +1572,36 @@ export function VncViewer({
     let rfb: RFB | null = null;
     try {
       rfb = new RFB(screenRef.current, url);
+      rfbRef.current = rfb;
       rfb.scaleViewport = true;
       rfb.resizeSession = false;
-      rfb.addEventListener('connect', () => setStatus('connected'));
+      rfb.addEventListener('connect', () => {
+        setStatus('connected');
+        setCredTypes(null);
+      });
       rfb.addEventListener('disconnect', (e) => {
         setStatus('disconnected');
         const d = (e as CustomEvent).detail;
         if (d && !d.clean) setError('The screen-sharing connection was closed.');
       });
       rfb.addEventListener('credentialsrequired', (e) => {
-        // macOS Screen Sharing authenticates with Apple's RA2 (security type 30),
-        // which needs the Mac ACCOUNT username + password — not a VNC-only password.
-        // Older/legacy VNC servers ask for just a password. Honour whichever the
-        // server requested (detail.types) or noVNC re-prompts until every field is set.
+        // Show an inline overlay for exactly the fields the server requested — noVNC
+        // re-fires this until every requested credential is supplied.
         const types: string[] = (e as CustomEvent).detail?.types ?? ['password'];
-        const creds: { username?: string; password?: string; target?: string } = {};
-        if (types.includes('username')) {
-          creds.username = window.prompt('macOS account username (the account you use to log in to that Mac):') || '';
-        }
-        if (types.includes('password')) {
-          creds.password = window.prompt('Password:') || '';
-        }
-        if (types.includes('target')) {
-          creds.target = window.prompt('Target:') || '';
-        }
-        rfb?.sendCredentials(creds);
+        setError(null);
+        setCredForm({ username: '', password: '', target: '' });
+        setCredTypes(types);
       });
       rfb.addEventListener('securityfailure', (e) => {
         const d = (e as CustomEvent).detail;
         setError(`Authentication failed${d?.reason ? `: ${d.reason}` : ''}.`);
+        setCredTypes(null);
       });
     } catch {
       setError('Failed to start the screen-sharing session.');
     }
     return () => {
+      rfbRef.current = null;
       try {
         rfb?.disconnect();
       } catch {
@@ -1605,6 +1610,20 @@ export function VncViewer({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.token]);
+
+  function submitCredentials() {
+    if (!credTypes) return;
+    const creds: { username?: string; password?: string; target?: string } = {};
+    if (credTypes.includes('username')) creds.username = credForm.username;
+    if (credTypes.includes('password')) creds.password = credForm.password;
+    if (credTypes.includes('target')) creds.target = credForm.target;
+    setCredTypes(null);
+    try {
+      rfbRef.current?.sendCredentials(creds);
+    } catch {
+      setError('Failed to send credentials.');
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -1644,7 +1663,73 @@ export function VncViewer({
           {error}
         </div>
       )}
-      <div ref={screenRef} className="flex-1 relative overflow-auto grid place-items-center" />
+      <div className="flex-1 relative overflow-auto grid place-items-center">
+        <div ref={screenRef} className="grid place-items-center" />
+        {credTypes && (
+          <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                submitCredentials();
+              }}
+              className="w-[22rem] max-w-[90vw] rounded-lg border border-border bg-sidebar p-5 shadow-xl space-y-4"
+            >
+              <div className="flex items-center gap-2 text-sm">
+                <Monitor className="h-4 w-4 text-primary" />
+                <span className="font-medium">Authenticate to {title}</span>
+              </div>
+              {credTypes.includes('username') && (
+                <p className="text-xs text-muted-foreground -mt-1">
+                  Use the macOS account you log in to that Mac with (it must be allowed in Screen Sharing).
+                </p>
+              )}
+              {credTypes.includes('username') && (
+                <div>
+                  <Label>Username</Label>
+                  <Input
+                    autoFocus
+                    autoComplete="username"
+                    placeholder="e.g. ember"
+                    value={credForm.username}
+                    onChange={(e) => setCredForm((f) => ({ ...f, username: e.target.value }))}
+                  />
+                </div>
+              )}
+              {credTypes.includes('password') && (
+                <div>
+                  <Label>Password</Label>
+                  <Input
+                    type="password"
+                    autoComplete="current-password"
+                    autoFocus={!credTypes.includes('username')}
+                    placeholder="••••••••"
+                    value={credForm.password}
+                    onChange={(e) => setCredForm((f) => ({ ...f, password: e.target.value }))}
+                  />
+                </div>
+              )}
+              {credTypes.includes('target') && (
+                <div>
+                  <Label>Target</Label>
+                  <Input
+                    placeholder="Target"
+                    value={credForm.target}
+                    onChange={(e) => setCredForm((f) => ({ ...f, target: e.target.value }))}
+                  />
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <Button type="button" variant="outline" size="sm" onClick={onClose}>
+                  Cancel
+                </Button>
+                <Button type="submit" size="sm">
+                  Connect
+                </Button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
