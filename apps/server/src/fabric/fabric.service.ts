@@ -214,6 +214,21 @@ export class FabricService implements OnModuleInit {
     return { token, wsPath: SESSION_WS_PATH, username: creds?.username, password: creds?.password };
   }
 
+  /** Push the SSH CA public key to an online agent to install into its sshd trust. */
+  async installCaOnAgent(agentId: string, caPublicKey: string, user: SessionUser): Promise<{ online: boolean }> {
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    const online = this.registry.requestInstallCa(agentId, caPublicKey);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.ca.host_trust_requested',
+      target: agentId,
+      meta: { name: agent.name, online },
+    });
+    return { online };
+  }
+
   /** Clear a target's pinned SSH host key (e.g. after the host was rebuilt). */
   async clearHostKey(agentId: string, targetId: string, user: SessionUser): Promise<void> {
     const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });

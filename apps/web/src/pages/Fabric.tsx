@@ -220,6 +220,17 @@ export function Fabric() {
     }
   };
 
+  const trustCa = async (a: FabricAgentDto) => {
+    if (!confirm(`Install the Cerebro SSH CA trust on "${a.name}"? The agent edits sshd_config (validated before reload).`)) return;
+    try {
+      await api.post(`/api/fabric/agents/${a.id}/trust-ca`);
+      setErr(null);
+      alert(`Requested — "${a.name}" is installing the CA trust. Check the Ship's Log for the result.`);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to request CA trust.');
+    }
+  };
+
   const remove = async (a: FabricAgentDto) => {
     if (!confirm(`Delete "${a.name}" and its history? This cannot be undone.`)) return;
     try {
@@ -326,6 +337,11 @@ export function Fabric() {
                     </div>
                     {canManage && (
                       <div className="flex items-center gap-1 shrink-0">
+                        {a.status === 'online' && (
+                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Install SSH CA trust on this host" onClick={() => trustCa(a)}>
+                            <ShieldCheck className="h-4 w-4" />
+                          </Button>
+                        )}
                         {a.status !== 'revoked' && (
                           <Button variant="ghost" size="icon" className="h-8 w-8" title="Revoke" onClick={() => revoke(a)}>
                             <ShieldOff className="h-4 w-4" />

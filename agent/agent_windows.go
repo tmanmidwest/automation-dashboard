@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -11,6 +12,56 @@ import (
 
 	"golang.org/x/sys/windows/svc"
 )
+
+// configureSshdTrustCA installs the CA key + TrustedUserCAKeys into the Windows
+// OpenSSH config, validates with `sshd -t`, reverts on failure, then restarts sshd.
+func configureSshdTrustCA(caPub string) error {
+	if caPub == "" {
+		return fmt.Errorf("empty CA key")
+	}
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	sshDir := filepath.Join(programData, "ssh")
+	caFile := filepath.Join(sshDir, "cerebro_ca.pub")
+	sshdConfig := filepath.Join(sshDir, "sshd_config")
+	const trustLine = `TrustedUserCAKeys __PROGRAMDATA__\ssh\cerebro_ca.pub`
+
+	if err := os.WriteFile(caFile, []byte(caPub+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", caFile, err)
+	}
+	backup, err := os.ReadFile(sshdConfig)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", sshdConfig, err)
+	}
+	if _, err := ensureLineInFile(sshdConfig, trustLine); err != nil {
+		return fmt.Errorf("edit %s: %w", sshdConfig, err)
+	}
+	if bin := windowsSshdPath(); bin != "" {
+		if out, err := exec.Command(bin, "-t").CombinedOutput(); err != nil {
+			_ = os.WriteFile(sshdConfig, backup, 0o644) // revert
+			return fmt.Errorf("sshd config invalid, reverted: %v: %s", err, string(out))
+		}
+	}
+	_ = exec.Command("powershell", "-NoProfile", "-Command", "Restart-Service", "sshd").Run()
+	return nil
+}
+
+func windowsSshdPath() string {
+	for _, p := range []string{
+		filepath.Join(os.Getenv("SystemRoot"), "System32", "OpenSSH", "sshd.exe"),
+		`C:\Program Files\OpenSSH\sshd.exe`,
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("sshd"); err == nil {
+		return p
+	}
+	return ""
+}
 
 const serviceName = "CerebroAgent"
 

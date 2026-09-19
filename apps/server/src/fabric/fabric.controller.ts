@@ -392,6 +392,18 @@ export class FabricController {
     return this.ca.sign(body.publicKey, body.principal, user, body.machine);
   }
 
+  /** Have an online agent install + trust the CA in its sshd config (opt-in). */
+  @Post('agents/:id/trust-ca')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async trustCa(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    const pub = await this.ca.publicKey();
+    if (!pub) throw new BadRequestException('Enable the SSH CA first (Fabric → SSH CA).');
+    const r = await this.fabric.installCaOnAgent(id, pub, user);
+    if (!r.online) throw new BadRequestException('Agent is offline — connect it and try again.');
+    return { ok: true };
+  }
+
   // --- SFTP file browser (over the SSH target) -------------------------------
 
   /** Open an SFTP session to a host's SSH target; returns its id + home listing. */

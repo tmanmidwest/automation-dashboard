@@ -131,6 +131,24 @@ export interface FabricUninstallFrame {
   t: 'uninstall';
 }
 
+/**
+ * broker → agent: trust this SSH CA public key — install it and add a
+ * `TrustedUserCAKeys` line to sshd_config, validating with `sshd -t` before
+ * reloading. Opt-in per machine (operator-triggered). The agent replies with a
+ * {@link FabricCaResultFrame}.
+ */
+export interface FabricInstallCaFrame {
+  t: 'install-ca';
+  caPublicKey: string;
+}
+
+/** agent → broker: outcome of an `install-ca` request (for audit/UX). */
+export interface FabricCaResultFrame {
+  t: 'ca-result';
+  ok: boolean;
+  error?: string;
+}
+
 // --- Stream lifecycle (Phase 2). streamId is broker-allocated per connection. ---
 
 /** broker → agent: dial a local target and attach a new data stream. */
@@ -164,6 +182,7 @@ export type FabricAgentToBroker =
   | FabricHelloFrame
   | FabricHeartbeatFrame
   | FabricTargetsFrame
+  | FabricCaResultFrame
   | FabricStreamOpenedFrame
   | FabricStreamErrorFrame
   | FabricCloseStreamFrame;
@@ -172,7 +191,8 @@ export type FabricBrokerToAgent =
   | FabricPingFrame
   | FabricOpenStreamFrame
   | FabricCloseStreamFrame
-  | FabricUninstallFrame;
+  | FabricUninstallFrame
+  | FabricInstallCaFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */
@@ -181,7 +201,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.3.2';
+export const FABRIC_AGENT_VERSION = '0.3.3';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

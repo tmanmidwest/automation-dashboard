@@ -31,7 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.2"
+const agentVersion = "0.3.3"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -183,6 +183,42 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 	}
 }
 
+// installCA installs an SSH CA public key into the host's sshd trust (best-effort,
+// OS-specific), then reports the outcome back to the broker.
+func (s *session) installCA(caPub string) {
+	err := configureSshdTrustCA(strings.TrimSpace(caPub))
+	if err != nil {
+		log.Printf("install-ca failed: %v", err)
+		s.writeJSON(map[string]any{"t": "ca-result", "ok": false, "error": err.Error()})
+		return
+	}
+	log.Print("installed SSH CA into sshd trust")
+	s.writeJSON(map[string]any{"t": "ca-result", "ok": true})
+}
+
+// ensureLineInFile appends `line` to the file if an exact-line match is absent.
+// Returns whether it changed the file.
+func ensureLineInFile(path, line string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	for _, existing := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(existing) == line {
+			return false, nil
+		}
+	}
+	content := string(b)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += line + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // targetsSig is an order-independent signature of a target set, for change detection.
 func targetsSig(ts []target) string {
 	keys := make([]string, 0, len(ts))
@@ -274,6 +310,7 @@ type ctrlFrame struct {
 	Port               int    `json:"port"`
 	LatestAgentVersion string `json:"latestAgentVersion"`
 	HeartbeatMs        int64  `json:"heartbeatMs"`
+	CaPublicKey        string `json:"caPublicKey"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -289,6 +326,8 @@ func (s *session) onControl(msg []byte) {
 	case "uninstall":
 		log.Print("received uninstall command from Cerebro — removing this agent")
 		selfUninstall() // OS-specific; spawns a detached remover and exits
+	case "install-ca":
+		go s.installCA(c.CaPublicKey)
 	case "hello-ack":
 		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)

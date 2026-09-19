@@ -162,6 +162,13 @@ export class AgentRegistryService {
         // the same way as hello, so a newly-enabled service appears live.
         await this.syncTargets(agentId, frame.targets ?? []);
         break;
+      case 'ca-result':
+        await this.audit.record({
+          action: frame.ok ? 'fabric.ca.host_trusted' : 'fabric.ca.host_trust_failed',
+          target: agentId,
+          meta: frame.ok ? {} : { error: frame.error },
+        });
+        break;
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':
@@ -271,6 +278,15 @@ export class AgentRegistryService {
       /* socket gone */
     }
     setTimeout(() => this.disconnect(agentId, 4003, 'uninstalled'), 3000);
+    return true;
+  }
+
+  /** Push an SSH CA public key to an online agent to install into sshd trust.
+   *  Returns whether the agent was online to receive it. */
+  requestInstallCa(agentId: string, caPublicKey: string): boolean {
+    const entry = this.live.get(agentId);
+    if (!entry) return false;
+    this.send(agentId, { t: 'install-ca', caPublicKey });
     return true;
   }
 
