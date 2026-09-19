@@ -252,9 +252,33 @@ export interface FabricRdpConnectInput {
 /** RDP security modes guacd accepts. */
 export const FABRIC_RDP_SECURITY = ['any', 'nla', 'tls', 'rdp', 'vmconnect'] as const;
 
-/** Options for a VNC (macOS Screen Sharing) session. Password is optional — noVNC
- * prompts if the server requires one. */
+/**
+ * Credentials for a VNC (macOS Screen Sharing) session. Same credential model as
+ * SSH/RDP: use the target's saved vault credential, a specific vault credential,
+ * or supply one — optionally saving it. All are optional: with none, noVNC just
+ * prompts in-browser as before.
+ */
 export interface FabricVncConnectInput {
+  useSaved?: boolean;
+  /** Use a specific vault credential by key (this machine's, or a shared one). */
+  secretRef?: string;
+  /** macOS account username (Apple RA2). Omit for legacy password-only VNC. */
+  username?: string;
+  password?: string;
+  /** Persist the supplied credential to the vault (needs fabric:manage). */
+  save?: boolean;
+  /** When saving, a name creates/updates a reusable credential (see SSH input). */
+  saveAs?: string;
+}
+
+/**
+ * A VNC session ticket. Because noVNC performs the RFB/RA2 auth *in the browser*
+ * (the relay is a raw byte pipe), a resolved credential is returned here so the
+ * viewer can auto-fill it instead of prompting. Delivered once over the
+ * authenticated TLS response; held only in memory for the session.
+ */
+export interface FabricVncSessionTicket extends FabricSessionTicket {
+  username?: string;
   password?: string;
 }
 

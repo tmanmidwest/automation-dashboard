@@ -11,10 +11,17 @@ import type {
   FabricSessionTicket,
   FabricSshConnectInput,
   FabricTargetDto,
+  FabricVncConnectInput,
+  FabricVncSessionTicket,
   RdpCredential,
   SessionUser,
   SshCredential,
+  VncCredential,
 } from '@cerebro/shared';
+
+/** Structured Fabric credential kinds that live in the vault. */
+type FabricCredKind = 'ssh' | 'rdp' | 'vnc';
+type FabricCredValue = SshCredential | RdpCredential | VncCredential;
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { SecretsService } from '../secrets/secrets.service';
@@ -48,7 +55,7 @@ export class FabricService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     try {
       for (const s of await this.secrets.list()) {
-        if ((s.kind !== 'ssh' && s.kind !== 'rdp') || !s.key.startsWith('fabric/')) continue;
+        if ((s.kind !== 'ssh' && s.kind !== 'rdp' && s.kind !== 'vnc') || !s.key.startsWith('fabric/')) continue;
         const patch: { category?: 'fabric'; label?: string; description?: string } = {};
         if (s.category !== 'fabric') patch.category = 'fabric';
 
@@ -167,11 +174,33 @@ export class FabricService implements OnModuleInit {
    * or any VNC). noVNC speaks RFB straight through the tunnel to :5900; the VNC
    * password (if any) is handled client-side by noVNC.
    */
-  async openVncSession(agentId: string, targetId: string, user: SessionUser): Promise<FabricSessionTicket> {
+  async openVncSession(
+    agentId: string,
+    targetId: string,
+    input: FabricVncConnectInput,
+    user: SessionUser,
+  ): Promise<FabricVncSessionTicket> {
     const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
     if (!target) throw new NotFoundException('Target not found.');
     if (target.kind !== 'vnc') throw new BadRequestException('This target is not a VNC endpoint.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+
+    // Resolve a credential the same way as SSH/RDP — but VNC auth runs in the
+    // browser (noVNC), so the resolved value is returned to the viewer rather
+    // than used server-side. With no saved/entered credential, noVNC prompts.
+    const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
+    let creds: VncCredential | undefined;
+    if (ref) {
+      creds = (await this.revealCredential(ref, 'vnc')) as VncCredential;
+    } else if (input.password) {
+      creds = { username: input.username?.trim() || undefined, password: input.password };
+      if (input.save) {
+        this.requireManage(user);
+        if (input.saveAs?.trim()) await this.saveNamedCredential('vnc', input.saveAs.trim(), creds, user);
+        else await this.saveTargetCredential(target, 'vnc', creds, user);
+      }
+    }
+
     const token = this.sessions.issue({
       agentId,
       targetId,
@@ -181,7 +210,7 @@ export class FabricService implements OnModuleInit {
       port: target.port,
       kind: 'vnc',
     });
-    return { token, wsPath: SESSION_WS_PATH };
+    return { token, wsPath: SESSION_WS_PATH, username: creds?.username, password: creds?.password };
   }
 
   /** Clear a target's pinned SSH host key (e.g. after the host was rebuilt). */
@@ -240,7 +269,7 @@ export class FabricService implements OnModuleInit {
    * other machines' per-target entries (`fabric/<agentId>/<targetId>`), which are
    * machine-specific and would clutter the list with ambiguous labels.
    */
-  async listCredentials(kind: 'ssh' | 'rdp'): Promise<{ key: string; label: string }[]> {
+  async listCredentials(kind: FabricCredKind): Promise<{ key: string; label: string }[]> {
     const all = await this.secrets.list();
     return all
       .filter((s) => s.kind === kind)
@@ -249,21 +278,21 @@ export class FabricService implements OnModuleInit {
   }
 
   /** Reveal + parse a vault credential, verifying it is of the expected kind. */
-  private async revealCredential(key: string, kind: 'ssh' | 'rdp'): Promise<SshCredential | RdpCredential> {
+  private async revealCredential(key: string, kind: FabricCredKind): Promise<FabricCredValue> {
     const meta = await this.prisma.secretMeta.findUnique({ where: { key }, select: { kind: true } });
     if (!meta || meta.kind !== kind) {
       throw new BadRequestException(`That vault entry is not an ${kind.toUpperCase()} credential.`);
     }
     const raw = await this.secrets.reveal(key);
     if (!raw) throw new BadRequestException('The credential is missing from the vault.');
-    return JSON.parse(raw) as SshCredential | RdpCredential;
+    return JSON.parse(raw) as FabricCredValue;
   }
 
   /** Save a named, reusable credential (not tied to one machine) in the vault. */
   private async saveNamedCredential(
-    kind: 'ssh' | 'rdp',
+    kind: FabricCredKind,
     name: string,
-    value: SshCredential | RdpCredential,
+    value: FabricCredValue,
     user: SessionUser,
   ): Promise<void> {
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'cred';
@@ -286,8 +315,8 @@ export class FabricService implements OnModuleInit {
   /** Store a target credential (SSH or RDP) in the vault and attach it to the target. */
   private async saveTargetCredential(
     target: AgentTarget,
-    kind: 'ssh' | 'rdp',
-    value: SshCredential | RdpCredential,
+    kind: FabricCredKind,
+    value: FabricCredValue,
     user: SessionUser,
   ): Promise<void> {
     const key = `fabric/${target.agentId}/${target.id}`;

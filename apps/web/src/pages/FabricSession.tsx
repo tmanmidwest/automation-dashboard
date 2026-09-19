@@ -15,6 +15,7 @@ interface Handoff {
   ticket: FabricSessionTicket;
   title: string;
   dynamicResize?: boolean;
+  vncCreds?: { username?: string; password?: string };
 }
 
 export function FabricSession() {
@@ -64,5 +65,5 @@ export function FabricSession() {
   if (data.kind === 'ssh') return <SshTerminal session={data.ticket} title={data.title} onClose={onClose} />;
   if (data.kind === 'rdp')
     return <RdpViewer session={data.ticket} title={data.title} dynamicResize={!!data.dynamicResize} onClose={onClose} />;
-  return <VncViewer session={data.ticket} title={data.title} onClose={onClose} />;
+  return <VncViewer session={data.ticket} title={data.title} creds={data.vncCreds} onClose={onClose} />;
 }

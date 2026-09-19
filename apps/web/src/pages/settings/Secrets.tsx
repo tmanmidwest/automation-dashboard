@@ -56,7 +56,7 @@ interface NewSecret {
   label: string;
   category: SecretCategory;
   value: string;
-  kind: 'generic' | 'git' | 'ssh' | 'rdp';
+  kind: 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc';
   gitHost: string;
   gitUsername: string;
   sshUsername: string;
@@ -65,6 +65,7 @@ interface NewSecret {
   sshPassphrase: string;
   rdpUsername: string;
   rdpDomain: string;
+  vncUsername: string;
 }
 /** Whether the create form has enough to submit (fields vary by kind). */
 function canCreateSecret(n: NewSecret): boolean {
@@ -73,6 +74,7 @@ function canCreateSecret(n: NewSecret): boolean {
     return n.sshUsername.trim() !== '' && (n.sshMethod === 'password' ? n.value !== '' : n.sshPrivateKey.trim() !== '');
   }
   if (n.kind === 'rdp') return n.rdpUsername.trim() !== '' && n.value !== '';
+  if (n.kind === 'vnc') return n.value !== '';
   return n.value !== '';
 }
 
@@ -90,6 +92,7 @@ const emptyNewSecret = (): NewSecret => ({
   sshPassphrase: '',
   rdpUsername: '',
   rdpDomain: '',
+  vncUsername: '',
 });
 
 export function Secrets() {
@@ -193,11 +196,17 @@ export function Secrets() {
           password: newSecret.value,
           domain: newSecret.rdpDomain.trim() || undefined,
         });
+      } else if (newSecret.kind === 'vnc') {
+        value = JSON.stringify({
+          username: newSecret.vncUsername.trim() || undefined,
+          password: newSecret.value,
+        });
       } else {
         value = newSecret.value;
       }
-      // SSH/RDP credentials belong in the Fabric group.
-      const category = newSecret.kind === 'ssh' || newSecret.kind === 'rdp' ? 'fabric' : newSecret.category;
+      // SSH/RDP/VNC credentials belong in the Fabric group.
+      const category =
+        newSecret.kind === 'ssh' || newSecret.kind === 'rdp' || newSecret.kind === 'vnc' ? 'fabric' : newSecret.category;
       await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
         value,
         label: newSecret.label.trim() || key,
@@ -330,7 +339,7 @@ export function Secrets() {
 
   /** Pretty-print a structured (git/ssh/rdp) JSON credential; show others verbatim. */
   function displayValue(s: SecretSummary, value: string): string {
-    if (s.kind === 'git' || s.kind === 'ssh' || s.kind === 'rdp') {
+    if (s.kind === 'git' || s.kind === 'ssh' || s.kind === 'rdp' || s.kind === 'vnc') {
       try {
         return JSON.stringify(JSON.parse(value), null, 2);
       } catch {
@@ -576,6 +585,7 @@ export function Secrets() {
               <option value="git">Git credential</option>
               <option value="ssh">SSH credential</option>
               <option value="rdp">RDP credential</option>
+              <option value="vnc">VNC credential</option>
             </select>
           </div>
           <div>
@@ -655,6 +665,14 @@ export function Secrets() {
               </div>
             </div>
           )}
+          {newSecret.kind === 'vnc' && (
+            <div>
+              <Label>Username (optional)</Label>
+              <Input value={newSecret.vncUsername} placeholder="macOS account, e.g. ember"
+                onChange={(e) => setNewSecret((s) => ({ ...s, vncUsername: e.target.value }))} />
+              <p className="mt-1 text-xs text-muted-foreground">Required for macOS Screen Sharing (Apple RA2); leave blank for legacy password-only VNC.</p>
+            </div>
+          )}
           {newSecret.kind === 'generic' && (
             <div>
               <Label>Category</Label>
@@ -675,7 +693,7 @@ export function Secrets() {
               <Label>
                 {newSecret.kind === 'git'
                   ? 'Token / Password'
-                  : newSecret.kind === 'ssh' || newSecret.kind === 'rdp'
+                  : newSecret.kind === 'ssh' || newSecret.kind === 'rdp' || newSecret.kind === 'vnc'
                     ? 'Password'
                     : 'Value'}
               </Label>

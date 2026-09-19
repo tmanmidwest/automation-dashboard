@@ -29,7 +29,7 @@ export interface SecretSummary {
 
 /** Editable metadata fields (PUT /api/secrets/:key). */
 /** Shape of a stored secret value: a single string, or a structured JSON credential. */
-export type SecretKind = 'generic' | 'git' | 'ssh' | 'rdp';
+export type SecretKind = 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc';
 
 /** A Git credential's decoded value (stored as the secret's JSON plaintext, kind='git'). */
 export interface GitCredential {
@@ -53,6 +53,16 @@ export interface RdpCredential {
   username: string;
   password: string;
   domain?: string;
+}
+
+/**
+ * A VNC credential's decoded value (stored as the secret's JSON plaintext,
+ * kind='vnc'). macOS Screen Sharing (Apple RA2) needs a username + password;
+ * legacy password-only VNC leaves username empty.
+ */
+export interface VncCredential {
+  username?: string;
+  password: string;
 }
 
 export interface SecretMetaInput {

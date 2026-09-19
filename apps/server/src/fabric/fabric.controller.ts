@@ -147,6 +147,35 @@ class RdpConnectDto {
   disableAudio?: boolean;
 }
 
+class VncConnectDto {
+  @IsOptional()
+  @IsBoolean()
+  useSaved?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  secretRef?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  username?: string;
+
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  save?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  saveAs?: string;
+}
+
 class SftpPathDto {
   @IsString()
   @MaxLength(4096)
@@ -242,7 +271,7 @@ export class FabricController {
   @SessionOnly()
   @RequirePermissions('fabric:connect')
   listCredentials(@Query('kind') kind?: string) {
-    return this.fabric.listCredentials(kind === 'rdp' ? 'rdp' : 'ssh');
+    return this.fabric.listCredentials(kind === 'rdp' ? 'rdp' : kind === 'vnc' ? 'vnc' : 'ssh');
   }
 
   /** Stream a session's recording for playback (Guacamole recording format). */
@@ -300,9 +329,10 @@ export class FabricController {
   openVncSession(
     @Param('id') id: string,
     @Param('targetId') targetId: string,
+    @Body() body: VncConnectDto,
     @CurrentUser() user: SessionUser,
   ) {
-    return this.fabric.openVncSession(id, targetId, user);
+    return this.fabric.openVncSession(id, targetId, body, user);
   }
 
   // --- SFTP file browser (over the SSH target) -------------------------------

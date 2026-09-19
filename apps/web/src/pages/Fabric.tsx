@@ -11,8 +11,8 @@ import Guacamole from 'guacamole-common-js';
 import RFB from '@novnc/novnc';
 import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
-  FabricSshConnectInput, FabricRdpConnectInput, FabricSessionTicket, FabricSessionDto,
-  FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
+  FabricSshConnectInput, FabricRdpConnectInput, FabricVncConnectInput, FabricSessionTicket,
+  FabricVncSessionTicket, FabricSessionDto, FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -130,7 +130,7 @@ export function Fabric() {
   const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
-  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
+  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string } } | null>(null);
 
   /**
    * Launch a session either in a new tab (default) or an in-page overlay. `win`
@@ -143,12 +143,15 @@ export function Fabric() {
     ticket: FabricSessionTicket,
     title: string,
     win: Window | null,
-    extra?: { dynamicResize?: boolean },
+    extra?: { dynamicResize?: boolean; vncCreds?: { username?: string; password?: string } },
   ) => {
     if (win) {
       const key = `fabric.session.${Math.random().toString(36).slice(2)}`;
       try {
-        localStorage.setItem(key, JSON.stringify({ kind, ticket, title, dynamicResize: extra?.dynamicResize }));
+        localStorage.setItem(
+          key,
+          JSON.stringify({ kind, ticket, title, dynamicResize: extra?.dynamicResize, vncCreds: extra?.vncCreds }),
+        );
       } catch {
         /* storage blocked — fall through to overlay */
       }
@@ -157,23 +160,12 @@ export function Fabric() {
     }
     if (kind === 'ssh') setSession({ ticket, title });
     else if (kind === 'rdp') setRdpSession({ ticket, title, dynamicResize: !!extra?.dynamicResize });
-    else setVncSession({ ticket, title });
+    else setVncSession({ ticket, title, creds: extra?.vncCreds });
   };
 
-  const openConnect = async (agent: FabricAgentDto, t: FabricTargetDto) => {
-    // VNC needs no credential dialog (noVNC prompts for the Screen Sharing
-    // password itself), so connect straight through.
-    if (t.kind === 'vnc') {
-      const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
-      try {
-        const ticket = await api.post<FabricSessionTicket>(`/api/fabric/agents/${agent.id}/targets/${t.id}/vnc-session`);
-        launchViewer('vnc', ticket, `${agent.name} · ${t.host}:${t.port}`, win);
-      } catch (e) {
-        win?.close();
-        setErr(e instanceof ApiError ? e.message : 'Failed to open VNC session.');
-      }
-      return;
-    }
+  const openConnect = (agent: FabricAgentDto, t: FabricTargetDto) => {
+    // SSH, RDP and VNC all open the credential dialog (VNC can now use a vault
+    // credential instead of prompting in-browser every time).
     setConnectFor({ agent, target: t });
   };
 
@@ -482,6 +474,22 @@ export function Fabric() {
         />
       )}
 
+      {connectFor && connectFor.target.kind === 'vnc' && (
+        <VncConnectDialog
+          agent={connectFor.agent}
+          target={connectFor.target}
+          canManage={canManage}
+          onChanged={load}
+          onClose={() => setConnectFor(null)}
+          onConnected={(ticket, win) => {
+            launchViewer('vnc', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win, {
+              vncCreds: ticket.username || ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
+            });
+            setConnectFor(null);
+          }}
+        />
+      )}
+
       {filesFor && (
         <FilesBrowser
           agent={filesFor.agent}
@@ -499,7 +507,7 @@ export function Fabric() {
           onClose={() => setRdpSession(null)}
         />
       )}
-      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} onClose={() => setVncSession(null)} />}
+      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} creds={vncSession.creds} onClose={() => setVncSession(null)} />}
     </div>
   );
 }
@@ -1573,14 +1581,19 @@ export function RdpViewer({
 export function VncViewer({
   session,
   title,
+  creds,
   onClose,
 }: {
   session: FabricSessionTicket;
   title: string;
+  /** Optional saved credential to auto-fill (vaulted) instead of prompting. */
+  creds?: { username?: string; password?: string };
   onClose: () => void;
 }) {
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
+  // Saved creds are auto-sent once; if they're rejected we fall back to the prompt.
+  const triedSavedRef = useRef(false);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<string | null>(null);
   // Which credentials the server asked for (null = no prompt showing). macOS
@@ -1612,9 +1625,22 @@ export function VncViewer({
         if (d && !d.clean) setError('The screen-sharing connection was closed.');
       });
       rfb.addEventListener('credentialsrequired', (e) => {
-        // Show an inline overlay for exactly the fields the server requested — noVNC
-        // re-fires this until every requested credential is supplied.
         const types: string[] = (e as CustomEvent).detail?.types ?? ['password'];
+        // If we have a vaulted credential that satisfies every requested field,
+        // auto-send it once (no prompt). Otherwise show the inline overlay — which
+        // noVNC re-fires until every requested credential is supplied.
+        const canSatisfy =
+          !!creds &&
+          (!types.includes('username') || !!creds.username) &&
+          (!types.includes('password') || !!creds.password);
+        if (canSatisfy && !triedSavedRef.current) {
+          triedSavedRef.current = true;
+          const auto: { username?: string; password?: string; target?: string } = {};
+          if (types.includes('username')) auto.username = creds!.username ?? '';
+          if (types.includes('password')) auto.password = creds!.password ?? '';
+          rfb?.sendCredentials(auto);
+          return;
+        }
         setError(null);
         setCredForm({ username: '', password: '', target: '' });
         setCredTypes(types);
@@ -1760,6 +1786,163 @@ export function VncViewer({
         )}
       </div>
     </div>
+  );
+}
+
+// ── VNC connect dialog (vault-credential picker) ─────────────────────────────
+
+function VncConnectDialog({
+  agent,
+  target,
+  canManage,
+  onClose,
+  onConnected,
+  onChanged,
+}: {
+  agent: FabricAgentDto;
+  target: FabricTargetDto;
+  canManage: boolean;
+  onClose: () => void;
+  onConnected: (ticket: FabricVncSessionTicket, win: Window | null) => void;
+  onChanged: () => void;
+}) {
+  const ownKey = `fabric/${agent.id}/${target.id}`;
+  const [savedExists, setSavedExists] = useState(target.hasCredential);
+  const [credOptions, setCredOptions] = useState<{ key: string; label: string }[]>([]);
+  const [credSource, setCredSource] = useState(target.hasCredential ? ownKey : 'manual');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [save, setSave] = useState(false);
+  const [saveAs, setSaveAs] = useState('');
+  const [newTab, setNewTab] = useState(prefNewTab());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const isManual = credSource === 'manual';
+
+  useEffect(() => {
+    api
+      .get<{ key: string; label: string }[]>('/api/fabric/credentials?kind=vnc')
+      .then((list) => setCredOptions(list.filter((c) => c.key !== ownKey)))
+      .catch(() => setCredOptions([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const submit = async () => {
+    setErr(null);
+    let body: FabricVncConnectInput;
+    if (credSource === ownKey) body = { useSaved: true };
+    else if (!isManual) body = { secretRef: credSource };
+    else {
+      const saving = save && canManage && !!password;
+      body = {
+        username: username.trim() || undefined,
+        password: password || undefined,
+        save: saving,
+        saveAs: saveAs.trim() || undefined,
+      };
+    }
+    const win = newTab ? window.open('about:blank', '_blank') : null;
+    setBusy(true);
+    try {
+      const ticket = await api.post<FabricVncSessionTicket>(
+        `/api/fabric/agents/${agent.id}/targets/${target.id}/vnc-session`,
+        body,
+      );
+      if (isManual && save && canManage && password) onChanged();
+      onConnected(ticket, win);
+    } catch (e) {
+      win?.close();
+      setErr(e instanceof ApiError ? e.message : 'Failed to open VNC session.');
+      setBusy(false);
+    }
+  };
+
+  const forget = async () => {
+    if (!confirm('Forget the saved credential for this target?')) return;
+    try {
+      await api.delete(`/api/fabric/agents/${agent.id}/targets/${target.id}/credential`);
+      setSavedExists(false);
+      if (credSource === ownKey) setCredSource('manual');
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to remove credential.');
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Connect to ${agent.name}`}
+      description={`VNC · ${target.host}:${target.port}`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Monitor className="h-4 w-4 mr-1" />}
+            Connect
+          </Button>
+        </>
+      }
+    >
+      {err && (
+        <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>
+      )}
+      <div className="space-y-4">
+        <div>
+          <Label>Credential</Label>
+          <select className={selectCls} value={credSource} onChange={(e) => setCredSource(e.target.value)}>
+            {savedExists && <option value={ownKey}>Saved for this machine</option>}
+            {credOptions.map((c) => (
+              <option key={c.key} value={c.key}>{c.label}</option>
+            ))}
+            <option value="manual">Enter manually…</option>
+          </select>
+          {savedExists && credSource === ownKey && canManage && (
+            <button type="button" className="mt-1 text-xs text-muted-foreground hover:text-destructive" onClick={forget}>
+              Forget saved credential
+            </button>
+          )}
+        </div>
+
+        {isManual && (
+          <>
+            <p className="text-xs text-muted-foreground -mb-1">
+              macOS Screen Sharing needs the Mac account username + password. Leave blank for a legacy
+              password-only VNC server (you'll be prompted in the viewer).
+            </p>
+            <div>
+              <Label>Username (macOS account)</Label>
+              <Input value={username} placeholder="e.g. ember" onChange={(e) => setUsername(e.target.value)} />
+            </div>
+            <div>
+              <Label>Password</Label>
+              <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+            {canManage && password && (
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+                  Save this credential to the vault
+                </label>
+                {save && (
+                  <Input
+                    placeholder="Reusable name (optional) — blank saves for this machine only"
+                    value={saveAs}
+                    onChange={(e) => setSaveAs(e.target.value)}
+                  />
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={newTab} onChange={(e) => setNewTab(e.target.checked)} />
+          Open in a new browser tab
+        </label>
+      </div>
+    </Dialog>
   );
 }
 
