@@ -1571,9 +1571,23 @@ export function VncViewer({
         const d = (e as CustomEvent).detail;
         if (d && !d.clean) setError('The screen-sharing connection was closed.');
       });
-      rfb.addEventListener('credentialsrequired', () => {
-        const password = window.prompt('Screen Sharing password:') || '';
-        rfb?.sendCredentials({ password });
+      rfb.addEventListener('credentialsrequired', (e) => {
+        // macOS Screen Sharing authenticates with Apple's RA2 (security type 30),
+        // which needs the Mac ACCOUNT username + password — not a VNC-only password.
+        // Older/legacy VNC servers ask for just a password. Honour whichever the
+        // server requested (detail.types) or noVNC re-prompts until every field is set.
+        const types: string[] = (e as CustomEvent).detail?.types ?? ['password'];
+        const creds: { username?: string; password?: string; target?: string } = {};
+        if (types.includes('username')) {
+          creds.username = window.prompt('macOS account username (the account you use to log in to that Mac):') || '';
+        }
+        if (types.includes('password')) {
+          creds.password = window.prompt('Password:') || '';
+        }
+        if (types.includes('target')) {
+          creds.target = window.prompt('Target:') || '';
+        }
+        rfb?.sendCredentials(creds);
       });
       rfb.addEventListener('securityfailure', (e) => {
         const d = (e as CustomEvent).detail;
