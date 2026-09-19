@@ -3,6 +3,7 @@ import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
+  ShieldCheck,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -122,6 +123,7 @@ export function Fabric() {
   const [err, setErr] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [showCli, setShowCli] = useState(false);
+  const [showCa, setShowCa] = useState(false);
   const [showRecordings, setShowRecordings] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
@@ -243,6 +245,11 @@ export function Fabric() {
             {canConnect && (
               <Button variant="outline" onClick={() => setShowCli(true)}>
                 <TerminalSquare className="h-4 w-4 mr-1" /> Command line
+              </Button>
+            )}
+            {canConnect && (
+              <Button variant="outline" onClick={() => setShowCa(true)}>
+                <ShieldCheck className="h-4 w-4 mr-1" /> SSH CA
               </Button>
             )}
             {canManage && (
@@ -439,6 +446,7 @@ export function Fabric() {
       )}
 
       {showCli && <CliDialog onClose={() => setShowCli(false)} />}
+      {showCa && <CaDialog canManage={canManage} onClose={() => setShowCa(false)} />}
       {showRecordings && <RecordingsDialog onClose={() => setShowRecordings(false)} />}
 
       {adding && (
@@ -785,6 +793,115 @@ function RecordingPlayer({ session, onClose }: { session: FabricSessionDto; onCl
         )}
       </div>
     </div>
+  );
+}
+
+interface CaStatus {
+  enabled: boolean;
+  publicKey?: string;
+  fingerprint?: string;
+  createdAt?: string;
+  ttlMinutes: number;
+  hostSetupLinux?: string;
+  hostSetupWindows?: string;
+}
+
+function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
+  const [status, setStatus] = useState<CaStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = () => api.get<CaStatus>('/api/fabric/ca').then(setStatus).catch((e) => setErr(e instanceof ApiError ? e.message : 'Failed to load CA status.'));
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const enable = async () => {
+    setBusy(true); setErr(null);
+    try { setStatus(await api.post<CaStatus>('/api/fabric/ca/enable')); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to enable the CA.'); }
+    finally { setBusy(false); }
+  };
+  const disable = async () => {
+    if (!confirm('Disable the SSH CA? New certificates can no longer be issued. Hosts keep the (now-unused) CA key until you remove it there.')) return;
+    setBusy(true); setErr(null);
+    try { await api.post('/api/fabric/ca/disable'); await load(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to disable the CA.'); }
+    finally { setBusy(false); }
+  };
+
+  const Cmd = ({ text }: { text: string }) => (
+    <div className="mt-1 flex items-start gap-2 rounded-md border border-input bg-background/60 p-2">
+      <code className="flex-1 text-xs break-all font-mono whitespace-pre-wrap">{text}</code>
+      <CopyBtn text={text} />
+    </div>
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title="SSH certificate authority"
+      description="Cerebro signs short-lived SSH certificates so you connect with your own client and no per-box keys."
+      footer={<Button onClick={onClose}>Done</Button>}
+    >
+      {err && (
+        <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>
+      )}
+      {!status ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+      ) : !status.enabled ? (
+        <div className="space-y-3 text-sm">
+          <p className="text-muted-foreground">
+            The SSH CA is <span className="text-foreground">off</span>. Enabling it generates a CA keypair (the private
+            key is sealed in the vault). You then trust its public key on each box once, and connect with{' '}
+            <code>cerebro ssh --ca &lt;user&gt;@&lt;machine&gt;</code> — no keys to manage, certs expire in minutes.
+          </p>
+          {canManage ? (
+            <Button onClick={enable} disabled={busy}>
+              {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ShieldCheck className="h-4 w-4 mr-1" />} Enable SSH CA
+            </Button>
+          ) : (
+            <p className="text-xs text-muted-foreground">An admin (fabric:manage) can enable it.</p>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-4 text-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="inline-flex items-center gap-1.5 text-emerald-400"><ShieldCheck className="h-4 w-4" /> Enabled</span>
+            <span className="text-muted-foreground text-xs">Certs valid {status.ttlMinutes} min</span>
+            {status.fingerprint && <span className="text-muted-foreground text-xs font-mono truncate">{status.fingerprint}</span>}
+          </div>
+
+          <div>
+            <p className="font-medium">CA public key</p>
+            <Cmd text={status.publicKey ?? ''} />
+          </div>
+          <div>
+            <p className="font-medium">1. Trust it on each Linux/macOS box (run there once)</p>
+            <Cmd text={status.hostSetupLinux ?? ''} />
+          </div>
+          <div>
+            <p className="font-medium">Windows host (elevated PowerShell)</p>
+            <Cmd text={status.hostSetupWindows ?? ''} />
+          </div>
+          <div>
+            <p className="font-medium">2. Connect with your own client (no key setup)</p>
+            <Cmd text={`cerebro ssh --ca <user>@<machine>`} />
+            <p className="text-muted-foreground text-xs mt-1">
+              Generates an ephemeral key, gets a {status.ttlMinutes}-minute cert signed, and launches your <code>ssh</code>.
+            </p>
+          </div>
+
+          {canManage && (
+            <div className="pt-2 border-t border-border/50">
+              <Button variant="outline" onClick={disable} disabled={busy} className="text-destructive">
+                Disable SSH CA
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </Dialog>
   );
 }
 

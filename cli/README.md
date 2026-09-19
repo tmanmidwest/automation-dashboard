@@ -78,3 +78,18 @@ sftp my-mac.fabric
 is exactly what SSH's `ProxyCommand` expects. Pass the machine name explicitly (as
 above); or, if you name the `Host` entry exactly after the machine, you can use
 SSH's `%h` token: `ProxyCommand cerebro proxy %h`.
+
+## SSH certificate authority (no per-box keys)
+
+If an admin has enabled the CA (Fabric → SSH CA), you can connect with a
+short-lived, Cerebro-signed certificate instead of managing keys on each box:
+
+```sh
+cerebro ca                       # print the CA public key + host-trust setup
+cerebro ssh --ca ember@my-mac    # mint an ephemeral cert and connect
+```
+
+`--ca` generates a throwaway keypair, has Cerebro sign it for the login user (a
+few-minute validity), and launches your `ssh` with it. Each box trusts the CA once
+(`cerebro ca` prints the one-liner) — after that no `authorized_keys` management,
+and every issuance is audited in Cerebro.

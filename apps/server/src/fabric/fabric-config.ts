@@ -30,4 +30,8 @@ export const fabricConfig = {
   get pollMs(): number {
     return envInt('FABRIC_POLL_MS', 10_000);
   },
+  /** Lifetime (minutes) of an SSH CA user certificate. Short by design. */
+  get caTtlMinutes(): number {
+    return envInt('FABRIC_CA_TTL_MINUTES', 5);
+  },
 };

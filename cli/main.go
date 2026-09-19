@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,6 +68,8 @@ func main() {
 		cmdProxy(args[1:])
 	case "ssh":
 		cmdSSH(args[1:])
+	case "ca":
+		cmdCa(args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -83,7 +86,8 @@ Usage:
   cerebro ls
   cerebro access <machine> [ssh|rdp] [--listen 127.0.0.1:PORT]
   cerebro proxy  <machine> [ssh|rdp]            (SSH ProxyCommand — stdio)
-  cerebro ssh    [user@]<machine> [ssh args…]   (launch your own ssh client)
+  cerebro ssh    [--ca] [user@]<machine> [ssh args…]  (launch your own ssh client)
+  cerebro ca                                    (print the CA public key + host setup)
 
 Options:
   --url    <url>     Cerebro base URL          (or CEREBRO_URL)
@@ -184,10 +188,20 @@ func cmdProxy(args []string) {
 // it, passing through any extra ssh args. A stable HostKeyAlias keeps known_hosts
 // from churning as the ephemeral local port changes between runs.
 func cmdSSH(args []string) {
+	// --ca is a boolean; pull it out before flag/positional parsing.
+	caMode := false
+	var rest []string
+	for _, a := range args {
+		if a == "--ca" {
+			caMode = true
+			continue
+		}
+		rest = append(rest, a)
+	}
 	var urlFlag, tokenFlag string
-	pos := parseFlags(args, map[string]*string{"url": &urlFlag, "token": &tokenFlag})
+	pos := parseFlags(rest, map[string]*string{"url": &urlFlag, "token": &tokenFlag})
 	if len(pos) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: cerebro ssh [user@]<machine> [ssh args…]")
+		fmt.Fprintln(os.Stderr, "usage: cerebro ssh [--ca] [user@]<machine> [ssh args…]")
 		os.Exit(2)
 	}
 	spec, extra := pos[0], pos[1:]
@@ -224,6 +238,15 @@ func cmdSSH(args []string) {
 		dest = user + "@127.0.0.1"
 	}
 	sshArgs := []string{"-p", port, "-o", "HostKeyAlias=cerebro." + slug(name)}
+	if caMode {
+		// Mint an ephemeral key + short-lived CA cert and use only that identity.
+		if user == "" {
+			log.Fatal("--ca needs a login user: cerebro ssh --ca <user>@<machine>")
+		}
+		certDir := issueCert(cfg, user, name)
+		defer os.RemoveAll(certDir)
+		sshArgs = append(sshArgs, "-i", filepath.Join(certDir, "id"), "-o", "IdentitiesOnly=yes")
+	}
 	sshArgs = append(sshArgs, extra...)
 	sshArgs = append(sshArgs, dest)
 
@@ -236,6 +259,74 @@ func cmdSSH(args []string) {
 		}
 		log.Fatalf("ssh: %v", err)
 	}
+}
+
+// cmdCa prints the SSH CA public key and the host-trust setup snippets.
+func cmdCa(args []string) {
+	var urlFlag, tokenFlag string
+	parseFlags(args, map[string]*string{"url": &urlFlag, "token": &tokenFlag})
+	cfg := mustConfig(urlFlag, tokenFlag)
+	b := apiGet(cfg, "/api/fabric/ca")
+	var s struct {
+		Enabled          bool   `json:"enabled"`
+		PublicKey        string `json:"publicKey"`
+		TTLMinutes       int    `json:"ttlMinutes"`
+		HostSetupLinux   string `json:"hostSetupLinux"`
+		HostSetupWindows string `json:"hostSetupWindows"`
+	}
+	_ = json.Unmarshal(b, &s)
+	if !s.Enabled {
+		fmt.Println("The SSH CA is not enabled. An admin can turn it on in Fabric → SSH CA.")
+		return
+	}
+	fmt.Println("# Cerebro SSH CA public key:")
+	fmt.Println(s.PublicKey)
+	fmt.Printf("\n# Certificates are valid for %d minutes.\n", s.TTLMinutes)
+	fmt.Println("\n# Trust this CA on a Linux/macOS host (run on the box):")
+	fmt.Println(s.HostSetupLinux)
+	fmt.Println("\n# Trust this CA on a Windows host (elevated PowerShell):")
+	fmt.Println(s.HostSetupWindows)
+	fmt.Println("\n# Then connect with a signed cert (no key setup):")
+	fmt.Println("  cerebro ssh --ca <user>@<machine>")
+}
+
+// issueCert generates an ephemeral keypair, gets it signed by the Cerebro CA for
+// `principal`, and returns a temp dir holding `id` (+ `id-cert.pub`) for ssh -i.
+func issueCert(cfg config, principal, machine string) string {
+	kg, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		log.Fatal("ssh-keygen not found — it is required for --ca")
+	}
+	dir, err := os.MkdirTemp("", "cbrocert-")
+	if err != nil {
+		log.Fatalf("temp dir: %v", err)
+	}
+	keyPath := filepath.Join(dir, "id")
+	if out, err := exec.Command(kg, "-t", "ed25519", "-f", keyPath, "-N", "", "-q").CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		log.Fatalf("generate key: %v %s", err, out)
+	}
+	pub, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		os.RemoveAll(dir)
+		log.Fatalf("read key: %v", err)
+	}
+	body := map[string]string{"publicKey": strings.TrimSpace(string(pub)), "principal": principal, "machine": machine}
+	respBytes := apiPost(cfg, "/api/fabric/ca/sign", body)
+	var r struct {
+		Certificate string `json:"certificate"`
+		TTLMinutes  int    `json:"ttlMinutes"`
+	}
+	if err := json.Unmarshal(respBytes, &r); err != nil || r.Certificate == "" {
+		os.RemoveAll(dir)
+		log.Fatal("the CA did not return a certificate — is the SSH CA enabled?")
+	}
+	if err := os.WriteFile(keyPath+"-cert.pub", []byte(r.Certificate+"\n"), 0o644); err != nil {
+		os.RemoveAll(dir)
+		log.Fatalf("write cert: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "Issued a %d-minute certificate for %q.\n", r.TTLMinutes, principal)
+	return dir
 }
 
 // resolveTarget finds a machine by name and picks a target of `kind` (or the
@@ -412,6 +503,63 @@ func bridge(local net.Conn, cfg config, targetID string) {
 }
 
 // --- config + http ----------------------------------------------------------
+
+// apiGet does an authenticated GET and returns the body, fataling on any error.
+func apiGet(cfg config, path string) []byte {
+	req, _ := http.NewRequest("GET", cfg.URL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	return doAPI(req)
+}
+
+// apiPost does an authenticated JSON POST and returns the body, fataling on error.
+func apiPost(cfg config, path string, body any) []byte {
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", cfg.URL+path, bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	return doAPI(req)
+}
+
+func doAPI(req *http.Request) []byte {
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		log.Fatalf("cannot reach Cerebro: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		log.Fatalf("unauthorized — the token needs the fabric:read + fabric:connect scopes")
+	}
+	if resp.StatusCode/100 != 2 {
+		msg := strings.TrimSpace(string(body))
+		if m := extractMessage(body); m != "" {
+			msg = m
+		}
+		log.Fatalf("%s: %s", resp.Status, msg)
+	}
+	return body
+}
+
+// extractMessage pulls a JSON {"message": …} error out of a body if present.
+func extractMessage(body []byte) string {
+	var e struct {
+		Message any `json:"message"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	switch m := e.Message.(type) {
+	case string:
+		return m
+	case []any:
+		var parts []string
+		for _, p := range m {
+			parts = append(parts, fmt.Sprint(p))
+		}
+		return strings.Join(parts, ", ")
+	}
+	return ""
+}
 
 func fetchAgents(cfg config) []agentInfo {
 	req, _ := http.NewRequest("GET", cfg.URL+"/api/fabric/agents", nil)

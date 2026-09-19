@@ -84,7 +84,7 @@ ARG JAVA_VERSION=25
 # official PGDG repo (bookworm ships only client 15, which can't dump our postgres:16 server).
 # See docs/system-backup.md. Then fetch a Temurin JRE (arch-matched) + signal-cli onto PATH.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl restic ca-certificates wget gnupg iputils-ping git \
+ && apt-get install -y --no-install-recommends openssl openssh-client restic ca-certificates wget gnupg iputils-ping git \
  && install -d /usr/share/keyrings \
  && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \

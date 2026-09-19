@@ -20,6 +20,7 @@ import { CurrentUser, Public, RequirePermissions, SessionOnly } from '../auth/de
 import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
 import { FabricSftpService } from './fabric-sftp.service';
+import { FabricCaService } from './fabric-ca.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
 
@@ -147,6 +148,21 @@ class RdpConnectDto {
   disableAudio?: boolean;
 }
 
+class CaSignDto {
+  @IsString()
+  @MaxLength(8192)
+  publicKey!: string;
+
+  @IsString()
+  @MaxLength(64)
+  principal!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  machine?: string;
+}
+
 class VncConnectDto {
   @IsOptional()
   @IsBoolean()
@@ -227,6 +243,7 @@ export class FabricController {
   constructor(
     private readonly fabric: FabricService,
     private readonly sftp: FabricSftpService,
+    private readonly ca: FabricCaService,
     private readonly enrollment: FabricEnrollmentService,
   ) {}
 
@@ -340,6 +357,39 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     return this.fabric.openVncSession(id, targetId, body, user);
+  }
+
+  // --- SSH certificate authority ---------------------------------------------
+
+  /** CA status + public key + host-trust snippets. */
+  @Get('ca')
+  @RequirePermissions('fabric:read')
+  caStatus() {
+    return this.ca.status();
+  }
+
+  /** Generate the CA keypair (idempotent). */
+  @Post('ca/enable')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  caEnable(@CurrentUser() user: SessionUser) {
+    return this.ca.enable(user);
+  }
+
+  /** Remove the CA keypair (existing host trust becomes orphaned). */
+  @Post('ca/disable')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async caDisable(@CurrentUser() user: SessionUser) {
+    await this.ca.disable(user);
+    return { ok: true };
+  }
+
+  /** Sign a public key into a short-lived user cert (usable by the CLI via token). */
+  @Post('ca/sign')
+  @RequirePermissions('fabric:connect')
+  caSign(@Body() body: CaSignDto, @CurrentUser() user: SessionUser) {
+    return this.ca.sign(body.publicKey, body.principal, user, body.machine);
   }
 
   // --- SFTP file browser (over the SSH target) -------------------------------
