@@ -339,19 +339,28 @@ export function ComputerSettings() {
           <div className="space-y-1.5">
             <Label>Model</Label>
             <div className="flex gap-2">
-              <Input value={cfg.model} onChange={(e) => set('model', e.target.value)} placeholder="qwen2.5:7b" list="assistant-models" />
-              <Button type="button" variant="outline" onClick={loadModels} disabled={loadingModels}>
+              <Input value={cfg.model} onChange={(e) => set('model', e.target.value)} placeholder="qwen2.5:7b" />
+              <Button type="button" variant="outline" onClick={loadModels} disabled={loadingModels} title="List installed models">
                 <RefreshCw className={loadingModels ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
               </Button>
             </div>
-            <datalist id="assistant-models">
-              {models.map((m) => (
-                <option key={m.name} value={m.name} />
-              ))}
-            </datalist>
             {models.length > 0 && (
-              <p className="text-xs text-muted-foreground">{models.length} models available on this backend.</p>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={models.some((m) => m.name === cfg.model) ? cfg.model : ''}
+                onChange={(e) => e.target.value && set('model', e.target.value)}
+              >
+                <option value="">Pick an installed model… ({models.length} available)</option>
+                {models.map((m) => (
+                  <option key={m.name} value={m.name}>{m.name}</option>
+                ))}
+              </select>
             )}
+            <p className="text-xs text-muted-foreground">
+              {models.length > 0
+                ? 'Pick from the list, or type any model name the backend serves.'
+                : 'Type the model name, or click refresh to list what the backend has installed.'}
+            </p>
           </div>
 
           {cfg.backend !== 'anthropic' && (
