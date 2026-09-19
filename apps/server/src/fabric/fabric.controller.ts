@@ -238,6 +238,13 @@ export class FabricController {
     return this.fabric.listAgents();
   }
 
+  /** Operator-tunable cadences for the web UI (e.g. the agent-list poll interval). */
+  @Get('config')
+  @RequirePermissions('fabric:read')
+  config() {
+    return this.fabric.clientConfig();
+  }
+
   @Post('agents')
   @SessionOnly()
   @RequirePermissions('fabric:manage')

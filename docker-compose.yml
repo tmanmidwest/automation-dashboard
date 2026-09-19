@@ -40,6 +40,12 @@ services:
       GUACD_HOST: ${GUACD_HOST:-guacd}
       GUACD_PORT: ${GUACD_PORT:-4822}
       FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-}
+      # Fabric scaling knobs. Raise the heartbeat interval to cut per-agent liveness
+      # DB writes when many agents are enrolled (agents adopt it on their next hello);
+      # FABRIC_POLL_MS slows how often the /fabric screen refreshes the agent list.
+      FABRIC_HEARTBEAT_MS: ${FABRIC_HEARTBEAT_MS:-15000}
+      FABRIC_MISSED_BEATS_OFFLINE: ${FABRIC_MISSED_BEATS_OFFLINE:-3}
+      FABRIC_POLL_MS: ${FABRIC_POLL_MS:-10000}
     volumes:
       - cerebro_signal:/data/signal
       # Fabric RDP session recordings — shared with the guacd sidecar (guacd writes,

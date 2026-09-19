@@ -30,6 +30,7 @@ import { FabricSessionService } from './fabric-session.service';
 import { FabricGuacService } from './fabric-guac.service';
 import { generateEnrollToken } from './fabric-credentials';
 import { baseUrl } from './fabric-enrollment.service';
+import { fabricConfig } from './fabric-config';
 
 const SESSION_WS_PATH = '/api/fabric/session/ws';
 
@@ -361,6 +362,11 @@ export class FabricService implements OnModuleInit {
       target: agentId,
       meta: { targetId },
     });
+  }
+
+  /** Operator-tunable cadences the web UI reads (poll interval, heartbeat). */
+  clientConfig(): { pollMs: number; heartbeatMs: number } {
+    return { pollMs: fabricConfig.pollMs, heartbeatMs: fabricConfig.heartbeatMs };
   }
 
   /** All agents with their targets, statuses reconciled against live connections. */

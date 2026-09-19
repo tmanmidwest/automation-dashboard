@@ -191,12 +191,22 @@ export function Fabric() {
     }
   };
 
+  const [pollMs, setPollMs] = useState(10_000);
+  useEffect(() => {
+    // Poll cadence is operator-tunable (FABRIC_POLL_MS); fetch it once, fall back to 10s.
+    api
+      .get<{ pollMs: number }>('/api/fabric/config')
+      .then((c) => c.pollMs > 0 && setPollMs(c.pollMs))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     load();
-    // Phase 1 has no live push yet — poll to reflect online/offline transitions.
-    const id = setInterval(load, 10_000);
+    // No live push yet — poll to reflect online/offline transitions.
+    const id = setInterval(load, pollMs);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollMs]);
 
   const revoke = async (a: FabricAgentDto) => {
     if (!confirm(`Revoke "${a.name}"? Its credential is destroyed and it can no longer connect.`)) return;

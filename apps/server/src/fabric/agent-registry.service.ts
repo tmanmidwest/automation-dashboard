@@ -3,8 +3,6 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import type { WebSocket } from 'ws';
 import {
   FABRIC_AGENT_VERSION,
-  FABRIC_HEARTBEAT_MS,
-  FABRIC_MISSED_BEATS_OFFLINE,
   type FabricAgentStatus,
   type FabricControlFrame,
   type FabricHelloFrame,
@@ -14,6 +12,7 @@ import { AuditService } from '../logging/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { parseCredential, safeEqualHex, sha256 } from './fabric-credentials';
 import { StreamMux, type TunnelStream } from './stream-mux';
+import { fabricConfig } from './fabric-config';
 
 interface LiveAgent {
   ws: WebSocket;
@@ -49,7 +48,7 @@ export class AgentRegistryService {
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcileOffline(): Promise<void> {
-    const staleBefore = new Date(Date.now() - 90_000);
+    const staleBefore = new Date(Date.now() - fabricConfig.reconcileGraceMs);
     let rows: { id: string; lastSeenAt: Date | null }[];
     try {
       rows = await this.prisma.agent.findMany({
@@ -220,7 +219,7 @@ export class AgentRegistryService {
     this.send(agentId, {
       t: 'hello-ack',
       agentId,
-      heartbeatMs: FABRIC_HEARTBEAT_MS,
+      heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
     });
   }
@@ -302,7 +301,7 @@ export class AgentRegistryService {
   private armOfflineTimer(agentId: string): NodeJS.Timeout {
     const timer = setTimeout(
       () => void this.markOffline(agentId, 'missed heartbeats'),
-      FABRIC_HEARTBEAT_MS * (FABRIC_MISSED_BEATS_OFFLINE + 1),
+      fabricConfig.heartbeatMs * (fabricConfig.missedBeatsOffline + 1),
     );
     // Don't keep the event loop alive solely for this timer.
     timer.unref?.();

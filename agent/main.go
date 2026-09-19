@@ -31,7 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.1"
+const agentVersion = "0.3.2"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -165,6 +165,10 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 			return err
 		case <-ticker.C:
 			sess.writeJSON(map[string]string{"t": "heartbeat"})
+		case d := <-sess.hbReset:
+			// Broker asked for a different heartbeat cadence — adopt it live.
+			log.Printf("heartbeat cadence set to %s by broker", d)
+			ticker.Reset(d)
 		case <-probe.C:
 			// Re-announce only when the reachable set actually changed. The allow-list
 			// already covers loopback 22/3389/5900 (the ports detectTargets probes), so
@@ -210,6 +214,8 @@ type session struct {
 	quitOnce sync.Once
 	mu       sync.Mutex
 	streams  map[uint32]net.Conn
+	// hbReset carries a new heartbeat cadence from a hello-ack to the run loop.
+	hbReset chan time.Duration
 }
 
 func newSession(conn *websocket.Conn, allow map[string]bool, cfg config) *session {
@@ -220,6 +226,7 @@ func newSession(conn *websocket.Conn, allow map[string]bool, cfg config) *sessio
 		out:     make(chan outMsg, 128),
 		quit:    make(chan struct{}),
 		streams: map[uint32]net.Conn{},
+		hbReset: make(chan time.Duration, 1),
 	}
 }
 
@@ -266,6 +273,7 @@ type ctrlFrame struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
 	LatestAgentVersion string `json:"latestAgentVersion"`
+	HeartbeatMs        int64  `json:"heartbeatMs"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -285,6 +293,13 @@ func (s *session) onControl(msg []byte) {
 		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)
 			go trySelfUpdate(s.cfg)
+		}
+		// Adopt the broker's heartbeat cadence (operator-tunable, FABRIC_HEARTBEAT_MS).
+		if c.HeartbeatMs >= 1000 {
+			select {
+			case s.hbReset <- time.Duration(c.HeartbeatMs) * time.Millisecond:
+			default:
+			}
 		}
 	case "ping":
 		// no action
