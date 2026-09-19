@@ -238,7 +238,7 @@ export class AgentRegistryService {
     targets: FabricHelloFrame['targets'],
   ): Promise<void> {
     for (const t of targets) {
-      if (t.kind !== 'ssh' && t.kind !== 'rdp') continue;
+      if (t.kind !== 'ssh' && t.kind !== 'rdp' && t.kind !== 'vnc') continue;
       const host = t.host || '127.0.0.1';
       const port = Number(t.port);
       if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
