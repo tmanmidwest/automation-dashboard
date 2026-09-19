@@ -7,14 +7,52 @@ import type { Logger } from '@nestjs/common';
  * `onData` / `onClose` and calls `write` / `close`.
  */
 export class TunnelStream {
-  onData?: (data: Buffer) => void;
-  onClose?: () => void;
   closed = false;
+
+  private _onClose?: () => void;
+  private closedBeforeHandler = false;
+  private _onData?: (data: Buffer) => void;
+  /**
+   * Bytes that arrived before a consumer attached `onData`. Server-speaks-first
+   * protocols (VNC/RFB, SSH banners) emit their opening bytes the instant the
+   * agent dials the target — which can land while the relay is still awaiting
+   * (e.g. writing the session row) between `openStream` and wiring `onData`.
+   * Buffer them here and flush in order the moment a handler is set, so the
+   * opening banner is never lost.
+   */
+  private preBuffer: Buffer[] = [];
 
   constructor(
     readonly id: number,
     private readonly mux: StreamMux,
   ) {}
+
+  get onData(): ((data: Buffer) => void) | undefined {
+    return this._onData;
+  }
+
+  set onData(fn: ((data: Buffer) => void) | undefined) {
+    this._onData = fn;
+    if (fn && this.preBuffer.length) {
+      const queued = this.preBuffer;
+      this.preBuffer = [];
+      for (const b of queued) fn(b);
+    }
+  }
+
+  get onClose(): (() => void) | undefined {
+    return this._onClose;
+  }
+
+  set onClose(fn: (() => void) | undefined) {
+    this._onClose = fn;
+    // If the peer already closed before a handler was attached, fire it now so
+    // the relay tears down instead of hanging.
+    if (fn && this.closedBeforeHandler) {
+      this.closedBeforeHandler = false;
+      fn();
+    }
+  }
 
   write(data: Buffer): void {
     if (!this.closed) this.mux.sendData(this.id, data);
@@ -31,12 +69,14 @@ export class TunnelStream {
   peerClosed(): void {
     if (this.closed) return;
     this.closed = true;
-    this.onClose?.();
+    if (this._onClose) this._onClose();
+    else this.closedBeforeHandler = true;
   }
 
-  /** internal — deliver inbound bytes to the consumer. */
+  /** internal — deliver inbound bytes to the consumer, buffering until one attaches. */
   deliver(data: Buffer): void {
-    this.onData?.(data);
+    if (this._onData) this._onData(data);
+    else this.preBuffer.push(data);
   }
 }
 
