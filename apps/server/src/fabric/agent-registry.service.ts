@@ -210,6 +210,7 @@ export class AgentRegistryService {
         osVersion: frame.osVersion ?? before.osVersion,
         hostname: frame.hostname ?? before.hostname,
         agentVersion: frame.agentVersion ?? before.agentVersion,
+        localIp: frame.localIp ?? before.localIp,
         lastSeenAt: new Date(),
       },
     });

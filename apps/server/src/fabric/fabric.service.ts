@@ -434,6 +434,37 @@ export class FabricService implements OnModuleInit {
     };
   }
 
+  /** Edit an agent's display fields (name, tags, notes). */
+  async updateAgent(
+    id: string,
+    input: { name?: string; tags?: string[]; notes?: string | null },
+    user: SessionUser,
+  ): Promise<FabricAgentDto> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    const data: { name?: string; tags?: string[]; notes?: string | null } = {};
+    if (input.name !== undefined) {
+      const name = input.name.trim();
+      if (!name) throw new BadRequestException('Name cannot be empty.');
+      data.name = name;
+    }
+    if (input.tags !== undefined) {
+      data.tags = input.tags.map((t) => t.trim()).filter(Boolean).slice(0, 20);
+    }
+    if (input.notes !== undefined) {
+      data.notes = input.notes?.trim() ? input.notes.trim().slice(0, 2000) : null;
+    }
+    const updated = await this.prisma.agent.update({ where: { id }, data, include: { targets: true } });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.updated',
+      target: id,
+      meta: { fields: Object.keys(data) },
+    });
+    return this.toAgentDto(updated, updated.targets);
+  }
+
   /** Revoke an agent: kill its credential and drop any live connection. */
   async revokeAgent(id: string, user: SessionUser): Promise<FabricAgentDto> {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
@@ -587,6 +618,8 @@ export class FabricService implements OnModuleInit {
       osVersion: agent.osVersion,
       agentVersion: agent.agentVersion,
       tags: agent.tags,
+      localIp: agent.localIp,
+      notes: agent.notes,
       status: this.registry.statusOf(agent.id, agent.status),
       lastSeenAt: agent.lastSeenAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),

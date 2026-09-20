@@ -31,9 +31,13 @@ export interface FabricAgentDto {
   id: string;
   name: string;
   hostname?: string | null;
-  os?: string | null; // "linux" | "windows"
+  os?: string | null; // "linux" | "windows" | "darwin"
   osVersion?: string | null;
   agentVersion?: string | null;
+  /** Primary local IPv4 of the box, reported by the agent. */
+  localIp?: string | null;
+  /** Free-form operator note. */
+  notes?: string | null;
   tags: string[];
   status: FabricAgentStatus;
   lastSeenAt?: string | null; // ISO
@@ -41,6 +45,13 @@ export interface FabricAgentDto {
   /** True when this host has installed + validated the SSH CA trust. */
   caTrusted: boolean;
   targets: FabricTargetDto[];
+}
+
+/** Editable agent fields (PATCH /api/fabric/agents/:id). */
+export interface FabricUpdateAgentInput {
+  name?: string;
+  tags?: string[];
+  notes?: string | null;
 }
 
 export interface FabricSessionDto {
@@ -93,6 +104,8 @@ export interface FabricHelloFrame {
   os: string;
   osVersion?: string;
   hostname?: string;
+  /** Primary local IPv4 of the box, for display. */
+  localIp?: string;
   targets: Array<{ kind: FabricTargetKind; host: string; port: number; label?: string }>;
 }
 
@@ -239,7 +252,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.3.4';
+export const FABRIC_AGENT_VERSION = '0.3.5';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

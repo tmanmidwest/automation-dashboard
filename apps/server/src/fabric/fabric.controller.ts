@@ -7,6 +7,7 @@ import {
   Header,
   NotFoundException,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -42,6 +43,23 @@ class CreateAgentDto {
 class EnrollDto {
   @IsString()
   token!: string;
+}
+
+class UpdateAgentDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  name?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string;
 }
 
 class SshConnectDto {
@@ -272,6 +290,13 @@ export class FabricController {
   @RequirePermissions('fabric:manage')
   createAgent(@Body() body: CreateAgentDto, @CurrentUser() user: SessionUser) {
     return this.fabric.createAgent(body, user);
+  }
+
+  @Patch('agents/:id')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  updateAgent(@Param('id') id: string, @Body() body: UpdateAgentDto, @CurrentUser() user: SessionUser) {
+    return this.fabric.updateAgent(id, body, user);
   }
 
   @Post('agents/:id/revoke')

@@ -31,7 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.4"
+const agentVersion = "0.3.5"
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -128,6 +128,7 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 		"os":           runtime.GOOS,
 		"osVersion":    osVersion(),
 		"hostname":     hostname(),
+		"localIp":      localIP(),
 		"targets":      targets,
 	})
 
@@ -270,6 +271,20 @@ func ensureLineInFile(path, line string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// localIP returns the box's primary outbound IPv4 (the interface used to reach the
+// network), determined without sending a packet. Empty if it can't be found.
+func localIP() string {
+	c, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	if addr, ok := c.LocalAddr().(*net.UDPAddr); ok && addr.IP != nil {
+		return addr.IP.String()
+	}
+	return ""
 }
 
 // targetsSig is an order-independent signature of a target set, for change detection.

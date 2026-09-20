@@ -644,9 +644,13 @@ model Agent {
   id           String   @id @default(cuid())
   name         String
   hostname     String?
-  os           String? // "linux" | "windows"
+  os           String? // "linux" | "windows" | "darwin"
   osVersion    String?
   agentVersion String?
+  /// Primary local IPv4 of the box (reported by the agent), for display.
+  localIp      String?
+  /// Free-form operator note shown on the card.
+  notes        String?
   /// Free-form tags for grouping / per-tag grants later.
   tags         String[]
   /// pending | online | offline | revoked

@@ -3,7 +3,7 @@ import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
-  ShieldCheck,
+  ShieldCheck, Search, Network, Tag as TagIcon,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -32,6 +32,29 @@ const STATUS: Record<FabricAgentStatus, { label: string; cls: string }> = {
   pending: { label: 'Awaiting enrollment', cls: 'text-amber-400' },
   revoked: { label: 'Revoked', cls: 'text-destructive' },
 };
+
+// OS grouping: friendly labels + a colored pill, and a stable section order.
+type OsKey = 'windows' | 'linux' | 'darwin' | 'other';
+const OS_ORDER: OsKey[] = ['windows', 'linux', 'darwin', 'other'];
+const OS_META: Record<OsKey, { label: string; cls: string }> = {
+  windows: { label: 'Windows', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' },
+  linux: { label: 'Linux', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  darwin: { label: 'macOS', cls: 'bg-zinc-400/15 text-zinc-200 border-zinc-400/30' },
+  other: { label: 'Other / pending', cls: 'bg-muted text-muted-foreground border-border' },
+};
+function osKey(os?: string | null): OsKey {
+  const v = (os || '').toLowerCase();
+  if (v.includes('win')) return 'windows';
+  if (v.includes('darwin') || v.includes('mac')) return 'darwin';
+  if (v.includes('linux')) return 'linux';
+  return 'other';
+}
+/** Friendly OS label for display (darwin → macOS). */
+function osLabel(os?: string | null, osVersion?: string | null): string {
+  if (!os && !osVersion) return '—';
+  const base = OS_META[osKey(os)].label;
+  return osVersion ? `${base} · ${osVersion}` : base;
+}
 
 /** Version-agnostic uninstall one-liner for a machine's OS. */
 function uninstallCmd(os?: string | null): string {
@@ -130,6 +153,9 @@ export function Fabric() {
   const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
+  const [editing, setEditing] = useState<FabricAgentDto | null>(null);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
   const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string } } | null>(null);
@@ -233,6 +259,11 @@ export function Fabric() {
     }
   };
 
+  const saveAgent = async (id: string, input: { name?: string; tags?: string[]; notes?: string | null }) => {
+    const updated = await api.patch<FabricAgentDto>(`/api/fabric/agents/${id}`, input);
+    setAgents((prev) => (prev ? prev.map((a) => (a.id === id ? updated : a)) : prev));
+  };
+
   const remove = async (a: FabricAgentDto) => {
     if (!confirm(`Delete "${a.name}" and its history? This cannot be undone.`)) return;
     try {
@@ -243,6 +274,155 @@ export function Fabric() {
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Delete failed.');
     }
+  };
+
+  // Filter (search + status) then group by OS in a stable order, online first.
+  const groups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const by: Record<OsKey, FabricAgentDto[]> = { windows: [], linux: [], darwin: [], other: [] };
+    for (const a of agents ?? []) {
+      if (statusFilter === 'online' && a.status !== 'online') continue;
+      if (statusFilter === 'offline' && a.status === 'online') continue;
+      if (q) {
+        const hay = [a.name, a.hostname, a.localIp, a.os, a.osVersion, a.notes, ...a.tags]
+          .filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      by[osKey(a.os)].push(a);
+    }
+    for (const k of OS_ORDER) {
+      by[k].sort((x, y) => (x.status === 'online' ? 0 : 1) - (y.status === 'online' ? 0 : 1) || x.name.localeCompare(y.name));
+    }
+    return by;
+  }, [agents, search, statusFilter]);
+  const totalShown = OS_ORDER.reduce((n, k) => n + groups[k].length, 0);
+
+  const renderAgentCard = (a: FabricAgentDto) => {
+    const st = STATUS[a.status];
+    const ssh = a.targets.find((t) => t.kind === 'ssh');
+    const online = a.status === 'online';
+    return (
+      <Card key={a.id} className="overflow-hidden">
+        <CardContent className="p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.65rem] font-medium ${OS_META[osKey(a.os)].cls}`}>
+                  {OS_META[osKey(a.os)].label}
+                </span>
+                <span className="font-semibold text-sm truncate">{a.name}</span>
+              </div>
+              <div className={`flex items-center gap-1.5 text-xs mt-1 ${st.cls}`}>
+                <CircleDot className="h-3.5 w-3.5" /> {st.label}
+                {a.lastSeenAt && (
+                  <span className="text-muted-foreground">· {online ? relTime(a.lastSeenAt) : `seen ${relTime(a.lastSeenAt)}`}</span>
+                )}
+              </div>
+            </div>
+            {canManage && (
+              <div className="flex items-center gap-0.5 shrink-0">
+                <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit name, tags & notes" onClick={() => setEditing(a)}>
+                  <Pencil className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost" size="icon" className="h-8 w-8"
+                  disabled={!online}
+                  title={a.caTrusted ? 'SSH CA trust installed & validated — click to re-install' : online ? 'Install SSH CA trust on this host' : 'Agent offline — CA trust not installed'}
+                  onClick={() => trustCa(a)}
+                >
+                  <ShieldCheck className={`h-4 w-4 ${a.caTrusted ? 'text-emerald-400' : ''}`} />
+                </Button>
+                {a.status !== 'revoked' && (
+                  <Button variant="ghost" size="icon" className="h-8 w-8" title="Revoke" onClick={() => revoke(a)}>
+                    <ShieldOff className="h-4 w-4" />
+                  </Button>
+                )}
+                <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete" onClick={() => remove(a)}>
+                  <Trash2 className="h-4 w-4 text-destructive/80" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            {a.hostname && (<><dt className="text-muted-foreground">Host</dt><dd className="truncate text-foreground/80">{a.hostname}</dd></>)}
+            {a.localIp && (
+              <><dt className="text-muted-foreground inline-flex items-center gap-1"><Network className="h-3 w-3" /> IP</dt>
+                <dd className="text-foreground/80 font-mono">{a.localIp}</dd></>
+            )}
+            <dt className="text-muted-foreground">OS</dt><dd className="truncate text-foreground/80">{osLabel(a.os, a.osVersion)}</dd>
+            {a.agentVersion && (<><dt className="text-muted-foreground">Agent</dt><dd className="text-foreground/80">v{a.agentVersion}</dd></>)}
+          </dl>
+
+          {a.targets.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              <div className="flex flex-wrap gap-1.5">
+                {a.targets.map((t) => {
+                  const pr = probe[t.id];
+                  const clickable = online && canConnect;
+                  return (
+                    <span key={t.id} className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 overflow-hidden">
+                      <button
+                        type="button" disabled={!clickable || pr?.loading}
+                        onClick={clickable ? () => runProbe(a.id, t) : undefined}
+                        title={clickable ? 'Test tunnel' : undefined}
+                        className={`inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] ${clickable ? 'hover:bg-muted cursor-pointer' : 'cursor-default'}`}
+                      >
+                        {pr?.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : t.kind === 'rdp' ? <MonitorSmartphone className="h-3 w-3" /> : t.kind === 'vnc' ? <Monitor className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
+                        {t.kind.toUpperCase()} :{t.port}
+                      </button>
+                      {canConnect && (
+                        <button
+                          type="button" disabled={!online}
+                          onClick={online ? () => openConnect(a, t) : undefined}
+                          title={online ? `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}` : 'Agent offline'}
+                          className={`inline-flex items-center gap-1 px-2 py-1 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
+                        >
+                          <TerminalSquare className="h-3 w-3" />
+                          {t.hasCredential && <KeyRound className="h-2.5 w-2.5 opacity-70" />}
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+                {canConnect && ssh && (
+                  <button
+                    type="button" disabled={!online}
+                    onClick={online ? () => setFilesFor({ agent: a, target: ssh }) : undefined}
+                    title={online ? 'Browse & transfer files over SFTP' : 'Agent offline'}
+                    className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-[0.7rem] ${online ? 'hover:bg-muted cursor-pointer' : 'opacity-40 cursor-default'}`}
+                  >
+                    <FolderOpen className="h-3 w-3" /> Files
+                  </button>
+                )}
+              </div>
+              {a.targets.map((t) => {
+                const r = probe[t.id]?.result;
+                if (!r) return null;
+                return (
+                  <p key={t.id} className={`text-[0.7rem] ${r.ok ? 'text-emerald-400' : 'text-destructive'}`}>
+                    {t.kind.toUpperCase()} :{t.port} —{' '}
+                    {r.ok ? `reachable${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.banner ? ` · ${r.banner}` : ''}` : r.error || 'unreachable'}
+                  </p>
+                );
+              })}
+            </div>
+          )}
+
+          {a.notes && <p className="mt-2 text-xs text-muted-foreground italic border-l-2 border-border/60 pl-2">{a.notes}</p>}
+
+          {a.tags.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {a.tags.map((tag) => (
+                <span key={tag} className="inline-flex items-center gap-1 rounded bg-secondary/20 px-1.5 py-0.5 text-[0.65rem] text-secondary-foreground/80">
+                  <TagIcon className="h-2.5 w-2.5 opacity-70" />{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
   };
 
   return (
@@ -315,163 +495,41 @@ export function Fabric() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {agents.map((a) => {
-            const st = STATUS[a.status];
-            return (
-              <Card key={a.id} className="overflow-hidden">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="font-medium truncate">{a.name}</span>
-                      </div>
-                      <div className={`flex items-center gap-1.5 text-xs mt-1 ${st.cls}`}>
-                        <CircleDot className="h-3.5 w-3.5" /> {st.label}
-                        {a.status === 'online' && a.lastSeenAt && (
-                          <span className="text-muted-foreground">· {relTime(a.lastSeenAt)}</span>
-                        )}
-                        {a.status === 'offline' && (
-                          <span className="text-muted-foreground">· seen {relTime(a.lastSeenAt)}</span>
-                        )}
-                      </div>
-                    </div>
-                    {canManage && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          disabled={a.status !== 'online'}
-                          title={
-                            a.caTrusted
-                              ? 'SSH CA trust installed & validated — click to re-install'
-                              : a.status === 'online'
-                                ? 'Install SSH CA trust on this host'
-                                : 'Agent offline — CA trust not installed'
-                          }
-                          onClick={() => trustCa(a)}
-                        >
-                          <ShieldCheck className={`h-4 w-4 ${a.caTrusted ? 'text-emerald-400' : ''}`} />
-                        </Button>
-                        {a.status !== 'revoked' && (
-                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Revoke" onClick={() => revoke(a)}>
-                            <ShieldOff className="h-4 w-4" />
-                          </Button>
-                        )}
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete" onClick={() => remove(a)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    )}
-                  </div>
+        <>
+          {/* Toolbar: search + status filter */}
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <div className="relative flex-1 min-w-[14rem] max-w-md">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, host, IP, tag, note…" className="pl-8" />
+            </div>
+            <div className="inline-flex rounded-md border border-border overflow-hidden text-xs">
+              {(['all', 'online', 'offline'] as const).map((f) => (
+                <button key={f} type="button" onClick={() => setStatusFilter(f)}
+                  className={`px-3 py-1.5 capitalize ${statusFilter === f ? 'bg-primary/20 text-primary' : 'hover:bg-muted'}`}>
+                  {f}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground">{totalShown} of {agents.length}</span>
+          </div>
 
-                  <dl className="mt-3 space-y-1 text-xs text-muted-foreground">
-                    {a.hostname && (
-                      <div className="flex gap-2"><dt className="w-16 shrink-0">Host</dt><dd className="truncate text-foreground/80">{a.hostname}</dd></div>
-                    )}
-                    {(a.os || a.osVersion) && (
-                      <div className="flex gap-2"><dt className="w-16 shrink-0">OS</dt><dd className="truncate text-foreground/80">{[a.os, a.osVersion].filter(Boolean).join(' ')}</dd></div>
-                    )}
-                    {a.agentVersion && (
-                      <div className="flex gap-2"><dt className="w-16 shrink-0">Agent</dt><dd className="text-foreground/80">v{a.agentVersion}</dd></div>
-                    )}
-                  </dl>
-
-                  {a.targets.length > 0 && (
-                    <div className="mt-3 space-y-1.5">
-                      <div className="flex flex-wrap gap-1.5">
-                        {a.targets.map((t) => {
-                          const pr = probe[t.id];
-                          const online = a.status === 'online';
-                          const clickable = online && canConnect;
-                          return (
-                            <span
-                              key={t.id}
-                              className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 overflow-hidden"
-                            >
-                              <button
-                                type="button"
-                                disabled={!clickable || pr?.loading}
-                                onClick={clickable ? () => runProbe(a.id, t) : undefined}
-                                title={clickable ? 'Test tunnel' : undefined}
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] ${clickable ? 'hover:bg-muted cursor-pointer' : 'cursor-default'}`}
-                              >
-                                {pr?.loading ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : t.kind === 'rdp' ? (
-                                  <MonitorSmartphone className="h-3 w-3" />
-                                ) : t.kind === 'vnc' ? (
-                                  <Monitor className="h-3 w-3" />
-                                ) : (
-                                  <Terminal className="h-3 w-3" />
-                                )}
-                                {t.kind.toUpperCase()} :{t.port}
-                              </button>
-                              {canConnect && (
-                                <button
-                                  type="button"
-                                  disabled={!online}
-                                  onClick={online ? () => openConnect(a, t) : undefined}
-                                  title={
-                                    online
-                                      ? `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}`
-                                      : 'Agent offline'
-                                  }
-                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
-                                >
-                                  <TerminalSquare className="h-3 w-3" />
-                                  {t.hasCredential && <KeyRound className="h-2.5 w-2.5 opacity-70" />}
-                                </button>
-                              )}
-                            </span>
-                          );
-                        })}
-                      </div>
-                      {a.targets.map((t) => {
-                        const r = probe[t.id]?.result;
-                        if (!r) return null;
-                        return (
-                          <p key={t.id} className={`text-[0.7rem] ${r.ok ? 'text-emerald-400' : 'text-destructive'}`}>
-                            {t.kind.toUpperCase()} :{t.port} —{' '}
-                            {r.ok
-                              ? `reachable${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.banner ? ` · ${r.banner}` : ''}`
-                              : r.error || 'unreachable'}
-                          </p>
-                        );
-                      })}
-                      {canConnect && (() => {
-                        const ssh = a.targets.find((t) => t.kind === 'ssh');
-                        if (!ssh) return null;
-                        const online = a.status === 'online';
-                        return (
-                          <button
-                            type="button"
-                            disabled={!online}
-                            onClick={online ? () => setFilesFor({ agent: a, target: ssh }) : undefined}
-                            title={online ? 'Browse & transfer files over SFTP' : 'Agent offline'}
-                            className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 text-[0.7rem] ${online ? 'hover:bg-muted cursor-pointer' : 'opacity-40 cursor-default'}`}
-                          >
-                            <FolderOpen className="h-3 w-3" /> Files
-                          </button>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  {a.tags.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {a.tags.map((tag) => (
-                        <span key={tag} className="rounded bg-secondary/20 px-1.5 py-0.5 text-[0.65rem] text-secondary-foreground/80">{tag}</span>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+          {totalShown === 0 ? (
+            <Card><CardContent className="py-10 text-center text-muted-foreground text-sm">No machines match your filters.</CardContent></Card>
+          ) : (
+            OS_ORDER.filter((k) => groups[k].length > 0).map((k) => (
+              <section key={k} className="mb-5">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.7rem] font-medium ${OS_META[k].cls}`}>{OS_META[k].label}</span>
+                  <span className="text-xs text-muted-foreground">{groups[k].length}</span>
+                  <div className="flex-1 h-px bg-border/60" />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {groups[k].map(renderAgentCard)}
+                </div>
+              </section>
+            ))
+          )}
+        </>
       )}
 
       {showCli && <CliDialog onClose={() => setShowCli(false)} />}
@@ -543,6 +601,10 @@ export function Fabric() {
           target={filesFor.target}
           onClose={() => setFilesFor(null)}
         />
+      )}
+
+      {editing && (
+        <EditAgentDialog agent={editing} onClose={() => setEditing(null)} onSave={saveAgent} />
       )}
 
       {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} />}
@@ -835,6 +897,75 @@ interface CaStatus {
   hostSetupLinux?: string;
   hostSetupWindows?: string;
   clientTrustLine?: string;
+}
+
+function EditAgentDialog({
+  agent,
+  onClose,
+  onSave,
+}: {
+  agent: FabricAgentDto;
+  onClose: () => void;
+  onSave: (id: string, input: { name?: string; tags?: string[]; notes?: string | null }) => Promise<void>;
+}) {
+  const [name, setName] = useState(agent.name);
+  const [tags, setTags] = useState(agent.tags.join(', '));
+  const [notes, setNotes] = useState(agent.notes ?? '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!name.trim()) { setErr('Name is required.'); return; }
+    setBusy(true); setErr(null);
+    try {
+      await onSave(agent.id, {
+        name: name.trim(),
+        tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
+        notes: notes.trim() || null,
+      });
+      onClose();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to save.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Edit machine"
+      description="Rename, tag, and annotate this machine. Tags and notes show on its card and are searchable."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy}>{busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}Save</Button>
+        </>
+      }
+    >
+      {err && <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+      <div className="space-y-4">
+        <div>
+          <Label>Name</Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div>
+          <Label>Tags</Label>
+          <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="prod, aws, us-east-1" />
+          <p className="mt-1 text-xs text-muted-foreground">Comma-separated. Shown as chips; used by search.</p>
+        </div>
+        <div>
+          <Label>Notes</Label>
+          <textarea
+            className="mt-1 w-full h-24 rounded-md border border-input bg-background/60 px-2 py-1.5 text-sm"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. AWS bastion — reboot only during the maintenance window."
+          />
+        </div>
+      </div>
+    </Dialog>
+  );
 }
 
 function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
