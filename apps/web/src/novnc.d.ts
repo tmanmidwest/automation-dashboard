@@ -10,6 +10,8 @@ declare module '@novnc/novnc' {
     scaleViewport: boolean;
     resizeSession: boolean;
     viewOnly: boolean;
+    /** Show a dot when the remote cursor is empty/hidden (e.g. macOS Screen Sharing). */
+    showDotCursor: boolean;
     focus(): void;
     blur(): void;
     disconnect(): void;

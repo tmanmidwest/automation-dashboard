@@ -2057,6 +2057,9 @@ export function VncViewer({
       rfbRef.current = rfb;
       rfb.scaleViewport = true;
       rfb.resizeSession = false;
+      // macOS Screen Sharing renders the cursor client-side and sometimes sends an
+      // empty shape → invisible pointer. Show a dot so it's always locatable.
+      rfb.showDotCursor = true;
       rfb.addEventListener('connect', () => {
         setStatus('connected');
         setCredTypes(null);
