@@ -44,8 +44,9 @@ const OS_META: Record<OsKey, { label: string; cls: string }> = {
 };
 function osKey(os?: string | null): OsKey {
   const v = (os || '').toLowerCase();
-  if (v.includes('win')) return 'windows';
+  // Check darwin/mac BEFORE windows — "darwin" contains the substring "win".
   if (v.includes('darwin') || v.includes('mac')) return 'darwin';
+  if (v.includes('windows') || v.includes('win')) return 'windows';
   if (v.includes('linux')) return 'linux';
   return 'other';
 }
