@@ -38,6 +38,8 @@ export interface FabricAgentDto {
   status: FabricAgentStatus;
   lastSeenAt?: string | null; // ISO
   createdAt: string; // ISO
+  /** True when this host has installed + validated the SSH CA trust. */
+  caTrusted: boolean;
   targets: FabricTargetDto[];
 }
 

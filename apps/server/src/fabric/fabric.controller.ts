@@ -148,6 +148,11 @@ class RdpConnectDto {
   disableAudio?: boolean;
 }
 
+class CaAutoTrustDto {
+  @IsBoolean()
+  enabled!: boolean;
+}
+
 class CaSignDto {
   @IsString()
   @MaxLength(8192)
@@ -383,6 +388,14 @@ export class FabricController {
   async caDisable(@CurrentUser() user: SessionUser) {
     await this.ca.disable(user);
     return { ok: true };
+  }
+
+  /** Toggle auto-trusting new agents on first connect. */
+  @Post('ca/auto-trust')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  caAutoTrust(@Body() body: CaAutoTrustDto, @CurrentUser() user: SessionUser) {
+    return this.ca.setAutoTrust(!!body.enabled, user);
   }
 
   /** Sign a public key into a short-lived user cert (usable by the CLI via token). */

@@ -225,7 +225,9 @@ export function Fabric() {
     try {
       await api.post(`/api/fabric/agents/${a.id}/trust-ca`);
       setErr(null);
-      alert(`Requested — "${a.name}" is installing the CA trust. Check the Ship's Log for the result.`);
+      // The agent installs + validates, then reports back; refresh to catch the green shield.
+      setTimeout(load, 2500);
+      setTimeout(load, 6000);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to request CA trust.');
     }
@@ -337,11 +339,22 @@ export function Fabric() {
                     </div>
                     {canManage && (
                       <div className="flex items-center gap-1 shrink-0">
-                        {a.status === 'online' && (
-                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Install SSH CA trust on this host" onClick={() => trustCa(a)}>
-                            <ShieldCheck className="h-4 w-4" />
-                          </Button>
-                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          disabled={a.status !== 'online'}
+                          title={
+                            a.caTrusted
+                              ? 'SSH CA trust installed & validated — click to re-install'
+                              : a.status === 'online'
+                                ? 'Install SSH CA trust on this host'
+                                : 'Agent offline — CA trust not installed'
+                          }
+                          onClick={() => trustCa(a)}
+                        >
+                          <ShieldCheck className={`h-4 w-4 ${a.caTrusted ? 'text-emerald-400' : ''}`} />
+                        </Button>
                         {a.status !== 'revoked' && (
                           <Button variant="ghost" size="icon" className="h-8 w-8" title="Revoke" onClick={() => revoke(a)}>
                             <ShieldOff className="h-4 w-4" />
@@ -818,6 +831,7 @@ interface CaStatus {
   fingerprint?: string;
   createdAt?: string;
   ttlMinutes: number;
+  autoTrust: boolean;
   hostSetupLinux?: string;
   hostSetupWindows?: string;
   clientTrustLine?: string;
@@ -842,6 +856,12 @@ function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => v
     setBusy(true); setErr(null);
     try { await api.post('/api/fabric/ca/disable'); await load(); }
     catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to disable the CA.'); }
+    finally { setBusy(false); }
+  };
+  const setAutoTrust = async (enabled: boolean) => {
+    setBusy(true); setErr(null);
+    try { setStatus(await api.post<CaStatus>('/api/fabric/ca/auto-trust', { enabled })); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to update auto-trust.'); }
     finally { setBusy(false); }
   };
 
@@ -888,6 +908,23 @@ function CaDialog({ canManage, onClose }: { canManage: boolean; onClose: () => v
             <span className="text-muted-foreground text-xs">Certs valid {status.ttlMinutes} min</span>
             {status.fingerprint && <span className="text-muted-foreground text-xs font-mono truncate">{status.fingerprint}</span>}
           </div>
+
+          <label className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={status.autoTrust}
+              disabled={!canManage || busy}
+              onChange={(e) => setAutoTrust(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Auto-trust new agents</span>
+              <span className="block text-xs text-muted-foreground">
+                Push CA trust + a host certificate to each machine automatically the first time it connects — new boxes
+                are CA-ready with no clicks. Runs once per machine.
+              </span>
+            </span>
+          </label>
 
           <div>
             <p className="font-medium">CA public key</p>

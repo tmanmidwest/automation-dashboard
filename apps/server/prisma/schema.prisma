@@ -661,8 +661,12 @@ model Agent {
   credHash      String?
 
   lastSeenAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  /// When this host last successfully installed + validated the SSH CA trust
+  /// (from the agent's ca-result). Null = not trusted; drives the green shield
+  /// and the "auto-trust once" gate.
+  caTrustedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   targets  AgentTarget[]
   sessions FabricSession[]

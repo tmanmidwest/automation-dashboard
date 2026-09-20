@@ -7,6 +7,7 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import type { SessionUser } from '@cerebro/shared';
 import { FABRIC_HOST_ALIAS_PREFIX } from '@cerebro/shared';
+import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { AuditService } from '../logging/audit.service';
 import { fabricConfig } from './fabric-config';
@@ -16,6 +17,8 @@ const execFileP = promisify(execFile);
 /** Where the CA public key + metadata live (public); the private key is sealed. */
 const CA_META_KEY = 'fabric.ca';
 const CA_PRIV_SECRET = 'fabric.ca.privateKey';
+/** Auto-trust toggle: push CA trust to each agent the first time it comes online. */
+const CA_AUTOTRUST_KEY = 'fabric.ca.autoTrust';
 
 /** Path the host-trust snippet installs the CA public key to. */
 const HOST_CA_PATH = '/etc/ssh/cerebro_ca.pub';
@@ -32,6 +35,8 @@ export interface CaStatus {
   fingerprint?: string;
   createdAt?: string;
   ttlMinutes: number;
+  /** Push CA trust to each agent automatically the first time it comes online. */
+  autoTrust: boolean;
   /** Copy-paste one-liners to make a host trust this CA. */
   hostSetupLinux?: string;
   hostSetupWindows?: string;
@@ -59,6 +64,7 @@ export class FabricCaService {
   private readonly logger = new Logger(FabricCaService.name);
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly audit: AuditService,
   ) {}
@@ -66,13 +72,15 @@ export class FabricCaService {
   async status(): Promise<CaStatus> {
     const meta = await this.settings.get<CaMeta>(CA_META_KEY);
     const ttlMinutes = fabricConfig.caTtlMinutes;
-    if (!meta?.publicKey) return { enabled: false, ttlMinutes };
+    const autoTrust = await this.autoTrustEnabled();
+    if (!meta?.publicKey) return { enabled: false, ttlMinutes, autoTrust };
     return {
       enabled: true,
       publicKey: meta.publicKey,
       fingerprint: meta.fingerprint,
       createdAt: meta.createdAt,
       ttlMinutes,
+      autoTrust,
       hostSetupLinux: hostSetupLinux(meta.publicKey),
       hostSetupWindows: hostSetupWindows(meta.publicKey),
       clientTrustLine: `@cert-authority ${FABRIC_HOST_ALIAS_PREFIX}* ${meta.publicKey}`,
@@ -83,6 +91,21 @@ export class FabricCaService {
   async publicKey(): Promise<string | null> {
     const meta = await this.settings.get<CaMeta>(CA_META_KEY);
     return meta?.publicKey ?? null;
+  }
+
+  /** Whether new agents should be auto-trusted on first connect. */
+  async autoTrustEnabled(): Promise<boolean> {
+    return (await this.settings.get<boolean>(CA_AUTOTRUST_KEY)) === true;
+  }
+
+  async setAutoTrust(enabled: boolean, user: SessionUser): Promise<CaStatus> {
+    await this.settings.set(CA_AUTOTRUST_KEY, enabled);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: enabled ? 'fabric.ca.autotrust_on' : 'fabric.ca.autotrust_off',
+    });
+    return this.status();
   }
 
   /** Generate the CA keypair (idempotent — returns the existing one if present). */
@@ -121,6 +144,9 @@ export class FabricCaService {
   async disable(user: SessionUser): Promise<void> {
     await this.settings.deleteSecret(CA_PRIV_SECRET).catch(() => undefined);
     await this.settings.set(CA_META_KEY, {});
+    // Existing host trust is now orphaned — clear the per-agent flags so the
+    // green shields reset (a re-enable mints a new key needing fresh trust).
+    await this.prisma.agent.updateMany({ data: { caTrustedAt: null } }).catch(() => undefined);
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'fabric.ca.disabled' });
   }
 

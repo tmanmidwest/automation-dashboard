@@ -166,6 +166,11 @@ export class AgentRegistryService {
         await this.syncTargets(agentId, frame.targets ?? []);
         break;
       case 'ca-result':
+        if (frame.ok) {
+          await this.prisma.agent
+            .update({ where: { id: agentId }, data: { caTrustedAt: new Date() } })
+            .catch(() => undefined);
+        }
         await this.audit.record({
           action: frame.ok ? 'fabric.ca.host_trusted' : 'fabric.ca.host_trust_failed',
           target: agentId,
@@ -235,6 +240,24 @@ export class AgentRegistryService {
       heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
     });
+
+    // Auto-trust: push CA trust to an untrusted agent (once it succeeds, the
+    // caTrustedAt flag stops this from firing again).
+    if (!before.caTrustedAt) void this.maybeAutoTrustCa(agentId);
+  }
+
+  /** If auto-trust is on and the CA is enabled, push CA trust to this agent. */
+  private async maybeAutoTrustCa(agentId: string): Promise<void> {
+    try {
+      if (!(await this.ca.autoTrustEnabled())) return;
+      const pub = await this.ca.publicKey();
+      if (!pub) return;
+      if (this.requestInstallCa(agentId, pub)) {
+        await this.audit.record({ action: 'fabric.ca.autotrust_pushed', target: agentId });
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   private onHeartbeat(agentId: string): void {

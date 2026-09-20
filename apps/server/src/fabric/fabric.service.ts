@@ -590,6 +590,7 @@ export class FabricService implements OnModuleInit {
       status: this.registry.statusOf(agent.id, agent.status),
       lastSeenAt: agent.lastSeenAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),
+      caTrusted: !!agent.caTrustedAt,
       targets: targets.map(
         (t): FabricTargetDto => ({
           id: t.id,
