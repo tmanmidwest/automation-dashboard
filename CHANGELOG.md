@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added — Fabric (agent-brokered remote access)
+- **Reach Linux/Windows/macOS boxes with no inbound firewall rule.** A tiny **Cerebro Agent** dials
+  *out* over TLS and holds one connection open; Cerebro brokers **SSH, RDP, and VNC** (macOS Screen
+  Sharing) back down it — in the browser, opened in a new tab by default. Model: Cloudflare Tunnel +
+  Teleport-lite, self-hosted. New top-level **Fabric** screen (`fabric:read|connect|manage`).
+- **In-browser sessions** — SSH (xterm.js), RDP (guacd sidecar), VNC (noVNC), with **RDP session
+  recording** + playback, and SSH **host-key pinning** (TOFU).
+- **Vault-injected credentials** for SSH/RDP/VNC — pick this machine's saved credential, a reusable
+  vault credential, or enter one (with an explicit *this machine vs reusable* save scope). Create
+  SSH/RDP/VNC credentials in the vault directly; they file under a **Fabric** category with
+  machine-named labels.
+- **SFTP file browser** — browse and transfer files to/from a host over the same SSH tunnel.
+- **Native `cerebro` CLI** — `ls` / `access` (local port forward), plus **bring-your-own SSH
+  client**: `cerebro proxy` (SSH `ProxyCommand`) and `cerebro ssh` (launches your own `ssh`/`scp`/
+  `sftp` with your keys). Driven by an API token with `fabric:read` + `fabric:connect`.
+- **SSH certificate authority** — Cerebro signs short-lived **user certs** (no per-box keys) and
+  **host certs** (no TOFU prompts). Host trust via a manual per-box snippet **or** agent-automated
+  install (validated with `sshd -t`, reverted on failure), with an **auto-trust new agents** toggle
+  and a green trust indicator per machine.
+- **Agent lifecycle** — cross-platform installer (systemd / launchd / Windows service), self-update,
+  self-uninstall on delete, periodic local-port re-probe, reports its local IP, and adopts the
+  broker's heartbeat cadence. Offline detection + alert.
+- **Inventory UX** — machines grouped by OS with search, status filter, a Cards/List density toggle,
+  the local IP, and **editable tags + notes** per machine. Operator-tunable cadences
+  (`FABRIC_HEARTBEAT_MS`, `FABRIC_POLL_MS`, CA TTLs). See `docs/fabric-remote-access.md`.
+
+### Added — Vault reveal for SSO users
+- **Reveal a vault secret as an SSO/OIDC user** — the step-up re-auth now supports single sign-on
+  accounts (which have no local password or TOTP): reveal re-authenticates through the identity
+  provider (a short-lived, audited step-up) instead of being blocked.
+
 ### Added — Automations engine (rules)
 - **Automation rules** — *when* something happens, *if* a condition holds, *do* one or more
   actions, across connectors. Triggers off the timeline event stream (any alert, audit event, job

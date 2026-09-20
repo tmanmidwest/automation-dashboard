@@ -17,10 +17,14 @@ existing relay, vault, crypto, RBAC, and timeline plumbing.
 > falls back to an in-page overlay. The `SshTerminal`/`RdpViewer`/`VncViewer` components are exported
 > from `Fabric.tsx` and reused by the standalone session page.
 >
-> Status: **Phases 1–5 (native client) BUILT + RDP/SSH live** (2026-09-18) — control plane, tunnel,
-> in-browser SSH + RDP + **VNC (macOS Screen Sharing)**, vault creds, full agent lifecycle
-> (self-uninstall, Windows service, host-key pinning, self-update), the native `cerebro access` CLI,
-> and **agents for Linux, Windows, and macOS**. Remaining: session recording, approval gate.
+> Status: **Feature-rich and in production** (updated 2026-09-20). Phases 1–5 plus a large set of
+> follow-ons — in-browser SSH/RDP/VNC, an SFTP file browser, vaulted credentials for all session
+> kinds, RDP session recording, the native `cerebro` CLI with **bring-your-own-SSH-client** modes,
+> a **Cerebro SSH certificate authority** (short-lived user certs + host certs, manual and
+> agent-automated host trust, auto-trust), operator-tunable cadences, and a redesigned inventory
+> screen. Agents for **Linux, Windows, and macOS** (agent **v0.3.5**). See **Current state** below
+> for the authoritative list; the rest of this doc is the original design record. Remaining ideas:
+> a per-session approval gate, and SSH/VNC session recording (RDP recording is done).
 >
 > **macOS + VNC note:** the Go agent also targets **darwin** (amd64/arm64, built + served). The unix
 > `install.sh`/`uninstall.sh` self-detect macOS and use **launchd** (`/Library/LaunchDaemons/
@@ -87,6 +91,85 @@ existing relay, vault, crypto, RBAC, and timeline plumbing.
 > (sha256-stored, exactly like a Cerebro API token), *not* mTLS. Full mTLS terminates awkwardly behind
 > the reverse proxy that already fronts Cerebro, and the bearer credential gives the same
 > enroll→authenticate→revoke properties with far less surface. **mTLS moves to Phase 5 hardening.**
+
+## Current state (what's built) — authoritative
+
+Everything below is shipped and on `main`. The sections after this one are the original
+pre-build design record; where they differ, this section wins.
+
+### Sessions in the browser
+- **SSH** (xterm.js ⟷ session-WS relay ⟷ ssh2 over the tunnel), **RDP** (guacamole-common-js ⟷
+  `guacamole-lite` relay ⟷ **guacd** sidecar ⟷ ephemeral TCP forward ⟷ tunnel), and **VNC / macOS
+  Screen Sharing** (noVNC RFB ⟷ raw byte pipe ⟷ tunnel to `:5900`). Open in a new tab by default.
+- **RDP session recording** — guacd-native, written to the shared `cerebro_fabric_recordings`
+  volume; a Recordings dialog lists + plays them back. (`FABRIC_RECORDING_DISABLED` to turn off.)
+- **SSH host-key pinning** (TOFU): learned on first connect (`AgentTarget.hostKey`), refused on
+  mismatch, resettable in the UI.
+
+### Credentials (vault-injected)
+- Per session kind — **SSH** (`ssh`), **RDP** (`rdp`), **VNC** (`vnc`) — a connect dialog picks
+  **this machine's saved credential**, a **reusable vault credential**, or **manual** entry, with an
+  explicit **save scope** (this machine vs a named reusable credential). Server reveals the secret at
+  connect time. **VNC is different**: noVNC does the RFB/RA2 auth *in the browser* (macOS Screen
+  Sharing needs a **username + password**, Apple RA2), so a vaulted VNC credential is returned in the
+  session ticket and the viewer auto-fills it. Fabric credentials live under the vault's **Fabric**
+  category; per-machine key `fabric/<agentId>/<targetId>`, reusable `fabric/cred/<slug>`.
+
+### SFTP file browser
+- A **Files** affordance (per host with an SSH target) opens a browser over the *same* SSH
+  connection: list/navigate, upload (streamed), download, mkdir, rename, delete. Server keeps a
+  pooled SFTP session (5-min idle TTL, ownership-checked); every op is audited (`fabric.sftp.*`).
+  Works on Linux, macOS (Remote Login), and Windows (OpenSSH).
+
+### Native CLI + bring-your-own SSH client (`cli/`, Go)
+- `cerebro ls` · `cerebro access <machine> [ssh|rdp] [--listen]` (local port forward for any client).
+- **`cerebro proxy <machine>`** — stdin/stdout bridge for SSH's `ProxyCommand` (native `ssh`/`scp`/
+  `sftp` via a `~/.ssh/config` `Host` entry).
+- **`cerebro ssh [--ca] [user@]<machine> [ssh args…]`** — launches the operator's own `ssh` through
+  the tunnel; `--ca` mints a short-lived cert (see CA below).
+- **`cerebro ca`** — prints the CA public key + host-trust setup. Auth = an API token with
+  `fabric:read` + `fabric:connect` (both grantable; offered in Settings → API Tokens).
+
+### SSH certificate authority
+- Cerebro signs **short-lived user certificates** (`ssh-keygen -s`, default 5 min,
+  `FABRIC_CA_TTL_MINUTES`) so operators connect with no per-box `authorized_keys`, and **host
+  certificates** (default 26 weeks, `FABRIC_CA_HOST_TTL_WEEKS`) so clients verify the box with no
+  TOFU prompt. CA private key sealed in the vault; signing needs `openssh-client` in the image.
+- **Host trust two ways:** a **manual** copy-paste snippet per box, or **agent-automated** — the
+  online agent installs the CA + a host cert, validating with `sshd -t` and **reverting on failure**.
+  An **auto-trust** toggle pushes trust to each new agent on first connect (once per box); the
+  per-agent **shield turns green** (`Agent.caTrustedAt`) once installed + validated.
+- Endpoints: `GET /api/fabric/ca`, `POST ca/enable|disable|auto-trust` (`fabric:manage`),
+  `POST ca/sign` (`fabric:connect`), `POST agents/:id/trust-ca` (`fabric:manage`). The client trusts
+  host certs via `@cert-authority cerebro.* <CAPUB>`; the CLI writes this to `~/.cerebro/known_hosts`.
+
+### Agent (Go) — lifecycle
+- Targets **Linux/Windows/macOS**, built in the Dockerfile and served from `/api/fabric/agent/binary`;
+  installs via a self-detecting `install.sh` (systemd/launchd) or `install.ps1` (Windows service).
+- **Self-update** (broker sends the latest version in hello-ack; keep `agentVersion` in
+  `agent/main.go` in sync with `FABRIC_AGENT_VERSION`), **self-uninstall** on delete, **periodic
+  port re-probe** (60s — a service enabled after connect appears without a restart), reports its
+  **primary local IPv4** and adopts the broker's **heartbeat cadence** live.
+
+### Operator-tunable cadences (env)
+- `FABRIC_HEARTBEAT_MS` (15000) — heartbeat interval + offline-timer window; agents adopt it on next
+  hello, cutting per-agent DB writes at scale. `FABRIC_MISSED_BEATS_OFFLINE` (3). `FABRIC_POLL_MS`
+  (10000) — `/fabric` list refresh. `FABRIC_CA_TTL_MINUTES` (5), `FABRIC_CA_HOST_TTL_WEEKS` (26).
+  Guacd/RDP: `GUACD_HOST`/`GUACD_PORT`/`FABRIC_GUACD_CALLBACK_HOST`; recording `FABRIC_RECORDING_*`.
+
+### The `/fabric` screen
+- Machines **grouped by OS** (Windows / Linux / **macOS** [reported as `darwin`] / Other) with a
+  **search** box (name/host/IP/tag/note), an **all/online/offline** filter, and a **Cards / List**
+  density toggle (persisted). Each machine shows OS, hostname, **local IP**, agent version, status,
+  connect chips, **tags + a free-form note**, and an **edit** button (`PATCH /api/fabric/agents/:id`).
+
+### Data model + versions
+- Migrations: `0022_fabric` (Agent/AgentTarget/FabricSession) · `0023_fabric_hostkey`
+  (`AgentTarget.hostKey`) · `0024_fabric_ca_trust` (`Agent.caTrustedAt`) · `0025_fabric_agent_meta`
+  (`Agent.localIp`, `Agent.notes`). Also `AgentTarget.secretRef` and `FabricSession.recordPath`.
+- Agent versions: 0.3.0 (lifecycle) → 0.3.1 (re-probe) → 0.3.2 (live heartbeat) → 0.3.3 (install-ca)
+  → 0.3.4 (host certs) → **0.3.5 (local IP)**.
+- RBAC: `fabric:read` + `fabric:connect` are grantable token scopes; `fabric:manage` is session-only.
 
 ## Why this is a top-level module, not a connector
 

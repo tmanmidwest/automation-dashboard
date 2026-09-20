@@ -134,6 +134,21 @@ export interface SecretSummary {
 
 ---
 
+## Structured credential kinds + the Fabric category (added later)
+
+The vault gained a `SecretMeta.kind` (`generic | git | ssh | rdp | vnc`). Beyond plain strings, a
+secret's plaintext can be a small JSON credential:
+
+- **`git`** — `{host, username, secret}` (HTTPS PAT/password), used by Docker Git-stack deploys.
+- **`ssh`** — `{username, password? | privateKey?, passphrase?}`.
+- **`rdp`** — `{username, password, domain?}`.
+- **`vnc`** — `{username?, password}` (macOS Screen Sharing / Apple RA2 needs the username).
+
+The **New secret** dialog creates any of these (structured fields per kind); reveal pretty-prints the
+JSON. `SecretCategory` also gained **`fabric`** — the full order is `connector | fabric | notification
+| api | manual`. Fabric credentials file here automatically: per-machine at `fabric/<agentId>/<targetId>`
+and reusable at `fabric/cred/<slug>`, with machine-named labels. See `docs/fabric-remote-access.md`.
+
 ## Phase 1 — `SecretsService` + metadata + backfill
 
 **New** `apps/server/src/secrets/secrets.service.ts` — the single choke point. It **owns** the
