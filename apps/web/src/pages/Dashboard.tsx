@@ -32,88 +32,11 @@ function uptimeSince(iso?: string): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
-/** Colour a signal ICON by what it actually is — provider + resource kind. */
-function guestColor(kind: string): string {
-  if (kind === 'ec2') return 'hsl(32 95% 56%)';       // AWS EC2 — amber
-  if (kind === 'lxc') return 'hsl(var(--accent))';     // Proxmox container — teal
-  if (kind === 'qemu') return 'hsl(var(--primary))';   // Proxmox VM — cyan
-  return 'hsl(var(--accent) / 0.7)';
-}
-
-/** Compute resources whose "running/stopped" state is meaningful for the "active" ratio. */
-const COMPUTE_KINDS = new Set(['qemu', 'lxc', 'ec2']);
-
-/** Reduce any connector's status string to up / down / idle for the status DOT. */
-function signalState(status: string): 'up' | 'down' | 'idle' {
-  const s = status.toLowerCase();
-  if (['running', 'on', 'active', 'available', 'in-use', 'enabled', 'playing', 'home', 'online', 'up', 'ok', 'success', 'backed up', 'healthy'].includes(s)) return 'up';
-  if (['error', 'failed', 'down', 'unavailable', 'unreachable', 'critical', 'stopped-error'].includes(s)) return 'down';
-  return 'idle'; // stopped, off, paused, snapshot, pending, unknown, …
-}
-function signalDotColor(status: string): string {
-  const t = signalState(status);
-  return t === 'up' ? 'hsl(160 84% 55%)' : t === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground) / 0.5)';
-}
-/** List order: problems first (down, then idle/stopped), running last — so a non-100% state shows at the top without scrolling. */
-function signalRank(status: string): number {
-  return { down: 0, idle: 1, up: 2 }[signalState(status)] ?? 1;
-}
-
-/** Where tapping a live signal takes you (its kind's overview scope). */
-function guestTo(kind: string): string {
-  if (kind === 'qemu') return '/overview/vm';
-  if (kind === 'lxc') return '/overview/container';
-  return '/connectors';
-}
-
 function monitorColor(status: MonitorStatus): string {
   if (status === 'up') return 'hsl(160 84% 55%)';
   if (status === 'down') return 'hsl(var(--destructive))';
   if (status === 'pending') return 'hsl(43 96% 56%)';
   return 'hsl(var(--muted-foreground) / 0.6)';
-}
-
-const SEGMENTS = 20;
-
-/**
- * Semantic direction of a meter:
- *  - `load`   — higher is worse (CPU, RAM, disk, temp, spend)
- *  - `health` — higher is better (systems online, monitors up)
- *  - `neutral`— no good/bad reading (e.g. active vs idle signals)
- */
-type Polarity = 'load' | 'health' | 'neutral';
-
-const GREEN = 'hsl(160 84% 55%)';
-const AMBER = 'hsl(38 92% 55%)';
-const RED = 'hsl(var(--destructive))';
-const CYAN = 'hsl(var(--accent))';
-
-/** Traffic-light colour for a value, respecting the metric's polarity. */
-function toneColor(pct: number, polarity: Polarity): string {
-  if (polarity === 'neutral') return CYAN;
-  const sev = polarity === 'load'
-    ? (pct > 85 ? 2 : pct > 70 ? 1 : 0)   // higher = worse
-    : (pct >= 90 ? 0 : pct >= 60 ? 1 : 2); // higher = better
-  return sev === 2 ? RED : sev === 1 ? AMBER : GREEN;
-}
-
-/** LCARS segmented readout — the functional replacement for the radar. */
-function Meter({ name, pct, polarity = 'load' }: { name: string; pct: number; polarity?: Polarity }) {
-  const clamped = Math.max(0, Math.min(100, Math.round(pct)));
-  const on = Math.round((clamped / 100) * SEGMENTS);
-  const col = toneColor(clamped, polarity);
-  return (
-    <div className="lcars-meter">
-      <span className="lcars-meter__name">{name}</span>
-      <div className="lcars-track">
-        {Array.from({ length: SEGMENTS }, (_, i) => (
-          <span key={i} className="flex-1 rounded-[2px]"
-            style={{ background: i < on ? col : 'hsl(var(--secondary))', opacity: i < on ? 1 : 0.28 }} />
-        ))}
-      </div>
-      <span className="lcars-meter__val" style={{ color: col }}>{clamped}%</span>
-    </div>
-  );
 }
 
 /** Card shell with the LCARS accent header. */
@@ -271,17 +194,10 @@ export function Dashboard() {
   const b2Cost = overview?.metrics.find((m) => m.key === 'b2CostMonthly');
   const b2LastOk = overview?.metrics.find((m) => m.key === 'b2LastBackupOk');
   const hasBackblaze = !!(b2Snapshots || b2Size || b2LastOk);
-  const guests = overview?.guests ?? [];
-
   const sources = overview?.sources ?? [];
   const offline = sources.filter((s) => !s.ok);
   const secsSinceScan = Math.floor((Date.now() - lastPollRef.current) / 1000);
   const stale = secsSinceScan > 15;
-  // "Signals active" only makes sense for compute (VMs/containers/instances) — not
-  // backup snapshots, HA entities, or AWS services, which also live in `guests`.
-  const computeGuests = guests.filter((g) => COMPUTE_KINDS.has(g.kind));
-  const runningGuests = computeGuests.filter((g) => g.status === 'running').length;
-  const idleGuests = computeGuests.length - runningGuests;
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
 
@@ -289,18 +205,6 @@ export function Dashboard() {
   const cts = useCountUp(metric('ctsRunning'));
   const nodes = useCountUp(metric('nodes'));
   const ops = useCountUp(userCount);
-
-  // System readout meters — all derived from real telemetry.
-  const readout: { name: string; pct: number; polarity: Polarity }[] = [
-    { name: 'Cluster CPU', pct: metric('cpuPct'), polarity: 'load' },
-    { name: 'Cluster RAM', pct: metric('memPct'), polarity: 'load' },
-    { name: 'Systems Online', pct: connTotal ? (connOk / connTotal) * 100 : 0, polarity: 'health' },
-    { name: 'Signals Active', pct: computeGuests.length ? (runningGuests / computeGuests.length) * 100 : 0, polarity: 'neutral' },
-  ];
-  if (monitors && monitors.length > 0) {
-    const denom = monitors.length - monPaused;
-    readout.push({ name: 'Monitors Up', pct: denom ? (monUp / denom) * 100 : 100, polarity: 'health' });
-  }
 
   return (
     <div className="animate-fade-in space-y-4">
@@ -328,57 +232,76 @@ export function Dashboard() {
         </Button>
       </div>
 
-      {/* System readout + live signals */}
-      <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
+      {/* Monitors + Connectors — the at-a-glance status row */}
+      <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-[1fr_340px]')}>
+        {canMonitors && (
+          <Panel
+            title="Monitors"
+            to="/monitors"
+            accent="primary"
+            tag={monitors && monitors.length > 0 ? <span className="tabular-nums">{monUp}/{monitors.length - monPaused} up</span> : undefined}
+          >
+            {monitors && monitors.length > 0 ? (
+              <div className="grid gap-1.5 sm:grid-cols-2 overflow-y-auto max-h-[380px] pr-1">
+                {[...monitors].sort((a, b) => rank(a.status) - rank(b.status)).map((m) => (
+                  <Link
+                    key={m.id}
+                    to={`/monitors/${m.id}`}
+                    className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
+                  >
+                    <span
+                      className="h-2.5 w-2.5 rotate-45 shrink-0"
+                      style={m.status === 'paused'
+                        ? { border: `1px solid ${monitorColor(m.status)}` }
+                        : { background: monitorColor(m.status), boxShadow: m.status !== 'pending' ? `0 0 6px ${monitorColor(m.status)}` : undefined }}
+                    />
+                    <span className={cn('text-sm truncate', m.status === 'down' && 'text-destructive')}>{m.name}</span>
+                    <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
+                      {m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status}
+                    </span>
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">
+                {monitors ? 'No monitors configured.' : 'Loading monitors…'}
+              </div>
+            )}
+          </Panel>
+        )}
+
         <Panel
-          title="System Readout"
+          title="Connectors"
+          to="/connectors"
           accent="accent"
-          tag={stale ? 'signal lost' : `${secsSinceScan}s ago`}
+          tag={<span className="tabular-nums">{connOk}/{connTotal} up</span>}
           className={cn(offline.length > 0 && 'border-amber-500/40')}
         >
-          <div className="py-1">
-            {readout.map((r) => <Meter key={r.name} name={r.name} pct={r.pct} polarity={r.polarity} />)}
-          </div>
-          <div className="mt-3 pt-3 border-t border-border/50 grid grid-cols-3 gap-2 text-center">
-            <div>
-              <div className="font-lcars text-2xl font-semibold text-emerald-400 tabular-nums">{runningGuests}</div>
-              <div className="text-[11px] text-muted-foreground">active</div>
+          {sources.length === 0 ? (
+            <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">
+              {overview ? 'No connectors configured.' : 'Scanning…'}
             </div>
-            <div>
-              <div className="font-lcars text-2xl font-semibold text-amber-400 tabular-nums">{idleGuests}</div>
-              <div className="text-[11px] text-muted-foreground">idle</div>
-            </div>
-            <div>
-              <div className={cn('font-lcars text-2xl font-semibold tabular-nums', offline.length ? 'text-destructive' : 'text-emerald-400')}>{offline.length}</div>
-              <div className="text-[11px] text-muted-foreground">offline</div>
-            </div>
-          </div>
-        </Panel>
-
-        <Panel title="Live Signals" to="/connectors" tag={<span className="tabular-nums">{computeGuests.length}</span>}>
-          {computeGuests.length === 0 ? (
-            <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">No signals detected.</div>
           ) : (
-            <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
-              {[...computeGuests].sort((a, b) => signalRank(a.status) - signalRank(b.status)).map((g, i) => (
+            <div className="space-y-1.5 overflow-y-auto max-h-[380px] pr-1">
+              {[...sources].sort((a, b) => Number(a.ok) - Number(b.ok)).map((s, i) => (
                 <Link
                   key={i}
-                  to={guestTo(g.kind)}
+                  to="/connectors"
+                  title={s.message ?? (s.ok ? 'online' : 'unreachable')}
                   className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
                 >
                   <span
                     className="h-2.5 w-2.5 rounded-full shrink-0"
-                    title={g.status}
                     style={{
-                      background: signalDotColor(g.status),
-                      boxShadow: signalState(g.status) === 'up' ? `0 0 6px ${signalDotColor(g.status)}` : undefined,
+                      background: s.ok ? 'hsl(160 84% 55%)' : 'hsl(var(--destructive))',
+                      boxShadow: s.ok ? '0 0 6px hsl(160 84% 55%)' : undefined,
                     }}
                   />
-                  {g.kind === 'lxc'
-                    ? <Boxes className="h-4 w-4 shrink-0" style={{ color: guestColor(g.kind) }} />
-                    : <Server className="h-4 w-4 shrink-0" style={{ color: guestColor(g.kind) }} />}
-                  <span className="text-sm truncate">{g.name}</span>
-                  <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">{g.node}</span>
+                  <span className={cn('text-sm truncate', !s.ok && 'text-destructive')}>{s.name}</span>
+                  <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
+                    {s.ok ? 'online' : 'offline'}
+                  </span>
                   <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
                 </Link>
               ))}
@@ -386,33 +309,6 @@ export function Dashboard() {
           )}
         </Panel>
       </div>
-
-      {/* Uptime monitors — clickable list */}
-      {monitors && monitors.length > 0 && (
-        <Panel title="Monitors" to="/monitors" tag={<span className="tabular-nums">{monUp}/{monitors.length - monPaused} up</span>} accent="primary">
-          <div className="grid gap-1.5 sm:grid-cols-2">
-            {[...monitors].sort((a, b) => rank(a.status) - rank(b.status)).map((m) => (
-              <Link
-                key={m.id}
-                to={`/monitors/${m.id}`}
-                className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
-              >
-                <span
-                  className="h-2.5 w-2.5 rotate-45 shrink-0"
-                  style={m.status === 'paused'
-                    ? { border: `1px solid ${monitorColor(m.status)}` }
-                    : { background: monitorColor(m.status), boxShadow: m.status !== 'pending' ? `0 0 6px ${monitorColor(m.status)}` : undefined }}
-                />
-                <span className={cn('text-sm truncate', m.status === 'down' && 'text-destructive')}>{m.name}</span>
-                <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
-                  {m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status}
-                </span>
-                <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
-              </Link>
-            ))}
-          </div>
-        </Panel>
-      )}
 
       {/* Telemetry tiles */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
