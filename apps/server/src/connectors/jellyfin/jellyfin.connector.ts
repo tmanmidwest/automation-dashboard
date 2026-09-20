@@ -247,7 +247,7 @@ export class JellyfinConnector implements Connector {
     name: 'Jellyfin',
     description:
       'Monitor and control a Jellyfin media server: who is streaming what (and who is transcoding), users, libraries, and scheduled tasks. Full user management — create/delete users, set passwords, upload avatars, and edit the complete access policy + display preferences (library/device access, parental controls, playback & content permissions, limits); pause/stop a stream, message a client, scan a library, run a task — with tiles + alerts for active streams, transcodes, and failed tasks.',
-    version: '0.7.0',
+    version: '0.7.1',
     icon: 'jellyfin',
     live: true,
     configFields: [

@@ -235,7 +235,11 @@ export class JellyfinApi {
     return new Promise((resolve, reject) => {
       let ws: WebSocket;
       try {
-        ws = new WebSocket(this.wsUrl(), { rejectUnauthorized: !this.auth.insecureSkipVerify, handshakeTimeout: 15000 });
+        ws = new WebSocket(this.wsUrl(), {
+          rejectUnauthorized: !this.auth.insecureSkipVerify,
+          handshakeTimeout: 15000,
+          headers: { Authorization: this.authHeader() },
+        });
       } catch (err) {
         return reject(err instanceof Error ? err : new JellyfinApiError('Failed to open Jellyfin socket.'));
       }
@@ -265,6 +269,15 @@ export class JellyfinApi {
     });
   }
 
+  /**
+   * Jellyfin's canonical authorization header. Jellyfin 12 removed the legacy
+   * `X-Emby-Token` header / `api_key` query param, so an API key must now be sent
+   * as `Authorization: MediaBrowser Token="…"` (accepted by 10.x too).
+   */
+  private authHeader(): string {
+    return `MediaBrowser Client="Cerebro", Device="Cerebro", DeviceId="cerebro-live", Version="1.0.0", Token="${this.auth.apiKey}"`;
+  }
+
   /** ws(s)://host:port/socket?api_key=…&deviceId=cerebro — the live socket. */
   private wsUrl(): string {
     const base = new URL(this.baseUrl());
@@ -287,6 +300,10 @@ export class JellyfinApi {
     const transport = isHttps ? https : http;
 
     const headers: Record<string, string> = {
+      // Jellyfin 12 dropped the legacy X-Emby-Token header in favour of the
+      // canonical MediaBrowser Authorization scheme; we send both so the
+      // connector works against old (10.x) and new (12.x) servers alike.
+      Authorization: this.authHeader(),
       'X-Emby-Token': this.auth.apiKey,
       Accept: 'application/json',
     };

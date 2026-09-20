@@ -7,7 +7,10 @@ Cerebro's automations / monitors / Ship's Log like every other connector.
 
 ## Transport & auth
 Jellyfin is self-hosted, so the base URL is user-supplied (`http(s)://host:8096`). Auth is an **API key**
-(Dashboard → API Keys), sent as the `X-Emby-Token` header. Dependency-free HTTP/HTTPS client
+(Dashboard → API Keys), sent via the canonical `Authorization: MediaBrowser Token="…"` header (`authHeader()`).
+**Jellyfin 12 removed the legacy `X-Emby-Token` header / `?api_key=` query param** — the connector sends the
+`Authorization` header on both REST and the live WebSocket handshake, and still includes `X-Emby-Token` as a
+harmless legacy fallback so it works against 10.x and 12.x alike. Dependency-free HTTP/HTTPS client
 (`jellyfin-api.ts`) in the Proxmox/Cloudflare style; `insecureSkipVerify` for self-signed HTTPS.
 
 - `configFields`: **Base URL** (text) + **API key** (password/secret) + optional **Skip TLS verify**.
