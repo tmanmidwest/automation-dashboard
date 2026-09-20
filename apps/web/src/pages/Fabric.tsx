@@ -3,7 +3,7 @@ import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
-  ShieldCheck, Search, Network, Tag as TagIcon,
+  ShieldCheck, Search, Network, Tag as TagIcon, LayoutGrid, List as ListIcon,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -156,6 +156,13 @@ export function Fabric() {
   const [editing, setEditing] = useState<FabricAgentDto | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [view, setView] = useState<'cards' | 'list'>(() => {
+    try { return localStorage.getItem('fabric.view') === 'list' ? 'list' : 'cards'; } catch { return 'cards'; }
+  });
+  const chooseView = (v: 'cards' | 'list') => {
+    setView(v);
+    try { localStorage.setItem('fabric.view', v); } catch { /* storage blocked */ }
+  };
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
   const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string } } | null>(null);
@@ -297,9 +304,117 @@ export function Fabric() {
   }, [agents, search, statusFilter]);
   const totalShown = OS_ORDER.reduce((n, k) => n + groups[k].length, 0);
 
+  // Target connect chips (+ Files) — shared by the card and the list row.
+  const renderConnectChips = (a: FabricAgentDto) => {
+    if (a.targets.length === 0) return null;
+    const online = a.status === 'online';
+    const ssh = a.targets.find((t) => t.kind === 'ssh');
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {a.targets.map((t) => {
+          const pr = probe[t.id];
+          const clickable = online && canConnect;
+          return (
+            <span key={t.id} className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 overflow-hidden">
+              <button
+                type="button" disabled={!clickable || pr?.loading}
+                onClick={clickable ? () => runProbe(a.id, t) : undefined}
+                title={clickable ? 'Test tunnel' : undefined}
+                className={`inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] ${clickable ? 'hover:bg-muted cursor-pointer' : 'cursor-default'}`}
+              >
+                {pr?.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : t.kind === 'rdp' ? <MonitorSmartphone className="h-3 w-3" /> : t.kind === 'vnc' ? <Monitor className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
+                {t.kind.toUpperCase()} :{t.port}
+              </button>
+              {canConnect && (
+                <button
+                  type="button" disabled={!online}
+                  onClick={online ? () => openConnect(a, t) : undefined}
+                  title={online ? `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}` : 'Agent offline'}
+                  className={`inline-flex items-center gap-1 px-2 py-1 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
+                >
+                  <TerminalSquare className="h-3 w-3" />
+                  {t.hasCredential && <KeyRound className="h-2.5 w-2.5 opacity-70" />}
+                </button>
+              )}
+            </span>
+          );
+        })}
+        {canConnect && ssh && (
+          <button
+            type="button" disabled={!online}
+            onClick={online ? () => setFilesFor({ agent: a, target: ssh }) : undefined}
+            title={online ? 'Browse & transfer files over SFTP' : 'Agent offline'}
+            className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-[0.7rem] ${online ? 'hover:bg-muted cursor-pointer' : 'opacity-40 cursor-default'}`}
+          >
+            <FolderOpen className="h-3 w-3" /> Files
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // Compact action-icon cluster (edit / trust / revoke / delete) — card + row.
+  const renderAgentActions = (a: FabricAgentDto, iconBtn = 'h-8 w-8') => {
+    if (!canManage) return null;
+    const online = a.status === 'online';
+    return (
+      <div className="flex items-center gap-0.5 shrink-0">
+        <Button variant="ghost" size="icon" className={iconBtn} title="Edit name, tags & notes" onClick={() => setEditing(a)}>
+          <Pencil className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost" size="icon" className={iconBtn}
+          disabled={!online}
+          title={a.caTrusted ? 'SSH CA trust installed & validated — click to re-install' : online ? 'Install SSH CA trust on this host' : 'Agent offline — CA trust not installed'}
+          onClick={() => trustCa(a)}
+        >
+          <ShieldCheck className={`h-4 w-4 ${a.caTrusted ? 'text-emerald-400' : ''}`} />
+        </Button>
+        {a.status !== 'revoked' && (
+          <Button variant="ghost" size="icon" className={iconBtn} title="Revoke" onClick={() => revoke(a)}>
+            <ShieldOff className="h-4 w-4" />
+          </Button>
+        )}
+        <Button variant="ghost" size="icon" className={iconBtn} title="Delete" onClick={() => remove(a)}>
+          <Trash2 className="h-4 w-4 text-destructive/80" />
+        </Button>
+      </div>
+    );
+  };
+
+  // Compact one-line row for the list-density view.
+  const renderAgentRow = (a: FabricAgentDto) => {
+    const st = STATUS[a.status];
+    const online = a.status === 'online';
+    const meta = [a.hostname, a.localIp, osLabel(a.os, a.osVersion), a.agentVersion ? `v${a.agentVersion}` : null]
+      .filter(Boolean).join(' · ');
+    return (
+      <div key={a.id} className="flex items-center gap-3 px-3 py-2">
+        <span className={`hidden sm:inline-flex items-center rounded border px-1.5 py-0.5 text-[0.6rem] font-medium shrink-0 ${OS_META[osKey(a.os)].cls}`}>
+          {OS_META[osKey(a.os)].label}
+        </span>
+        <span
+          className={`h-2 w-2 rounded-full shrink-0 ${online ? 'bg-emerald-400' : a.status === 'pending' ? 'bg-amber-400' : a.status === 'revoked' ? 'bg-destructive' : 'bg-muted-foreground'}`}
+          title={st.label}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-sm truncate">{a.name}</span>
+            {a.caTrusted && <ShieldCheck className="h-3 w-3 text-emerald-400 shrink-0" />}
+            {a.tags.slice(0, 3).map((tag) => (
+              <span key={tag} className="hidden md:inline rounded bg-secondary/20 px-1.5 py-0.5 text-[0.6rem] text-secondary-foreground/80">{tag}</span>
+            ))}
+          </div>
+          <div className="text-xs text-muted-foreground truncate">{meta || '—'}</div>
+        </div>
+        <div className="hidden md:flex flex-wrap gap-1.5 justify-end max-w-[45%]">{renderConnectChips(a)}</div>
+        {renderAgentActions(a, 'h-7 w-7')}
+      </div>
+    );
+  };
+
   const renderAgentCard = (a: FabricAgentDto) => {
     const st = STATUS[a.status];
-    const ssh = a.targets.find((t) => t.kind === 'ssh');
     const online = a.status === 'online';
     return (
       <Card key={a.id} className="overflow-hidden">
@@ -319,29 +434,7 @@ export function Fabric() {
                 )}
               </div>
             </div>
-            {canManage && (
-              <div className="flex items-center gap-0.5 shrink-0">
-                <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit name, tags & notes" onClick={() => setEditing(a)}>
-                  <Pencil className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost" size="icon" className="h-8 w-8"
-                  disabled={!online}
-                  title={a.caTrusted ? 'SSH CA trust installed & validated — click to re-install' : online ? 'Install SSH CA trust on this host' : 'Agent offline — CA trust not installed'}
-                  onClick={() => trustCa(a)}
-                >
-                  <ShieldCheck className={`h-4 w-4 ${a.caTrusted ? 'text-emerald-400' : ''}`} />
-                </Button>
-                {a.status !== 'revoked' && (
-                  <Button variant="ghost" size="icon" className="h-8 w-8" title="Revoke" onClick={() => revoke(a)}>
-                    <ShieldOff className="h-4 w-4" />
-                  </Button>
-                )}
-                <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete" onClick={() => remove(a)}>
-                  <Trash2 className="h-4 w-4 text-destructive/80" />
-                </Button>
-              </div>
-            )}
+            {renderAgentActions(a)}
           </div>
 
           <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
@@ -356,46 +449,7 @@ export function Fabric() {
 
           {a.targets.length > 0 && (
             <div className="mt-3 space-y-1.5">
-              <div className="flex flex-wrap gap-1.5">
-                {a.targets.map((t) => {
-                  const pr = probe[t.id];
-                  const clickable = online && canConnect;
-                  return (
-                    <span key={t.id} className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 overflow-hidden">
-                      <button
-                        type="button" disabled={!clickable || pr?.loading}
-                        onClick={clickable ? () => runProbe(a.id, t) : undefined}
-                        title={clickable ? 'Test tunnel' : undefined}
-                        className={`inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] ${clickable ? 'hover:bg-muted cursor-pointer' : 'cursor-default'}`}
-                      >
-                        {pr?.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : t.kind === 'rdp' ? <MonitorSmartphone className="h-3 w-3" /> : t.kind === 'vnc' ? <Monitor className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
-                        {t.kind.toUpperCase()} :{t.port}
-                      </button>
-                      {canConnect && (
-                        <button
-                          type="button" disabled={!online}
-                          onClick={online ? () => openConnect(a, t) : undefined}
-                          title={online ? `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}` : 'Agent offline'}
-                          className={`inline-flex items-center gap-1 px-2 py-1 border-l border-border/60 ${online ? 'hover:bg-primary/20 cursor-pointer text-primary' : 'opacity-40 cursor-default'}`}
-                        >
-                          <TerminalSquare className="h-3 w-3" />
-                          {t.hasCredential && <KeyRound className="h-2.5 w-2.5 opacity-70" />}
-                        </button>
-                      )}
-                    </span>
-                  );
-                })}
-                {canConnect && ssh && (
-                  <button
-                    type="button" disabled={!online}
-                    onClick={online ? () => setFilesFor({ agent: a, target: ssh }) : undefined}
-                    title={online ? 'Browse & transfer files over SFTP' : 'Agent offline'}
-                    className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-[0.7rem] ${online ? 'hover:bg-muted cursor-pointer' : 'opacity-40 cursor-default'}`}
-                  >
-                    <FolderOpen className="h-3 w-3" /> Files
-                  </button>
-                )}
-              </div>
+              {renderConnectChips(a)}
               {a.targets.map((t) => {
                 const r = probe[t.id]?.result;
                 if (!r) return null;
@@ -511,6 +565,16 @@ export function Fabric() {
               ))}
             </div>
             <span className="text-xs text-muted-foreground">{totalShown} of {agents.length}</span>
+            <div className="inline-flex rounded-md border border-border overflow-hidden ml-auto">
+              <button type="button" title="Card view" onClick={() => chooseView('cards')}
+                className={`px-2 py-1.5 ${view === 'cards' ? 'bg-primary/20 text-primary' : 'hover:bg-muted text-muted-foreground'}`}>
+                <LayoutGrid className="h-4 w-4" />
+              </button>
+              <button type="button" title="List view" onClick={() => chooseView('list')}
+                className={`px-2 py-1.5 border-l border-border ${view === 'list' ? 'bg-primary/20 text-primary' : 'hover:bg-muted text-muted-foreground'}`}>
+                <ListIcon className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           {totalShown === 0 ? (
@@ -523,9 +587,15 @@ export function Fabric() {
                   <span className="text-xs text-muted-foreground">{groups[k].length}</span>
                   <div className="flex-1 h-px bg-border/60" />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  {groups[k].map(renderAgentCard)}
-                </div>
+                {view === 'cards' ? (
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {groups[k].map(renderAgentCard)}
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-border/60 divide-y divide-border/60 bg-card/40">
+                    {groups[k].map(renderAgentRow)}
+                  </div>
+                )}
               </section>
             ))
           )}
