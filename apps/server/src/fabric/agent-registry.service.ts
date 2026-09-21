@@ -76,12 +76,34 @@ export class AgentRegistryService {
 
   /** Verify a presented agent credential; returns the agent id or null. */
   async authenticate(credential: string): Promise<string | null> {
+    const outcome = await this.authenticateOutcome(credential);
+    return outcome.status === 'ok' ? outcome.agentId : null;
+  }
+
+  /**
+   * Richer auth outcome for the relay so it can pick the right HTTP status:
+   *  - `ok`   → authenticated (includes a `deleting` tombstone, so `onHello` can
+   *             push its uninstall — that box is authorized to reconnect briefly).
+   *  - `gone` → the credential's prefix matches an agent that was **revoked**
+   *             (positively removed). The relay answers 410 so the box self-uninstalls
+   *             instead of looping as a zombie. Prefix is unguessably random, so a
+   *             match is strong evidence it really is that (now-removed) agent.
+   *  - `bad`  → malformed, unknown prefix, or wrong secret → 401 (never self-destruct;
+   *             an unknown prefix could just be a healthy agent pointed at the wrong URL).
+   */
+  async authenticateOutcome(
+    credential: string,
+  ): Promise<{ status: 'ok'; agentId: string } | { status: 'gone' } | { status: 'bad' }> {
     const parsed = parseCredential(credential);
-    if (!parsed) return null;
+    if (!parsed) return { status: 'bad' };
     const agent = await this.prisma.agent.findUnique({ where: { credPrefix: parsed.prefix } });
-    if (!agent || !agent.credHash || agent.status === 'revoked') return null;
-    if (!safeEqualHex(sha256(parsed.secret), agent.credHash)) return null;
-    return agent.id;
+    if (!agent) return { status: 'bad' };
+    // Revoke clears credHash, so we can't verify the secret — a prefix match to a
+    // revoked row is itself the positive "this agent was removed" signal.
+    if (agent.status === 'revoked') return { status: 'gone' };
+    if (!agent.credHash) return { status: 'bad' };
+    if (!safeEqualHex(sha256(parsed.secret), agent.credHash)) return { status: 'bad' };
+    return { status: 'ok', agentId: agent.id };
   }
 
   /** True while the agent holds a live control connection. */

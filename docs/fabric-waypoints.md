@@ -437,3 +437,57 @@ gets `CEREBRO_MODE=waypoint … sudo -E sh`) for a box that will never check in 
 **Deploy note.** Full confirmation requires the **v0.5.1** agent binary on the boxes; older agents still
 uninstall but don't ack, so their tombstone lingers until it's force-removed (or you can rely on the
 manual command). Needs the migration + the new server + the rebuilt agent.
+
+## 13. Install robustness + connect-time validation (as built)
+
+**Installer atomicity.** `install.sh`/`install.ps1` downloaded straight over the destination
+(`curl -o $BIN`), so a re-install/self-update over the *running* binary failed with `ETXTBSY`
+(curl error 23 / a Windows sharing violation). Now both download to a temp file and atomically
+`mv`/`Move-Item` into place (a rename swaps the directory entry; the running process keeps its old
+inode); Linux uses `systemctl enable` + `restart` (not `enable --now`) so a re-install actually swaps
+the binary; Windows stops the service first and only `sc.exe create`s when the service is new.
+
+**Installer guards + post-install check.** `install.sh` now: requires `curl`; verifies the download is
+non-empty; warns when `$CFG/credential` already exists (the agent reuses the saved credential and
+**ignores** a fresh `ENROLL` — the classic "new token had no effect" trap); and after starting the
+service **polls the logs (~20s)** for `connected to` (✓) vs `credential refused` / `enrollment failed`
+/ `enroll rejected` / `removed in Cerebro` / `410 Gone` (✗), printing a clear PASS/FAIL with the
+recent log lines and the exact clean-re-enroll commands (`stop; rm -rf $CFG`). So "installed but never
+shows up, no error" now surfaces the real reason at install time. (Windows keeps the atomic-install
+hardening; log-based connect validation there is a follow-up.)
+
+**Zombie cleanup on removal (agent auth outcomes).** The agent used to loop forever on a refused
+credential. Now the broker's WS handshake distinguishes outcomes (`AgentRegistryService.authenticateOutcome`):
+a credential whose prefix matches a **revoked** agent gets **HTTP 410 Gone**; malformed/unknown/wrong
+gets **401**. The agent (v0.5.1) treats **410** as "I've been removed" → `selfUninstall()`; a **401/403**
+is logged with actionable guidance and backed off to 5-min retries (no self-destruct — could be a
+transient broker issue or a wrong `CEREBRO_URL`). A `deleting` tombstone still authenticates so
+`onHello` pushes its uninstall (§12). Net: an agent/Waypoint removed while offline cleans itself up on
+next check-in — via the tombstone uninstall (delete) or the 410 (revoke). The agent also now resets its
+reconnect backoff to ~1s after a *real* session drop (proxy recycle) while still backing off during a
+dial outage.
+
+**Agent log file.** The agent now tees its log to `<stateDir>/agent.log` (`setupFileLog`, bounded by
+truncation past ~2 MB). This is the *only* place a Windows service's logs land (its stderr goes
+nowhere), and it's what the Windows installer polls for the post-install connect check — the macOS/Linux
+checks use the launchd log file / journald.
+
+**Windows post-install check.** `install.ps1` clears `agent.log`, starts the service, then polls it
+(~20 s) for the same `connected to` / refusal markers and prints ✓/✗ with recent logs + clean-re-enroll
+commands — parity with `install.sh`. Both connect-checks are scoped to the current run (journald
+`--since`, or a truncated log file) so a stale "connected" line from a prior install can't false-pass.
+
+**Uninstall hardening (the "said removed but it's still there" bug).** Two root causes: (1) running
+`uninstall.sh` for a Waypoint **without** `CEREBRO_MODE=waypoint` removed the *endpoint* service and
+reported success while the waypoint stayed; (2) the agent's Linux `selfUninstall()` depended solely on
+`systemd-run` and swallowed its error, so if it wasn't scheduled, nothing was removed. Fixes:
+- `uninstall.sh` rebuilt as a **verifying cleanup script**: `set -u` (not `-e`) so it pushes through
+  every step; `stop`+`disable`+remove unit **and** the `multi-user.target.wants` symlink + binary +
+  `/etc/<name>` + `/var/lib/<name>`, `reset-failed`, `pkill -f` the binary; then it **verifies**
+  (binary/unit gone, `is-active` false) and prints ✓ or a ⚠ with exactly what remains, exiting non-zero
+  if incomplete. `CEREBRO_MODE=all` removes both; a single-mode run **nudges** when the other mode is
+  also installed.
+- Agent `selfUninstall()` (Linux) now `LookPath`s `systemd-run`, logs the attempt, **falls back** to a
+  detached `setsid` remover if it's missing/fails, and removes the wants-symlink + `/var/lib/<svc>` too.
+- The `deleting → uninstall-ack → purge` flow (§12) means the **UI only reports removal once the box
+  confirms** it — so "deleted" can no longer be claimed while the box is still installed.

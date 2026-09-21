@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,16 @@ import (
 )
 
 const agentVersion = "0.5.1"
+
+// Connection-loop sentinels. errAgentGone means the broker positively reported
+// this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
+// the credential was refused (401/403) — likely removed/revoked, but we don't
+// self-destruct on it (could be a transient server issue or a wrong URL); we log
+// loudly and back off hard instead.
+var (
+	errAgentGone    = errors.New("server reported this agent was removed (410 Gone)")
+	errAuthRejected = errors.New("credential rejected by server")
+)
 
 // modeFlag is parsed from the command line in main() (systemd ExecStart, launchd
 // ProgramArguments, or the Windows service binPath pass `--mode waypoint`). It
@@ -114,6 +125,11 @@ func main() {
 // closed (a service Stop) — or the process exits on an uninstall command.
 func agentMain(stop <-chan struct{}) {
 	cfg := loadConfig()
+	// Tee logs to a file in the state dir. On Windows the service's stderr goes
+	// nowhere, so this is the only place its logs land (and it lets the installer
+	// verify the connection post-install, the same way journald/launchd do on
+	// Linux/macOS). Harmless duplication elsewhere.
+	setupFileLog(cfg.StateDir)
 	if cfg.URL == "" {
 		log.Print("CEREBRO_URL is not set (env or config.env).")
 		return
@@ -126,35 +142,70 @@ func agentMain(stop <-chan struct{}) {
 	log.Printf("cerebro-agent v%s starting; endpoint=%s", agentVersion, cfg.URL)
 
 	backoff := time.Second
+	authFails := 0
 	for {
 		select {
 		case <-stop:
 			return
 		default:
 		}
-		if err := run(cfg, cred, stop); err != nil {
+		connected, err := run(cfg, cred, stop)
+		if err != nil {
 			log.Printf("connection ended: %v", err)
 		}
+
+		// The broker positively reported we've been removed — stop being a zombie
+		// and uninstall ourselves (mode-aware). This is the self-cleanup for an
+		// agent/Waypoint removed in Cerebro while we were offline.
+		if errors.Is(err, errAgentGone) {
+			log.Print("this agent was removed in Cerebro — uninstalling now")
+			selfUninstall() // spawns a detached remover and exits
+			return
+		}
+
+		switch {
+		case errors.Is(err, errAuthRejected):
+			// Refused credential (401/403): almost certainly removed/revoked, but we
+			// won't self-destruct on it (could be a transient broker issue or a wrong
+			// CEREBRO_URL). Log something actionable and back off hard so we stop
+			// hammering — a real outage still recovers once the broker accepts us.
+			authFails++
+			if authFails == 1 || authFails%10 == 0 {
+				log.Printf("credential refused by %s (attempt %d). If you removed this %s in Cerebro, uninstall it here; if not, check CEREBRO_URL and that it still exists.", cfg.URL, authFails, resolvedMode())
+			}
+			backoff = 5 * time.Minute
+		case connected:
+			// A real session dropped (e.g. an upstream proxy recycled the socket) —
+			// reconnect promptly.
+			authFails = 0
+			backoff = time.Second
+		default:
+			// Never connected (transient dial failure) — exponential backoff to 30s.
+			authFails = 0
+			if backoff < 30*time.Second {
+				backoff *= 2
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+			}
+		}
+
 		jitter := time.Duration(time.Now().UnixNano()%int64(time.Second)) / 2
 		select {
 		case <-stop:
 			return
 		case <-time.After(backoff + jitter):
 		}
-		if backoff < 30*time.Second {
-			backoff *= 2
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-		}
 	}
 }
 
 // run holds one control connection open until it drops, then returns the error
-// so main can reconnect with backoff. It carries both the control channel
-// (JSON text frames) and the tunnel data plane (binary frames), multiplexed by
-// a per-connection session.
-func run(cfg config, cred string, stop <-chan struct{}) error {
+// so main can reconnect with backoff. The bool reports whether a connection was
+// actually established this cycle (so the caller can reconnect promptly after a
+// real session drops, but back off during a dial outage). It carries both the
+// control channel (JSON text frames) and the tunnel data plane (binary frames),
+// multiplexed by a per-connection session.
+func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 	wsURL := toWS(cfg.URL) + "/api/fabric/agent/ws"
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+cred)
@@ -164,9 +215,15 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 	conn, resp, err := dialer.Dial(wsURL, header)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("dial %s: %s", wsURL, resp.Status)
+			switch resp.StatusCode {
+			case http.StatusGone: // 410 — broker says this agent was removed
+				return false, errAgentGone
+			case http.StatusUnauthorized, http.StatusForbidden: // 401/403
+				return false, fmt.Errorf("%w (%s)", errAuthRejected, resp.Status)
+			}
+			return false, fmt.Errorf("dial %s: %s", wsURL, resp.Status)
 		}
-		return fmt.Errorf("dial %s: %w", wsURL, err)
+		return false, fmt.Errorf("dial %s: %w", wsURL, err)
 	}
 	defer conn.Close()
 	log.Printf("connected to %s", wsURL)
@@ -226,11 +283,11 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 		case <-stop:
 			sess.stop()
 			<-writerDone
-			return nil
+			return true, nil
 		case err := <-readErr:
 			sess.stop()
 			<-writerDone
-			return err
+			return true, err
 		case <-ticker.C:
 			sess.writeJSON(map[string]string{"t": "heartbeat"})
 		case d := <-sess.hbReset:
@@ -765,6 +822,24 @@ func loadConfig() config {
 		StateDir: stateDir,
 		Mode:     mode,
 	}
+}
+
+// setupFileLog tees log output to <dir>/agent.log, bounded by truncating the
+// file when it has grown past a couple MB across long-running restarts. Best
+// effort: on any error we just keep logging to stderr.
+func setupFileLog(dir string) {
+	if dir == "" {
+		return
+	}
+	logPath := filepath.Join(dir, "agent.log")
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > 2<<20 {
+		_ = os.Truncate(logPath, 0)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
 }
 
 func defaultConfigDir(mode string) string {

@@ -38,13 +38,21 @@ export function attachFabricAgentRelay(server: Server, registry: AgentRegistrySe
     }
 
     registry
-      .authenticate(credential)
-      .then((agentId) => {
-        if (!agentId) {
+      .authenticateOutcome(credential)
+      .then((outcome) => {
+        if (outcome.status === 'gone') {
+          // Positively-removed credential (revoked agent): tell the box it's gone
+          // so it self-uninstalls instead of reconnecting forever as a zombie.
+          socket.write('HTTP/1.1 410 Gone\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (outcome.status !== 'ok') {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
         }
+        const agentId = outcome.agentId;
         wss.handleUpgrade(req, socket, head, (client) => {
           registry.register(agentId, client);
           wireAgentSocket(agentId, client, registry);
