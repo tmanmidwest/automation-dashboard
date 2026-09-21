@@ -37,6 +37,7 @@ export type Permission =
   | 'fabric:read' // list agents / sessions
   | 'fabric:connect' // open an RDP/SSH session to an agent
   | 'fabric:manage' // enroll / revoke agents, edit targets
+  | 'fabric:approve' // approve/deny four-eyes session requests
   // The Computer — in-app LLM assistant (session-only; runs tools as the user)
   | 'assistant:use';
 
@@ -84,6 +85,7 @@ export const BUILTIN_ROLES = {
       'fabric:read',
       'fabric:connect',
       'fabric:manage',
+      'fabric:approve',
       'assistant:use',
     ] as Permission[],
   },

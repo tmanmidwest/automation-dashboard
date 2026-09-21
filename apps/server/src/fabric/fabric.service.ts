@@ -1,9 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, type OnModuleInit } from '@nestjs/common';
 import { existsSync } from 'fs';
+import { BlockList, isIP } from 'net';
 import { join } from 'path';
 import type { Agent, AgentTarget } from '@prisma/client';
 import type {
   FabricAgentDto,
+  FabricAgentMode,
+  FabricApprovalPending,
   FabricEnrollmentDto,
   FabricProbeResult,
   FabricRdpConnectInput,
@@ -19,6 +22,17 @@ import type {
   VncCredential,
 } from '@cerebro/shared';
 
+/** Create/edit input for a route (kind validated at runtime in normalizeRoute). */
+type RouteInput = {
+  kind: string;
+  host?: string;
+  port?: number;
+  label?: string;
+  group?: string;
+  secretRef?: string;
+  webUrl?: string;
+};
+
 /** Structured Fabric credential kinds that live in the vault. */
 type FabricCredKind = 'ssh' | 'rdp' | 'vnc';
 type FabricCredValue = SshCredential | RdpCredential | VncCredential;
@@ -28,6 +42,8 @@ import { SecretsService } from '../secrets/secrets.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
 import { FabricGuacService } from './fabric-guac.service';
+import { RemoteBrowserService } from './remote-browser.service';
+import { FabricApprovalService } from './fabric-approval.service';
 import { generateEnrollToken } from './fabric-credentials';
 import { baseUrl } from './fabric-enrollment.service';
 import { fabricConfig } from './fabric-config';
@@ -46,7 +62,40 @@ export class FabricService implements OnModuleInit {
     private readonly sessions: FabricSessionService,
     private readonly guac: FabricGuacService,
     private readonly secrets: SecretsService,
+    private readonly remoteBrowser: RemoteBrowserService,
+    private readonly approvals: FabricApprovalService,
   ) {}
+
+  /**
+   * Four-eyes gate: if the agent requires approval, hold the (already-resolved)
+   * session as a pending request and return a handle the client polls; otherwise
+   * mint it immediately. The `mint` closure captures the resolved target + creds,
+   * so nothing sensitive is persisted while a request waits.
+   */
+  private async gate<T extends FabricSessionTicket>(
+    agentId: string,
+    meta: { kind: string; host: string; port: number; label?: string | null; url?: string | null },
+    user: SessionUser,
+    mint: () => Promise<T>,
+  ): Promise<T | FabricApprovalPending> {
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { requireApproval: true, name: true, mode: true },
+    });
+    if (!agent?.requireApproval) return mint();
+    const approvalId = await this.approvals.request(
+      {
+        agentId,
+        agentName: agent.name,
+        agentMode: (agent.mode as FabricAgentMode) ?? 'endpoint',
+        kind: meta.kind,
+        target: meta.url || `${meta.host}:${meta.port}`,
+        user,
+      },
+      mint,
+    );
+    return { pending: true, approvalId };
+  }
 
   /**
    * One-time backfill: give existing per-machine Fabric credentials a label that
@@ -95,17 +144,36 @@ export class FabricService implements OnModuleInit {
     targetId: string,
     input: FabricSshConnectInput,
     user: SessionUser,
+  ): Promise<FabricSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveStoredTarget(agentId, targetId, 'ssh');
+    return this.gate(agentId, { kind: 'ssh', host: target.host, port: target.port, label: target.label }, user, () =>
+      this.issueSshSession(agentId, target, input, user),
+    );
+  }
+
+  /** Ad-hoc SSH connection to an in-range IP:port through a Waypoint (Phase 2). */
+  async openAdhocSshSession(
+    agentId: string,
+    adhoc: { host: string; port: number },
+    input: FabricSshConnectInput,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveAdhocTarget(agentId, 'ssh', adhoc);
+    return this.gate(agentId, { kind: 'ssh', host: target.host, port: target.port }, user, () =>
+      this.issueSshSession(agentId, target, input, user),
+    );
+  }
+
+  private async issueSshSession(
+    agentId: string,
+    target: AgentTarget,
+    input: FabricSshConnectInput,
+    user: SessionUser,
   ): Promise<FabricSessionTicket> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
-    if (!target) throw new NotFoundException('Target not found.');
-    if (target.kind !== 'ssh') throw new BadRequestException('Only SSH sessions are supported yet (Phase 3).');
-    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
-
     const creds = await this.resolveSshCreds(target, input, user);
-
     const token = this.sessions.issue({
       agentId,
-      targetId,
+      targetId: target.id,
       userId: user.id,
       userEmail: user.email,
       host: target.host,
@@ -129,12 +197,32 @@ export class FabricService implements OnModuleInit {
     targetId: string,
     input: FabricRdpConnectInput,
     user: SessionUser,
-  ): Promise<FabricSessionTicket> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
-    if (!target) throw new NotFoundException('Target not found.');
-    if (target.kind !== 'rdp') throw new BadRequestException('This target is not an RDP endpoint.');
-    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+  ): Promise<FabricSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveStoredTarget(agentId, targetId, 'rdp');
+    return this.gate(agentId, { kind: 'rdp', host: target.host, port: target.port, label: target.label }, user, () =>
+      this.issueRdpSession(agentId, target, input, user),
+    );
+  }
 
+  /** Ad-hoc RDP connection to an in-range IP:port through a Waypoint (Phase 2). */
+  async openAdhocRdpSession(
+    agentId: string,
+    adhoc: { host: string; port: number },
+    input: FabricRdpConnectInput,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveAdhocTarget(agentId, 'rdp', adhoc);
+    return this.gate(agentId, { kind: 'rdp', host: target.host, port: target.port }, user, () =>
+      this.issueRdpSession(agentId, target, input, user),
+    );
+  }
+
+  private async issueRdpSession(
+    agentId: string,
+    target: AgentTarget,
+    input: FabricRdpConnectInput,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket> {
     const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
     let creds: RdpCredential;
     if (ref) {
@@ -152,7 +240,7 @@ export class FabricService implements OnModuleInit {
 
     return this.guac.issue({
       agentId,
-      targetId,
+      targetId: target.id,
       userId: user.id,
       userEmail: user.email,
       host: target.host,
@@ -180,12 +268,32 @@ export class FabricService implements OnModuleInit {
     targetId: string,
     input: FabricVncConnectInput,
     user: SessionUser,
-  ): Promise<FabricVncSessionTicket> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
-    if (!target) throw new NotFoundException('Target not found.');
-    if (target.kind !== 'vnc') throw new BadRequestException('This target is not a VNC endpoint.');
-    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+  ): Promise<FabricVncSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveStoredTarget(agentId, targetId, 'vnc');
+    return this.gate(agentId, { kind: 'vnc', host: target.host, port: target.port, label: target.label }, user, () =>
+      this.issueVncSession(agentId, target, input, user),
+    );
+  }
 
+  /** Ad-hoc VNC connection to an in-range IP:port through a Waypoint (Phase 2). */
+  async openAdhocVncSession(
+    agentId: string,
+    adhoc: { host: string; port: number },
+    input: FabricVncConnectInput,
+    user: SessionUser,
+  ): Promise<FabricVncSessionTicket | FabricApprovalPending> {
+    const target = await this.resolveAdhocTarget(agentId, 'vnc', adhoc);
+    return this.gate(agentId, { kind: 'vnc', host: target.host, port: target.port }, user, () =>
+      this.issueVncSession(agentId, target, input, user),
+    );
+  }
+
+  private async issueVncSession(
+    agentId: string,
+    target: AgentTarget,
+    input: FabricVncConnectInput,
+    user: SessionUser,
+  ): Promise<FabricVncSessionTicket> {
     // Resolve a credential the same way as SSH/RDP — but VNC auth runs in the
     // browser (noVNC), so the resolved value is returned to the viewer rather
     // than used server-side. With no saved/entered credential, noVNC prompts.
@@ -204,7 +312,7 @@ export class FabricService implements OnModuleInit {
 
     const token = this.sessions.issue({
       agentId,
-      targetId,
+      targetId: target.id,
       userId: user.id,
       userEmail: user.email,
       host: target.host,
@@ -212,6 +320,29 @@ export class FabricService implements OnModuleInit {
       kind: 'vnc',
     });
     return { token, wsPath: SESSION_WS_PATH, username: creds?.username, password: creds?.password };
+  }
+
+  /**
+   * Launch a Remote Browser: an ephemeral remote browser (streamed over VNC) whose
+   * traffic is proxied through the Waypoint to an internal web app. Returns a
+   * one-time VNC ticket the browser opens against the Remote Browser relay.
+   */
+  async openRemoteBrowserSession(
+    agentId: string,
+    targetId: string,
+    user: SessionUser,
+  ): Promise<FabricSessionTicket | FabricApprovalPending> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.kind !== 'web' || !target.webUrl) throw new BadRequestException('This target is not a Remote Browser.');
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Waypoint is offline.');
+    const webUrl = target.webUrl;
+    return this.gate(
+      agentId,
+      { kind: 'web', host: target.host, port: target.port, url: webUrl },
+      user,
+      () => this.remoteBrowser.launch({ agentId, targetId, url: webUrl, host: target.host, port: target.port, user }),
+    );
   }
 
   /** Push the SSH CA public key to an online agent to install into its sshd trust. */
@@ -241,6 +372,93 @@ export class FabricService implements OnModuleInit {
       target: agentId,
       meta: { targetId },
     });
+  }
+
+  /** Resolve a stored route/endpoint by id, asserting kind + online. */
+  private async resolveStoredTarget(
+    agentId: string,
+    targetId: string,
+    kind: FabricCredKind,
+  ): Promise<AgentTarget> {
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!target) throw new NotFoundException('Target not found.');
+    if (target.kind !== kind) throw new BadRequestException(`This target is not a ${kind.toUpperCase()} endpoint.`);
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+    return target;
+  }
+
+  /**
+   * Synthesize a non-persistent target for an ad-hoc connection (Phase 2): the host must
+   * be a literal IP inside one of the Waypoint's egress CIDR ranges. No AgentTarget
+   * row is created — the session is audited by host:port and its SSH host key is
+   * accepted (not persistently pinned) since there is no target to pin against.
+   */
+  private async resolveAdhocTarget(
+    agentId: string,
+    kind: FabricCredKind,
+    adhoc: { host: string; port: number },
+  ): Promise<AgentTarget> {
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    if (agent.mode !== 'waypoint') throw new BadRequestException('Ad-hoc connections require a Waypoint.');
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Waypoint is offline.');
+    const host = (adhoc.host || '').trim();
+    const port = Number(adhoc.port);
+    if (!isIP(host)) throw new BadRequestException('Ad-hoc connections require a literal IP address.');
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new BadRequestException('Invalid port.');
+    if (!agent.egressCidrs?.length) {
+      throw new BadRequestException('This Waypoint has no ad-hoc egress ranges configured.');
+    }
+    if (!this.ipInCidrs(host, agent.egressCidrs)) {
+      throw new BadRequestException(`${host} is not within this Waypoint's egress ranges.`);
+    }
+    return {
+      id: '',
+      agentId,
+      kind,
+      host,
+      port,
+      label: null,
+      secretRef: null,
+      hostKey: null,
+      source: 'adhoc',
+      group: null,
+      webUrl: null,
+    } as AgentTarget;
+  }
+
+  /** Validate + normalize CIDR strings (a bare IP becomes /32 or /128). */
+  private normalizeCidrs(list: string[]): string[] {
+    const out: string[] = [];
+    for (const raw of list) {
+      const v = (raw || '').trim();
+      if (!v) continue;
+      const [addr, bitsStr] = v.split('/');
+      const fam = isIP(addr);
+      if (!fam) throw new BadRequestException(`Invalid CIDR/IP: ${v}`);
+      const maxBits = fam === 6 ? 128 : 32;
+      const bits = bitsStr === undefined ? maxBits : Number(bitsStr);
+      if (!Number.isInteger(bits) || bits < 0 || bits > maxBits) {
+        throw new BadRequestException(`Invalid CIDR mask: ${v}`);
+      }
+      out.push(`${addr}/${bits}`);
+    }
+    return Array.from(new Set(out)).slice(0, 64);
+  }
+
+  private ipInCidrs(ip: string, cidrs: string[]): boolean {
+    const fam = isIP(ip);
+    if (!fam) return false;
+    try {
+      const bl = new BlockList();
+      for (const c of cidrs) {
+        const [addr, bitsStr] = c.split('/');
+        bl.addSubnet(addr, Number(bitsStr), isIP(addr) === 6 ? 'ipv6' : 'ipv4');
+      }
+      return bl.check(ip, fam === 6 ? 'ipv6' : 'ipv4');
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -335,6 +553,9 @@ export class FabricService implements OnModuleInit {
     value: FabricCredValue,
     user: SessionUser,
   ): Promise<void> {
+    if (!target.id) {
+      throw new BadRequestException("Use 'Save as' to store a credential for an ad-hoc connection.");
+    }
     const key = `fabric/${target.agentId}/${target.id}`;
     const agent = await this.prisma.agent.findUnique({
       where: { id: target.agentId },
@@ -398,17 +619,19 @@ export class FabricService implements OnModuleInit {
    * enrollment token. Returns the token (shown once) plus copy-paste installers.
    */
   async createAgent(
-    input: { name: string; os?: string | null; tags?: string[] },
+    input: { name: string; os?: string | null; tags?: string[]; mode?: string },
     user: SessionUser,
   ): Promise<FabricEnrollmentDto> {
     const enroll = generateEnrollToken();
     const expires = new Date(Date.now() + ENROLL_TTL_MS);
+    const mode: FabricAgentDto['mode'] = input.mode === 'waypoint' ? 'waypoint' : 'endpoint';
     const agent = await this.prisma.agent.create({
       data: {
-        name: input.name.trim() || 'Unnamed machine',
+        name: input.name.trim() || (mode === 'waypoint' ? 'Unnamed Waypoint' : 'Unnamed machine'),
         os: input.os ?? null,
         tags: input.tags ?? [],
         status: 'pending',
+        mode,
         enrollHash: enroll.hash,
         enrollExpires: expires,
       },
@@ -420,29 +643,40 @@ export class FabricService implements OnModuleInit {
       actorEmail: user.email,
       action: 'fabric.agent.created',
       target: agent.id,
-      meta: { name: agent.name, os: agent.os },
+      meta: { name: agent.name, os: agent.os, mode },
     });
 
     const url = baseUrl();
+    // A Waypoint installer passes CEREBRO_MODE=waypoint (script) / --mode waypoint
+    // (service), so it uses its own service name + config dir and can coexist with
+    // an endpoint agent on the same box.
+    const modeEnvSh = mode === 'waypoint' ? ' CEREBRO_MODE=waypoint' : '';
+    const modeEnvPs = mode === 'waypoint' ? `$env:CEREBRO_MODE='waypoint'; ` : '';
     return {
       agent: this.toAgentDto(agent, agent.targets),
       enrollToken: enroll.plaintext,
       enrollExpiresAt: expires.toISOString(),
       url,
-      installLinux: `curl -fsSL ${url}/api/fabric/install.sh | sudo CEREBRO_URL=${url} ENROLL=${enroll.plaintext} sh`,
-      installWindows: `$env:CEREBRO_URL='${url}'; $env:ENROLL='${enroll.plaintext}'; iwr ${url}/api/fabric/install.ps1 -UseBasicParsing | iex`,
+      installLinux: `curl -fsSL ${url}/api/fabric/install.sh | sudo CEREBRO_URL=${url} ENROLL=${enroll.plaintext}${modeEnvSh} sh`,
+      installWindows: `${modeEnvPs}$env:CEREBRO_URL='${url}'; $env:ENROLL='${enroll.plaintext}'; iwr ${url}/api/fabric/install.ps1 -UseBasicParsing | iex`,
     };
   }
 
   /** Edit an agent's display fields (name, tags, notes). */
   async updateAgent(
     id: string,
-    input: { name?: string; tags?: string[]; notes?: string | null },
+    input: { name?: string; tags?: string[]; notes?: string | null; egressCidrs?: string[]; requireApproval?: boolean },
     user: SessionUser,
   ): Promise<FabricAgentDto> {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
     if (!agent) throw new NotFoundException('Agent not found.');
-    const data: { name?: string; tags?: string[]; notes?: string | null } = {};
+    const data: {
+      name?: string;
+      tags?: string[];
+      notes?: string | null;
+      egressCidrs?: string[];
+      requireApproval?: boolean;
+    } = {};
     if (input.name !== undefined) {
       const name = input.name.trim();
       if (!name) throw new BadRequestException('Name cannot be empty.');
@@ -454,6 +688,15 @@ export class FabricService implements OnModuleInit {
     if (input.notes !== undefined) {
       data.notes = input.notes?.trim() ? input.notes.trim().slice(0, 2000) : null;
     }
+    if (input.egressCidrs !== undefined) {
+      if (agent.mode !== 'waypoint') {
+        throw new BadRequestException('Egress ranges apply only to a Waypoint.');
+      }
+      data.egressCidrs = this.normalizeCidrs(input.egressCidrs);
+    }
+    if (input.requireApproval !== undefined) {
+      data.requireApproval = !!input.requireApproval;
+    }
     const updated = await this.prisma.agent.update({ where: { id }, data, include: { targets: true } });
     await this.audit.record({
       actorId: user.id,
@@ -462,7 +705,176 @@ export class FabricService implements OnModuleInit {
       target: id,
       meta: { fields: Object.keys(data) },
     });
+    // Egress ranges are part of a Waypoint's allow policy — push the change live.
+    if (data.egressCidrs !== undefined) await this.registry.pushAllow(id);
     return this.toAgentDto(updated, updated.targets);
+  }
+
+  // --- Waypoint routes (curated LAN targets) -----------------------------
+
+  private async requireWaypoint(id: string): Promise<Agent> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    if (agent.mode !== 'waypoint') {
+      throw new BadRequestException('Routes can only be added to a Waypoint.');
+    }
+    return agent;
+  }
+
+  private normalizeRoute(input: {
+    kind: string;
+    host?: string;
+    port?: number;
+    label?: string | null;
+    group?: string | null;
+    secretRef?: string | null;
+    webUrl?: string | null;
+  }): {
+    kind: string;
+    host: string;
+    port: number;
+    label: string | null;
+    group: string | null;
+    secretRef: string | null;
+    webUrl: string | null;
+  } {
+    const kind = input.kind;
+    if (kind !== 'ssh' && kind !== 'rdp' && kind !== 'vnc' && kind !== 'web') {
+      throw new BadRequestException('kind must be one of ssh, rdp, vnc, web.');
+    }
+    const label = input.label?.trim() ? input.label.trim().slice(0, 120) : null;
+    const group = input.group?.trim() ? input.group.trim().slice(0, 80) : null;
+    const secretRef = input.secretRef?.trim() ? input.secretRef.trim().slice(0, 256) : null;
+
+    // Remote Browser: host/port are parsed from the URL (the remote browser dials them
+    // through the tunnel), and the full URL is what the browser opens.
+    if (kind === 'web') {
+      const raw = (input.webUrl ?? '').trim();
+      if (!raw) throw new BadRequestException('A Remote Browser needs a URL.');
+      let u: URL;
+      try {
+        u = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`);
+      } catch {
+        throw new BadRequestException('Enter a valid URL, e.g. https://10.20.0.5.');
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        throw new BadRequestException('Remote Browser URLs must be http(s).');
+      }
+      const host = u.hostname;
+      if (host === '127.0.0.1' || host.toLowerCase() === 'localhost') {
+        throw new BadRequestException('A Waypoint targets the LAN, not its own loopback.');
+      }
+      const port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
+      return { kind, host, port, label, group, secretRef: null, webUrl: u.toString() };
+    }
+
+    const host = (input.host ?? '').trim();
+    if (!host) throw new BadRequestException('host is required.');
+    if (host === '127.0.0.1' || host.toLowerCase() === 'localhost') {
+      throw new BadRequestException('A Waypoint targets the LAN, not its own loopback.');
+    }
+    const port = Number(input.port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new BadRequestException('port must be 1–65535.');
+    }
+    return { kind, host, port, label, group, secretRef, webUrl: null };
+  }
+
+  async createRoute(
+    agentId: string,
+    input: RouteInput,
+    user: SessionUser,
+  ): Promise<FabricAgentDto> {
+    await this.requireWaypoint(agentId);
+    const t = this.normalizeRoute(input);
+    const existing = await this.prisma.agentTarget.findUnique({
+      where: { agentId_kind_host_port: { agentId, kind: t.kind, host: t.host, port: t.port } },
+      select: { id: true },
+    });
+    if (existing) throw new BadRequestException('A route for this protocol/host/port already exists.');
+    await this.prisma.agentTarget.create({
+      data: {
+        agentId,
+        kind: t.kind,
+        host: t.host,
+        port: t.port,
+        label: t.label,
+        group: t.group,
+        secretRef: t.secretRef,
+        webUrl: t.webUrl,
+        source: 'curated',
+      },
+    });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.route.created',
+      target: agentId,
+      meta: { kind: t.kind, host: t.host, port: t.port, label: t.label },
+    });
+    await this.registry.pushAllow(agentId);
+    return this.reloadAgentDto(agentId);
+  }
+
+  async updateRoute(
+    agentId: string,
+    targetId: string,
+    input: RouteInput,
+    user: SessionUser,
+  ): Promise<FabricAgentDto> {
+    await this.requireWaypoint(agentId);
+    const row = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!row) throw new NotFoundException('Route not found.');
+    const t = this.normalizeRoute(input);
+    // If host/port/kind changed, re-pin host key from scratch (a different box).
+    const identityChanged = row.kind !== t.kind || row.host !== t.host || row.port !== t.port;
+    await this.prisma.agentTarget.update({
+      where: { id: targetId },
+      data: {
+        kind: t.kind,
+        host: t.host,
+        port: t.port,
+        label: t.label,
+        group: t.group,
+        secretRef: t.secretRef,
+        webUrl: t.webUrl,
+        source: 'curated',
+        ...(identityChanged ? { hostKey: null } : {}),
+      },
+    });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.route.updated',
+      target: agentId,
+      meta: { targetId, kind: t.kind, host: t.host, port: t.port },
+    });
+    await this.registry.pushAllow(agentId);
+    return this.reloadAgentDto(agentId);
+  }
+
+  async deleteRoute(agentId: string, targetId: string, user: SessionUser): Promise<FabricAgentDto> {
+    await this.requireWaypoint(agentId);
+    const row = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    if (!row) throw new NotFoundException('Route not found.');
+    await this.prisma.agentTarget.delete({ where: { id: targetId } });
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.route.deleted',
+      target: agentId,
+      meta: { targetId, kind: row.kind, host: row.host, port: row.port },
+    });
+    await this.registry.pushAllow(agentId);
+    return this.reloadAgentDto(agentId);
+  }
+
+  private async reloadAgentDto(agentId: string): Promise<FabricAgentDto> {
+    const agent = await this.prisma.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      include: { targets: { orderBy: [{ group: 'asc' }, { kind: 'asc' }, { host: 'asc' }, { port: 'asc' }] } },
+    });
+    return this.toAgentDto(agent, agent.targets);
   }
 
   /** Revoke an agent: kill its credential and drop any live connection. */
@@ -621,6 +1033,9 @@ export class FabricService implements OnModuleInit {
       localIp: agent.localIp,
       notes: agent.notes,
       status: this.registry.statusOf(agent.id, agent.status),
+      mode: (agent.mode as FabricAgentDto['mode']) ?? 'endpoint',
+      egressCidrs: agent.egressCidrs ?? [],
+      requireApproval: !!agent.requireApproval,
       lastSeenAt: agent.lastSeenAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),
       caTrusted: !!agent.caTrustedAt,
@@ -633,6 +1048,9 @@ export class FabricService implements OnModuleInit {
           label: t.label,
           hasCredential: !!t.secretRef,
           hostKeyPinned: !!t.hostKey,
+          source: (t.source as FabricTargetDto['source']) ?? 'discovered',
+          group: t.group,
+          webUrl: t.webUrl,
         }),
       ),
     };

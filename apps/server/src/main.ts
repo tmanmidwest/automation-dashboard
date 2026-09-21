@@ -15,6 +15,8 @@ import { FabricSessionService } from './fabric/fabric-session.service';
 import { attachFabricSessionRelay } from './fabric/fabric-session-relay';
 import { FabricGuacService } from './fabric/fabric-guac.service';
 import { attachFabricGuacRelay } from './fabric/fabric-guac-relay';
+import { attachFabricRemoteBrowserRelay } from './fabric/fabric-remote-browser-relay';
+import { RemoteBrowserService } from './fabric/remote-browser.service';
 import { attachFabricAccessRelay } from './fabric/fabric-access-relay';
 import { TokenAuthService } from './auth/token-auth.service';
 import { PrismaService } from './prisma/prisma.service';
@@ -63,6 +65,9 @@ async function bootstrap() {
 
   // Fabric guac relay (in-browser RDP via the guacd sidecar).
   attachFabricGuacRelay(app.getHttpServer(), app.get(FabricGuacService));
+
+  // Fabric Remote Browser relay (noVNC ⟷ ephemeral remote-browser container).
+  attachFabricRemoteBrowserRelay(app.getHttpServer(), app.get(RemoteBrowserService));
 
   // Fabric access relay (raw TCP over WS for the native `cerebro access` CLI).
   attachFabricAccessRelay(app.getHttpServer(), {

@@ -142,7 +142,13 @@ export class FabricSessionService {
         shell = channel;
         const row = await this.prisma.fabricSession
           .create({
-            data: { agentId: desc.agentId, targetKind: desc.kind, userId: desc.userId },
+            data: {
+              agentId: desc.agentId,
+              targetKind: desc.kind,
+              userId: desc.userId,
+              targetHost: desc.host,
+              targetPort: desc.port,
+            },
             select: { id: true },
           })
           .catch(() => null);
@@ -231,7 +237,16 @@ export class FabricSessionService {
       return;
     }
     const row = await this.prisma.fabricSession
-      .create({ data: { agentId: desc.agentId, targetKind: desc.kind, userId: desc.userId }, select: { id: true } })
+      .create({
+        data: {
+          agentId: desc.agentId,
+          targetKind: desc.kind,
+          userId: desc.userId,
+          targetHost: desc.host,
+          targetPort: desc.port,
+        },
+        select: { id: true },
+      })
       .catch(() => null);
     await this.audit.record({
       actorId: desc.userId,

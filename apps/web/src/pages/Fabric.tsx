@@ -4,6 +4,7 @@ import {
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
   ShieldCheck, Search, Network, Tag as TagIcon, LayoutGrid, List as ListIcon,
+  Waypoints, Globe,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -14,6 +15,7 @@ import type {
   FabricAgentDto, FabricEnrollmentDto, FabricAgentStatus, FabricProbeResult, FabricTargetDto,
   FabricSshConnectInput, FabricRdpConnectInput, FabricVncConnectInput, FabricSessionTicket,
   FabricVncSessionTicket, FabricSessionDto, FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
+  FabricApprovalPending, FabricApprovalStatus, FabricApprovalDto,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -89,6 +91,46 @@ function saveRdpPrefs(targetId: string, prefs: RdpPrefs): void {
   }
 }
 
+/**
+ * Resolve a session-open response: a ready ticket opens immediately; a held
+ * (four-eyes) request is polled until an approver approves it (then its ticket is
+ * returned) or it is denied/expires. `onPending` lets the caller show a "waiting"
+ * state. Inlined `pending` check — never import a runtime value from @cerebro/shared.
+ */
+async function awaitSession<T extends FabricSessionTicket>(
+  resp: T | FabricApprovalPending,
+  onPending?: () => void,
+): Promise<T> {
+  if (!('pending' in resp && resp.pending)) return resp as T;
+  onPending?.();
+  const id = (resp as FabricApprovalPending).approvalId;
+  // Poll for up to ~5 minutes (the server-side approval TTL).
+  for (let i = 0; i < 150; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let s: FabricApprovalStatus;
+    try {
+      s = await api.get<FabricApprovalStatus>(`/api/fabric/approvals/${id}`);
+    } catch {
+      continue; // transient; keep polling until the TTL
+    }
+    if (s.state === 'approved' && s.ticket) return s.ticket as unknown as T;
+    if (s.state === 'denied') throw new ApiError(403, s.error || 'The session was denied.');
+    if (s.state === 'expired') throw new ApiError(408, 'The approval request expired.');
+    if (s.state === 'error') throw new ApiError(500, s.error || 'The session failed to start.');
+  }
+  throw new ApiError(408, 'Timed out waiting for approval.');
+}
+
+/** Amber "held for approval" banner shown while a four-eyes request is pending. */
+function WaitingApproval() {
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300/90">
+      <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+      Waiting for an approver to allow this session… (this request expires in a few minutes)
+    </div>
+  );
+}
+
 /** Whether new sessions open in a new browser tab (default) vs. an in-page overlay. */
 const NEWTAB_PREF = 'fabric.openInNewTab';
 function prefNewTab(): boolean {
@@ -142,6 +184,7 @@ export function Fabric() {
   const { can } = useAuth();
   const canManage = can('fabric:manage');
   const canConnect = can('fabric:connect');
+  const canApprove = can('fabric:approve');
 
   const [agents, setAgents] = useState<FabricAgentDto[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -151,9 +194,14 @@ export function Fabric() {
   const [showRecordings, setShowRecordings] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
+  const [webBusy, setWebBusy] = useState<Record<string, boolean>>({});
+  const [showApprovals, setShowApprovals] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
+  const [routesFor, setRoutesFor] = useState<FabricAgentDto | null>(null);
+  const [adhocFor, setAdhocFor] = useState<FabricAgentDto | null>(null);
   const [editing, setEditing] = useState<FabricAgentDto | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
@@ -205,6 +253,23 @@ export function Fabric() {
     setConnectFor({ agent, target: t });
   };
 
+  // Remote Browser: launch the remote browser (takes a few seconds to spin up), then
+  // open the noVNC viewer on its screen.
+  const openRemoteBrowser = async (agent: FabricAgentDto, t: FabricTargetDto) => {
+    setWebBusy((s) => ({ ...s, [t.id]: true }));
+    const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
+    try {
+      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
+      const ticket = await awaitSession(resp);
+      launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win);
+    } catch (e) {
+      win?.close();
+      setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Browser.');
+    } finally {
+      setWebBusy((s) => ({ ...s, [t.id]: false }));
+    }
+  };
+
   const runProbe = async (agentId: string, t: FabricTargetDto) => {
     setProbe((p) => ({ ...p, [t.id]: { loading: true } }));
     try {
@@ -244,6 +309,16 @@ export function Fabric() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pollMs]);
 
+  // Approvers: poll the pending-approval count for the header badge.
+  useEffect(() => {
+    if (!canApprove) return;
+    const tick = () =>
+      api.get<FabricApprovalDto[]>('/api/fabric/approvals').then((a) => setPendingApprovals(a.length)).catch(() => undefined);
+    tick();
+    const id = setInterval(tick, 8_000);
+    return () => clearInterval(id);
+  }, [canApprove]);
+
   const revoke = async (a: FabricAgentDto) => {
     if (!confirm(`Revoke "${a.name}"? Its credential is destroyed and it can no longer connect.`)) return;
     try {
@@ -267,7 +342,7 @@ export function Fabric() {
     }
   };
 
-  const saveAgent = async (id: string, input: { name?: string; tags?: string[]; notes?: string | null }) => {
+  const saveAgent = async (id: string, input: { name?: string; tags?: string[]; notes?: string | null; requireApproval?: boolean }) => {
     const updated = await api.patch<FabricAgentDto>(`/api/fabric/agents/${id}`, input);
     setAgents((prev) => (prev ? prev.map((a) => (a.id === id ? updated : a)) : prev));
   };
@@ -307,12 +382,42 @@ export function Fabric() {
 
   // Target connect chips (+ Files) — shared by the card and the list row.
   const renderConnectChips = (a: FabricAgentDto) => {
-    if (a.targets.length === 0) return null;
     const online = a.status === 'online';
+    const isWaypoint = a.mode === 'waypoint';
+    const adhoc = isWaypoint && canConnect && a.egressCidrs.length > 0;
+    if (a.targets.length === 0 && !adhoc) return null;
     const ssh = a.targets.find((t) => t.kind === 'ssh');
     return (
       <div className="flex flex-wrap gap-1.5">
+        {adhoc && (
+          <button
+            type="button"
+            disabled={!online}
+            onClick={online ? () => setAdhocFor(a) : undefined}
+            title={online ? 'Ad-hoc connect to any in-range host' : 'Waypoint offline'}
+            className={`inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-1 text-[0.7rem] text-primary ${online ? 'hover:bg-primary/20 cursor-pointer' : 'opacity-40 cursor-default'}`}
+          >
+            <Waypoints className="h-3 w-3" /> Ad-hoc connect
+          </button>
+        )}
         {a.targets.map((t) => {
+          if (t.kind === 'web') {
+            const wb = webBusy[t.id];
+            const clickable = online && canConnect;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                disabled={!clickable || wb}
+                onClick={clickable ? () => openRemoteBrowser(a, t) : undefined}
+                title={clickable ? `Remote Browser → ${t.webUrl || ''}` : 'Waypoint offline'}
+                className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-[0.7rem] ${clickable ? 'hover:bg-primary/20 hover:text-primary cursor-pointer' : 'opacity-40 cursor-default'}`}
+              >
+                {wb ? <Loader2 className="h-3 w-3 animate-spin" /> : <Globe className="h-3 w-3" />}
+                {t.label || 'Web'}
+              </button>
+            );
+          }
           const pr = probe[t.id];
           const clickable = online && canConnect;
           return (
@@ -360,6 +465,11 @@ export function Fabric() {
     const online = a.status === 'online';
     return (
       <div className="flex items-center gap-0.5 shrink-0">
+        {a.mode === 'waypoint' && (
+          <Button variant="ghost" size="icon" className={iconBtn} title="Manage routes (LAN targets)" onClick={() => setRoutesFor(a)}>
+            <Waypoints className="h-4 w-4 text-primary" />
+          </Button>
+        )}
         <Button variant="ghost" size="icon" className={iconBtn} title="Edit name, tags & notes" onClick={() => setEditing(a)}>
           <Pencil className="h-4 w-4" />
         </Button>
@@ -426,6 +536,11 @@ export function Fabric() {
                 <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.65rem] font-medium ${OS_META[osKey(a.os)].cls}`}>
                   {OS_META[osKey(a.os)].label}
                 </span>
+                {a.mode === 'waypoint' && (
+                  <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-primary" title="A Waypoint: proxies to curated LAN targets">
+                    <Waypoints className="h-3 w-3" /> Waypoint
+                  </span>
+                )}
                 <span className="font-semibold text-sm truncate">{a.name}</span>
               </div>
               <div className={`flex items-center gap-1.5 text-xs mt-1 ${st.cls}`}>
@@ -464,6 +579,17 @@ export function Fabric() {
             </div>
           )}
 
+          {a.mode === 'waypoint' && a.targets.length === 0 && (
+            <button
+              type="button"
+              disabled={!canManage}
+              onClick={canManage ? () => setRoutesFor(a) : undefined}
+              className={`mt-3 inline-flex items-center gap-1 rounded-full border border-dashed border-primary/40 px-2 py-1 text-[0.7rem] text-primary ${canManage ? 'hover:bg-primary/10' : 'opacity-50'}`}
+            >
+              <Plus className="h-3 w-3" /> Add routes
+            </button>
+          )}
+
           {a.notes && <p className="mt-2 text-xs text-muted-foreground italic border-l-2 border-border/60 pl-2">{a.notes}</p>}
 
           {a.tags.length > 0 && (
@@ -487,6 +613,14 @@ export function Fabric() {
         description="Agent-brokered remote access. Machines dial out to Cerebro — no inbound RDP/SSH exposure."
         actions={
           <>
+            {canApprove && (
+              <Button variant="outline" onClick={() => setShowApprovals(true)} className={pendingApprovals > 0 ? 'border-amber-500/50 text-amber-300' : ''}>
+                <ShieldCheck className="h-4 w-4 mr-1" /> Approvals
+                {pendingApprovals > 0 && (
+                  <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-amber-500 text-black text-[0.65rem] font-semibold h-4 min-w-4 px-1">{pendingApprovals}</span>
+                )}
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setShowRecordings(true)}>
               <Film className="h-4 w-4 mr-1" /> Recordings
             </Button>
@@ -678,6 +812,32 @@ export function Fabric() {
         <EditAgentDialog agent={editing} onClose={() => setEditing(null)} onSave={saveAgent} />
       )}
 
+      {routesFor && (
+        <RoutesDialog
+          agent={routesFor}
+          onClose={() => setRoutesFor(null)}
+          onChanged={(updated) => {
+            setAgents((prev) => (prev ? prev.map((x) => (x.id === updated.id ? updated : x)) : prev));
+            setRoutesFor(updated);
+          }}
+        />
+      )}
+
+      {adhocFor && (
+        <AdhocConnectDialog
+          agent={adhocFor}
+          onClose={() => setAdhocFor(null)}
+          onLaunch={(kind, ticket, title, win, extra) => {
+            launchViewer(kind, ticket, title, win, extra);
+            setAdhocFor(null);
+          }}
+        />
+      )}
+
+      {showApprovals && (
+        <ApprovalsDialog onClose={() => setShowApprovals(false)} onCountChange={setPendingApprovals} />
+      )}
+
       {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} />}
       {rdpSession && (
         <RdpViewer
@@ -701,6 +861,7 @@ function AddMachineDialog({
 }) {
   const [name, setName] = useState('');
   const [os, setOs] = useState('linux');
+  const [mode, setMode] = useState<'endpoint' | 'waypoint'>('endpoint');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -712,7 +873,7 @@ function AddMachineDialog({
     setBusy(true);
     setErr(null);
     try {
-      const e = await api.post<FabricEnrollmentDto>('/api/fabric/agents', { name: name.trim(), os });
+      const e = await api.post<FabricEnrollmentDto>('/api/fabric/agents', { name: name.trim(), os, mode });
       onEnrolled(e);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to create agent.');
@@ -739,8 +900,29 @@ function AddMachineDialog({
       <div className="space-y-3">
         {err && <p className="text-sm text-destructive">{err}</p>}
         <div>
+          <Label>Type</Label>
+          <div className="mt-1 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setMode('endpoint')}
+              className={`flex flex-col items-start gap-1 rounded-md border p-2.5 text-left text-xs ${mode === 'endpoint' ? 'border-primary bg-primary/10' : 'border-input hover:bg-muted/40'}`}
+            >
+              <span className="inline-flex items-center gap-1.5 font-medium text-sm"><Server className="h-4 w-4" /> Endpoint agent</span>
+              <span className="text-muted-foreground">Remote access to this one box (its own SSH/RDP/VNC).</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('waypoint')}
+              className={`flex flex-col items-start gap-1 rounded-md border p-2.5 text-left text-xs ${mode === 'waypoint' ? 'border-primary bg-primary/10' : 'border-input hover:bg-muted/40'}`}
+            >
+              <span className="inline-flex items-center gap-1.5 font-medium text-sm"><Waypoints className="h-4 w-4" /> Waypoint</span>
+              <span className="text-muted-foreground">A gateway: reach any host on this box's LAN.</span>
+            </button>
+          </div>
+        </div>
+        <div>
           <Label htmlFor="fab-name">Name</Label>
-          <Input id="fab-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-web-01" autoFocus />
+          <Input id="fab-name" value={name} onChange={(e) => setName(e.target.value)} placeholder={mode === 'waypoint' ? 'dmz-waypoint-01' : 'prod-web-01'} autoFocus />
         </div>
         <div>
           <Label htmlFor="fab-os">Operating system</Label>
@@ -750,6 +932,12 @@ function AddMachineDialog({
             <option value="windows">Windows</option>
           </select>
         </div>
+        {mode === 'waypoint' && (
+          <p className="text-xs text-muted-foreground">
+            After the Waypoint is online, add the LAN targets (SSH/RDP/VNC hosts) it should reach from its
+            <Waypoints className="inline h-3 w-3 mx-1" /> routes panel.
+          </p>
+        )}
       </div>
     </Dialog>
   );
@@ -977,11 +1165,12 @@ function EditAgentDialog({
 }: {
   agent: FabricAgentDto;
   onClose: () => void;
-  onSave: (id: string, input: { name?: string; tags?: string[]; notes?: string | null }) => Promise<void>;
+  onSave: (id: string, input: { name?: string; tags?: string[]; notes?: string | null; requireApproval?: boolean }) => Promise<void>;
 }) {
   const [name, setName] = useState(agent.name);
   const [tags, setTags] = useState(agent.tags.join(', '));
   const [notes, setNotes] = useState(agent.notes ?? '');
+  const [requireApproval, setRequireApproval] = useState(agent.requireApproval);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -993,6 +1182,7 @@ function EditAgentDialog({
         name: name.trim(),
         tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
         notes: notes.trim() || null,
+        requireApproval,
       });
       onClose();
     } catch (e) {
@@ -1034,7 +1224,519 @@ function EditAgentDialog({
             placeholder="e.g. AWS bastion — reboot only during the maintenance window."
           />
         </div>
+        <div className="rounded-md border border-border/60 p-3">
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={requireApproval}
+              onChange={(e) => setRequireApproval(e.target.checked)}
+            />
+            <span>
+              <span className="inline-flex items-center gap-1 font-medium"><ShieldCheck className="h-3.5 w-3.5 text-amber-400" /> Require approval (four-eyes)</span>
+              <span className="block text-xs text-muted-foreground">Every SSH/RDP/VNC/Web session through this {agent.mode === 'waypoint' ? 'Waypoint' : 'machine'} must be approved by another user (with the approve permission) before it opens.</span>
+            </span>
+          </label>
+        </div>
       </div>
+    </Dialog>
+  );
+}
+
+const DEFAULT_PORT: Record<string, number> = { ssh: 22, rdp: 3389, vnc: 5900 };
+
+function RoutesDialog({
+  agent,
+  onClose,
+  onChanged,
+}: {
+  agent: FabricAgentDto;
+  onClose: () => void;
+  onChanged: (updated: FabricAgentDto) => void;
+}) {
+  const blank = { kind: 'ssh', host: '', port: 22, label: '', group: '', secretRef: '', webUrl: '' };
+  const [form, setForm] = useState<{ kind: string; host: string; port: number; label: string; group: string; secretRef: string; webUrl: string }>(blank);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [creds, setCreds] = useState<{ key: string; label: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [egress, setEgress] = useState(agent.egressCidrs.join(', '));
+  const [egressBusy, setEgressBusy] = useState(false);
+
+  const saveEgress = async () => {
+    setEgressBusy(true); setErr(null);
+    try {
+      const list = egress.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+      const updated = await api.patch<FabricAgentDto>(`/api/fabric/agents/${agent.id}`, { egressCidrs: list });
+      onChanged(updated);
+      setEgress(updated.egressCidrs.join(', '));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to save egress ranges.');
+    } finally {
+      setEgressBusy(false);
+    }
+  };
+
+  // Vault credentials for the selected protocol (server-injected at session time).
+  useEffect(() => {
+    let live = true;
+    api
+      .get<{ key: string; label: string }[]>(`/api/fabric/credentials?kind=${form.kind}`)
+      .then((c) => { if (live) setCreds(c); })
+      .catch(() => { if (live) setCreds([]); });
+    return () => { live = false; };
+  }, [form.kind]);
+
+  const reset = () => { setForm(blank); setEditingId(null); setErr(null); };
+
+  const setKind = (kind: string) =>
+    setForm((f) => ({ ...f, kind, port: f.port === DEFAULT_PORT[f.kind] ? (DEFAULT_PORT[kind] ?? f.port) : f.port, secretRef: '' }));
+
+  const save = async () => {
+    const isWeb = form.kind === 'web';
+    if (isWeb ? !form.webUrl.trim() : !form.host.trim()) {
+      setErr(isWeb ? 'A URL is required.' : 'Host is required.');
+      return;
+    }
+    setBusy(true); setErr(null);
+    const body = isWeb
+      ? {
+          kind: 'web',
+          webUrl: form.webUrl.trim(),
+          label: form.label.trim() || undefined,
+          group: form.group.trim() || undefined,
+        }
+      : {
+          kind: form.kind,
+          host: form.host.trim(),
+          port: Number(form.port),
+          label: form.label.trim() || undefined,
+          group: form.group.trim() || undefined,
+          secretRef: form.secretRef || undefined,
+        };
+    try {
+      const updated = editingId
+        ? await api.patch<FabricAgentDto>(`/api/fabric/agents/${agent.id}/routes/${editingId}`, body)
+        : await api.post<FabricAgentDto>(`/api/fabric/agents/${agent.id}/routes`, body);
+      onChanged(updated);
+      reset();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to save route.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const edit = (t: FabricTargetDto) => {
+    setEditingId(t.id);
+    setErr(null);
+    setForm({ kind: t.kind, host: t.host, port: t.port, label: t.label ?? '', group: t.group ?? '', secretRef: '', webUrl: t.webUrl ?? '' });
+  };
+
+  const del = async (t: FabricTargetDto) => {
+    const what = t.kind === 'web' ? t.webUrl || 'Remote Browser' : `${t.kind.toUpperCase()} ${t.host}:${t.port}`;
+    if (!confirm(`Remove route ${what}?`)) return;
+    setBusy(true); setErr(null);
+    try {
+      const updated = await api.delete<FabricAgentDto>(`/api/fabric/agents/${agent.id}/routes/${t.id}`);
+      onChanged(updated);
+      if (editingId === t.id) reset();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to remove route.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const items = [...agent.targets].sort((a, b) =>
+    (a.group ?? '').localeCompare(b.group ?? '') || a.kind.localeCompare(b.kind) || a.host.localeCompare(b.host) || a.port - b.port,
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title={`Routes — ${agent.name}`}
+      description="LAN targets this Waypoint can reach — SSH/RDP/VNC sessions or a Remote Browser (remote browser), all tunnelled through the Waypoint's network."
+      footer={<Button onClick={onClose}>Done</Button>}
+    >
+      {err && <div className="mb-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+
+      <div className="mb-4 rounded-md border border-border/60 p-3">
+        <Label className="text-xs">Ad-hoc egress ranges</Label>
+        <p className="mb-1.5 text-[0.7rem] text-muted-foreground">
+          CIDR ranges (or bare IPs) this Waypoint may reach for ad-hoc connections — a host you did not save as a route. Leave empty to allow only the curated items above.
+        </p>
+        <div className="flex items-center gap-2">
+          <Input value={egress} onChange={(e) => setEgress(e.target.value)} placeholder="10.20.0.0/24, 192.168.50.10" className="font-mono text-xs" />
+          <Button variant="outline" onClick={saveEgress} disabled={egressBusy}>
+            {egressBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-1.5 mb-4 max-h-64 overflow-auto">
+        {items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No routes yet. Add one below.</p>
+        ) : (
+          items.map((t) => (
+            <div key={t.id} className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm ${editingId === t.id ? 'border-primary bg-primary/5' : 'border-border/60'}`}>
+              <span className="inline-flex items-center gap-1 rounded bg-muted/50 px-1.5 py-0.5 text-[0.65rem] font-medium uppercase">
+                {t.kind === 'rdp' ? <MonitorSmartphone className="h-3 w-3" /> : t.kind === 'vnc' ? <Monitor className="h-3 w-3" /> : t.kind === 'web' ? <Globe className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
+                {t.kind}
+              </span>
+              <span className="font-mono text-xs truncate max-w-[16rem]">{t.kind === 'web' ? t.webUrl : `${t.host}:${t.port}`}</span>
+              {t.label && <span className="text-muted-foreground truncate">{t.label}</span>}
+              {t.group && <span className="rounded bg-secondary/20 px-1.5 py-0.5 text-[0.6rem] text-secondary-foreground/80">{t.group}</span>}
+              {t.hasCredential && <span title="Vault credential attached"><KeyRound className="h-3 w-3 text-primary/70" /></span>}
+              <div className="ml-auto flex items-center gap-0.5">
+                <Button variant="ghost" size="icon" className="h-7 w-7" title="Edit" onClick={() => edit(t)}><Pencil className="h-3.5 w-3.5" /></Button>
+                <Button variant="ghost" size="icon" className="h-7 w-7" title="Remove" onClick={() => del(t)} disabled={busy}><Trash2 className="h-3.5 w-3.5 text-destructive/80" /></Button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="rounded-md border border-border/60 p-3 space-y-3">
+        <div className="text-xs font-medium text-muted-foreground">{editingId ? 'Edit route' : 'Add a route'}</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div>
+            <Label className="text-xs">Protocol</Label>
+            <select className={selectCls} value={form.kind} onChange={(e) => setKind(e.target.value)}>
+              <option value="ssh">SSH</option>
+              <option value="rdp">RDP</option>
+              <option value="vnc">VNC</option>
+              <option value="web">Web</option>
+            </select>
+          </div>
+          {form.kind === 'web' ? (
+            <div className="col-span-2 sm:col-span-3">
+              <Label className="text-xs">URL</Label>
+              <Input value={form.webUrl} onChange={(e) => setForm((f) => ({ ...f, webUrl: e.target.value }))} placeholder="https://10.20.0.5" />
+            </div>
+          ) : (
+            <>
+              <div className="col-span-2">
+                <Label className="text-xs">Host / IP</Label>
+                <Input value={form.host} onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))} placeholder="10.20.0.15" />
+              </div>
+              <div>
+                <Label className="text-xs">Port</Label>
+                <Input type="number" value={form.port} onChange={(e) => setForm((f) => ({ ...f, port: Number(e.target.value) }))} />
+              </div>
+            </>
+          )}
+          <div className="col-span-2">
+            <Label className="text-xs">Label (optional)</Label>
+            <Input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder={form.kind === 'web' ? 'Switch admin' : 'DB server'} />
+          </div>
+          <div>
+            <Label className="text-xs">Group (optional)</Label>
+            <Input value={form.group} onChange={(e) => setForm((f) => ({ ...f, group: e.target.value }))} placeholder="DMZ" />
+          </div>
+          {form.kind !== 'web' && (
+            <div>
+              <Label className="text-xs">Credential</Label>
+              <select className={selectCls} value={form.secretRef} onChange={(e) => setForm((f) => ({ ...f, secretRef: e.target.value }))}>
+                <option value="">None (enter at connect)</option>
+                {creds.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        {form.kind === 'web' && (
+          <p className="text-[0.7rem] text-muted-foreground">
+            Opens in an isolated remote browser streamed back over VNC — the page is fetched through the Waypoint, so it works for internal-only web UIs. Requires the Remote Browser image + Docker access on the Cerebro host (see docs).
+          </p>
+        )}
+        <div className="flex items-center gap-2">
+          <Button onClick={save} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : editingId ? <Check className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
+            {editingId ? 'Save changes' : 'Add route'}
+          </Button>
+          {editingId && <Button variant="ghost" onClick={reset} disabled={busy}>Cancel edit</Button>}
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+function AdhocConnectDialog({
+  agent,
+  onClose,
+  onLaunch,
+}: {
+  agent: FabricAgentDto;
+  onClose: () => void;
+  onLaunch: (
+    kind: 'ssh' | 'rdp' | 'vnc',
+    ticket: FabricSessionTicket,
+    title: string,
+    win: Window | null,
+    extra?: { dynamicResize?: boolean; vncCreds?: { username?: string; password?: string } },
+  ) => void;
+}) {
+  const [kind, setKind] = useState<'ssh' | 'rdp' | 'vnc'>('ssh');
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState(22);
+  const [creds, setCreds] = useState<{ key: string; label: string }[]>([]);
+  const [credSource, setCredSource] = useState('manual');
+  const [username, setUsername] = useState('root');
+  const [method, setMethod] = useState<'password' | 'key'>('password');
+  const [password, setPassword] = useState('');
+  const [privateKey, setPrivateKey] = useState('');
+  const [passphrase, setPassphrase] = useState('');
+  const [domain, setDomain] = useState('');
+  const [newTab, setNewTab] = useState(prefNewTab());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .get<{ key: string; label: string }[]>(`/api/fabric/credentials?kind=${kind}`)
+      .then((c) => { if (live) setCreds(c); })
+      .catch(() => { if (live) setCreds([]); });
+    return () => { live = false; };
+  }, [kind]);
+
+  const pickKind = (k: 'ssh' | 'rdp' | 'vnc') => {
+    setKind(k);
+    setPort(DEFAULT_PORT[k] ?? port);
+    setCredSource('manual');
+    if (k === 'rdp' && username === 'root') setUsername('Administrator');
+    if (k === 'ssh' && username === 'Administrator') setUsername('root');
+  };
+
+  const submit = async () => {
+    setErr(null);
+    if (!host.trim()) { setErr('Enter the target IP address.'); return; }
+    const base: Record<string, unknown> = { host: host.trim(), port: Number(port) };
+    if (credSource !== 'manual') {
+      base.secretRef = credSource;
+    } else if (kind === 'ssh') {
+      if (!username.trim()) { setErr('A username is required.'); return; }
+      if (method === 'password' ? !password : !privateKey.trim()) { setErr(method === 'password' ? 'Enter a password.' : 'Paste a private key.'); return; }
+      Object.assign(base, method === 'password'
+        ? { username: username.trim(), password }
+        : { username: username.trim(), privateKey, passphrase: passphrase || undefined });
+    } else if (kind === 'rdp') {
+      if (!username.trim() || !password) { setErr('RDP needs a username and password.'); return; }
+      Object.assign(base, { username: username.trim(), password, domain: domain.trim() || undefined });
+    } else {
+      // VNC — password optional (noVNC prompts if omitted).
+      if (password) base.password = password;
+      if (username.trim()) base.username = username.trim();
+    }
+    const win = newTab ? window.open('about:blank', '_blank') : null;
+    setBusy(true);
+    try {
+      const title = `${agent.name} · ${host.trim()}:${port} (ad-hoc)`;
+      if (kind === 'vnc') {
+        const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/adhoc/vnc-session`, base);
+        const ticket = await awaitSession(resp, () => setWaiting(true));
+        onLaunch('vnc', ticket, title, win, {
+          vncCreds: ticket.username || ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
+        });
+      } else {
+        const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/adhoc/${kind}-session`, base);
+        const ticket = await awaitSession(resp, () => setWaiting(true));
+        onLaunch(kind, ticket, title, win, kind === 'rdp' ? { dynamicResize: true } : undefined);
+      }
+      onClose();
+    } catch (e) {
+      win?.close();
+      setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
+      setBusy(false);
+      setWaiting(false);
+    }
+  };
+
+  const hasEgress = agent.egressCidrs.length > 0;
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title={`Ad-hoc connect — ${agent.name}`}
+      description="Connect to any in-range host on this Waypoint's network, without saving it as a route."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy || !hasEgress}>
+            {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <TerminalSquare className="h-4 w-4 mr-1" />}
+            Connect
+          </Button>
+        </>
+      }
+    >
+      {waiting && <WaitingApproval />}
+      {err && <div className="mb-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+      {!hasEgress ? (
+        <p className="text-sm text-muted-foreground">
+          This Waypoint has no egress ranges yet. Add allowed CIDR ranges in its
+          <Waypoints className="inline h-3 w-3 mx-1" /> routes panel before making ad-hoc connections.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div>
+              <Label className="text-xs">Protocol</Label>
+              <select className={selectCls} value={kind} onChange={(e) => pickKind(e.target.value as 'ssh' | 'rdp' | 'vnc')}>
+                <option value="ssh">SSH</option>
+                <option value="rdp">RDP</option>
+                <option value="vnc">VNC</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <Label className="text-xs">Target IP</Label>
+              <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="10.20.0.15" autoFocus />
+            </div>
+            <div>
+              <Label className="text-xs">Port</Label>
+              <Input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} />
+            </div>
+          </div>
+
+          <div>
+            <Label className="text-xs">Credential</Label>
+            <select className={selectCls} value={credSource} onChange={(e) => setCredSource(e.target.value)}>
+              <option value="manual">Enter manually</option>
+              {creds.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+            </select>
+          </div>
+
+          {credSource === 'manual' && (
+            <div className="grid grid-cols-2 gap-2">
+              {kind !== 'vnc' && (
+                <div>
+                  <Label className="text-xs">Username</Label>
+                  <Input value={username} onChange={(e) => setUsername(e.target.value)} />
+                </div>
+              )}
+              {kind === 'rdp' && (
+                <div>
+                  <Label className="text-xs">Domain (optional)</Label>
+                  <Input value={domain} onChange={(e) => setDomain(e.target.value)} />
+                </div>
+              )}
+              {kind === 'ssh' && (
+                <div>
+                  <Label className="text-xs">Auth</Label>
+                  <select className={selectCls} value={method} onChange={(e) => setMethod(e.target.value as 'password' | 'key')}>
+                    <option value="password">Password</option>
+                    <option value="key">Private key</option>
+                  </select>
+                </div>
+              )}
+              {(kind !== 'ssh' || method === 'password') && (
+                <div className={kind === 'vnc' ? 'col-span-2' : ''}>
+                  <Label className="text-xs">Password{kind === 'vnc' ? ' (optional)' : ''}</Label>
+                  <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                </div>
+              )}
+              {kind === 'ssh' && method === 'key' && (
+                <>
+                  <div className="col-span-2">
+                    <Label className="text-xs">Private key</Label>
+                    <textarea className="mt-1 w-full h-20 rounded-md border border-input bg-background/60 px-2 py-1.5 text-xs font-mono" value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Passphrase (optional)</Label>
+                    <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input type="checkbox" checked={newTab} onChange={(e) => setNewTab(e.target.checked)} /> Open in a new browser tab
+          </label>
+          <p className="text-[0.7rem] text-muted-foreground">Allowed ranges: <span className="font-mono">{agent.egressCidrs.join(', ')}</span></p>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+function ApprovalsDialog({
+  onClose,
+  onCountChange,
+}: {
+  onClose: () => void;
+  onCountChange: (n: number) => void;
+}) {
+  const [items, setItems] = useState<FabricApprovalDto[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = async () => {
+    try {
+      const list = await api.get<FabricApprovalDto[]>('/api/fabric/approvals');
+      setItems(list);
+      onCountChange(list.length);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to load approvals.');
+    }
+  };
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 4000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const decide = async (id: string, action: 'approve' | 'deny') => {
+    setBusy(id); setErr(null);
+    try {
+      await api.post(`/api/fabric/approvals/${id}/${action}`);
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : `Failed to ${action}.`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title="Session approvals"
+      description="Requests waiting for four-eyes approval. Approving mints the session for the requester; denying rejects it."
+      footer={<Button onClick={onClose}>Close</Button>}
+    >
+      {err && <div className="mb-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+      {items === null ? (
+        <div className="flex items-center gap-2 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+      ) : items.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">No pending requests.</p>
+      ) : (
+        <div className="space-y-2">
+          {items.map((a) => (
+            <div key={a.id} className="flex items-center gap-3 rounded-md border border-border/60 px-3 py-2">
+              <span className="inline-flex items-center gap-1 rounded bg-muted/50 px-1.5 py-0.5 text-[0.65rem] font-medium uppercase">
+                {a.kind === 'rdp' ? <MonitorSmartphone className="h-3 w-3" /> : a.kind === 'vnc' ? <Monitor className="h-3 w-3" /> : a.kind === 'web' ? <Globe className="h-3 w-3" /> : <Terminal className="h-3 w-3" />}
+                {a.kind}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm truncate"><span className="font-medium">{a.requesterEmail || 'An operator'}</span> → <span className="font-mono text-xs">{a.target}</span></div>
+                <div className="text-xs text-muted-foreground truncate">via {a.agentName} · {relTime(a.createdAt)}</div>
+              </div>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => decide(a.id, 'deny')}>Deny</Button>
+              <Button size="sm" disabled={!!busy} onClick={() => decide(a.id, 'approve')}>
+                {busy === a.id ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Approve'}
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
     </Dialog>
   );
 }
@@ -1321,6 +2023,7 @@ function SshConnectDialog({
   const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
   const isManual = credSource === 'manual';
 
   useEffect(() => {
@@ -1355,16 +2058,18 @@ function SshConnectDialog({
     const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
-      const ticket = await api.post<FabricSessionTicket>(
+      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(
         `/api/fabric/agents/${agent.id}/targets/${target.id}/session`,
         body,
       );
+      const ticket = await awaitSession(resp, () => setWaiting(true));
       if (isManual && save && canManage) onChanged();
       onConnected(ticket, win);
     } catch (e) {
       win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
+      setWaiting(false);
     }
   };
 
@@ -1408,6 +2113,7 @@ function SshConnectDialog({
       }
     >
       <div className="space-y-3">
+        {waiting && <WaitingApproval />}
         {err && <p className="text-sm text-destructive">{err}</p>}
 
         <div>
@@ -1652,6 +2358,7 @@ function RdpConnectDialog({
   const [enableAudio, setEnableAudio] = useState(prefs.enableAudio ?? true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
 
   useEffect(() => {
     api
@@ -1712,16 +2419,18 @@ function RdpConnectDialog({
     const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
-      const ticket = await api.post<FabricSessionTicket>(
+      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(
         `/api/fabric/agents/${agent.id}/targets/${target.id}/rdp-session`,
         body,
       );
+      const ticket = await awaitSession(resp, () => setWaiting(true));
       if (isManual && save && canManage) onChanged();
       onConnected(ticket, win, { dynamicResize: resolution === 'fit' });
     } catch (e) {
       win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to open session.');
       setBusy(false);
+      setWaiting(false);
     }
   };
 
@@ -1754,6 +2463,7 @@ function RdpConnectDialog({
       }
     >
       <div className="space-y-3">
+        {waiting && <WaitingApproval />}
         {err && <p className="text-sm text-destructive">{err}</p>}
 
         <div>
@@ -2263,6 +2973,7 @@ function VncConnectDialog({
   const [newTab, setNewTab] = useState(prefNewTab());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
   const isManual = credSource === 'manual';
 
   useEffect(() => {
@@ -2290,16 +3001,18 @@ function VncConnectDialog({
     const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
-      const ticket = await api.post<FabricVncSessionTicket>(
+      const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(
         `/api/fabric/agents/${agent.id}/targets/${target.id}/vnc-session`,
         body,
       );
+      const ticket = await awaitSession(resp, () => setWaiting(true));
       if (isManual && save && canManage && password) onChanged();
       onConnected(ticket, win);
     } catch (e) {
       win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to open VNC session.');
       setBusy(false);
+      setWaiting(false);
     }
   };
 
@@ -2331,6 +3044,7 @@ function VncConnectDialog({
         </>
       }
     >
+      {waiting && <WaitingApproval />}
       {err && (
         <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>
       )}

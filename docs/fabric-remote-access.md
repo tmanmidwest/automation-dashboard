@@ -24,7 +24,20 @@ existing relay, vault, crypto, RBAC, and timeline plumbing.
 > agent-automated host trust, auto-trust), operator-tunable cadences, and a redesigned inventory
 > screen. Agents for **Linux, Windows, and macOS** (agent **v0.3.5**). See **Current state** below
 > for the authoritative list; the rest of this doc is the original design record. Remaining ideas:
-> a per-session approval gate, and SSH/VNC session recording (RDP recording is done).
+> SSH/VNC session recording (RDP recording is done). The per-session approval gate that was listed
+> here has since been **built** as part of Waypoints (see below).
+>
+> **Extension — Waypoints (network gateways):** Fabric now has a **second agent mode**. An
+> `endpoint` agent proxies only to its own `127.0.0.1` services (everything in this doc); a
+> **`waypoint`** agent is a network gateway/bastion that proxies to operator-curated LAN targets
+> (**Routes**) *and* ad-hoc in-range hosts, so you can SSH/RDP/VNC or open a **Remote Browser** to any
+> host reachable from that box's network — one agent per segment, zero inbound rules. It reuses this
+> feature's tunnel, relays, vault, host-key pinning, RBAC, and audit wholesale; the delta is that the
+> agent's allow-list is **pushed from Cerebro** (curated Routes + egress CIDRs) instead of
+> self-discovered. Both modes coexist on one box via per-mode service names (`cerebro-agent` vs
+> `cerebro-waypoint`). Waypoints also delivered the **four-eyes per-session approval gate**
+> (`Agent.requireApproval`), which applies to *any* Fabric agent, endpoint or waypoint. Agent is
+> **v0.5.0**. Full design + as-built record: **[docs/fabric-waypoints.md](fabric-waypoints.md)**.
 >
 > **macOS + VNC note:** the Go agent also targets **darwin** (amd64/arm64, built + served). The unix
 > `install.sh`/`uninstall.sh` self-detect macOS and use **launchd** (`/Library/LaunchDaemons/
@@ -326,7 +339,7 @@ iwr https://cerebro.example/api/fabric/install.ps1 -UseBasicParsing | iex   # pr
 | **Audit** | Enroll, connect, disconnect, session-start, session-end → **Ship's Log** with actor, agent, target, duration, byte counts. Live tail via the timeline SSE. |
 | **Liveness alerting** | Missed-heartbeat ⇒ agent offline ⇒ heartbeat monitor ⇒ notification. Natural reuse of the monitors module. |
 | **Session recording** *(later)* | guacd can record sessions to disk for playback — opt-in per agent/target. |
-| **Break-glass approval** *(later)* | Optional per-session approval gate reusing the assistant's `PendingActionStore` pattern. |
+| **Break-glass approval** ✅ **built (Waypoints P4)** | Per-session four-eyes approval gate — `Agent.requireApproval` holds a session until a `fabric:approve` user approves it. Applies to any agent. See [docs/fabric-waypoints.md](fabric-waypoints.md) §11. |
 
 ---
 
@@ -415,7 +428,7 @@ CJS-barrel gotcha).
 | **3.5 — Vault SSH creds** ✅ **BUILT** | `ssh` vault kind; per-target credential stored at `fabric/<agentId>/<targetId>`, revealed server-side at connect (**Use saved credential** — operator never sees it); save/forget gated on `fabric:manage`; orphan cleanup on agent delete. `tsc`/`vite` green. | Connect with one click; secrets never leave the server. |
 | **4a — RDP in browser** ✅ **BUILT** | guacd sidecar; `guacamole-lite` relay + encrypted ticket (`FabricGuacService`); ephemeral tunnel forward (`tunnel-forward.ts`); `guacamole-common-js` viewer (canvas/mouse/keyboard/resize); `rdp` vault kind + vault-injected creds; `FabricSession` audit. `tsc`/`vite` green; token crypto verified vs guacamole-lite; compose valid. *Live RDP render needs guacd + a real host.* | Windows RDP in the browser through the tunnel. |
 | **4b — Agent lifecycle** ✅ **BUILT** | Self-uninstall on delete (`uninstall` frame → detached remover); Windows-agent-as-a-service (`x/sys/windows/svc`, Linux unit runs as root); **SSH host-key pinning (TOFU)** — learn on first connect, refuse a changed key, reset in the UI (`AgentTarget.hostKey`, migration 0023); **self-update** — broker advertises `latestAgentVersion` in hello-ack, older agent swaps its binary (systemd/Windows-failure-action restart; `CEREBRO_NO_AUTO_UPDATE` to disable). All three targets cross-compile green. *RDP cert pinning n/a — guacd terminates the RDP TLS itself.* | Clean delete removes the agent from the box; survives as a real Windows service; MITM-resistant SSH; fleet self-updates. |
-| **5 — Native client + hardening** ◑ **PARTIAL** | ✅ `cerebro` CLI (`cli/`, Go): `ls` + `access <machine> [ssh\|rdp\|vnc]` over `/api/fabric/access/ws` (bearer API token; `fabric:read`+`fabric:connect` grantable); served at `/api/fabric/cli/binary`; **Command line** dialog. ✅ offline reconciler + alert. ✅ **RDP session recording** — guacd records to a shared `/recordings` volume (`recording-name` = session id); `GET /api/fabric/recordings/:id` streams it; **Recordings** dialog + in-browser player (`Guacamole.SessionRecording`). *Remaining:* SSH/VNC recording, approval gate. | Power-user path + audit playback. |
+| **5 — Native client + hardening** ◑ **PARTIAL** | ✅ `cerebro` CLI (`cli/`, Go): `ls` + `access <machine> [ssh\|rdp\|vnc]` over `/api/fabric/access/ws` (bearer API token; `fabric:read`+`fabric:connect` grantable); served at `/api/fabric/cli/binary`; **Command line** dialog. ✅ offline reconciler + alert. ✅ **RDP session recording** — guacd records to a shared `/recordings` volume (`recording-name` = session id); `GET /api/fabric/recordings/:id` streams it; **Recordings** dialog + in-browser player (`Guacamole.SessionRecording`). ✅ **per-session approval gate** (four-eyes) — delivered via Waypoints ([docs/fabric-waypoints.md](fabric-waypoints.md) §11). *Remaining:* SSH/VNC recording. | Power-user path + audit playback. |
 
 ---
 

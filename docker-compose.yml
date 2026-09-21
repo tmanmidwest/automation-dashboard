@@ -46,11 +46,26 @@ services:
       FABRIC_HEARTBEAT_MS: ${FABRIC_HEARTBEAT_MS:-15000}
       FABRIC_MISSED_BEATS_OFFLINE: ${FABRIC_MISSED_BEATS_OFFLINE:-3}
       FABRIC_POLL_MS: ${FABRIC_POLL_MS:-10000}
+      # Fabric Waypoint Remote Browser (remote browser). The app launches ONE ephemeral
+      # browser container per session via the Docker socket (mounted below), and the
+      # browser dials back to this app's per-session SOCKS bridge at
+      # REMOTE_BROWSER_CALLBACK_HOST. Build the image once:
+      #   docker build -t cerebro-remote-browser:latest docker/remote-browser
+      # REMOTE_BROWSER_NETWORK MUST be this compose project's network (so the app can reach
+      # the browser's VNC and the browser can reach REMOTE_BROWSER_CALLBACK_HOST) — usually
+      # "<project>_default", e.g. automation-dashboard_default. See docs/fabric-waypoints.md.
+      REMOTE_BROWSER_IMAGE: ${REMOTE_BROWSER_IMAGE:-cerebro-remote-browser:latest}
+      REMOTE_BROWSER_NETWORK: ${REMOTE_BROWSER_NETWORK:-}
+      REMOTE_BROWSER_CALLBACK_HOST: ${REMOTE_BROWSER_CALLBACK_HOST:-cerebro-app}
+      REMOTE_BROWSER_GEOMETRY: ${REMOTE_BROWSER_GEOMETRY:-1280x800}
     volumes:
       - cerebro_signal:/data/signal
       # Fabric RDP session recordings — shared with the guacd sidecar (guacd writes,
       # the app serves them back for playback). See docs/fabric-remote-access.md.
       - cerebro_fabric_recordings:/recordings
+      # Fabric Remote Browser: the app spawns ephemeral remote-browser containers via the
+      # host Docker socket. Omit this mount to disable Remote Browser. See docs/fabric-waypoints.md.
+      - /var/run/docker.sock:/var/run/docker.sock
     # ICMP for the uptime monitor's Ping probe (system `ping` needs a raw socket).
     cap_add:
       - NET_RAW

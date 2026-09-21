@@ -23,6 +23,7 @@ import { FabricService } from './fabric.service';
 import { FabricSftpService } from './fabric-sftp.service';
 import { FabricCaService } from './fabric-ca.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
+import { FabricApprovalService } from './fabric-approval.service';
 import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
 
 class CreateAgentDto {
@@ -38,6 +39,50 @@ class CreateAgentDto {
   @IsArray()
   @IsString({ each: true })
   tags?: string[];
+
+  /** "endpoint" (default) or "waypoint" (a network gateway). */
+  @IsOptional()
+  @IsString()
+  mode?: string;
+}
+
+/** Create/edit a Waypoint route (curated LAN target). */
+class RouteDto {
+  @IsString()
+  @MaxLength(8)
+  kind!: string; // ssh | rdp | vnc | web
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  host?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  label?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  group?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  secretRef?: string;
+
+  /** Remote Browser only: the internal URL the remote browser opens. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  webUrl?: string;
 }
 
 class EnrollDto {
@@ -60,6 +105,17 @@ class UpdateAgentDto {
   @IsString()
   @MaxLength(2000)
   notes?: string;
+
+  /** Waypoint only: CIDR/IP ranges permitted for ad-hoc connections. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  egressCidrs?: string[];
+
+  /** Four-eyes: require approval for every session through this agent. */
+  @IsOptional()
+  @IsBoolean()
+  requireApproval?: boolean;
 }
 
 class SshConnectDto {
@@ -215,6 +271,41 @@ class VncConnectDto {
   saveAs?: string;
 }
 
+// Ad-hoc connection DTOs = a connect DTO plus the target host:port (validated against
+// the Waypoint's egress ranges server-side).
+class AdhocSshDto extends SshConnectDto {
+  @IsString()
+  @MaxLength(255)
+  host!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port!: number;
+}
+
+class AdhocRdpDto extends RdpConnectDto {
+  @IsString()
+  @MaxLength(255)
+  host!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port!: number;
+}
+
+class AdhocVncDto extends VncConnectDto {
+  @IsString()
+  @MaxLength(255)
+  host!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port!: number;
+}
+
 class SftpPathDto {
   @IsString()
   @MaxLength(4096)
@@ -268,6 +359,7 @@ export class FabricController {
     private readonly sftp: FabricSftpService,
     private readonly ca: FabricCaService,
     private readonly enrollment: FabricEnrollmentService,
+    private readonly approvals: FabricApprovalService,
   ) {}
 
   // --- Management (session-gated) --------------------------------------------
@@ -312,6 +404,70 @@ export class FabricController {
   async deleteAgent(@Param('id') id: string, @CurrentUser() user: SessionUser) {
     await this.fabric.deleteAgent(id, user);
     return { ok: true };
+  }
+
+  // --- Four-eyes session approvals -------------------------------------------
+
+  /** Pending session requests awaiting approval (for approvers). */
+  @Get('approvals')
+  @SessionOnly()
+  @RequirePermissions('fabric:approve')
+  listApprovals() {
+    return this.approvals.listPending();
+  }
+
+  /** The requester's own poll for a held request (returns the ticket once approved). */
+  @Get('approvals/:id')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  approvalStatus(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.approvals.status(id, user);
+  }
+
+  @Post('approvals/:id/approve')
+  @SessionOnly()
+  @RequirePermissions('fabric:approve')
+  approve(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.approvals.approve(id, user);
+  }
+
+  @Post('approvals/:id/deny')
+  @SessionOnly()
+  @RequirePermissions('fabric:approve')
+  deny(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.approvals.deny(id, user);
+  }
+
+  // --- Waypoint routes (curated LAN targets) -----------------------------
+
+  @Post('agents/:id/routes')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  createRoute(@Param('id') id: string, @Body() body: RouteDto, @CurrentUser() user: SessionUser) {
+    return this.fabric.createRoute(id, body, user);
+  }
+
+  @Patch('agents/:id/routes/:targetId')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  updateRoute(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @Body() body: RouteDto,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.fabric.updateRoute(id, targetId, body, user);
+  }
+
+  @Delete('agents/:id/routes/:targetId')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  deleteRoute(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.fabric.deleteRoute(id, targetId, user);
   }
 
   @Get('sessions')
@@ -387,6 +543,40 @@ export class FabricController {
     @CurrentUser() user: SessionUser,
   ) {
     return this.fabric.openVncSession(id, targetId, body, user);
+  }
+
+  // --- Ad-hoc connections (Waypoint → any in-range IP:port) ------------------------
+
+  @Post('agents/:id/adhoc/ssh-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openAdhocSsh(@Param('id') id: string, @Body() body: AdhocSshDto, @CurrentUser() user: SessionUser) {
+    const { host, port, ...input } = body;
+    return this.fabric.openAdhocSshSession(id, { host, port }, input, user);
+  }
+
+  @Post('agents/:id/adhoc/rdp-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openAdhocRdp(@Param('id') id: string, @Body() body: AdhocRdpDto, @CurrentUser() user: SessionUser) {
+    const { host, port, ...input } = body;
+    return this.fabric.openAdhocRdpSession(id, { host, port }, input, user);
+  }
+
+  @Post('agents/:id/adhoc/vnc-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openAdhocVnc(@Param('id') id: string, @Body() body: AdhocVncDto, @CurrentUser() user: SessionUser) {
+    const { host, port, ...input } = body;
+    return this.fabric.openAdhocVncSession(id, { host, port }, input, user);
+  }
+
+  /** Launch a Remote Browser (remote browser) for a `web` route. */
+  @Post('agents/:id/targets/:targetId/remote-browser-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openRemoteBrowser(@Param('id') id: string, @Param('targetId') targetId: string, @CurrentUser() user: SessionUser) {
+    return this.fabric.openRemoteBrowserSession(id, targetId, user);
   }
 
   // --- SSH certificate authority ---------------------------------------------

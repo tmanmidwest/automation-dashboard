@@ -10,7 +10,7 @@ targets and actions your role can reach.
 
 ## Phase 1 — navigation + quick commands (client-only)
 - **Go to** every page + settings sub-page; **Actions** (add connector, new monitor/automation,
-  Backup & Restore, log out); plus your **connectors** and **monitors** as jump targets (lazy-loaded
+  Backup & Restore, log out); plus your **connectors** and **monitors** as navigation targets (lazy-loaded
   from existing endpoints on first open).
 - Tiny subsequence fuzzy matcher, grouped results, ↑/↓ + Enter + Esc.
 

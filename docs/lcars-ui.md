@@ -115,7 +115,7 @@ npx vite build        # production bundle (uses es2022 target for noVNC top-leve
 Not yet built — good starting points for a new session:
 
 - **Condition status + Red Alert mode** *(highest value)* — roll every signal (offline connectors, down monitors, meters in the red) into one **Condition Green/Yellow/Red** badge in the sweep; on Red, pulse the frame border (optional klaxon w/ mute). Turns the panel into a real ops surface and ties the traffic-light work together.
-- **Kiosk standby / screensaver** — after N idle minutes dim to a big clock + Condition badge (OLED burn-in), tap to wake; and **auto-jump** the kiosk to the offending view when something goes critical.
+- **Kiosk standby / screensaver** — after N idle minutes dim to a big clock + Condition badge (OLED burn-in), tap to wake; and **auto-navigate** the kiosk to the offending view when something goes critical.
 - **LCARS boot sequence** (~1.5s "CEREBRO ONLINE" cold-start) + optional **button chirps** (audible tap feedback), both behind a settings toggle.
 - **Heartbeat sparklines** — `MonitorSummary.recentBeats` is already in the data but unrendered; draw the classic LCARS bar strip per monitor. Also sparklines on stat tiles (CPU/RAM/spend trend).
 - **PWA / fullscreen + add-to-home-screen** for `/panel` so the iPad launches straight into the kiosk like an appliance *(high value-per-effort)*.

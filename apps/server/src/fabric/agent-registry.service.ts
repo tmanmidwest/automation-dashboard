@@ -215,7 +215,12 @@ export class AgentRegistryService {
       },
     });
 
-    await this.syncTargets(agentId, frame.targets ?? []);
+    // A Waypoint self-discovers nothing — its targets are operator-curated, so we
+    // never let its self-report touch the allow-list. An endpoint agent reconciles
+    // its discovered loopback services as before.
+    if (before.mode !== 'waypoint') {
+      await this.syncTargets(agentId, frame.targets ?? []);
+    }
 
     if (before.status !== 'online') {
       await this.audit.record({
@@ -235,16 +240,54 @@ export class AgentRegistryService {
       }
     }
 
+    // A Waypoint learns its reachable set from the broker: send the curated
+    // allow-list with the ack so it can serve sessions immediately on connect.
+    const allow = before.mode === 'waypoint' ? await this.computeAllow(agentId) : undefined;
     this.send(agentId, {
       t: 'hello-ack',
       agentId,
       heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
+      ...(allow ? { allow, egressCidrs: before.egressCidrs ?? [] } : {}),
     });
 
     // Auto-trust: push CA trust to an untrusted agent (once it succeeds, the
     // caTrustedAt flag stops this from firing again).
     if (!before.caTrustedAt) void this.maybeAutoTrustCa(agentId);
+  }
+
+  /** The set of LAN host:port a Waypoint is permitted to dial (its routes). */
+  private async computeAllow(agentId: string): Promise<Array<{ host: string; port: number }>> {
+    const rows = await this.prisma.agentTarget.findMany({
+      where: { agentId },
+      select: { host: true, port: true },
+    });
+    // De-dupe (a host may host several protocols on distinct ports).
+    const seen = new Set<string>();
+    const out: Array<{ host: string; port: number }> = [];
+    for (const r of rows) {
+      const key = `${r.host}:${r.port}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ host: r.host, port: r.port });
+    }
+    return out;
+  }
+
+  /**
+   * Push a Waypoint's current allow-list to it live (after an operator adds/edits/
+   * removes a route), so its reachable set updates without a reconnect.
+   * Best-effort: only reaches an online agent. Returns whether it was delivered.
+   */
+  async pushAllow(agentId: string): Promise<boolean> {
+    if (!this.live.has(agentId)) return false;
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { egressCidrs: true },
+    });
+    const allow = await this.computeAllow(agentId);
+    this.send(agentId, { t: 'set-allow', allow, egressCidrs: agent?.egressCidrs ?? [] });
+    return true;
   }
 
   /** If auto-trust is on and the CA is enabled, push CA trust to this agent. */
@@ -278,6 +321,13 @@ export class AgentRegistryService {
     agentId: string,
     targets: FabricHelloFrame['targets'],
   ): Promise<void> {
+    // Never let a Waypoint's (unexpected) self-report inject allow-list rows — its
+    // targets are operator-curated only.
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { mode: true },
+    });
+    if (agent?.mode === 'waypoint') return;
     for (const t of targets) {
       if (t.kind !== 'ssh' && t.kind !== 'rdp' && t.kind !== 'vnc') continue;
       const host = t.host || '127.0.0.1';

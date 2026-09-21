@@ -15,16 +15,46 @@ export type FabricAgentStatus = 'pending' | 'online' | 'offline' | 'revoked';
 /** A local endpoint on the box that the agent is willing to proxy to. */
 export type FabricTargetKind = 'ssh' | 'rdp' | 'vnc';
 
+/**
+ * Agent mode. `endpoint` (default) proxies only to its own 127.0.0.1 services;
+ * `waypoint` is a network gateway/bastion that proxies to operator-curated LAN
+ * targets whose allow-list is pushed down from Cerebro. See docs/fabric-waypoints.md.
+ */
+export type FabricAgentMode = 'endpoint' | 'waypoint';
+
+/** Route protocols. A Waypoint additionally supports `web` (a Remote Browser). */
+export type FabricRouteKind = FabricTargetKind | 'web';
+
 export interface FabricTargetDto {
   id: string;
-  kind: FabricTargetKind;
-  host: string; // almost always 127.0.0.1
+  kind: FabricRouteKind;
+  host: string; // 127.0.0.1 for endpoints; a LAN host for Waypoint routes
   port: number; // 22 | 3389 | custom
   label?: string | null;
   /** True when a vault credential is attached (server-injected at session time). */
   hasCredential: boolean;
   /** True when an SSH host key has been pinned for this target (TOFU). */
   hostKeyPinned: boolean;
+  /** "discovered" (endpoint self-report) | "curated" (a Waypoint route). */
+  source: 'discovered' | 'curated';
+  /** Free-form grouping within a Waypoint (e.g. "Client A DMZ"). */
+  group?: string | null;
+  /** Remote Browser (`kind: 'web'`) only: the internal URL opened in the remote browser. */
+  webUrl?: string | null;
+}
+
+/** Create/update a Waypoint route (curated LAN target). */
+export interface FabricRouteInput {
+  kind: FabricRouteKind;
+  /** For ssh/rdp/vnc: the LAN host. For `web`: derived from `webUrl` (ignored). */
+  host?: string;
+  port?: number;
+  label?: string | null;
+  group?: string | null;
+  /** Attach a vault credential (ssh/rdp/vnc kind) for server-side injection. */
+  secretRef?: string | null;
+  /** Remote Browser only: the internal URL the remote browser opens. */
+  webUrl?: string | null;
 }
 
 export interface FabricAgentDto {
@@ -40,6 +70,12 @@ export interface FabricAgentDto {
   notes?: string | null;
   tags: string[];
   status: FabricAgentStatus;
+  /** "endpoint" (default) or "waypoint" (a LAN gateway). */
+  mode: FabricAgentMode;
+  /** Waypoint only: CIDR ranges permitted for ad-hoc connections (Phase 2). */
+  egressCidrs: string[];
+  /** Four-eyes: sessions through this agent need approval before they open. */
+  requireApproval: boolean;
   lastSeenAt?: string | null; // ISO
   createdAt: string; // ISO
   /** True when this host has installed + validated the SSH CA trust. */
@@ -52,6 +88,52 @@ export interface FabricUpdateAgentInput {
   name?: string;
   tags?: string[];
   notes?: string | null;
+  /** Waypoint only: ad-hoc egress CIDR ranges. */
+  egressCidrs?: string[];
+  /** Four-eyes gate: require approval for every session through this agent. */
+  requireApproval?: boolean;
+}
+
+/**
+ * A session request that is held for four-eyes approval instead of opening
+ * immediately. The client polls `GET /api/fabric/approvals/:id` until it resolves.
+ */
+export interface FabricApprovalPending {
+  pending: true;
+  approvalId: string;
+}
+
+/** True for a held (pending-approval) response vs an immediate session ticket. */
+export function isApprovalPending(
+  r: FabricSessionTicket | FabricVncSessionTicket | FabricApprovalPending,
+): r is FabricApprovalPending {
+  return (r as FabricApprovalPending).pending === true;
+}
+
+export type FabricApprovalState = 'pending' | 'approved' | 'denied' | 'expired' | 'error';
+
+/** A pending approval as shown to an approver (no credentials are ever exposed). */
+export interface FabricApprovalDto {
+  id: string;
+  agentId: string;
+  agentName: string;
+  agentMode: FabricAgentMode;
+  kind: FabricRouteKind;
+  target: string; // host:port or URL, for display
+  requesterEmail?: string | null;
+  createdAt: string; // ISO
+  expiresAt: string; // ISO
+  state: FabricApprovalState;
+}
+
+/** The requester's poll result for their own held request. */
+export interface FabricApprovalStatus {
+  state: FabricApprovalState;
+  /** Present once approved and the session minted. */
+  ticket?: FabricVncSessionTicket;
+  /** Set when state is 'denied'/'expired'/'error'. */
+  error?: string;
+  decidedByEmail?: string | null;
 }
 
 export interface FabricSessionDto {
@@ -106,6 +188,9 @@ export interface FabricHelloFrame {
   hostname?: string;
   /** Primary local IPv4 of the box, for display. */
   localIp?: string;
+  /** How the agent was installed. Absent ⇒ "endpoint" (older agents). A waypoint
+   * self-reports no targets; its allow-list is pushed via hello-ack / set-allow. */
+  mode?: FabricAgentMode;
   targets: Array<{ kind: FabricTargetKind; host: string; port: number; label?: string }>;
 }
 
@@ -133,6 +218,30 @@ export interface FabricHelloAckFrame {
   heartbeatMs: number;
   /** Latest agent version the broker serves; an older agent self-updates. */
   latestAgentVersion?: string;
+  /** Waypoint only: the curated allow-list of LAN targets this gateway may dial.
+   * Sent on connect so a waypoint (which self-discovers nothing) knows its reach.
+   * Endpoints ignore this — their allow-list is self-built. */
+  allow?: FabricAllowEntry[];
+  /** Waypoint only: CIDR ranges permitted for ad-hoc connections (Phase 2). */
+  egressCidrs?: string[];
+}
+
+/** A single host:port a Waypoint is permitted to dial. */
+export interface FabricAllowEntry {
+  host: string;
+  port: number;
+}
+
+/**
+ * broker → agent (Waypoint only): replace the curated allow-list live, without a
+ * reconnect. Sent whenever an operator adds/edits/removes a route so the
+ * reachable set updates immediately. The agent stays default-deny for anything
+ * off this list (plus egressCidrs, Phase 2).
+ */
+export interface FabricSetAllowFrame {
+  t: 'set-allow';
+  allow: FabricAllowEntry[];
+  egressCidrs?: string[];
 }
 
 /** broker → agent: keep-alive / liveness probe. */
@@ -243,7 +352,8 @@ export type FabricBrokerToAgent =
   | FabricCloseStreamFrame
   | FabricUninstallFrame
   | FabricInstallCaFrame
-  | FabricHostCertFrame;
+  | FabricHostCertFrame
+  | FabricSetAllowFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */
@@ -252,7 +362,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.3.5';
+export const FABRIC_AGENT_VERSION = '0.5.0';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

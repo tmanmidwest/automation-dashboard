@@ -655,6 +655,16 @@ model Agent {
   tags         String[]
   /// pending | online | offline | revoked
   status       String   @default("pending")
+  /// "endpoint" (default — proxies only to its own 127.0.0.1 services) or
+  /// "waypoint" (a network gateway: proxies to operator-curated LAN targets whose
+  /// allow-list is pushed down from Cerebro). See docs/fabric-waypoints.md.
+  mode         String   @default("endpoint")
+  /// Waypoint only: CIDR ranges the operator permits ad-hoc connections into (Phase 2).
+  /// Empty = curated Routes only. Enforced server-side AND on the agent.
+  egressCidrs  String[] @default([])
+  /// Four-eyes: when true, every session through this agent must be approved by a
+  /// user with fabric:approve before it opens. See docs/fabric-waypoints.md.
+  requireApproval Boolean @default(false)
 
   /// One-time enrollment: sha256 of the enrollment token, cleared once exchanged.
   enrollHash    String?   @unique
@@ -682,7 +692,7 @@ model AgentTarget {
   id        String  @id @default(cuid())
   agent     Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
   agentId   String
-  kind      String // "ssh" | "rdp"
+  kind      String // "ssh" | "rdp" | "vnc" | "web"
   host      String  @default("127.0.0.1")
   port      Int
   label     String?
@@ -690,6 +700,13 @@ model AgentTarget {
   secretRef String?
   /// Pinned SSH host-key fingerprint (sha256, base64) — TOFU. Null until first seen.
   hostKey   String?
+  /// "discovered" (endpoint self-report) | "curated" (operator-defined on a
+  /// Waypoint). Curated rows are never overwritten by an agent's self-report.
+  source    String  @default("discovered")
+  /// Free-form grouping within a Waypoint (e.g. "Client A DMZ").
+  group     String?
+  /// Remote Browser only (Phase 3): full start URL; host/port are parsed from it.
+  webUrl    String?
 
   @@unique([agentId, kind, host, port])
   @@index([agentId])
@@ -701,13 +718,18 @@ model FabricSession {
   id         String    @id @default(cuid())
   agent      Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
   agentId    String
-  targetKind String // "ssh" | "rdp"
+  targetKind String // "ssh" | "rdp" | "vnc" | "web"
   userId     String
   startedAt  DateTime  @default(now())
   endedAt    DateTime?
   bytesUp    BigInt    @default(0)
   bytesDown  BigInt    @default(0)
   recordPath String?
+  /// Resolved target behind the agent (a Waypoint brokers many hosts, so audit
+  /// records where the session actually went — not just which agent brokered it).
+  targetHost  String?
+  targetPort  Int?
+  targetLabel String?
 
   @@index([agentId, startedAt])
 }

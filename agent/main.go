@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -31,7 +32,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.3.5"
+const agentVersion = "0.5.0"
+
+// modeFlag is parsed from the command line in main() (systemd ExecStart, launchd
+// ProgramArguments, or the Windows service binPath pass `--mode waypoint`). It
+// decides whether this process is an endpoint agent or a network Waypoint.
+var modeFlag string
 
 // Keep in step with FABRIC_HEARTBEAT_MS in packages/shared/src/fabric.ts.
 const heartbeatInterval = 15 * time.Second
@@ -44,10 +50,60 @@ type config struct {
 	URL      string
 	Enroll   string
 	StateDir string
+	// Mode is "endpoint" (proxy only to 127.0.0.1) or "waypoint" (a network
+	// gateway whose allow-list is pushed down from Cerebro). See docs/fabric-waypoints.md.
+	Mode string
 }
+
+func (c config) isWaypoint() bool { return c.Mode == "waypoint" }
+
+// resolvedMode returns this process's mode from the --mode flag, then CEREBRO_MODE,
+// defaulting to "endpoint". Used by the OS-specific service/self-uninstall code,
+// which runs without a config in hand.
+func resolvedMode() string {
+	m := modeFlag
+	if m == "" {
+		m = os.Getenv("CEREBRO_MODE")
+	}
+	if m != "waypoint" {
+		m = "endpoint"
+	}
+	return m
+}
+
+// Per-mode service identity, so an endpoint agent and a Waypoint can coexist on
+// one box. Keep in sync with the installer names in agent-installers.ts.
+func unixServiceName() string {
+	if resolvedMode() == "waypoint" {
+		return "cerebro-waypoint"
+	}
+	return "cerebro-agent"
+}
+
+func winServiceName() string {
+	if resolvedMode() == "waypoint" {
+		return "CerebroWaypoint"
+	}
+	return "CerebroAgent"
+}
+
+func launchdLabel() string {
+	if resolvedMode() == "waypoint" {
+		return "com.cerebro.waypoint"
+	}
+	return "com.cerebro.agent"
+}
+
+func modeConfigDir() string { return defaultConfigDir(resolvedMode()) }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
+	// Parse --mode before the (OS-specific) service dispatch so both foreground
+	// and service starts see it. Unknown flags are ignored for forward-compat.
+	flag.StringVar(&modeFlag, "mode", "", "agent mode: endpoint|waypoint")
+	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	_ = flag.CommandLine.Parse(os.Args[1:])
 	// runAgent is OS-specific: on Windows it runs under the Service Control
 	// Manager when launched as a service; elsewhere it runs in the foreground.
 	// Both call agentMain with a stop channel.
@@ -115,8 +171,18 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 	defer conn.Close()
 	log.Printf("connected to %s", wsURL)
 
-	targets := detectTargets()
-	sess := newSession(conn, allowSet(targets), cfg)
+	// A Waypoint self-discovers nothing: its allow-list is curated in Cerebro and
+	// pushed down in hello-ack / set-allow. An endpoint agent probes its own
+	// loopback services as before.
+	var targets []target
+	var allow map[string]bool
+	if cfg.isWaypoint() {
+		allow = map[string]bool{} // filled by the broker's hello-ack
+	} else {
+		targets = detectTargets()
+		allow = allowSet(targets)
+	}
+	sess := newSession(conn, allow, cfg)
 	defer sess.closeAll()
 
 	writerDone := make(chan struct{})
@@ -129,6 +195,7 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 		"osVersion":    osVersion(),
 		"hostname":     hostname(),
 		"localIp":      localIP(),
+		"mode":         cfg.Mode,
 		"targets":      targets,
 	})
 
@@ -171,6 +238,10 @@ func run(cfg config, cred string, stop <-chan struct{}) error {
 			log.Printf("heartbeat cadence set to %s by broker", d)
 			ticker.Reset(d)
 		case <-probe.C:
+			// Waypoints don't self-discover — their reach is broker-curated.
+			if cfg.isWaypoint() {
+				continue
+			}
 			// Re-announce only when the reachable set actually changed. The allow-list
 			// already covers loopback 22/3389/5900 (the ports detectTargets probes), so
 			// no allow-list update is needed for the broker to dial a new target.
@@ -312,6 +383,7 @@ type outMsg struct {
 type session struct {
 	conn     *websocket.Conn
 	allow    map[string]bool
+	egress   []*net.IPNet // Waypoint ad-hoc: any host:port whose IP is in-range is allowed
 	cfg      config
 	out      chan outMsg
 	quit     chan struct{}
@@ -352,6 +424,50 @@ func (s *session) writeLoop(done chan struct{}) {
 
 func (s *session) stop() { s.quitOnce.Do(func() { close(s.quit) }) }
 
+// setAllow replaces the tunnel allow-list (Waypoint: pushed by the broker). Stays
+// default-deny: only the listed host:port pairs — plus any host inside an egress
+// CIDR range (ad-hoc connections) — may be dialed.
+func (s *session) setAllow(entries []allowEntry, cidrs []string) {
+	m := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Host == "" || e.Port <= 0 || e.Port > 65535 {
+			continue
+		}
+		m[fmt.Sprintf("%s:%d", e.Host, e.Port)] = true
+	}
+	var nets []*net.IPNet
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	s.mu.Lock()
+	s.allow = m
+	s.egress = nets
+	s.mu.Unlock()
+	log.Printf("allow-list updated by broker: %d target(s), %d egress range(s)", len(m), len(nets))
+}
+
+// allowed reports whether host:port may be dialed (guarded, since a Waypoint's
+// policy can be swapped live by set-allow): an explicit allow-list hit, or a
+// literal IP host that falls inside one of the egress CIDR ranges.
+func (s *session) allowed(host string, port int) bool {
+	key := fmt.Sprintf("%s:%d", host, port)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allow[key] {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		for _, n := range s.egress {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enqueue blocks the caller until the frame is buffered or the session stops —
 // providing per-stream backpressure rather than dropping bytes.
 func (s *session) enqueue(m outMsg) {
@@ -371,16 +487,23 @@ func (s *session) writeJSON(v any) {
 
 func (s *session) writeBinary(b []byte) { s.enqueue(outMsg{websocket.BinaryMessage, b}) }
 
+type allowEntry struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
 type ctrlFrame struct {
-	T                  string `json:"t"`
-	StreamID           uint32 `json:"streamId"`
-	Host               string `json:"host"`
-	Port               int    `json:"port"`
-	LatestAgentVersion string `json:"latestAgentVersion"`
-	HeartbeatMs        int64  `json:"heartbeatMs"`
-	CaPublicKey        string `json:"caPublicKey"`
-	Certificate        string `json:"certificate"`
-	KeyType            string `json:"keyType"`
+	T                  string       `json:"t"`
+	StreamID           uint32       `json:"streamId"`
+	Host               string       `json:"host"`
+	Port               int          `json:"port"`
+	LatestAgentVersion string       `json:"latestAgentVersion"`
+	HeartbeatMs        int64        `json:"heartbeatMs"`
+	CaPublicKey        string       `json:"caPublicKey"`
+	Certificate        string       `json:"certificate"`
+	KeyType            string       `json:"keyType"`
+	Allow              []allowEntry `json:"allow"`
+	EgressCidrs        []string     `json:"egressCidrs"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -400,10 +523,18 @@ func (s *session) onControl(msg []byte) {
 		go s.installCA(c.CaPublicKey)
 	case "host-cert":
 		go s.installHostCert(c.Certificate, c.KeyType)
+	case "set-allow":
+		// Waypoint only: the broker replaced the curated allow-list + egress ranges.
+		s.setAllow(c.Allow, c.EgressCidrs)
 	case "hello-ack":
 		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)
 			go trySelfUpdate(s.cfg)
+		}
+		// A Waypoint adopts the broker's pushed allow-list on connect. An endpoint
+		// agent keeps its self-built one (the broker sends no allow for endpoints).
+		if s.cfg.isWaypoint() {
+			s.setAllow(c.Allow, c.EgressCidrs)
 		}
 		// Adopt the broker's heartbeat cadence (operator-tunable, FABRIC_HEARTBEAT_MS).
 		if c.HeartbeatMs >= 1000 {
@@ -435,7 +566,7 @@ func (s *session) onData(msg []byte) {
 
 func (s *session) openStream(id uint32, host string, port int) {
 	key := fmt.Sprintf("%s:%d", host, port)
-	if !s.allow[key] {
+	if !s.allowed(host, port) {
 		s.writeJSON(map[string]any{"t": "stream-error", "streamId": id, "error": "target not allowed"})
 		return
 	}
@@ -605,7 +736,10 @@ func portOpen(port int) bool {
 }
 
 func loadConfig() config {
-	configDir := getenv("CEREBRO_CONFIG_DIR", defaultConfigDir())
+	// Mode selects the per-mode config/state directory so an endpoint agent and a
+	// Waypoint can coexist on one box without sharing credentials.
+	mode := resolvedMode()
+	configDir := getenv("CEREBRO_CONFIG_DIR", defaultConfigDir(mode))
 	fileVals := readEnvFile(filepath.Join(configDir, "config.env"))
 	get := func(k string) string {
 		if v := os.Getenv(k); v != "" {
@@ -624,18 +758,25 @@ func loadConfig() config {
 		URL:      strings.TrimRight(get("CEREBRO_URL"), "/"),
 		Enroll:   get("ENROLL"),
 		StateDir: stateDir,
+		Mode:     mode,
 	}
 }
 
-func defaultConfigDir() string {
+func defaultConfigDir(mode string) string {
+	base := "cerebro-agent"
+	winBase := "CerebroAgent"
+	if mode == "waypoint" {
+		base = "cerebro-waypoint"
+		winBase = "CerebroWaypoint"
+	}
 	if runtime.GOOS == "windows" {
 		pd := os.Getenv("ProgramData")
 		if pd == "" {
 			pd = `C:\ProgramData`
 		}
-		return filepath.Join(pd, "CerebroAgent")
+		return filepath.Join(pd, winBase)
 	}
-	return "/etc/cerebro-agent"
+	return "/etc/" + base
 }
 
 func readEnvFile(path string) map[string]string {

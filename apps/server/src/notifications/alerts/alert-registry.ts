@@ -461,6 +461,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: false,
   },
+  {
+    key: 'fabric.approval_requested',
+    label: 'Fabric session approval requested',
+    description: 'An operator requested a session through an agent that requires approval (four-eyes).',
+    category: 'Fabric',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

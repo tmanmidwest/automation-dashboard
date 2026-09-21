@@ -93,7 +93,16 @@ async function bridgeAccess(
   }
 
   const row = await deps.prisma.fabricSession
-    .create({ data: { agentId: target.agentId, targetKind: target.kind, userId: user.id }, select: { id: true } })
+    .create({
+      data: {
+        agentId: target.agentId,
+        targetKind: target.kind,
+        userId: user.id,
+        targetHost: target.host,
+        targetPort: target.port,
+      },
+      select: { id: true },
+    })
     .catch(() => null);
   await deps.audit.record({
     actorId: user.id,

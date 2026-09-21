@@ -13,11 +13,13 @@ import (
 // runs the service as root for exactly this reason).
 func selfUninstall() {
 	exe, _ := os.Executable()
+	svc := unixServiceName() // "cerebro-agent" or "cerebro-waypoint"
+	cfgDir := modeConfigDir()
 	script := "sleep 1; " +
-		"systemctl disable --now cerebro-agent 2>/dev/null; " +
-		"rm -f /etc/systemd/system/cerebro-agent.service '" + exe + "'; " +
-		"rm -rf /etc/cerebro-agent; " +
+		"systemctl disable --now " + svc + " 2>/dev/null; " +
+		"rm -f /etc/systemd/system/" + svc + ".service '" + exe + "'; " +
+		"rm -rf " + cfgDir + "; " +
 		"systemctl daemon-reload 2>/dev/null"
-	_ = exec.Command("systemd-run", "--collect", "--unit=cerebro-agent-uninstall", "/bin/sh", "-c", script).Start()
+	_ = exec.Command("systemd-run", "--collect", "--unit="+svc+"-uninstall", "/bin/sh", "-c", script).Start()
 	os.Exit(0)
 }

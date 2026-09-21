@@ -72,7 +72,16 @@ export class FabricGuacService {
     this.prune();
 
     const row = await this.prisma.fabricSession
-      .create({ data: { agentId: desc.agentId, targetKind: 'rdp', userId: desc.userId }, select: { id: true } })
+      .create({
+        data: {
+          agentId: desc.agentId,
+          targetKind: 'rdp',
+          userId: desc.userId,
+          targetHost: desc.host,
+          targetPort: desc.port,
+        },
+        select: { id: true },
+      })
       .catch(() => null);
 
     // Record the session (guacd writes it to the shared volume) unless disabled.

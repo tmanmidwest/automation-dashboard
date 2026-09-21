@@ -95,8 +95,6 @@ func reloadSshd() {
 	_ = exec.Command("powershell", "-NoProfile", "-Command", "Restart-Service", "sshd").Run()
 }
 
-const serviceName = "CerebroAgent"
-
 type serviceHandler struct{}
 
 // Execute is the Windows Service Control Manager entry point. It runs agentMain
@@ -135,7 +133,7 @@ func (serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- s
 func runAgent() {
 	isService, err := svc.IsWindowsService()
 	if err == nil && isService {
-		if err := svc.Run(serviceName, serviceHandler{}); err != nil {
+		if err := svc.Run(winServiceName(), serviceHandler{}); err != nil {
 			log.Printf("service run failed: %v", err)
 		}
 		return
@@ -149,9 +147,10 @@ func runAgent() {
 func selfUninstall() {
 	exe, _ := os.Executable()
 	dir := filepath.Dir(exe)
+	svcName := winServiceName()
 	ps := "Start-Sleep -Seconds 2; " +
-		"sc.exe stop " + serviceName + "; " +
-		"sc.exe delete " + serviceName + "; " +
+		"sc.exe stop " + svcName + "; " +
+		"sc.exe delete " + svcName + "; " +
 		"Remove-Item -Recurse -Force '" + dir + "'"
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
 	// DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so it survives our exit.
