@@ -406,6 +406,23 @@ export class FabricController {
     return { ok: true };
   }
 
+  /** Re-push the uninstall to a pending-removal agent that's online now. */
+  @Post('agents/:id/uninstall/retry')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  retryUninstall(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.fabric.retryUninstall(id, user);
+  }
+
+  /** Force-remove a tombstoned agent's row without waiting for an uninstall ack. */
+  @Delete('agents/:id/force')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async forceRemoveAgent(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    await this.fabric.forceRemoveAgent(id, user);
+    return { ok: true };
+  }
+
   // --- Four-eyes session approvals -------------------------------------------
 
   /** Pending session requests awaiting approval (for approvers). */

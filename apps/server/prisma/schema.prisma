@@ -653,8 +653,15 @@ model Agent {
   notes        String?
   /// Free-form tags for grouping / per-tag grants later.
   tags         String[]
-  /// pending | online | offline | revoked
+  /// pending | online | offline | revoked | deleting
+  /// "deleting" is a tombstone: the operator asked to remove the agent but it must
+  /// still self-uninstall (and ack) before the row is purged. See fabric-waypoints.md.
   status       String   @default("pending")
+  /// Set when a delete is requested; the row lingers as a tombstone until the box
+  /// uninstalls + acks (or an operator force-removes it).
+  pendingUninstallAt DateTime?
+  /// Email of the user who requested removal (for the audit trail + UI).
+  pendingUninstallBy String?
   /// "endpoint" (default — proxies only to its own 127.0.0.1 services) or
   /// "waypoint" (a network gateway: proxies to operator-curated LAN targets whose
   /// allow-list is pushed down from Cerebro). See docs/fabric-waypoints.md.

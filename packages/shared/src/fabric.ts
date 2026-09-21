@@ -10,7 +10,7 @@
  */
 
 /** Lifecycle of an agent as tracked on the Agent row. */
-export type FabricAgentStatus = 'pending' | 'online' | 'offline' | 'revoked';
+export type FabricAgentStatus = 'pending' | 'online' | 'offline' | 'revoked' | 'deleting';
 
 /** A local endpoint on the box that the agent is willing to proxy to. */
 export type FabricTargetKind = 'ssh' | 'rdp' | 'vnc';
@@ -80,6 +80,11 @@ export interface FabricAgentDto {
   createdAt: string; // ISO
   /** True when this host has installed + validated the SSH CA trust. */
   caTrusted: boolean;
+  /** Set (ISO) when removal was requested; the row is a tombstone awaiting the
+   *  box's self-uninstall + ack. Drives the "Removal pending" UI. */
+  pendingUninstallAt?: string | null;
+  /** Email of the user who requested removal. */
+  pendingUninstallBy?: string | null;
   targets: FabricTargetDto[];
 }
 
@@ -274,6 +279,16 @@ export interface FabricCaResultFrame {
 }
 
 /**
+ * agent → broker: the agent received an `uninstall` command and is removing
+ * itself now. On this ack the broker purges the (tombstoned) agent row — the
+ * positive confirmation that the box acted on the delete. Sent just before the
+ * agent stops its own service and exits.
+ */
+export interface FabricUninstallAckFrame {
+  t: 'uninstall-ack';
+}
+
+/**
  * agent → broker: the box's SSH host public key, offered for signing into a host
  * certificate so clients can verify the host via the CA (no TOFU prompts). Sent
  * as part of the `install-ca` flow.
@@ -341,6 +356,7 @@ export type FabricAgentToBroker =
   | FabricHeartbeatFrame
   | FabricTargetsFrame
   | FabricCaResultFrame
+  | FabricUninstallAckFrame
   | FabricHostKeyFrame
   | FabricStreamOpenedFrame
   | FabricStreamErrorFrame
@@ -362,7 +378,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.5.0';
+export const FABRIC_AGENT_VERSION = '0.5.1';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

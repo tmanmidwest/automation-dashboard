@@ -393,3 +393,47 @@ browser tab, opened on click to dodge popup blockers, is navigated when ready). 
 
 **Still open (optional):** SSH/VNC session recording for Waypoint sessions, Remote Browser
 clipboard/file/URL policy, a warm browser pool.
+
+## 12. Reliable delete + uninstall lifecycle (as built)
+
+Applies to **both** modes (endpoint agents and Waypoints). Previously a delete hard-dropped the
+`Agent` row immediately: if the box was offline it never got the uninstall and came back as a
+reconnecting **zombie** (its check-in found no row and was closed as `revoked` — never told to
+uninstall), and the online uninstall was fire-and-forget (no confirmation). Now delete is a
+**tombstone + positive-confirmation** lifecycle.
+
+**State machine.** `active → (delete) → deleting → (uninstall-ack) → row purged`. A `deleting` row is a
+tombstone: the box still owes us an uninstall. Every check-in re-pushes the uninstall until it sticks.
+
+**Server.**
+- `FabricService.deleteAgent` no longer deletes — it removes the target vault creds up front, then sets
+  `status='deleting'`, `pendingUninstallAt`, `pendingUninstallBy`, and (if online) `requestUninstall`.
+  Audit `fabric.agent.delete_requested`.
+- `AgentRegistryService.onHello`: a `deleting` agent is **never** brought online — it re-pushes
+  `uninstall` and returns (audit `fabric.agent.uninstall_pushed`).
+- New agent→broker frame **`uninstall-ack`**: on receipt, `purgeUninstalledAgent` hard-deletes the row
+  (guarded to `status==='deleting'` so a stray ack can't delete a live agent) and audits
+  `fabric.agent.uninstalled`. This is the positive "it's gone" signal that closes the loop.
+- `statusOf` returns `'deleting'` even while a live socket is briefly up; `finalizeOffline` skips
+  tombstoned agents (no "offline" flip, no offline alert); `resolveStoredTarget`/`resolveAdhocTarget`
+  refuse new sessions to a `deleting` agent.
+- `FabricService.retryUninstall` (re-push to an online box) and `forceRemoveAgent` (purge the row
+  without an ack — the decommissioned-box escape hatch, guarded to `deleting`). Endpoints:
+  `POST /api/fabric/agents/:id/uninstall/retry`, `DELETE /api/fabric/agents/:id/force` (both
+  `fabric:manage`); audits `fabric.agent.uninstall_retried` / `fabric.agent.force_removed`.
+
+**Agent (Go, v0.5.1).** On the `uninstall` control frame the agent now sends `{t:"uninstall-ack"}` and
+sleeps 300 ms to flush before `selfUninstall()` calls `os.Exit`. Self-uninstall was already mode-aware
+(`resolvedMode()` → `cerebro-waypoint`/`com.cerebro.waypoint`/`CerebroWaypoint`).
+
+**UI.** Tombstoned agents/Waypoints render in their own amber **"Removal pending"** section
+(`renderPendingCard`), separate from the OS groups and the Waypoints section. Each card shows who
+requested removal, a **Retry now** action (re-push if it's online), a **Force remove** action (confirm
+→ purge), and a copyable **mode-aware manual uninstall command** (`uninstallCmd(os, mode)` — a Waypoint
+gets `CEREBRO_MODE=waypoint … sudo -E sh`) for a box that will never check in again.
+
+**Migration:** `0028_fabric_pending_uninstall` (adds `Agent.pendingUninstallAt`, `pendingUninstallBy`).
+
+**Deploy note.** Full confirmation requires the **v0.5.1** agent binary on the boxes; older agents still
+uninstall but don't ack, so their tombstone lingers until it's force-removed (or you can rely on the
+manual command). Needs the migration + the new server + the rebuilt agent.

@@ -97,6 +97,9 @@ export class AgentRegistryService {
   statusOf(agentId: string, stored: string): FabricAgentStatus {
     // A live connection — or one within the brief reconnect grace — reads online,
     // so a proxy recycling the WebSocket doesn't flicker the card to offline.
+    // A pending-removal tombstone always reads "deleting", even while a live socket
+    // is briefly up (we're uninstalling it, not bringing it online).
+    if (stored === 'deleting') return 'deleting';
     if (this.isOnline(agentId) || this.pendingOffline.has(agentId)) return 'online';
     if (stored === 'pending' || stored === 'revoked') return stored;
     return 'offline';
@@ -196,6 +199,9 @@ export class AgentRegistryService {
       case 'host-key':
         await this.signHostCertFor(agentId, frame.publicKey, frame.keyType);
         break;
+      case 'uninstall-ack':
+        await this.purgeUninstalledAgent(agentId);
+        break;
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':
@@ -215,6 +221,19 @@ export class AgentRegistryService {
     const before = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!before || before.status === 'revoked') {
       entry.ws.close(4003, 'revoked');
+      return;
+    }
+
+    // Tombstoned: the operator asked to remove this box while it was offline. Don't
+    // bring it online — re-push the uninstall and wait for the ack (which purges the
+    // row). Every check-in re-pushes until it sticks.
+    if (before.status === 'deleting') {
+      this.requestUninstall(agentId);
+      await this.audit.record({
+        action: 'fabric.agent.uninstall_pushed',
+        target: agentId,
+        meta: { name: before.name, hostname: frame.hostname, agentVersion: frame.agentVersion },
+      });
       return;
     }
 
@@ -377,6 +396,25 @@ export class AgentRegistryService {
     return true;
   }
 
+  /**
+   * An agent confirmed it received the uninstall and is removing itself — purge the
+   * tombstoned row now. Only a `deleting` row is purged, so a stray/replayed ack can
+   * never delete a live agent. This is the positive confirmation that closes the
+   * delete lifecycle (see docs/fabric-waypoints.md).
+   */
+  private async purgeUninstalledAgent(agentId: string): Promise<void> {
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } }).catch(() => null);
+    if (!agent || agent.status !== 'deleting') return;
+    await this.prisma.agent.delete({ where: { id: agentId } }).catch(() => undefined);
+    await this.audit.record({
+      action: 'fabric.agent.uninstalled',
+      target: agentId,
+      meta: { name: agent.name, mode: agent.mode },
+    });
+    this.logger.log(`Agent ${agentId} (${agent.name}) confirmed uninstall — row purged.`);
+    this.disconnect(agentId, 4003, 'uninstalled');
+  }
+
   /** Push an SSH CA public key to an online agent to install into sshd trust.
    *  Returns whether the agent was online to receive it. */
   requestInstallCa(agentId: string, caPublicKey: string): boolean {
@@ -485,7 +523,9 @@ export class AgentRegistryService {
     if (this.live.has(agentId)) return; // reconnected in the meantime
     this.logger.log(`Agent ${agentId} offline (${reason}).`);
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } }).catch(() => null);
-    if (!agent || agent.status === 'revoked' || agent.status === 'offline') return;
+    // A tombstoned (deleting) agent is expected to go quiet as it uninstalls —
+    // never flip it to "offline" or fire an offline alert for it.
+    if (!agent || agent.status === 'revoked' || agent.status === 'offline' || agent.status === 'deleting') return;
     await this.prisma.agent
       .update({ where: { id: agentId }, data: { status: 'offline' } })
       .catch(() => undefined);

@@ -33,6 +33,7 @@ const STATUS: Record<FabricAgentStatus, { label: string; cls: string }> = {
   offline: { label: 'Offline', cls: 'text-muted-foreground' },
   pending: { label: 'Awaiting enrollment', cls: 'text-amber-400' },
   revoked: { label: 'Revoked', cls: 'text-destructive' },
+  deleting: { label: 'Removal pending', cls: 'text-amber-400' },
 };
 
 // OS grouping: friendly labels + a colored pill, and a stable section order.
@@ -59,11 +60,19 @@ function osLabel(os?: string | null, osVersion?: string | null): string {
   return osVersion ? `${base} · ${osVersion}` : base;
 }
 
-/** Version-agnostic uninstall one-liner for a machine's OS. */
-function uninstallCmd(os?: string | null): string {
+/** Version-agnostic uninstall one-liner for a machine's OS + mode. A Waypoint must
+ *  pass CEREBRO_MODE=waypoint so the uninstaller targets the waypoint service, not
+ *  the endpoint agent (they can coexist on one box). */
+function uninstallCmd(os?: string | null, mode?: string | null): string {
   const origin = location.origin;
-  return os === 'windows'
-    ? `iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`
+  const wp = mode === 'waypoint';
+  if (os === 'windows') {
+    return wp
+      ? `$env:CEREBRO_MODE='waypoint'; iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`
+      : `iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`;
+  }
+  return wp
+    ? `CEREBRO_MODE=waypoint curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo -E sh`
     : `curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo sh`;
 }
 
@@ -197,7 +206,7 @@ export function Fabric() {
   const [webBusy, setWebBusy] = useState<Record<string, boolean>>({});
   const [showApprovals, setShowApprovals] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
-  const [deletedHint, setDeletedHint] = useState<{ name: string; os?: string | null } | null>(null);
+  const [pendingMsg, setPendingMsg] = useState<string | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [routesFor, setRoutesFor] = useState<FabricAgentDto | null>(null);
@@ -361,37 +370,81 @@ export function Fabric() {
   };
 
   const remove = async (a: FabricAgentDto) => {
-    if (!confirm(`Delete "${a.name}" and its history? This cannot be undone.`)) return;
+    if (
+      !confirm(
+        `Remove "${a.name}"? It will self-uninstall — now if it's online, otherwise the next time it checks in — and stays listed under "Removal pending" until the box confirms it's gone.`,
+      )
+    )
+      return;
     try {
       await api.delete(`/api/fabric/agents/${a.id}`);
-      // An online v0.3.0+ agent self-uninstalls; anything else needs manual cleanup.
-      setDeletedHint({ name: a.name, os: a.os });
       await load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Delete failed.');
     }
   };
 
-  // Filter (search + status) then group by OS in a stable order, online first.
-  const groups = useMemo(() => {
+  // Re-push the uninstall to a pending-removal box that may be online now.
+  const retryUninstall = async (a: FabricAgentDto) => {
+    try {
+      const r = await api.post<{ online: boolean }>(`/api/fabric/agents/${a.id}/uninstall/retry`);
+      setErr(null);
+      setPendingMsg(
+        r.online
+          ? `Uninstall re-sent to "${a.name}" — it should drop off the list shortly.`
+          : `"${a.name}" isn't connected right now. It'll uninstall automatically the next time it checks in.`,
+      );
+      setTimeout(load, 2000);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Retry failed.');
+    }
+  };
+
+  // Purge the tombstone without waiting for an ack (decommissioned / gone box).
+  const forceRemove = async (a: FabricAgentDto) => {
+    if (
+      !confirm(
+        `Force-remove "${a.name}" from Cerebro without waiting for it to confirm? Only do this if the box is decommissioned or will never check in again — you're responsible for any manual cleanup on it. This cannot be undone.`,
+      )
+    )
+      return;
+    try {
+      await api.delete(`/api/fabric/agents/${a.id}/force`);
+      setPendingMsg(null);
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Force-remove failed.');
+    }
+  };
+
+  // Filter (search + status), then split Waypoints into their own category and
+  // group the remaining endpoints by OS — each in a stable order, online first.
+  const { groups, waypoints, pending } = useMemo(() => {
     const q = search.trim().toLowerCase();
     const by: Record<OsKey, FabricAgentDto[]> = { windows: [], linux: [], darwin: [], other: [] };
+    const wp: FabricAgentDto[] = [];
+    const pend: FabricAgentDto[] = [];
     for (const a of agents ?? []) {
       if (statusFilter === 'online' && a.status !== 'online') continue;
       if (statusFilter === 'offline' && a.status === 'online') continue;
       if (q) {
-        const hay = [a.name, a.hostname, a.localIp, a.os, a.osVersion, a.notes, ...a.tags]
+        const hay = [a.name, a.hostname, a.localIp, a.os, a.osVersion, a.notes, ...a.tags,
+          ...a.targets.map((t) => `${t.label ?? ''} ${t.host} ${t.group ?? ''} ${t.webUrl ?? ''}`)]
           .filter(Boolean).join(' ').toLowerCase();
         if (!hay.includes(q)) continue;
       }
-      by[osKey(a.os)].push(a);
+      if (a.status === 'deleting') pend.push(a);
+      else if (a.mode === 'waypoint') wp.push(a);
+      else by[osKey(a.os)].push(a);
     }
-    for (const k of OS_ORDER) {
-      by[k].sort((x, y) => (x.status === 'online' ? 0 : 1) - (y.status === 'online' ? 0 : 1) || x.name.localeCompare(y.name));
-    }
-    return by;
+    const onlineFirst = (x: FabricAgentDto, y: FabricAgentDto) =>
+      (x.status === 'online' ? 0 : 1) - (y.status === 'online' ? 0 : 1) || x.name.localeCompare(y.name);
+    for (const k of OS_ORDER) by[k].sort(onlineFirst);
+    wp.sort(onlineFirst);
+    pend.sort((x, y) => x.name.localeCompare(y.name));
+    return { groups: by, waypoints: wp, pending: pend };
   }, [agents, search, statusFilter]);
-  const totalShown = OS_ORDER.reduce((n, k) => n + groups[k].length, 0);
+  const totalShown = OS_ORDER.reduce((n, k) => n + groups[k].length, 0) + waypoints.length + pending.length;
 
   // Target connect chips (+ Files) — shared by the card and the list row.
   const renderConnectChips = (a: FabricAgentDto) => {
@@ -619,6 +672,219 @@ export function Fabric() {
     );
   };
 
+  // A single Waypoint route as a full descriptive row: kind icon + label +
+  // host:port + group + credential/host-key marks, with Test / Files / Connect.
+  const routeIcon = (kind: string) =>
+    kind === 'web' ? <Globe className="h-4 w-4" />
+      : kind === 'rdp' ? <MonitorSmartphone className="h-4 w-4" />
+      : kind === 'vnc' ? <Monitor className="h-4 w-4" />
+      : <Terminal className="h-4 w-4" />;
+
+  const renderRouteRow = (a: FabricAgentDto, t: FabricTargetDto) => {
+    const online = a.status === 'online';
+    const clickable = online && canConnect;
+    const isWeb = t.kind === 'web';
+    const pr = probe[t.id];
+    const wb = webBusy[t.id];
+    const primary = t.label || (isWeb ? 'Remote Browser' : t.host);
+    const dest = isWeb ? (t.webUrl || '—') : `${t.host}:${t.port}`;
+    const r = pr?.result;
+    return (
+      <div key={t.id} className="flex items-center gap-2.5 px-2.5 py-2">
+        <span className="text-primary/80 shrink-0">{routeIcon(t.kind)}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-sm font-medium truncate">{primary}</span>
+            <span className="rounded border border-border/60 bg-muted/40 px-1 py-px text-[0.6rem] uppercase tracking-wide text-muted-foreground">{t.kind}</span>
+            {t.group && <span className="rounded bg-secondary/20 px-1.5 py-px text-[0.6rem] text-secondary-foreground/80">{t.group}</span>}
+            {t.hasCredential && <KeyRound className="h-3 w-3 text-emerald-400/80" aria-hidden />}
+            {t.hostKeyPinned && <ShieldCheck className="h-3 w-3 text-emerald-400/80" aria-hidden />}
+          </div>
+          <div className="text-xs text-muted-foreground font-mono truncate">{dest}</div>
+          {r && (
+            <p className={`text-[0.7rem] ${r.ok ? 'text-emerald-400' : 'text-destructive'}`}>
+              {r.ok ? `reachable${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.banner ? ` · ${r.banner}` : ''}` : r.error || 'unreachable'}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {!isWeb && (
+            <Button
+              variant="ghost" size="sm" className="h-7 px-2 text-xs"
+              disabled={!clickable || pr?.loading}
+              title={clickable ? 'Test tunnel reachability' : online ? undefined : 'Waypoint offline'}
+              onClick={clickable ? () => runProbe(a.id, t) : undefined}
+            >
+              {pr?.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Test'}
+            </Button>
+          )}
+          {!isWeb && t.kind === 'ssh' && canConnect && (
+            <Button
+              variant="ghost" size="icon" className="h-7 w-7"
+              disabled={!online}
+              title={online ? 'Browse & transfer files over SFTP' : 'Waypoint offline'}
+              onClick={online ? () => setFilesFor({ agent: a, target: t }) : undefined}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {canConnect && (
+            <Button
+              size="sm" className="h-7 px-2.5 text-xs"
+              disabled={!clickable || (isWeb && wb)}
+              title={online ? (isWeb ? `Open Remote Browser → ${t.webUrl || ''}` : `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}`) : 'Waypoint offline'}
+              onClick={clickable ? () => (isWeb ? openRemoteBrowser(a, t) : openConnect(a, t)) : undefined}
+            >
+              {isWeb && wb ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <TerminalSquare className="h-3 w-3 mr-1" />}
+              Connect
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // A Waypoint panel: same identity header as an agent card, but its routes are
+  // listed as full rows (with a Connect button each) instead of terse chips.
+  const renderWaypointCard = (a: FabricAgentDto) => {
+    const st = STATUS[a.status];
+    const online = a.status === 'online';
+    const adhoc = canConnect && a.egressCidrs.length > 0;
+    const routes = [...a.targets].sort((x, y) =>
+      (x.group ?? '').localeCompare(y.group ?? '') || x.kind.localeCompare(y.kind) || x.host.localeCompare(y.host) || x.port - y.port,
+    );
+    return (
+      <Card key={a.id} className="overflow-hidden">
+        <CardContent className="p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-primary" title="A Waypoint: proxies to curated LAN routes">
+                  <Waypoints className="h-3 w-3" /> Waypoint
+                </span>
+                <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.65rem] font-medium ${OS_META[osKey(a.os)].cls}`}>
+                  {OS_META[osKey(a.os)].label}
+                </span>
+                <span className="font-semibold text-sm truncate">{a.name}</span>
+              </div>
+              <div className={`flex items-center gap-1.5 text-xs mt-1 ${st.cls}`}>
+                <CircleDot className="h-3.5 w-3.5" /> {st.label}
+                {a.hostname && <span className="text-muted-foreground">· {a.hostname}</span>}
+                {a.localIp && <span className="text-muted-foreground font-mono">· {a.localIp}</span>}
+                {a.lastSeenAt && <span className="text-muted-foreground">· {online ? relTime(a.lastSeenAt) : `seen ${relTime(a.lastSeenAt)}`}</span>}
+              </div>
+            </div>
+            {renderAgentActions(a)}
+          </div>
+
+          <div className="mt-3">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground">Routes</span>
+              <span className="text-[0.7rem] text-muted-foreground">{routes.length}</span>
+              <div className="flex-1 h-px bg-border/60" />
+              {canManage && (
+                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setRoutesFor(a)}>
+                  <Pencil className="h-3 w-3 mr-1" /> Manage
+                </Button>
+              )}
+            </div>
+            {routes.length > 0 ? (
+              <div className="rounded-md border border-border/60 divide-y divide-border/60 bg-card/40">
+                {routes.map((t) => renderRouteRow(a, t))}
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={!canManage}
+                onClick={canManage ? () => setRoutesFor(a) : undefined}
+                className={`inline-flex items-center gap-1 rounded-full border border-dashed border-primary/40 px-2 py-1 text-[0.7rem] text-primary ${canManage ? 'hover:bg-primary/10' : 'opacity-50'}`}
+              >
+                <Plus className="h-3 w-3" /> Add routes
+              </button>
+            )}
+          </div>
+
+          {adhoc && (
+            <button
+              type="button"
+              disabled={!online}
+              onClick={online ? () => setAdhocFor(a) : undefined}
+              title={online ? 'Ad-hoc connect to any in-range host' : 'Waypoint offline'}
+              className={`mt-2 inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-1 text-[0.7rem] text-primary ${online ? 'hover:bg-primary/20 cursor-pointer' : 'opacity-40 cursor-default'}`}
+            >
+              <Waypoints className="h-3 w-3" /> Ad-hoc connect
+            </button>
+          )}
+
+          {a.notes && <p className="mt-2 text-xs text-muted-foreground italic border-l-2 border-border/60 pl-2">{a.notes}</p>}
+          {a.tags.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {a.tags.map((tag) => (
+                <span key={tag} className="inline-flex items-center gap-1 rounded bg-secondary/20 px-1.5 py-0.5 text-[0.65rem] text-secondary-foreground/80">
+                  <TagIcon className="h-2.5 w-2.5 opacity-70" />{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  };
+
+  // A tombstoned agent/Waypoint awaiting confirmed uninstall: identity + status,
+  // the manual uninstall command, and Retry / Force-remove escape hatches.
+  const renderPendingCard = (a: FabricAgentDto) => {
+    const cmd = uninstallCmd(a.os, a.mode);
+    return (
+      <Card key={a.id} className="overflow-hidden border-amber-500/30">
+        <CardContent className="p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-amber-300">
+                  <Trash2 className="h-3 w-3" /> Removal pending
+                </span>
+                {a.mode === 'waypoint' && (
+                  <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-primary">
+                    <Waypoints className="h-3 w-3" /> Waypoint
+                  </span>
+                )}
+                <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.65rem] font-medium ${OS_META[osKey(a.os)].cls}`}>
+                  {OS_META[osKey(a.os)].label}
+                </span>
+                <span className="font-semibold text-sm truncate">{a.name}</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Will self-uninstall when it next checks in, then drop off this list automatically.
+                {a.pendingUninstallBy && <> Requested by {a.pendingUninstallBy}.</>}
+              </p>
+            </div>
+            {canManage && (
+              <div className="flex items-center gap-1 shrink-0">
+                <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => retryUninstall(a)}>
+                  <RefreshCw className="h-3 w-3 mr-1" /> Retry now
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-destructive/90 hover:text-destructive" onClick={() => forceRemove(a)}>
+                  Force remove
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3">
+            <p className="text-[0.7rem] text-muted-foreground mb-1">
+              Won't check in again (decommissioned)? Uninstall it by hand on the box{a.mode === 'waypoint' ? ' (mode-aware — targets the Waypoint service)' : ''}:
+            </p>
+            <div className="flex items-start gap-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5">
+              <code className="flex-1 text-xs break-all font-mono">{cmd}</code>
+              <CopyBtn text={cmd} />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
+
   return (
     <div>
       <PageHeader
@@ -662,18 +928,11 @@ export function Fabric() {
         </div>
       )}
 
-      {deletedHint && (
+      {pendingMsg && (
         <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
           <div className="flex items-start justify-between gap-2">
-            <div className="text-amber-300/90 min-w-0">
-              Deleted <span className="font-medium">{deletedHint.name}</span>. If the agent is still installed on that
-              machine (offline or an older version), remove it there:
-              <div className="mt-1 flex items-start gap-2">
-                <code className="flex-1 text-xs break-all font-mono">{uninstallCmd(deletedHint.os)}</code>
-                <CopyBtn text={uninstallCmd(deletedHint.os)} />
-              </div>
-            </div>
-            <button onClick={() => setDeletedHint(null)} className="text-muted-foreground hover:text-foreground shrink-0">
+            <div className="text-amber-300/90 min-w-0">{pendingMsg}</div>
+            <button onClick={() => setPendingMsg(null)} className="text-muted-foreground hover:text-foreground shrink-0">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -728,7 +987,36 @@ export function Fabric() {
           {totalShown === 0 ? (
             <Card><CardContent className="py-10 text-center text-muted-foreground text-sm">No machines match your filters.</CardContent></Card>
           ) : (
-            OS_ORDER.filter((k) => groups[k].length > 0).map((k) => (
+            <>
+            {waypoints.length > 0 && (
+              <section className="mb-5">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[0.7rem] font-medium text-primary">
+                    <Waypoints className="h-3 w-3" /> Waypoints
+                  </span>
+                  <span className="text-xs text-muted-foreground">{waypoints.length}</span>
+                  <div className="flex-1 h-px bg-border/60" />
+                </div>
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {waypoints.map(renderWaypointCard)}
+                </div>
+              </section>
+            )}
+            {pending.length > 0 && (
+              <section className="mb-5">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[0.7rem] font-medium text-amber-300">
+                    <Trash2 className="h-3 w-3" /> Removal pending
+                  </span>
+                  <span className="text-xs text-muted-foreground">{pending.length}</span>
+                  <div className="flex-1 h-px bg-border/60" />
+                </div>
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {pending.map(renderPendingCard)}
+                </div>
+              </section>
+            )}
+            {OS_ORDER.filter((k) => groups[k].length > 0).map((k) => (
               <section key={k} className="mb-5">
                 <div className="flex items-center gap-2 mb-2">
                   <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[0.7rem] font-medium ${OS_META[k].cls}`}>{OS_META[k].label}</span>
@@ -745,7 +1033,8 @@ export function Fabric() {
                   </div>
                 )}
               </section>
-            ))
+            ))}
+            </>
           )}
         </>
       )}

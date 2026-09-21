@@ -32,7 +32,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.5.0"
+const agentVersion = "0.5.1"
 
 // modeFlag is parsed from the command line in main() (systemd ExecStart, launchd
 // ProgramArguments, or the Windows service binPath pass `--mode waypoint`). It
@@ -518,6 +518,11 @@ func (s *session) onControl(msg []byte) {
 		s.closeStream(c.StreamID, false)
 	case "uninstall":
 		log.Print("received uninstall command from Cerebro — removing this agent")
+		// Confirm receipt so the broker can purge our (tombstoned) row — the
+		// positive "it's gone" signal. Flush briefly before exit, since
+		// selfUninstall() calls os.Exit and would otherwise drop the in-flight frame.
+		s.writeJSON(map[string]any{"t": "uninstall-ack"})
+		time.Sleep(300 * time.Millisecond)
 		selfUninstall() // OS-specific; spawns a detached remover and exits
 	case "install-ca":
 		go s.installCA(c.CaPublicKey)

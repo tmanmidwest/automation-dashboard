@@ -380,9 +380,10 @@ export class FabricService implements OnModuleInit {
     targetId: string,
     kind: FabricCredKind,
   ): Promise<AgentTarget> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId }, include: { agent: { select: { status: true } } } });
     if (!target) throw new NotFoundException('Target not found.');
     if (target.kind !== kind) throw new BadRequestException(`This target is not a ${kind.toUpperCase()} endpoint.`);
+    if (target.agent?.status === 'deleting') throw new BadRequestException('This agent is being removed.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
     return target;
   }
@@ -401,6 +402,7 @@ export class FabricService implements OnModuleInit {
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found.');
     if (agent.mode !== 'waypoint') throw new BadRequestException('Ad-hoc connections require a Waypoint.');
+    if (agent.status === 'deleting') throw new BadRequestException('This Waypoint is being removed.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Waypoint is offline.');
     const host = (adhoc.host || '').trim();
     const port = Number(adhoc.port);
@@ -898,14 +900,20 @@ export class FabricService implements OnModuleInit {
   }
 
   /** Delete an agent and its history. */
+  /**
+   * Request removal of an agent/Waypoint. Rather than hard-deleting the row (which
+   * would strand the software on an offline box as a reconnecting zombie), we
+   * tombstone it as `deleting` and let it self-uninstall: an online box uninstalls
+   * + acks now (the ack purges the row via {@link AgentRegistryService}); an offline
+   * box is re-pushed the uninstall on its next check-in. The vault credentials are
+   * removed immediately so they never outlive the agent.
+   */
   async deleteAgent(id: string, user: SessionUser): Promise<void> {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
     if (!agent) throw new NotFoundException('Agent not found.');
-    // If it's online, ask it to uninstall itself before we drop it; otherwise
-    // just disconnect (a manual uninstall on the box is then needed).
-    if (!this.registry.requestUninstall(id)) this.registry.disconnect(id);
-    // Remove any vault credentials attached to this agent's targets so they
-    // don't outlive the agent as orphans.
+
+    // Remove any vault credentials attached to this agent's targets up front so
+    // they don't outlive the agent as orphans (the tombstone can't use them).
     const withSecrets = await this.prisma.agentTarget.findMany({
       where: { agentId: id, secretRef: { not: null } },
       select: { secretRef: true },
@@ -913,11 +921,56 @@ export class FabricService implements OnModuleInit {
     for (const t of withSecrets) {
       if (t.secretRef) await this.secrets.remove(t.secretRef, { actorId: user.id, actorEmail: user.email }).catch(() => undefined);
     }
+
+    // Tombstone the row; the registry drives the uninstall + purge from here.
+    await this.prisma.agent.update({
+      where: { id },
+      data: { status: 'deleting', pendingUninstallAt: new Date(), pendingUninstallBy: user.email },
+    });
+    const online = this.registry.requestUninstall(id);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.delete_requested',
+      target: id,
+      meta: { name: agent.name, mode: agent.mode, online },
+    });
+  }
+
+  /**
+   * Re-push the uninstall to a pending (`deleting`) agent that happens to be
+   * online now — the "Retry now" action. No-op reachability is reported back.
+   */
+  async retryUninstall(id: string, user: SessionUser): Promise<{ online: boolean }> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    if (agent.status !== 'deleting') throw new BadRequestException('Agent is not pending removal.');
+    const online = this.registry.requestUninstall(id);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'fabric.agent.uninstall_retried',
+      target: id,
+      meta: { name: agent.name, online },
+    });
+    return { online };
+  }
+
+  /**
+   * Force-remove a tombstoned agent's row without waiting for an uninstall ack —
+   * the escape hatch for a decommissioned box that will never check in again. The
+   * operator is responsible for any manual cleanup on the box itself.
+   */
+  async forceRemoveAgent(id: string, user: SessionUser): Promise<void> {
+    const agent = await this.prisma.agent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException('Agent not found.');
+    if (agent.status !== 'deleting') throw new BadRequestException('Only a pending-removal agent can be force-removed.');
+    this.registry.disconnect(id);
     await this.prisma.agent.delete({ where: { id } });
     await this.audit.record({
       actorId: user.id,
       actorEmail: user.email,
-      action: 'fabric.agent.deleted',
+      action: 'fabric.agent.force_removed',
       target: id,
       meta: { name: agent.name },
     });
@@ -1039,6 +1092,8 @@ export class FabricService implements OnModuleInit {
       lastSeenAt: agent.lastSeenAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),
       caTrusted: !!agent.caTrustedAt,
+      pendingUninstallAt: agent.pendingUninstallAt?.toISOString() ?? null,
+      pendingUninstallBy: agent.pendingUninstallBy,
       targets: targets.map(
         (t): FabricTargetDto => ({
           id: t.id,
