@@ -4,7 +4,7 @@ import {
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
   ShieldCheck, Search, Network, Tag as TagIcon, LayoutGrid, List as ListIcon,
-  Waypoints, Globe,
+  Waypoints, Globe, WifiOff,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -212,9 +212,10 @@ export function Fabric() {
     setView(v);
     try { localStorage.setItem('fabric.view', v); } catch { /* storage blocked */ }
   };
-  const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string } | null>(null);
-  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean } | null>(null);
-  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string } } | null>(null);
+  type Reconnect = () => Promise<FabricSessionTicket>;
+  const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string; reopen?: () => void; reconnect?: Reconnect } | null>(null);
+  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean; reopen?: () => void; reconnect?: Reconnect } | null>(null);
+  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string }; reopen?: () => void; reconnect?: Reconnect } | null>(null);
 
   /**
    * Launch a session either in a new tab (default) or an in-page overlay. `win`
@@ -227,14 +228,26 @@ export function Fabric() {
     ticket: FabricSessionTicket,
     title: string,
     win: Window | null,
-    extra?: { dynamicResize?: boolean; vncCreds?: { username?: string; password?: string } },
+    extra?: {
+      dynamicResize?: boolean;
+      vncCreds?: { username?: string; password?: string };
+      reopen?: () => void;
+      /** Present when the target has a saved credential, enabling auto-reconnect. */
+      reconnectCtx?: { agentId: string; targetId: string };
+    },
   ) => {
+    // Auto-reconnect re-mints with the saved credential; only offered when there is one.
+    const reconnect = extra?.reconnectCtx
+      ? () => reconnectSession(extra.reconnectCtx!.agentId, extra.reconnectCtx!.targetId, kind)
+      : undefined;
     if (win) {
+      // New-tab sessions run on the standalone page; pass the reconnect ingredients
+      // (not the closure) so that page can auto-reconnect too.
       const key = `fabric.session.${Math.random().toString(36).slice(2)}`;
       try {
         localStorage.setItem(
           key,
-          JSON.stringify({ kind, ticket, title, dynamicResize: extra?.dynamicResize, vncCreds: extra?.vncCreds }),
+          JSON.stringify({ kind, ticket, title, dynamicResize: extra?.dynamicResize, vncCreds: extra?.vncCreds, reconnect: extra?.reconnectCtx }),
         );
       } catch {
         /* storage blocked — fall through to overlay */
@@ -242,9 +255,9 @@ export function Fabric() {
       win.location.href = `${location.origin}/fabric/session?k=${encodeURIComponent(key)}`;
       return;
     }
-    if (kind === 'ssh') setSession({ ticket, title });
-    else if (kind === 'rdp') setRdpSession({ ticket, title, dynamicResize: !!extra?.dynamicResize });
-    else setVncSession({ ticket, title, creds: extra?.vncCreds });
+    if (kind === 'ssh') setSession({ ticket, title, reopen: extra?.reopen, reconnect });
+    else if (kind === 'rdp') setRdpSession({ ticket, title, dynamicResize: !!extra?.dynamicResize, reopen: extra?.reopen, reconnect });
+    else setVncSession({ ticket, title, creds: extra?.vncCreds, reopen: extra?.reopen, reconnect });
   };
 
   const openConnect = (agent: FabricAgentDto, t: FabricTargetDto) => {
@@ -762,8 +775,11 @@ export function Fabric() {
           onChanged={load}
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win, opts) => {
-            launchViewer('rdp', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win, {
+            const a = connectFor.agent, t = connectFor.target;
+            launchViewer('rdp', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
               dynamicResize: opts.dynamicResize,
+              reopen: () => { setRdpSession(null); setConnectFor({ agent: a, target: t }); },
+              reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
             });
             setConnectFor(null);
           }}
@@ -778,7 +794,11 @@ export function Fabric() {
           onChanged={load}
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win) => {
-            launchViewer('ssh', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win);
+            const a = connectFor.agent, t = connectFor.target;
+            launchViewer('ssh', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
+              reopen: () => { setSession(null); setConnectFor({ agent: a, target: t }); },
+              reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
+            });
             setConnectFor(null);
           }}
         />
@@ -792,8 +812,11 @@ export function Fabric() {
           onChanged={load}
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win) => {
-            launchViewer('vnc', ticket, `${connectFor.agent.name} · ${connectFor.target.host}:${connectFor.target.port}`, win, {
+            const a = connectFor.agent, t = connectFor.target;
+            launchViewer('vnc', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
               vncCreds: ticket.username || ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
+              reopen: () => { setVncSession(null); setConnectFor({ agent: a, target: t }); },
+              reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
             });
             setConnectFor(null);
           }}
@@ -838,16 +861,18 @@ export function Fabric() {
         <ApprovalsDialog onClose={() => setShowApprovals(false)} onCountChange={setPendingApprovals} />
       )}
 
-      {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} />}
+      {session && <SshTerminal session={session.ticket} title={session.title} onClose={() => setSession(null)} onReconnect={session.reopen} reconnect={session.reconnect} />}
       {rdpSession && (
         <RdpViewer
           session={rdpSession.ticket}
           title={rdpSession.title}
           dynamicResize={rdpSession.dynamicResize}
           onClose={() => setRdpSession(null)}
+          onReconnect={rdpSession.reopen}
+          reconnect={rdpSession.reconnect}
         />
       )}
-      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} creds={vncSession.creds} onClose={() => setVncSession(null)} />}
+      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} creds={vncSession.creds} onClose={() => setVncSession(null)} onReconnect={vncSession.reopen} reconnect={vncSession.reconnect} />}
     </div>
   );
 }
@@ -2216,16 +2241,24 @@ export function SshTerminal({
   session,
   title,
   onClose,
+  onReconnect,
+  reconnect,
 }: {
   session: FabricSessionTicket;
   title: string;
   onClose: () => void;
+  onReconnect?: () => void;
+  reconnect?: () => Promise<FabricSessionTicket>;
 }) {
   const screenRef = useRef<HTMLDivElement>(null);
+  const [ticket, setTicket] = useState(session);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [wasConnected, setWasConnected] = useState(false);
+  const reconnecting = useAutoReconnect(status, wasConnected, reconnect, setTicket);
 
   useEffect(() => {
     if (!screenRef.current) return;
+    setStatus('connecting');
     const term = new XTerm({
       cursorBlink: true,
       fontSize: 14,
@@ -2238,7 +2271,7 @@ export function SshTerminal({
     fit.fit();
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}${session.wsPath}?token=${encodeURIComponent(session.token)}`;
+    const url = `${proto}//${location.host}${ticket.wsPath}?token=${encodeURIComponent(ticket.token)}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     const dec = new TextDecoder();
@@ -2250,6 +2283,7 @@ export function SshTerminal({
 
     ws.onopen = () => {
       setStatus('connected');
+      setWasConnected(true);
       fit.fit();
       term.focus();
       sendResize();
@@ -2279,7 +2313,7 @@ export function SshTerminal({
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.token]);
+  }, [ticket.token]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -2316,6 +2350,10 @@ export function SshTerminal({
       </div>
       <div className="flex-1 relative overflow-hidden">
         <div ref={screenRef} className="w-full h-full p-2" />
+        {reconnecting && <ReconnectingOverlay />}
+        {status === 'disconnected' && wasConnected && !reconnecting && (
+          <SessionLostOverlay onReconnect={onReconnect} onClose={onClose} />
+        )}
       </div>
     </div>
   );
@@ -2572,28 +2610,139 @@ function RdpConnectDialog({
   );
 }
 
+/**
+ * Re-mint a session ticket for the same target using its saved vault credential.
+ * Used for auto-reconnect after the agent's WebSocket is recycled (RDP/VNC resume
+ * the same remote session; SSH gets a fresh shell). Requires a saved credential —
+ * throws if the target has none (the caller then falls back to a manual reconnect).
+ */
+export async function reconnectSession(
+  agentId: string,
+  targetId: string,
+  kind: 'ssh' | 'rdp' | 'vnc',
+): Promise<FabricSessionTicket> {
+  const endpoint = kind === 'ssh' ? 'session' : kind === 'rdp' ? 'rdp-session' : 'vnc-session';
+  const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(
+    `/api/fabric/agents/${agentId}/targets/${targetId}/${endpoint}`,
+    { useSaved: true },
+  );
+  return awaitSession(resp);
+}
+
+/**
+ * When a connected viewer drops and a reconnect function is available, keep
+ * re-minting (with backoff) until it succeeds — the agent is usually back within
+ * a few seconds. Returns whether a reconnect is currently in flight (for the
+ * "Reconnecting…" overlay). On success, `applyTicket` swaps in the fresh ticket.
+ */
+function useAutoReconnect(
+  status: 'connecting' | 'connected' | 'disconnected',
+  wasConnected: boolean,
+  reconnect: (() => Promise<FabricSessionTicket>) | undefined,
+  applyTicket: (t: FabricSessionTicket) => void,
+): boolean {
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectRef = useRef(reconnect);
+  reconnectRef.current = reconnect;
+  const applyRef = useRef(applyTicket);
+  applyRef.current = applyTicket;
+  useEffect(() => {
+    if (status !== 'disconnected' || !wasConnected || !reconnectRef.current) return;
+    let cancelled = false;
+    setReconnecting(true);
+    const delays = [2000, 4000, 7000, 12000, 20000];
+    void (async () => {
+      for (const d of delays) {
+        await new Promise((r) => setTimeout(r, d));
+        if (cancelled) return;
+        try {
+          const fresh = await reconnectRef.current!();
+          if (cancelled) return;
+          setReconnecting(false);
+          applyRef.current(fresh); // swaps the ticket → the viewer reconnects
+          return;
+        } catch {
+          /* agent not back yet — retry after the next backoff */
+        }
+      }
+      if (!cancelled) setReconnecting(false); // gave up → the manual overlay shows
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, wasConnected]);
+  return reconnecting;
+}
+
+/** Shown while auto-reconnect is retrying after a mid-session drop. */
+function ReconnectingOverlay() {
+  return (
+    <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm shadow-xl">
+        <Loader2 className="h-4 w-4 animate-spin text-amber-400" /> Reconnecting…
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown over a session viewer when the tunnel drops after it had connected — a
+ * proxy recycling the agent's WebSocket kills the in-flight session, so instead of
+ * a silently frozen frame the operator gets a clear "connection lost" state and,
+ * when reconnect context is available (in-page sessions), a one-click reconnect.
+ */
+function SessionLostOverlay({ onReconnect, onClose }: { onReconnect?: () => void; onClose: () => void }) {
+  return (
+    <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
+      <div className="max-w-sm text-center rounded-lg border border-border bg-card p-5 shadow-xl">
+        <WifiOff className="h-8 w-8 mx-auto mb-2 text-amber-400" />
+        <p className="text-sm font-medium">Connection lost</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The tunnel to the agent dropped — it usually reconnects within a few seconds. Reconnect to resume the session.
+        </p>
+        <div className="mt-4 flex justify-center gap-2">
+          {onReconnect && (
+            <Button size="sm" onClick={onReconnect}>
+              <RefreshCw className="h-4 w-4 mr-1" /> Reconnect
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RdpViewer({
   session,
   title,
   dynamicResize,
   onClose,
+  onReconnect,
+  reconnect,
 }: {
   session: FabricSessionTicket;
   title: string;
   dynamicResize: boolean;
   onClose: () => void;
+  onReconnect?: () => void;
+  reconnect?: () => Promise<FabricSessionTicket>;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const [ticket, setTicket] = useState(session);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [wasConnected, setWasConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reconnecting = useAutoReconnect(status, wasConnected, reconnect, setTicket);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
+    setStatus('connecting');
+    setError(null);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // WebSocketTunnel appends `?<connectData>` to this URL, so keep it query-less
     // and pass the token as the connect data below (→ `…/ws?token=…`).
-    const url = `${proto}//${location.host}${session.wsPath}`;
+    const url = `${proto}//${location.host}${ticket.wsPath}`;
 
     const tunnel = new Guacamole.WebSocketTunnel(url);
     const client = new Guacamole.Client(tunnel);
@@ -2610,6 +2759,7 @@ export function RdpViewer({
       console.log('[RDP] client state:', state, STATE_NAMES[state] ?? '');
       if (state === 3) {
         everConnected = true;
+        setWasConnected(true);
         setStatus('connected');
       } else if (state === 5) {
         setStatus('disconnected');
@@ -2643,7 +2793,7 @@ export function RdpViewer({
       }
     };
 
-    client.connect(`token=${encodeURIComponent(session.token)}`);
+    client.connect(`token=${encodeURIComponent(ticket.token)}`);
 
     // Mouse
     const mouse = new Guacamole.Mouse(displayEl);
@@ -2685,7 +2835,7 @@ export function RdpViewer({
       if (displayEl.parentNode === host) host.removeChild(displayEl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.token]);
+  }, [ticket.token]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -2725,7 +2875,12 @@ export function RdpViewer({
           {error}
         </div>
       )}
-      <div ref={hostRef} className="flex-1 relative overflow-auto outline-none grid place-items-center" />
+      <div ref={hostRef} className="flex-1 relative overflow-auto outline-none grid place-items-center">
+        {reconnecting && <ReconnectingOverlay />}
+        {status === 'disconnected' && wasConnected && !reconnecting && (
+          <SessionLostOverlay onReconnect={onReconnect} onClose={onClose} />
+        )}
+      </div>
     </div>
   );
 }
@@ -2735,19 +2890,29 @@ export function VncViewer({
   title,
   creds,
   onClose,
+  onReconnect,
+  reconnect,
 }: {
   session: FabricSessionTicket;
   title: string;
   /** Optional saved credential to auto-fill (vaulted) instead of prompting. */
   creds?: { username?: string; password?: string };
   onClose: () => void;
+  onReconnect?: () => void;
+  reconnect?: () => Promise<FabricSessionTicket>;
 }) {
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
   // Saved creds are auto-sent once; if they're rejected we fall back to the prompt.
   const triedSavedRef = useRef(false);
+  const [ticket, setTicket] = useState(session);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [wasConnected, setWasConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reconnecting = useAutoReconnect(status, wasConnected, reconnect, setTicket);
+  // A re-minted VNC ticket carries its own vault creds; prefer those, else the prop.
+  const vt = ticket as FabricVncSessionTicket;
+  const activeCreds = vt.username || vt.password ? { username: vt.username, password: vt.password } : creds;
   // Which credentials the server asked for (null = no prompt showing). macOS
   // Screen Sharing (Apple RA2) needs username+password; legacy VNC just password.
   const [credTypes, setCredTypes] = useState<string[] | null>(null);
@@ -2759,8 +2924,11 @@ export function VncViewer({
 
   useEffect(() => {
     if (!screenRef.current) return;
+    setStatus('connecting');
+    setError(null);
+    triedSavedRef.current = false; // allow auto-sending saved creds on each (re)connect
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}${session.wsPath}?token=${encodeURIComponent(session.token)}`;
+    const url = `${proto}//${location.host}${ticket.wsPath}?token=${encodeURIComponent(ticket.token)}`;
     let rfb: RFB | null = null;
     try {
       rfb = new RFB(screenRef.current, url);
@@ -2772,6 +2940,7 @@ export function VncViewer({
       rfb.showDotCursor = true;
       rfb.addEventListener('connect', () => {
         setStatus('connected');
+        setWasConnected(true);
         setCredTypes(null);
       });
       rfb.addEventListener('disconnect', (e) => {
@@ -2785,14 +2954,14 @@ export function VncViewer({
         // auto-send it once (no prompt). Otherwise show the inline overlay — which
         // noVNC re-fires until every requested credential is supplied.
         const canSatisfy =
-          !!creds &&
-          (!types.includes('username') || !!creds.username) &&
-          (!types.includes('password') || !!creds.password);
+          !!activeCreds &&
+          (!types.includes('username') || !!activeCreds.username) &&
+          (!types.includes('password') || !!activeCreds.password);
         if (canSatisfy && !triedSavedRef.current) {
           triedSavedRef.current = true;
           const auto: { username?: string; password?: string; target?: string } = {};
-          if (types.includes('username')) auto.username = creds!.username ?? '';
-          if (types.includes('password')) auto.password = creds!.password ?? '';
+          if (types.includes('username')) auto.username = activeCreds!.username ?? '';
+          if (types.includes('password')) auto.password = activeCreds!.password ?? '';
           rfb?.sendCredentials(auto);
           return;
         }
@@ -2817,7 +2986,7 @@ export function VncViewer({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.token]);
+  }, [ticket.token]);
 
   function submitCredentials() {
     if (!credTypes) return;
@@ -2875,6 +3044,10 @@ export function VncViewer({
         {/* The RFB canvas mounts here — must fill the pane so noVNC's scaleViewport
             has real dimensions to scale into (an unsized container renders black). */}
         <div ref={screenRef} className="absolute inset-0 overflow-auto grid place-items-center" />
+        {reconnecting && <ReconnectingOverlay />}
+        {status === 'disconnected' && wasConnected && !credTypes && !reconnecting && (
+          <SessionLostOverlay onReconnect={onReconnect} onClose={onClose} />
+        )}
         {credTypes && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
             <form

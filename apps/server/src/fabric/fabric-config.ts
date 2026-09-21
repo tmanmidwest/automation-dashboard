@@ -21,10 +21,21 @@ export const fabricConfig = {
   get missedBeatsOffline(): number {
     return envInt('FABRIC_MISSED_BEATS_OFFLINE', FABRIC_MISSED_BEATS_OFFLINE);
   },
+  /**
+   * Grace period after a control connection drops before the agent is actually
+   * marked offline + alerted. Agents reconnect in ~1–6s after an upstream proxy
+   * recycles the WebSocket, so this debounce swallows those blips (no status
+   * flicker, no false "offline" email) while still alerting on a real outage.
+   */
+  get offlineGraceMs(): number {
+    return envInt('FABRIC_OFFLINE_GRACE_MS', 60_000);
+  },
   /** How long a stale-but-online agent may go unseen before the reconciler
-   *  marks it offline: the missed-beats window plus a fixed reconnect buffer. */
+   *  marks it offline: the larger of the missed-beats window and the offline
+   *  grace, plus a fixed reconnect buffer (so the reconciler never beats the
+   *  connection-drop debounce). */
   get reconcileGraceMs(): number {
-    return this.heartbeatMs * (this.missedBeatsOffline + 1) + 30_000;
+    return Math.max(this.heartbeatMs * (this.missedBeatsOffline + 1), this.offlineGraceMs) + 30_000;
   },
   /** How often the web /fabric screen polls the agent list. */
   get pollMs(): number {

@@ -33,6 +33,12 @@ interface LiveAgent {
 export class AgentRegistryService {
   private readonly logger = new Logger(AgentRegistryService.name);
   private readonly live = new Map<string, LiveAgent>();
+  /**
+   * Agents whose control connection just dropped and are within the offline grace
+   * window — held here so a fast reconnect (the common case: a proxy recycled the
+   * WebSocket) is swallowed without a status flicker or a false "offline" alert.
+   */
+  private readonly pendingOffline = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -62,9 +68,9 @@ export class AgentRegistryService {
       return;
     }
     for (const a of rows) {
-      if (this.isOnline(a.id)) continue; // holds a live connection — fine
+      if (this.isOnline(a.id) || this.pendingOffline.has(a.id)) continue; // live or within grace
       if (a.lastSeenAt && a.lastSeenAt > staleBefore) continue; // may be reconnecting; wait
-      await this.markOffline(a.id, 'no heartbeat (reconciled)');
+      await this.finalizeOffline(a.id, 'no heartbeat (reconciled)');
     }
   }
 
@@ -89,7 +95,9 @@ export class AgentRegistryService {
    * has ever connected reads as offline.
    */
   statusOf(agentId: string, stored: string): FabricAgentStatus {
-    if (this.isOnline(agentId)) return 'online';
+    // A live connection — or one within the brief reconnect grace — reads online,
+    // so a proxy recycling the WebSocket doesn't flicker the card to offline.
+    if (this.isOnline(agentId) || this.pendingOffline.has(agentId)) return 'online';
     if (stored === 'pending' || stored === 'revoked') return stored;
     return 'offline';
   }
@@ -100,6 +108,14 @@ export class AgentRegistryService {
    * the agent green). Wires close/error to teardown.
    */
   register(agentId: string, ws: WebSocket): void {
+    // Reconnected within the offline grace window — swallow the blip: cancel the
+    // pending-offline timer so no status change or "offline" alert ever fires.
+    const pending = this.pendingOffline.get(agentId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingOffline.delete(agentId);
+      this.logger.log(`Agent ${agentId} reconnected within grace — offline suppressed.`);
+    }
     // Replace any stale connection for the same agent.
     this.live.get(agentId)?.ws.close(4000, 'superseded');
 
@@ -413,7 +429,7 @@ export class AgentRegistryService {
 
   private armOfflineTimer(agentId: string): NodeJS.Timeout {
     const timer = setTimeout(
-      () => void this.markOffline(agentId, 'missed heartbeats'),
+      () => this.beginOffline(agentId, 'missed heartbeats'),
       fabricConfig.heartbeatMs * (fabricConfig.missedBeatsOffline + 1),
     );
     // Don't keep the event loop alive solely for this timer.
@@ -424,10 +440,17 @@ export class AgentRegistryService {
   private handleClose(agentId: string, ws: WebSocket): void {
     const entry = this.live.get(agentId);
     if (!entry || entry.ws !== ws) return; // already superseded
-    void this.markOffline(agentId, 'connection closed');
+    this.beginOffline(agentId, 'connection closed');
   }
 
-  private async markOffline(agentId: string, reason: string): Promise<void> {
+  /**
+   * The control connection dropped: tear the (dead) socket + its streams down
+   * immediately, but hold the "offline" status change + alert for the grace
+   * window. If the agent reconnects before then (`register`), the blip is
+   * swallowed; otherwise `finalizeOffline` fires. This is what stops a proxy
+   * recycling the WebSocket every ~100 min from spamming offline alerts.
+   */
+  private beginOffline(agentId: string, reason: string): void {
     const entry = this.live.get(agentId);
     if (entry) {
       clearTimeout(entry.offlineTimer);
@@ -439,6 +462,27 @@ export class AgentRegistryService {
         /* noop */
       }
     }
+    // Already counting down toward offline — don't restart the clock.
+    if (this.pendingOffline.has(agentId)) return;
+    this.logger.log(
+      `Agent ${agentId} disconnected (${reason}); waiting ${Math.round(fabricConfig.offlineGraceMs / 1000)}s for reconnect.`,
+    );
+    const timer = setTimeout(() => {
+      this.pendingOffline.delete(agentId);
+      void this.finalizeOffline(agentId, reason);
+    }, fabricConfig.offlineGraceMs);
+    timer.unref?.();
+    this.pendingOffline.set(agentId, timer);
+  }
+
+  /** Commit the offline status + audit + alert (grace elapsed, or reconciled). */
+  private async finalizeOffline(agentId: string, reason: string): Promise<void> {
+    const t = this.pendingOffline.get(agentId);
+    if (t) {
+      clearTimeout(t);
+      this.pendingOffline.delete(agentId);
+    }
+    if (this.live.has(agentId)) return; // reconnected in the meantime
     this.logger.log(`Agent ${agentId} offline (${reason}).`);
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } }).catch(() => null);
     if (!agent || agent.status === 'revoked' || agent.status === 'offline') return;

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import type { FabricSessionTicket } from '@cerebro/shared';
-import { SshTerminal, RdpViewer, VncViewer } from './Fabric';
+import { SshTerminal, RdpViewer, VncViewer, reconnectSession } from './Fabric';
 
 /**
  * Standalone full-tab session viewer. The Fabric page mints the one-time ticket
@@ -16,6 +16,8 @@ interface Handoff {
   title: string;
   dynamicResize?: boolean;
   vncCreds?: { username?: string; password?: string };
+  /** Ingredients to auto-reconnect (re-mint with the saved credential). */
+  reconnect?: { agentId: string; targetId: string };
 }
 
 export function FabricSession() {
@@ -62,8 +64,10 @@ export function FabricSession() {
   }
 
   const onClose = () => window.close();
-  if (data.kind === 'ssh') return <SshTerminal session={data.ticket} title={data.title} onClose={onClose} />;
+  const rc = data.reconnect;
+  const reconnect = rc ? () => reconnectSession(rc.agentId, rc.targetId, data.kind) : undefined;
+  if (data.kind === 'ssh') return <SshTerminal session={data.ticket} title={data.title} onClose={onClose} reconnect={reconnect} />;
   if (data.kind === 'rdp')
-    return <RdpViewer session={data.ticket} title={data.title} dynamicResize={!!data.dynamicResize} onClose={onClose} />;
-  return <VncViewer session={data.ticket} title={data.title} creds={data.vncCreds} onClose={onClose} />;
+    return <RdpViewer session={data.ticket} title={data.title} dynamicResize={!!data.dynamicResize} onClose={onClose} reconnect={reconnect} />;
+  return <VncViewer session={data.ticket} title={data.title} creds={data.vncCreds} onClose={onClose} reconnect={reconnect} />;
 }
