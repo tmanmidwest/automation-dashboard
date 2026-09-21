@@ -941,7 +941,7 @@ function AddMachineDialog({
               className={`flex flex-col items-start gap-1 rounded-md border p-2.5 text-left text-xs ${mode === 'waypoint' ? 'border-primary bg-primary/10' : 'border-input hover:bg-muted/40'}`}
             >
               <span className="inline-flex items-center gap-1.5 font-medium text-sm"><Waypoints className="h-4 w-4" /> Waypoint</span>
-              <span className="text-muted-foreground">A gateway: reach any host on this box's LAN.</span>
+              <span className="text-muted-foreground">A gateway into the network where you install it — reach any host on that network. Deploy one per network.</span>
             </button>
           </div>
         </div>
@@ -959,7 +959,8 @@ function AddMachineDialog({
         </div>
         {mode === 'waypoint' && (
           <p className="text-xs text-muted-foreground">
-            After the Waypoint is online, add the LAN targets (SSH/RDP/VNC hosts) it should reach from its
+            Install it on any box that can reach the target network (a DMZ, a client site, another VLAN). Once it's
+            online, add the hosts on <span className="italic">that</span> network (SSH/RDP/VNC) from its
             <Waypoints className="inline h-3 w-3 mx-1" /> routes panel.
           </p>
         )}
@@ -1383,7 +1384,7 @@ function RoutesDialog({
       onClose={onClose}
       size="lg"
       title={`Routes — ${agent.name}`}
-      description="LAN targets this Waypoint can reach — SSH/RDP/VNC sessions or a Remote Browser (remote browser), all tunnelled through the Waypoint's network."
+      description="Hosts on this Waypoint's network — SSH/RDP/VNC sessions or a Remote Browser — all tunnelled through the Waypoint."
       footer={<Button onClick={onClose}>Done</Button>}
     >
       {err && <div className="mb-3 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
