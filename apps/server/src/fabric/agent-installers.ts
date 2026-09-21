@@ -101,10 +101,15 @@ read_logs() {
   fi
 }
 
-# Poll the logs for up to ~20s. 0 = connected, 2 = rejected/failed, 1 = unknown.
+# Poll the logs for up to ~60s. 0 = connected, 2 = rejected (terminal),
+# 3 = only transient upstream errors seen (server restarting — keep waiting was
+# in vain but the agent will retry on its own), 1 = unknown/no logs. A 502/503/504
+# is transient (a Cerebro redeploy briefly recycles the edge), so we don't fail on
+# it — we keep polling and, if it never clears in the window, report it softly.
 wait_connect() {
   i=0
-  while [ "$i" -lt 20 ]; do
+  saw_transient=0
+  while [ "$i" -lt 60 ]; do
     logs="$(read_logs)"
     case "$logs" in
       *"connected to"*) return 0 ;;
@@ -112,9 +117,13 @@ wait_connect() {
     case "$logs" in
       *"credential refused"*|*"enrollment failed"*|*"enroll rejected"*|*"removed in Cerebro"*|*"410 Gone"*) return 2 ;;
     esac
+    case "$logs" in
+      *"Bad Gateway"*|*"Service Unavailable"*|*"Gateway Timeout"*|*": 502 "*|*": 503 "*|*": 504 "*) saw_transient=1 ;;
+    esac
     i=$((i + 1))
     sleep 1
   done
+  if [ "$saw_transient" = 1 ]; then return 3; fi
   return 1
 }
 
@@ -123,6 +132,19 @@ report_result() {
   if wait_connect; then rc=0; else rc=$?; fi
   if [ "$rc" = 0 ]; then
     echo "✓ $DISPLAY connected to Cerebro."
+    exit 0
+  fi
+  if [ "$rc" = 3 ]; then
+    # Only saw 502/503/504 — Cerebro is restarting (e.g. a redeploy). Not a failure:
+    # the agent keeps retrying and will connect on its own once the server is back.
+    echo ""
+    echo "• $DISPLAY is installed and running, but Cerebro returned a temporary 502/503 (it looks like it's restarting)."
+    echo "  The agent will keep retrying and connect automatically once the server is back — no action needed."
+    if [ "$OS" = "darwin" ]; then
+      echo "  Re-check any time:  tail -n 20 /var/log/$NAME.log"
+    else
+      echo "  Re-check any time:  sudo journalctl -u $NAME -n 20 --no-pager"
+    fi
     exit 0
   fi
   echo "" >&2
@@ -270,7 +292,8 @@ else
   if [ "$MODE" = "waypoint" ]; then OTHER=endpoint; ONAME=cerebro-agent; OLABEL=com.cerebro.agent
   else OTHER=waypoint; ONAME=cerebro-waypoint; OLABEL=com.cerebro.waypoint; fi
   if [ -e /usr/local/bin/$ONAME ] || [ -e /etc/systemd/system/$ONAME.service ] || [ -e /Library/LaunchDaemons/$OLABEL.plist ]; then
-    echo "Note: the $OTHER agent is also installed on this box. Remove it with CEREBRO_MODE=$OTHER (or CEREBRO_MODE=all)."
+    echo "Note: the $OTHER agent is also installed on this box. Remove it by re-running with the mode on sudo (not curl):"
+    echo "    curl -fsSL <cerebro-url>/api/fabric/uninstall.sh | sudo CEREBRO_MODE=$OTHER sh    # or CEREBRO_MODE=all"
   fi
 fi
 
@@ -348,24 +371,32 @@ $log = Join-Path $dir 'agent.log'
 if (Test-Path $log) { Clear-Content -Path $log -ErrorAction SilentlyContinue }
 sc.exe start $svc | Out-Null
 
-# --- Post-install validation: poll the agent log (~20s) for a connect result. ---
+# --- Post-install validation: poll the agent log (~60s) for a connect result. ---
+# A 502/503/504 is transient (a Cerebro redeploy briefly recycles the edge), so we
+# keep waiting on it rather than failing — the agent retries and connects on its own.
 Write-Host "Waiting for $display to connect to Cerebro..."
-$ok = $false; $refused = $false
-for ($i = 0; $i -lt 20; $i++) {
+$ok = $false; $refused = $false; $transient = $false
+for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Seconds 1
   if (Test-Path $log) {
     $txt = (Get-Content -Path $log -Tail 200 -ErrorAction SilentlyContinue) -join "\`n"
     if ($txt -match 'connected to') { $ok = $true; break }
     if ($txt -match 'credential refused|enrollment failed|enroll rejected|removed in Cerebro|410 Gone') { $refused = $true; break }
+    if ($txt -match 'Bad Gateway|Service Unavailable|Gateway Timeout|: 50[234] ') { $transient = $true }
   }
 }
 if ($ok) {
   Write-Host "OK: $display connected to Cerebro."
+} elseif ($transient -and -not $refused) {
+  Write-Host ""
+  Write-Host "• $display is installed and running, but Cerebro returned a temporary 502/503 (it looks like it's restarting)."
+  Write-Host "  It will keep retrying and connect automatically once the server is back — no action needed."
+  Write-Host "  Re-check any time:  Get-Content '$log' -Tail 20"
 } else {
   if ($refused) {
     Write-Warning "$display started but Cerebro REFUSED it — likely a stale enrollment on this box, or the agent was removed in Cerebro."
   } else {
-    Write-Warning "$display started but did not confirm a connection within 20s."
+    Write-Warning "$display started but did not confirm a connection within 60s."
   }
   Write-Host 'Recent logs:'
   if (Test-Path $log) { Get-Content -Path $log -Tail 12 | ForEach-Object { "    $_" } }

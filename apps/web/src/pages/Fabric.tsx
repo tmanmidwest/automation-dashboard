@@ -71,8 +71,11 @@ function uninstallCmd(os?: string | null, mode?: string | null): string {
       ? `$env:CEREBRO_MODE='waypoint'; iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`
       : `iwr ${origin}/api/fabric/uninstall.ps1 -UseBasicParsing | iex`;
   }
+  // NB: the mode must be an argument to `sudo` (right of the pipe), not a prefix
+  // on `curl` — `CEREBRO_MODE=x curl … | sudo sh` sets it only for curl, so the
+  // uninstaller would default to endpoint and remove the wrong service.
   return wp
-    ? `CEREBRO_MODE=waypoint curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo -E sh`
+    ? `curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo CEREBRO_MODE=waypoint sh`
     : `curl -fsSL ${origin}/api/fabric/uninstall.sh | sudo sh`;
 }
 

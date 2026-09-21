@@ -473,9 +473,17 @@ nowhere), and it's what the Windows installer polls for the post-install connect
 checks use the launchd log file / journald.
 
 **Windows post-install check.** `install.ps1` clears `agent.log`, starts the service, then polls it
-(~20 s) for the same `connected to` / refusal markers and prints ✓/✗ with recent logs + clean-re-enroll
+for the same `connected to` / refusal markers and prints ✓/✗ with recent logs + clean-re-enroll
 commands — parity with `install.sh`. Both connect-checks are scoped to the current run (journald
 `--since`, or a truncated log file) so a stale "connected" line from a prior install can't false-pass.
+
+**Transient 502 handling.** Both checks poll ~60 s and classify a **502/503/504** (`Bad Gateway` /
+`Service Unavailable` / `Gateway Timeout`) as *transient* — a Cerebro **redeploy** briefly recycles the
+edge, so the agent's WS dial 502s for a few seconds. Instead of a scary ✗, the installer keeps waiting;
+if only transient upstream errors are seen in the window, it exits **0** with a calm "Cerebro is
+restarting — the agent will keep retrying and connect on its own" note (`connected to` still passes
+immediately; a `401`/`410`/enroll refusal still fails fast). This keeps an install run during your own
+deploy from reporting a false failure.
 
 **Uninstall hardening (the "said removed but it's still there" bug).** Two root causes: (1) running
 `uninstall.sh` for a Waypoint **without** `CEREBRO_MODE=waypoint` removed the *endpoint* service and
