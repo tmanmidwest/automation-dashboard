@@ -3,16 +3,30 @@ import { connect as netConnect, isIP } from 'net';
 import { lookup } from 'dns/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { hostname } from 'os';
 import { randomUUID } from 'crypto';
 import type { WebSocket } from 'ws';
 import type { FabricSessionTicket, SessionUser } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
+import { SettingsService } from '../settings/settings.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { DockerApi, type DockerAuth } from '../connectors/docker/docker-api';
 import { openRemoteBrowserProxy, type RemoteBrowserProxy } from './remote-browser-proxy';
 
 const REMOTE_BROWSER_WS_PATH = '/api/fabric/remote-browser/ws';
+/** Settings key for the operator's Remote Browser overrides. */
+const REMOTE_BROWSER_CONFIG_KEY = 'fabric.remoteBrowser';
+
+/** Operator-set Remote Browser overrides (all optional; blank = fall through). */
+export interface RemoteBrowserConfig {
+  image?: string;
+  geometry?: string;
+  /** Docker network to attach the browser container to. */
+  network?: string;
+  /** Hostname the browser container dials back to reach Cerebro's SOCKS bridge. */
+  callbackHost?: string;
+}
 const REDEEM_TTL_MS = 60_000; // tear the browser down if the ticket is never opened
 const MAX_SESSION_MS = 8 * 60 * 60 * 1000; // hard safety cap on a browser's lifetime
 const VNC_PORT = 5900;
@@ -53,6 +67,7 @@ export class RemoteBrowserService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly registry: AgentRegistryService,
+    private readonly settings: SettingsService,
   ) {}
 
   private dockerApi(): DockerApi {
@@ -81,13 +96,23 @@ export class RemoteBrowserService {
     port: number;
     user: SessionUser;
   }): Promise<FabricSessionTicket> {
-    const image = process.env.REMOTE_BROWSER_IMAGE || 'cerebro-remote-browser:latest';
-    const network = process.env.REMOTE_BROWSER_NETWORK || undefined;
-    const callbackHost = process.env.REMOTE_BROWSER_CALLBACK_HOST || process.env.FABRIC_GUACD_CALLBACK_HOST;
-    const geometry = process.env.REMOTE_BROWSER_GEOMETRY || '1280x800';
+    const docker = this.dockerApi();
+    // Precedence for every setting: UI-stored → env var → auto-detect → default.
+    // Auto-detect (put the browser on the app's own Docker network, callback = the
+    // app's container name) makes a standard compose deploy zero-config; the UI/env
+    // override it for non-standard setups (e.g. a remote Docker endpoint).
+    const cfg = await this.storedConfig();
+    const image = cfg.image || process.env.REMOTE_BROWSER_IMAGE || 'cerebro-remote-browser:latest';
+    const geometry = cfg.geometry || process.env.REMOTE_BROWSER_GEOMETRY || '1280x800';
+    const network = cfg.network || process.env.REMOTE_BROWSER_NETWORK || (await this.resolveSelfNetwork(docker));
+    const callbackHost =
+      cfg.callbackHost ||
+      process.env.REMOTE_BROWSER_CALLBACK_HOST ||
+      process.env.FABRIC_GUACD_CALLBACK_HOST ||
+      (await this.resolveSelfName(docker));
     if (!callbackHost) {
       throw new BadRequestException(
-        'Remote Browser is not configured: set REMOTE_BROWSER_CALLBACK_HOST (the Cerebro service name reachable from the browser container).',
+        'Remote Browser could not determine how the browser container reaches Cerebro. Set REMOTE_BROWSER_CALLBACK_HOST (the app’s service/container name on the Docker network).',
       );
     }
 
@@ -99,7 +124,6 @@ export class RemoteBrowserService {
     const bindHost = await this.resolveBindHost(callbackHost);
     const proxy = await openRemoteBrowserProxy(this.registry, { agentId: params.agentId, bindHost, logger: this.logger });
     const name = `cerebro-remote-browser-${token.slice(0, 8)}`;
-    const docker = this.dockerApi();
 
     let containerId: string;
     try {
@@ -259,6 +283,87 @@ export class RemoteBrowserService {
       await new Promise((r) => setTimeout(r, 300));
     }
     return null;
+  }
+
+  /** Operator-set overrides (Fabric → Remote Browser). Empty strings are treated
+   *  as unset so they fall through to env/auto-detect. */
+  private async storedConfig(): Promise<RemoteBrowserConfig> {
+    const c = (await this.settings.get<RemoteBrowserConfig>(REMOTE_BROWSER_CONFIG_KEY)) ?? {};
+    const clean = (v?: string) => (v && v.trim() ? v.trim() : undefined);
+    return { image: clean(c.image), geometry: clean(c.geometry), network: clean(c.network), callbackHost: clean(c.callbackHost) };
+  }
+
+  /** Config for the settings UI: what's stored, what's currently in effect, and
+   *  what auto-detect resolves (shown as placeholders). */
+  async getConfig(): Promise<{
+    stored: RemoteBrowserConfig;
+    effective: { image: string; geometry: string; network?: string; callbackHost?: string };
+    detected: { network?: string; callbackHost?: string };
+    env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
+  }> {
+    const stored = await this.storedConfig();
+    let detectedNetwork: string | undefined;
+    let detectedName: string | undefined;
+    try {
+      const docker = this.dockerApi();
+      [detectedNetwork, detectedName] = await Promise.all([this.resolveSelfNetwork(docker), this.resolveSelfName(docker)]);
+    } catch {
+      /* Docker unreachable — leave detected blank */
+    }
+    const env = {
+      network: process.env.REMOTE_BROWSER_NETWORK || undefined,
+      callbackHost: process.env.REMOTE_BROWSER_CALLBACK_HOST || process.env.FABRIC_GUACD_CALLBACK_HOST || undefined,
+      image: process.env.REMOTE_BROWSER_IMAGE || undefined,
+      geometry: process.env.REMOTE_BROWSER_GEOMETRY || undefined,
+    };
+    return {
+      stored,
+      detected: { network: detectedNetwork, callbackHost: detectedName },
+      env,
+      effective: {
+        image: stored.image || env.image || 'cerebro-remote-browser:latest',
+        geometry: stored.geometry || env.geometry || '1280x800',
+        network: stored.network || env.network || detectedNetwork,
+        callbackHost: stored.callbackHost || env.callbackHost || detectedName,
+      },
+    };
+  }
+
+  /** Save the operator overrides. Blank fields clear the override (env/auto-detect wins). */
+  async setConfig(input: RemoteBrowserConfig, user: SessionUser): Promise<void> {
+    const clean = (v?: string | null) => (v && `${v}`.trim() ? `${v}`.trim() : undefined);
+    const cfg: RemoteBrowserConfig = {
+      image: clean(input.image),
+      geometry: clean(input.geometry),
+      network: clean(input.network),
+      callbackHost: clean(input.callbackHost),
+    };
+    await this.settings.set(REMOTE_BROWSER_CONFIG_KEY, cfg);
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'fabric.remote_browser.configured', meta: { ...cfg } });
+  }
+
+  /** The Docker network the app container is on (so the browser can share it), by
+   *  inspecting our own container. Undefined if it can't be determined. */
+  private async resolveSelfNetwork(docker: DockerApi): Promise<string | undefined> {
+    try {
+      const info = await docker.inspectContainerFull(hostname());
+      const nets = Object.keys(info.NetworkSettings?.Networks ?? {});
+      // Prefer the compose project network over the default bridge/host/none.
+      return nets.find((n) => n !== 'bridge' && n !== 'host' && n !== 'none') ?? nets[0];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The app's own container name (e.g. "cerebro-app"), used as the default host
+   *  the browser container dials back to. */
+  private async resolveSelfName(docker: DockerApi): Promise<string | undefined> {
+    try {
+      const info = await docker.inspectContainerFull(hostname());
+      return info.Name?.replace(/^\//, '') || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** In-flight image build, shared so concurrent launches don't build twice. */

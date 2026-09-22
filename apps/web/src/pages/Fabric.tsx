@@ -204,6 +204,7 @@ export function Fabric() {
   const [showCli, setShowCli] = useState(false);
   const [showCa, setShowCa] = useState(false);
   const [showSigning, setShowSigning] = useState(false);
+  const [showRemoteBrowser, setShowRemoteBrowser] = useState(false);
   const [showRecordings, setShowRecordings] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
@@ -924,6 +925,11 @@ export function Fabric() {
               </Button>
             )}
             {canManage && (
+              <Button variant="outline" onClick={() => setShowRemoteBrowser(true)}>
+                <Globe className="h-4 w-4 mr-1" /> Remote Browser
+              </Button>
+            )}
+            {canManage && (
               <Button onClick={() => setAdding(true)}>
                 <Plus className="h-4 w-4 mr-1" /> Add machine
               </Button>
@@ -1052,6 +1058,7 @@ export function Fabric() {
       {showCli && <CliDialog onClose={() => setShowCli(false)} />}
       {showCa && <CaDialog canManage={canManage} onClose={() => setShowCa(false)} />}
       {showSigning && <UpdateSigningDialog canManage={canManage} onClose={() => setShowSigning(false)} />}
+      {showRemoteBrowser && <RemoteBrowserDialog canManage={canManage} onClose={() => setShowRemoteBrowser(false)} />}
       {showRecordings && <RecordingsDialog onClose={() => setShowRecordings(false)} />}
 
       {adding && (
@@ -2061,6 +2068,101 @@ function ApprovalsDialog({
               </Button>
             </div>
           ))}
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+interface RemoteBrowserCfg {
+  stored: { image?: string; geometry?: string; network?: string; callbackHost?: string };
+  effective: { image: string; geometry: string; network?: string; callbackHost?: string };
+  detected: { network?: string; callbackHost?: string };
+  env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
+}
+
+/** Remote Browser settings: operator overrides on top of auto-detect + env. */
+function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
+  const [cfg, setCfg] = useState<RemoteBrowserCfg | null>(null);
+  const [form, setForm] = useState<{ network: string; callbackHost: string; image: string; geometry: string }>({ network: '', callbackHost: '', image: '', geometry: '' });
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const apply = (c: RemoteBrowserCfg) => {
+    setCfg(c);
+    setForm({
+      network: c.stored.network ?? '',
+      callbackHost: c.stored.callbackHost ?? '',
+      image: c.stored.image ?? '',
+      geometry: c.stored.geometry ?? '',
+    });
+  };
+  useEffect(() => {
+    api.get<RemoteBrowserCfg>('/api/fabric/remote-browser/config').then(apply).catch((e) => setErr(e instanceof ApiError ? e.message : 'Failed to load config.'));
+  }, []);
+
+  const save = async () => {
+    setBusy(true); setErr(null); setSaved(false);
+    try {
+      const c = await api.post<RemoteBrowserCfg>('/api/fabric/remote-browser/config', form);
+      apply(c); setSaved(true);
+    } catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to save.'); }
+    finally { setBusy(false); }
+  };
+
+  // What a blank field falls through to (env, else auto-detected), shown as the placeholder.
+  const fallback = (key: 'network' | 'callbackHost' | 'image' | 'geometry'): string => {
+    const env = cfg?.env[key];
+    const det = key === 'network' || key === 'callbackHost' ? cfg?.detected[key] : undefined;
+    const def = key === 'image' ? 'cerebro-remote-browser:latest' : key === 'geometry' ? '1280x800' : undefined;
+    return env ? `${env} (from env)` : det ? `${det} (auto-detected)` : def ? `${def} (default)` : 'auto';
+  };
+
+  const Field = ({ label, k, help }: { label: string; k: 'network' | 'callbackHost' | 'image' | 'geometry'; help: string }) => (
+    <div className="space-y-1">
+      <Label className="text-xs">{label}</Label>
+      <Input
+        value={form[k]}
+        disabled={!canManage}
+        placeholder={fallback(k)}
+        onChange={(e) => { setForm((f) => ({ ...f, [k]: e.target.value })); setSaved(false); }}
+      />
+      <p className="text-[0.7rem] text-muted-foreground">{help}</p>
+    </div>
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title="Remote Browser settings"
+      description="Overrides for the ephemeral browser containers. Leave a field blank to use the env var, else the auto-detected value."
+      footer={
+        <div className="flex items-center gap-2">
+          {saved && <span className="text-xs text-emerald-400">Saved.</span>}
+          <Button variant="outline" onClick={onClose}>Close</Button>
+          {canManage && <Button onClick={save} disabled={busy || !cfg}>{busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Save</Button>}
+        </div>
+      }
+    >
+      {err && <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+      {!cfg ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            In effect now — network <span className="font-mono text-foreground">{cfg.effective.network ?? '—'}</span>,
+            callback <span className="font-mono text-foreground">{cfg.effective.callbackHost ?? '—'}</span>,
+            image <span className="font-mono text-foreground">{cfg.effective.image}</span>,
+            geometry <span className="font-mono text-foreground">{cfg.effective.geometry}</span>.
+          </div>
+          <Field label="Docker network" k="network" help="Network the browser container joins so it can reach Cerebro (and vice-versa). Blank = the app's own network." />
+          <Field label="Callback host" k="callbackHost" help="Hostname the browser dials back to reach Cerebro. Blank = the app's container name." />
+          <Field label="Image" k="image" help="Remote Browser image tag. Blank = cerebro-remote-browser:latest (auto-built if missing)." />
+          <Field label="Geometry" k="geometry" help="Browser resolution, e.g. 1280x800." />
+          <p className="text-[0.7rem] text-muted-foreground">Precedence: this form → environment variable → auto-detected → default. Set these only for a non-standard setup (e.g. a remote Docker endpoint).</p>
         </div>
       )}
     </Dialog>

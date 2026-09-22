@@ -23,6 +23,7 @@ import { FabricService } from './fabric.service';
 import { FabricSftpService } from './fabric-sftp.service';
 import { FabricCaService } from './fabric-ca.service';
 import { FabricUpdateSigningService } from './fabric-update-signing.service';
+import { RemoteBrowserService, type RemoteBrowserConfig } from './remote-browser.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { FabricApprovalService } from './fabric-approval.service';
 import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
@@ -360,6 +361,7 @@ export class FabricController {
     private readonly sftp: FabricSftpService,
     private readonly ca: FabricCaService,
     private readonly updateSigning: FabricUpdateSigningService,
+    private readonly remoteBrowser: RemoteBrowserService,
     private readonly enrollment: FabricEnrollmentService,
     private readonly approvals: FabricApprovalService,
   ) {}
@@ -874,6 +876,22 @@ export class FabricController {
   async uploadOfflineSignature(@Body() body: { sha256: string; signature: string }, @CurrentUser() user: SessionUser) {
     await this.updateSigning.storeOfflineSignature(body?.sha256 ?? '', body?.signature ?? '', user);
     return { ok: true };
+  }
+
+  // ── Remote Browser config (stored overrides + what's auto-detected) ─────────
+  @Get('remote-browser/config')
+  @SessionOnly()
+  @RequirePermissions('fabric:read')
+  remoteBrowserConfig() {
+    return this.remoteBrowser.getConfig();
+  }
+
+  @Post('remote-browser/config')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async setRemoteBrowserConfig(@Body() body: RemoteBrowserConfig, @CurrentUser() user: SessionUser) {
+    await this.remoteBrowser.setConfig(body ?? {}, user);
+    return this.remoteBrowser.getConfig();
   }
 
   @Public()
