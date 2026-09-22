@@ -128,8 +128,10 @@ COPY --from=cli-build /cli-dist ./cli-dist
 COPY docker/entrypoint.sh ./docker/entrypoint.sh
 RUN chmod +x ./docker/entrypoint.sh
 # Remote Browser build context — the app auto-builds this image on first use
-# (via the Docker socket), so no manual `docker build` step is needed.
+# (via the Docker socket), so no manual `docker build` step is needed. The env var
+# points the app straight at it (cwd is apps/server, not /app).
 COPY docker/remote-browser ./docker/remote-browser
+ENV REMOTE_BROWSER_BUILD_CONTEXT=/app/docker/remote-browser
 EXPOSE 3000
 # entrypoint runs prisma migrate deploy + seed, then starts the server
 ENTRYPOINT ["./docker/entrypoint.sh"]

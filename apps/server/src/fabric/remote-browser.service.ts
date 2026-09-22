@@ -378,11 +378,11 @@ export class RemoteBrowserService {
   private async ensureImage(docker: DockerApi, image: string): Promise<void> {
     if (await docker.imageExists(image)) return;
     if (!this.imageBuild) {
-      const context = process.env.REMOTE_BROWSER_BUILD_CONTEXT || join(process.cwd(), 'docker', 'remote-browser');
-      if (!existsSync(join(context, 'Dockerfile'))) {
+      const context = this.buildContextDir();
+      if (!context) {
         throw new BadRequestException(
-          `The Remote Browser image "${image}" is missing and no build context was found at ${context}. ` +
-            `Build it manually: docker build -t ${image} docker/remote-browser`,
+          `The Remote Browser image "${image}" is missing and its build context wasn't found in the app image. ` +
+            `Build it manually on the Docker host: docker build -t ${image} docker/remote-browser`,
         );
       }
       this.logger.log(`Remote Browser image "${image}" not found — building from ${context} (first use; may take a few minutes)…`);
@@ -394,6 +394,23 @@ export class RemoteBrowserService {
         });
     }
     await this.imageBuild;
+  }
+
+  /** Locate the bundled Remote Browser build context. The server's cwd is
+   *  apps/server, not the repo/app root, so we search known layouts rather than
+   *  assume one. Returns the first dir that actually contains a Dockerfile. */
+  private buildContextDir(): string | null {
+    const candidates = [
+      process.env.REMOTE_BROWSER_BUILD_CONTEXT,
+      '/app/docker/remote-browser', // Docker image layout (WORKDIR /app)
+      join(process.cwd(), 'docker', 'remote-browser'),
+      join(process.cwd(), '..', '..', 'docker', 'remote-browser'), // from apps/server
+      join(__dirname, '..', '..', '..', '..', 'docker', 'remote-browser'), // from dist/fabric
+    ].filter((p): p is string => !!p);
+    for (const c of candidates) {
+      if (existsSync(join(c, 'Dockerfile'))) return c;
+    }
+    return null;
   }
 
   /** The interface IP to bind the SOCKS bridge to: the address `callbackHost`
