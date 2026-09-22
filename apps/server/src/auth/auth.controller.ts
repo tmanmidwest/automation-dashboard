@@ -3,6 +3,7 @@ import type { Request } from 'express';
 import type { FirstRunStatus, SessionUser } from '@cerebro/shared';
 import { AuthService } from './auth.service';
 import { TotpService } from './totp.service';
+import { LoginThrottleService } from './login-throttle.service';
 import { AuditService } from '../logging/audit.service';
 import { Public, CurrentUser } from './decorators';
 import { LoginDto, LoginTotpDto, SetupDto } from './dto';
@@ -18,6 +19,7 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly totp: TotpService,
     private readonly audit: AuditService,
+    private readonly throttle: LoginThrottleService,
   ) {}
 
   @Public()
@@ -37,8 +39,10 @@ export class AuthController {
   @Public()
   @Post('login')
   async login(@Body() dto: LoginDto, @Req() req: Request): Promise<{ ok: true } | { mfaRequired: true }> {
+    await this.throttle.assertAllowed(req.ip, dto.email);
     const userId = await this.auth.validateLocal(dto.email, dto.password);
     if (!userId) {
+      await this.throttle.recordFailure(req.ip, dto.email);
       await this.audit.record({
         actorEmail: dto.email,
         action: 'auth.login_failed',
@@ -49,12 +53,15 @@ export class AuthController {
 
     // Password is correct. If this account has TOTP enabled, don't establish a full
     // session yet — hold a half-authenticated challenge and demand the second factor.
+    // (Do NOT clear the throttle here: the account stays under brute-force watch
+    // through the second factor; only a completed sign-in resets it.)
     const { enabled } = await this.totp.getStatus(userId);
     if (enabled) {
       await this.beginMfaChallenge_(req, userId);
       return { mfaRequired: true };
     }
 
+    await this.throttle.recordSuccess(dto.email);
     await this.login_(req, userId);
     await this.audit.record({ actorId: userId, actorEmail: dto.email, action: 'auth.login' });
     return { ok: true };
@@ -76,15 +83,22 @@ export class AuthController {
       throw new UnauthorizedException('Too many incorrect codes. Start over.');
     }
 
+    // Rate-limit the second factor per account (across challenges), so re-minting a
+    // fresh challenge can't be used to keep guessing the 6-digit code.
+    const acct = `uid:${pending.userId}`;
+    await this.throttle.assertAllowed(req.ip, acct);
+
     const ok = await this.totp.verifyForLogin(pending.userId, dto.code);
     if (!ok) {
       pending.attempts++;
       await this.saveSession_(req);
+      await this.throttle.recordFailure(req.ip, acct);
       throw new UnauthorizedException('That code is incorrect.');
     }
 
     // Second factor satisfied — promote to a full session (regenerate drops pendingMfa).
     const userId = pending.userId;
+    await this.throttle.recordSuccess(acct);
     await this.login_(req, userId);
     await this.audit.record({ actorId: userId, action: 'auth.login', meta: { mfa: true } });
     return { ok: true };

@@ -5,11 +5,12 @@ import { AuthController } from './auth.controller';
 import { TokenAuthService } from './token-auth.service';
 import { OAuthTokenService } from './oauth-token.service';
 import { TotpService } from './totp.service';
+import { LoginThrottleService } from './login-throttle.service';
 
 @Module({
   imports: [SettingsModule], // OAuthTokenService reads/writes the JWT secret in the vault
   controllers: [AuthController],
-  providers: [AuthService, TokenAuthService, OAuthTokenService, TotpService],
+  providers: [AuthService, TokenAuthService, OAuthTokenService, TotpService, LoginThrottleService],
   exports: [AuthService, TokenAuthService, OAuthTokenService, TotpService],
 })
 export class AuthModule {}

@@ -7,6 +7,7 @@ import session from 'express-session';
 import RedisStore from 'connect-redis';
 import { Redis } from 'ioredis';
 import { AppModule } from './app.module';
+import { securityHeaders } from './common/security-headers';
 import { ConsoleService } from './connectors/console.service';
 import { attachConsoleRelay } from './connectors/console-relay';
 import { AgentRegistryService } from './fabric/agent-registry.service';
@@ -32,6 +33,11 @@ async function bootstrap() {
   app.set('trust proxy', 1);
 
   const isHttps = (process.env.APP_URL ?? '').startsWith('https://');
+
+  // Baseline security headers (clickjacking, MIME-sniffing, CSP, HSTS) on every
+  // response, including the served SPA.
+  app.use(securityHeaders({ https: isHttps }));
+
   const redis = new Redis(process.env.REDIS_URL ?? 'redis://redis:6379');
 
   app.use(

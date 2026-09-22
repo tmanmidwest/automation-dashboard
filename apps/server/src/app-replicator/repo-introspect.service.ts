@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
+import { assertSafeGitUrl, gitSafeEnv } from '../common/git-safety';
 import type { GitCredential, IntrospectRepoInput, IntrospectResult } from '@cerebro/shared';
 import { introspectCompose, generateComposeWrapper, exposedPortOf } from './compose-introspect';
 
@@ -22,8 +23,7 @@ export class RepoIntrospectService {
   constructor(private readonly secrets: SecretsService) {}
 
   async introspect(input: IntrospectRepoInput): Promise<IntrospectResult> {
-    const gitUrl = input.gitUrl?.trim();
-    if (!gitUrl) throw new BadRequestException('A git repository URL is required.');
+    const gitUrl = assertSafeGitUrl(input.gitUrl);
     const ref = input.gitRef?.trim() || '';
 
     const cred = await this.resolveCred(input.gitCredKey);
@@ -32,11 +32,11 @@ export class RepoIntrospectService {
     const repoDir = join(workdir, 'repo');
 
     try {
-      const env = {
+      const env = gitSafeEnv({
         ...process.env,
         GIT_TERMINAL_PROMPT: '0', // never block on an interactive auth prompt
         GIT_ASKPASS: '/bin/true',
-      };
+      });
       const helper = cred ? ['-c', `credential.helper=store --file=${credFile}`] : [];
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
@@ -47,10 +47,10 @@ export class RepoIntrospectService {
       // Shallow clone at the ref. A ref that's a commit SHA can't be --branch'd,
       // so fall back to a default clone + checkout.
       try {
-        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), gitUrl, repoDir], workdir, env);
+        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', gitUrl, repoDir], workdir, env);
       } catch (err) {
         if (!ref) throw err;
-        await this.run('git', [...helper, 'clone', gitUrl, repoDir], workdir, env);
+        await this.run('git', [...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
         await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
       }
 
@@ -101,15 +101,14 @@ export class RepoIntrospectService {
    * docs/app-replicator-ecs-target.md.
    */
   async fetchComposeText(input: IntrospectRepoInput): Promise<{ text: string; composePath: string; usesGeneratedCompose: boolean }> {
-    const gitUrl = input.gitUrl?.trim();
-    if (!gitUrl) throw new BadRequestException('A git repository URL is required.');
+    const gitUrl = assertSafeGitUrl(input.gitUrl);
     const ref = input.gitRef?.trim() || '';
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-ecs-compose-'));
     const credFile = join(workdir, '.gitcred');
     const repoDir = join(workdir, 'repo');
     try {
-      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' };
+      const env = gitSafeEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' });
       const helper = cred ? ['-c', `credential.helper=store --file=${credFile}`] : [];
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
@@ -117,10 +116,10 @@ export class RepoIntrospectService {
         await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
       }
       try {
-        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), gitUrl, repoDir], workdir, env);
+        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', gitUrl, repoDir], workdir, env);
       } catch (err) {
         if (!ref) throw err;
-        await this.run('git', [...helper, 'clone', gitUrl, repoDir], workdir, env);
+        await this.run('git', [...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
         await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
       }
       const explicit = input.gitPath?.trim().replace(/^\/+/, '');
@@ -156,14 +155,14 @@ export class RepoIntrospectService {
    * any failure (unreachable/auth) — the caller treats that as "no update".
    */
   async remoteCommit(input: { gitUrl: string; gitRef?: string | null; gitCredKey?: string | null }): Promise<string | null> {
-    const gitUrl = input.gitUrl?.trim();
-    if (!gitUrl) return null;
+    let gitUrl: string;
+    try { gitUrl = assertSafeGitUrl(input.gitUrl); } catch { return null; }
     const ref = input.gitRef?.trim() || 'HEAD';
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-lsremote-'));
     const credFile = join(workdir, '.gitcred');
     try {
-      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' };
+      const env = gitSafeEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' });
       const helper = cred ? ['-c', `credential.helper=store --file=${credFile}`] : [];
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { runSsh } from '../connectors/docker/docker-ssh';
+import { assertSafeGitUrl, GIT_SAFE_SH_PREFIX } from '../common/git-safety';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import type { GitCredential } from '@cerebro/shared';
 
@@ -66,6 +67,7 @@ export class EcsBuilderService {
     const composeFile = `${dir}/${relCompose}`;
     const contextDir = composeFile.replace(/\/[^/]*$/, '') || dir;
     const ref = input.source.gitRef?.trim();
+    assertSafeGitUrl(input.source.gitUrl);
 
     let cred: GitCredential | null = null;
     if (input.source.credKey) {
@@ -87,8 +89,8 @@ export class EcsBuilderService {
       const isRepo = (await runSsh(ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
       onPhase(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(ssh, `git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
-        : await runSsh(ssh, `rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} '${sq(input.source.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
+        ? await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(input.source.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) throw new Error(`Git ${isRepo ? 'update' : 'clone'} failed: ${redact(tail(g.stderr || g.stdout, 2000))}`);
 
       onPhase('Logging in to ECR…');

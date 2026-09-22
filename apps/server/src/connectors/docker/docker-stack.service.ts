@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SecretsService } from '../../secrets/secrets.service';
 import { runSsh, type SshConfig } from './docker-ssh';
+import { assertSafeGitUrl, GIT_SAFE_SH_PREFIX } from '../../common/git-safety';
 import type { GitCredential } from '@cerebro/shared';
 
 export interface StackDeployTarget {
@@ -192,7 +193,7 @@ export class DockerStackService {
   ): Promise<StackRunResult> {
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
-    if (!src.gitUrl?.trim()) return { ok: false, message: 'A git repository URL is required.' };
+    try { assertSafeGitUrl(src.gitUrl); } catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Invalid git repository URL.' }; }
 
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const dir = `${base}/repo`;
@@ -225,8 +226,8 @@ export class DockerStackService {
       const isRepo = (await runSsh(target.ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
       onProgress?.(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(target.ssh, `git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
-        : await runSsh(target.ssh, `rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} '${sq(src.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
+        ? await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(src.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) {
         const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
         await this.record(instanceId, project, 'error', detail);
@@ -303,7 +304,7 @@ export class DockerStackService {
         const dir = `${trimSlash(target.stacksDir)}/${project}/repo`;
         const ref = stored.gitRef?.trim();
         const local = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD 2>/dev/null || true`)).stdout.trim();
-        const remote = (await runSsh(target.ssh, `git -C '${dir}' ls-remote origin ${ref ? `'${ref}'` : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
+        const remote = (await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ls-remote origin ${ref ? `'${sq(ref)}'` : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
         if (local && remote && local !== remote) { lines.push(`⚠ Repo has moved: deployed ${local.slice(0, 7)}, ${ref || 'HEAD'} is now ${remote.slice(0, 7)}. Redeploy to update.`); drift = true; }
         else if (local) lines.push(`✓ On the latest commit for ${ref || 'the default branch'} (${local.slice(0, 7)}).`);
         else lines.push('⚠ No git checkout found on the host.');
