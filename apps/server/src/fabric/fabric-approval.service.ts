@@ -86,6 +86,11 @@ export class FabricApprovalService {
         p.state = 'expired';
         p.result = { error: 'Approval request expired.' };
       }
+      // Free the record (and its mint closure, which captured the requester's
+      // plaintext credentials) shortly after — an un-actioned request must not leak
+      // them for the process lifetime. Keep it briefly so the requester's poll can
+      // still read "expired".
+      this.scheduleCleanup(p);
     }, APPROVAL_TTL_MS);
     p.timer.unref?.();
     this.pending.set(id, p);

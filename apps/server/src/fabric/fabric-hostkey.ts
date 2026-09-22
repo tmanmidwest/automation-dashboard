@@ -42,15 +42,26 @@ export async function checkHostKey(
   if (adhoc && (!actor.host || !actor.port)) return { ok: true }; // nothing to key on
   const pinKey = adhoc ? adhocPinKey(actor.agentId, actor.host as string, actor.port as number) : null;
 
+  // Read the pinned key. A read FAILURE must not look like "never pinned" — that
+  // would take the first-use branch below and re-pin whatever key is presented,
+  // silently defeating the MITM check exactly when it matters. Fail closed instead.
   let stored: string | null;
-  if (adhoc) {
-    const row = await prisma.setting.findUnique({ where: { key: pinKey as string } }).catch(() => null);
-    stored = typeof row?.value === 'string' ? row.value : null;
-  } else {
-    const target = await prisma.agentTarget
-      .findUnique({ where: { id: actor.targetId }, select: { hostKey: true } })
-      .catch(() => null);
-    stored = target?.hostKey ?? null;
+  try {
+    if (adhoc) {
+      const row = await prisma.setting.findUnique({ where: { key: pinKey as string } });
+      stored = typeof row?.value === 'string' ? row.value : null;
+    } else {
+      const target = await prisma.agentTarget.findUnique({
+        where: { id: actor.targetId },
+        select: { hostKey: true },
+      });
+      stored = target?.hostKey ?? null;
+    }
+  } catch {
+    return {
+      ok: false,
+      reason: 'Could not verify the host key (storage error) — refusing to connect. Try again in a moment.',
+    };
   }
 
   if (!stored) {

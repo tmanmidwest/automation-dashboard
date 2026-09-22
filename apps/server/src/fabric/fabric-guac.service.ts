@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'crypto';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
@@ -107,10 +107,22 @@ export class FabricGuacService {
     // container's IP on guacd's subnet, else first non-internal IP, else hostname.
     const callbackHost =
       process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
-    // Bind the ephemeral forward to the exact interface guacd dials (when that's an
-    // IP), not 0.0.0.0 — so a co-tenant on another network this container is on can't
-    // race the listener. Falls back to all-interfaces only when we can't resolve an IP.
-    const bindHost = isIP(callbackHost) ? callbackHost : '0.0.0.0';
+    // Bind the ephemeral forward to the exact interface guacd dials, never 0.0.0.0 —
+    // so a co-tenant on another network this container is on can't race the listener.
+    // When callbackHost is a name, resolve it to the IP we'll bind. If it can't be
+    // resolved, guacd (resolving the same name) couldn't reach us either, so refuse
+    // the session rather than opening an all-interfaces listener.
+    let bindHost = callbackHost;
+    if (!isIP(callbackHost)) {
+      try {
+        const { address } = await lookup(callbackHost);
+        bindHost = address;
+      } catch {
+        throw new BadRequestException(
+          `Could not resolve the guacd callback host "${callbackHost}" to an IP. Set FABRIC_GUACD_CALLBACK_HOST to the Cerebro container's address on guacd's network.`,
+        );
+      }
+    }
 
     const forward = await openTunnelForward(this.registry, {
       agentId: desc.agentId,

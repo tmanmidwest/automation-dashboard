@@ -85,6 +85,11 @@ class RouteDto {
   @IsString()
   @MaxLength(2048)
   webUrl?: string;
+
+  /** Remote Browser only: accept invalid/self-signed TLS certs for this route. */
+  @IsOptional()
+  @IsBoolean()
+  webIgnoreCertErrors?: boolean;
 }
 
 class EnrollDto {

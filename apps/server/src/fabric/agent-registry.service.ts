@@ -143,8 +143,20 @@ export class AgentRegistryService {
       this.pendingOffline.delete(agentId);
       this.logger.log(`Agent ${agentId} reconnected within grace — offline suppressed.`);
     }
-    // Replace any stale connection for the same agent.
-    this.live.get(agentId)?.ws.close(4000, 'superseded');
+    // Replace any stale connection for the same agent — dispose it FULLY (offline
+    // timer + mux), not just close the socket. Once we overwrite this.live below, the
+    // old socket's handleClose no-ops (entry.ws !== ws), so a concurrent duplicate
+    // connection would otherwise leak the old mux's streams and its offline timer.
+    const stale = this.live.get(agentId);
+    if (stale) {
+      clearTimeout(stale.offlineTimer);
+      stale.mux.dispose();
+      try {
+        stale.ws.close(4000, 'superseded');
+      } catch {
+        /* noop */
+      }
+    }
 
     const entry: LiveAgent = {
       ws,
