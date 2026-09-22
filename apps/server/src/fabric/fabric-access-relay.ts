@@ -55,6 +55,22 @@ export function attachFabricAccessRelay(server: Server, deps: FabricAccessDeps):
       if (!targetId) return reject(400, 'Bad Request');
       const target = await deps.prisma.agentTarget.findUnique({ where: { id: targetId } }).catch(() => null);
       if (!target) return reject(404, 'Not Found');
+      // The raw CLI tunnel has no per-session approval step, so it must not become a
+      // way around a four-eyes agent's requireApproval gate. Refuse those here — the
+      // approval-gated flows (browser SSH/RDP/VNC/Remote Browser) remain available.
+      const agent = await deps.prisma.agent
+        .findUnique({ where: { id: target.agentId }, select: { requireApproval: true } })
+        .catch(() => null);
+      if (agent?.requireApproval) {
+        await deps.audit.record({
+          actorId: principal.user.id,
+          actorEmail: principal.user.email,
+          action: 'fabric.session.denied',
+          target: target.agentId,
+          meta: { targetId: target.id, kind: target.kind, via: 'cli', reason: 'approval-required' },
+        });
+        return reject(403, 'Approval Required — use the browser');
+      }
       if (!deps.registry.isOnline(target.agentId)) return reject(409, 'Agent Offline');
 
       wss.handleUpgrade(req, socket, head, (client) => {

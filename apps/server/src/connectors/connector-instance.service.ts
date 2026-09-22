@@ -1,5 +1,7 @@
-import { BadGatewayException, BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { hasPermission } from '@cerebro/shared';
+import type { SessionUser } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
@@ -28,6 +30,28 @@ export class ConnectorInstanceService implements OnModuleInit {
 
   private secretKey(instanceId: string, field: string) {
     return `connector:${instanceId}:${field}`;
+  }
+
+  /**
+   * Guard a `{$secretRef}` write. A reference lets a connector field read a shared
+   * vault secret at session time; without this, a `connectors:write` user could
+   * point a field at ANY vault key (another connector's credential, `oauth:jwtSecret`,
+   * Fabric creds, SMTP password) and have it transmitted to a base URL they control —
+   * silently bypassing the audited, step-up-gated `secrets:read` reveal flow. So a
+   * reference is allowed only when the actor can read secrets AND the target is a
+   * user-managed ("manual") vault secret, never an internal system key.
+   */
+  private async assertRefAllowed(key: string, actor?: SessionUser): Promise<void> {
+    if (!actor || !hasPermission(actor.permissions, 'secrets:read')) {
+      throw new ForbiddenException('Referencing a shared vault secret requires the "secrets:read" permission.');
+    }
+    const allowed = await this.settings.manualSecretKeys();
+    if (!allowed.has(key)) {
+      throw new BadRequestException(
+        'A connector field can only reference a vault secret you created in Settings → Secrets. ' +
+          'Internal secrets (other connectors, OAuth/SSO, Fabric, mail) cannot be referenced.',
+      );
+    }
   }
 
   /** Read the field → vault-key reference map stored in an instance's config. */
@@ -67,7 +91,7 @@ export class ConnectorInstanceService implements OnModuleInit {
     return this.refsOf(instance);
   }
 
-  async create(connectorId: string, name: string, values: Record<string, unknown>): Promise<ConnectorInstance> {
+  async create(connectorId: string, name: string, values: Record<string, unknown>, actor?: SessionUser): Promise<ConnectorInstance> {
     if (!name?.trim()) throw new BadRequestException('A name is required.');
     const secretKeys = this.secretFields(connectorId);
     const config: Record<string, unknown> = {};
@@ -75,8 +99,10 @@ export class ConnectorInstanceService implements OnModuleInit {
     const secretRefs: Record<string, string> = {};
     for (const [k, v] of Object.entries(values)) {
       if (secretKeys.includes(k)) {
-        if (isSecretRef(v)) secretRefs[k] = v.$secretRef;
-        else if (v != null && `${v}` !== '') secrets[k] = String(v);
+        if (isSecretRef(v)) {
+          await this.assertRefAllowed(v.$secretRef, actor);
+          secretRefs[k] = v.$secretRef;
+        } else if (v != null && `${v}` !== '') secrets[k] = String(v);
       } else {
         config[k] = v;
       }
@@ -94,6 +120,7 @@ export class ConnectorInstanceService implements OnModuleInit {
   async update(
     id: string,
     updates: { name?: string; enabled?: boolean; values?: Record<string, unknown>; refreshIntervalSec?: number },
+    actor?: SessionUser,
   ): Promise<ConnectorInstance> {
     const instance = await this.get(id);
     const secretKeys = this.secretFields(instance.connectorId);
@@ -112,6 +139,7 @@ export class ConnectorInstanceService implements OnModuleInit {
         if (secretKeys.includes(k)) {
           if (isSecretRef(v)) {
             // Reference a shared vault secret; drop any connector-owned copy.
+            await this.assertRefAllowed(v.$secretRef, actor);
             refs[k] = v.$secretRef;
             await this.settings.deleteSecret(this.secretKey(id, k));
           } else if (v != null && `${v}` !== '') {
@@ -143,9 +171,18 @@ export class ConnectorInstanceService implements OnModuleInit {
     const config: Record<string, unknown> = { ...(instance.config as object) };
     const refs = this.refsOf(instance);
     delete config.secretRefs; // internal bookkeeping — never expose to the connector
+    // Resolution-time guard: only resolve references to user-managed ("manual")
+    // vault secrets, so a reference planted before write-time validation (or one to
+    // a since-recategorized key) can never leak an internal system secret.
+    const allowedRefs = Object.keys(refs).length ? await this.settings.manualSecretKeys() : null;
     for (const field of this.secretFields(instance.connectorId)) {
+      const ref = refs[field];
+      if (ref && !allowedRefs?.has(ref)) {
+        void this.logging.warn('connectors', `[${instance.name}] ignoring secret reference for "${field}" → non-shareable key "${ref}".`);
+        continue;
+      }
       // A referenced field reveals a shared vault secret; otherwise the connector's own.
-      const key = refs[field] ? refs[field] : this.secretKey(instance.id, field);
+      const key = ref ? ref : this.secretKey(instance.id, field);
       const secret = await this.settings.getSecret(key);
       if (secret != null) config[field] = secret;
     }

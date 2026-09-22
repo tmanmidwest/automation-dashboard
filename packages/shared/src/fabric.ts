@@ -223,6 +223,10 @@ export interface FabricHelloAckFrame {
   heartbeatMs: number;
   /** Latest agent version the broker serves; an older agent self-updates. */
   latestAgentVersion?: string;
+  /** base64 raw ed25519 public key for agent-update signing. The agent pins this on
+   *  first receipt and verifies every self-update binary against it (fail-closed).
+   *  Absent when signing isn't configured — the agent then keeps its legacy path. */
+  updateSigningPublicKey?: string;
   /** Waypoint only: the curated allow-list of LAN targets this gateway may dial.
    * Sent on connect so a waypoint (which self-discovers nothing) knows its reach.
    * Endpoints ignore this — their allow-list is self-built. */
@@ -378,7 +382,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.5.1';
+export const FABRIC_AGENT_VERSION = '0.5.2';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

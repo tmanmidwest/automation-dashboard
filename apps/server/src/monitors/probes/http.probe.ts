@@ -3,6 +3,7 @@ import * as https from 'https';
 import type { TLSSocket } from 'tls';
 import type { Probe, ProbeConfig, ProbeResult, ProbeCert } from './probe';
 import { bool, errMessage, num, str } from './probe';
+import { guardedLookup, hostBlockedReason } from './ssrf-guard';
 
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 const MAX_BODY = 1024 * 1024; // only read up to 1 MB when keyword-matching
@@ -125,6 +126,10 @@ interface FetchResult {
 function fetchOnce(url: string, o: FetchOpts): Promise<FetchResult> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    // Literal-IP targets bypass the custom lookup, so check them directly here
+    // (runs for the initial URL and every redirect hop, since each hop re-enters).
+    const blocked = hostBlockedReason(u.hostname);
+    if (blocked) return reject(Object.assign(new Error(blocked), { code: 'EBLOCKED' }));
     const lib = u.protocol === 'https:' ? https : http;
     const req = lib.request(
       u,
@@ -133,6 +138,7 @@ function fetchOnce(url: string, o: FetchOpts): Promise<FetchResult> {
         headers: { 'user-agent': 'Cerebro-Monitor/1.0', accept: '*/*', ...o.headers },
         rejectUnauthorized: !o.ignoreTls,
         timeout: o.timeoutMs,
+        lookup: guardedLookup, // block DNS results in loopback/link-local ranges (+ rebinding)
       },
       (res) => {
         let cert: ProbeCert | undefined;

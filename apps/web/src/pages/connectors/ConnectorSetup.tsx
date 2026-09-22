@@ -42,8 +42,10 @@ export function ConnectorSetup() {
   useEffect(() => {
     async function load() {
       // Best-effort — only users with secrets:read get the list; others just don't see the option.
+      // Only user-managed ("manual") secrets are referenceable — internal keys (other
+      // connectors, OAuth/SSO, Fabric, mail) are rejected server-side, so don't offer them.
       const vault = await api.get<SecretSummary[]>('/api/secrets').catch(() => [] as SecretSummary[]);
-      setVaultSecrets(vault);
+      setVaultSecrets(vault.filter((s) => s.category === 'manual'));
       if (editing) {
         const inst = await api.get<ConnectorInstanceConfig>(`/api/connectors/instances/${id}`);
         const m = await api.get<ConnectorManifest>(`/api/connectors/available/${inst.connectorId}`);

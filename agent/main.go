@@ -12,6 +12,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -33,7 +36,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.5.1"
+const agentVersion = "0.5.2"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
@@ -555,6 +558,7 @@ type ctrlFrame struct {
 	Host               string       `json:"host"`
 	Port               int          `json:"port"`
 	LatestAgentVersion string       `json:"latestAgentVersion"`
+	UpdateSigningKey   string       `json:"updateSigningPublicKey"`
 	HeartbeatMs        int64        `json:"heartbeatMs"`
 	CaPublicKey        string       `json:"caPublicKey"`
 	Certificate        string       `json:"certificate"`
@@ -589,6 +593,12 @@ func (s *session) onControl(msg []byte) {
 		// Waypoint only: the broker replaced the curated allow-list + egress ranges.
 		s.setAllow(c.Allow, c.EgressCidrs)
 	case "hello-ack":
+		// Pin the update-signing key on first receipt (TOFU); thereafter every
+		// self-update must verify against it. A pinned key is never overwritten
+		// automatically — a rotation requires re-enrollment (see the runbook).
+		if c.UpdateSigningKey != "" {
+			pinUpdateKey(s.cfg, c.UpdateSigningKey)
+		}
 		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)
 			go trySelfUpdate(s.cfg)
@@ -969,6 +979,90 @@ func downloadAgentBinary(cfg config, dest string) error {
 	if n < 1024 {
 		return fmt.Errorf("downloaded binary is implausibly small (%d bytes)", n)
 	}
+	if err := f.Sync(); err != nil { // flush to disk before we hash/verify it
+		return err
+	}
+	// Integrity: if this agent has pinned an update-signing key, the new binary
+	// must carry a valid ed25519 signature over its sha256 — otherwise refuse to
+	// swap (a compromised broker/MITM can't push an unsigned or forged binary).
+	if err := verifyUpdateSignature(cfg, dest); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	return nil
+}
+
+// updateKeyPath is where the agent pins the broker's update-signing public key.
+func updateKeyPath(cfg config) string { return filepath.Join(cfg.StateDir, "update-key.pub") }
+
+// pinUpdateKey writes the signing public key on first receipt (TOFU) and never
+// overwrites an existing pin — a changed key would be a tamper signal, and a
+// legitimate rotation is handled by re-enrollment.
+func pinUpdateKey(cfg config, b64 string) {
+	path := updateKeyPath(cfg)
+	if _, err := os.Stat(path); err == nil {
+		return // already pinned
+	}
+	if raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64)); err != nil || len(raw) != ed25519.PublicKeySize {
+		log.Printf("ignoring malformed update-signing key from broker")
+		return
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(b64)+"\n"), 0o600); err != nil {
+		log.Printf("could not pin update-signing key: %v", err)
+		return
+	}
+	log.Printf("pinned agent-update signing key (%s)", path)
+}
+
+// loadPinnedUpdateKey returns the pinned ed25519 public key, or nil if none.
+func loadPinnedUpdateKey(cfg config) ed25519.PublicKey {
+	b, err := os.ReadFile(updateKeyPath(cfg))
+	if err != nil {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		log.Printf("pinned update key is malformed — refusing updates until re-pinned")
+		return ed25519.PublicKey{} // non-nil but wrong length → verify fails closed
+	}
+	return ed25519.PublicKey(raw)
+}
+
+// verifyUpdateSignature refuses an update binary that isn't validly signed for a
+// pinned key. When no key is pinned (signing not set up for this agent), it's a
+// no-op — the legacy path — so signing can be rolled out without touching agents.
+func verifyUpdateSignature(cfg config, binPath string) error {
+	pub := loadPinnedUpdateKey(cfg)
+	if pub == nil {
+		return nil // no key pinned yet — legacy behavior
+	}
+	sigURL := strings.TrimRight(cfg.URL, "/") + "/api/fabric/agent/binary.sig?os=" + runtime.GOOS + "&arch=" + runtime.GOARCH
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(sigURL)
+	if err != nil {
+		return fmt.Errorf("update signature unavailable (refusing unsigned update): %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("update signature unavailable (%s) — refusing unsigned update", resp.Status)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return err
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("malformed update signature")
+	}
+	data, err := os.ReadFile(binPath)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	if !ed25519.Verify(pub, sum[:], sig) {
+		return fmt.Errorf("update signature does not verify against the pinned key — refusing update")
+	}
+	log.Print("agent-update signature verified against pinned key")
 	return nil
 }
 

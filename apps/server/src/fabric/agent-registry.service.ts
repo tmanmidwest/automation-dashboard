@@ -15,6 +15,7 @@ import { parseCredential, safeEqualHex, sha256 } from './fabric-credentials';
 import { StreamMux, type TunnelStream } from './stream-mux';
 import { fabricConfig } from './fabric-config';
 import { FabricCaService } from './fabric-ca.service';
+import { FabricUpdateSigningService } from './fabric-update-signing.service';
 
 interface LiveAgent {
   ws: WebSocket;
@@ -45,6 +46,7 @@ export class AgentRegistryService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly ca: FabricCaService,
+    private readonly updateSigning: FabricUpdateSigningService,
   ) {}
 
   /**
@@ -300,11 +302,15 @@ export class AgentRegistryService {
     // A Waypoint learns its reachable set from the broker: send the curated
     // allow-list with the ack so it can serve sessions immediately on connect.
     const allow = before.mode === 'waypoint' ? await this.computeAllow(agentId) : undefined;
+    // The agent pins this on first receipt and verifies every self-update against
+    // it; null when update signing isn't set up (agent then keeps its legacy path).
+    const updateSigningPublicKey = (await this.updateSigning.publicKeyForAck().catch(() => null)) ?? undefined;
     this.send(agentId, {
       t: 'hello-ack',
       agentId,
       heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
+      ...(updateSigningPublicKey ? { updateSigningPublicKey } : {}),
       ...(allow ? { allow, egressCidrs: before.egressCidrs ?? [] } : {}),
     });
 

@@ -203,6 +203,7 @@ export function Fabric() {
   const [adding, setAdding] = useState(false);
   const [showCli, setShowCli] = useState(false);
   const [showCa, setShowCa] = useState(false);
+  const [showSigning, setShowSigning] = useState(false);
   const [showRecordings, setShowRecordings] = useState(false);
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
@@ -917,6 +918,11 @@ export function Fabric() {
               </Button>
             )}
             {canManage && (
+              <Button variant="outline" onClick={() => setShowSigning(true)}>
+                <KeyRound className="h-4 w-4 mr-1" /> Update signing
+              </Button>
+            )}
+            {canManage && (
               <Button onClick={() => setAdding(true)}>
                 <Plus className="h-4 w-4 mr-1" /> Add machine
               </Button>
@@ -1044,6 +1050,7 @@ export function Fabric() {
 
       {showCli && <CliDialog onClose={() => setShowCli(false)} />}
       {showCa && <CaDialog canManage={canManage} onClose={() => setShowCa(false)} />}
+      {showSigning && <UpdateSigningDialog canManage={canManage} onClose={() => setShowSigning(false)} />}
       {showRecordings && <RecordingsDialog onClose={() => setShowRecordings(false)} />}
 
       {adding && (
@@ -2053,6 +2060,85 @@ function ApprovalsDialog({
               </Button>
             </div>
           ))}
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+interface SigningStatus {
+  enabled: boolean;
+  mode?: 'vault' | 'offline';
+  publicKey?: string;
+  fingerprint?: string;
+  createdAt?: string;
+}
+
+/** Agent-update signing: generate the key, show its fingerprint, explain rollout. */
+function UpdateSigningDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
+  const [status, setStatus] = useState<SigningStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = () => api.get<SigningStatus>('/api/fabric/update-signing').then(setStatus).catch((e) => setErr(e instanceof ApiError ? e.message : 'Failed to load signing status.'));
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const enable = async (regenerate = false) => {
+    if (regenerate && !confirm('Rotate the signing key? Agents that already pinned the old key will REFUSE updates until they are re-enrolled (uninstall + reinstall). Only do this if the key was exposed.')) return;
+    setBusy(true); setErr(null);
+    try { setStatus(await api.post<SigningStatus>('/api/fabric/update-signing/enable', { regenerate })); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Failed to generate the signing key.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      title="Agent update signing"
+      description="Sign agent auto-updates so an agent only installs a binary signed by a key it pinned at enrollment."
+      footer={<Button onClick={onClose}>Done</Button>}
+    >
+      {err && <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>}
+      {!status ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+      ) : !status.enabled ? (
+        <div className="space-y-3 text-sm">
+          <p className="text-muted-foreground">
+            Agent auto-update is currently <span className="text-foreground">unsigned</span> — an agent installs whatever
+            binary the server serves. Turning this on generates an ed25519 signing key (sealed in the vault). Each agent
+            <span className="italic"> pins</span> the public key the next time it checks in, and from then on refuses any
+            update whose signature doesn't verify — so a tampered or MITM'd binary can't be pushed to your fleet.
+          </p>
+          {canManage ? (
+            <Button onClick={() => enable(false)} disabled={busy}>
+              {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <KeyRound className="h-4 w-4 mr-1" />} Generate signing key
+            </Button>
+          ) : <p className="text-muted-foreground">You need the manage permission to enable this.</p>}
+        </div>
+      ) : (
+        <div className="space-y-4 text-sm">
+          <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-emerald-300/90 flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4" /> Update signing is <span className="font-medium">on</span> ({status.mode === 'offline' ? 'offline key' : 'vault key'}).
+          </div>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Fingerprint</dt><dd className="font-mono break-all">{status.fingerprint}</dd>
+            <dt className="text-muted-foreground">Created</dt><dd>{status.createdAt ? new Date(status.createdAt).toLocaleString() : '—'}</dd>
+          </dl>
+          <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-muted-foreground space-y-1.5">
+            <p><span className="text-foreground font-medium">Rollout:</span> each agent pins this key the next time it checks in. New updates are then verified automatically — no per-box action needed.</p>
+            <p><span className="text-foreground font-medium">Backup:</span> the private key lives in the vault, so it's included in your passphrase-encrypted <span className="italic">system backup</span> (Settings → Backup). Keep that backup safe — it's how you restore signing after a rebuild.</p>
+            <p><span className="text-foreground font-medium">If the key is lost</span> (no backup): generate a new one, then re-enroll each agent (uninstall + reinstall) so it pins the new key.</p>
+          </div>
+          {canManage && (
+            <div className="pt-1">
+              <Button variant="outline" onClick={() => enable(true)} disabled={busy} className="text-amber-300 border-amber-500/40 hover:bg-amber-500/10">
+                {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />} Rotate key
+              </Button>
+              <p className="text-xs text-muted-foreground mt-1">Rotating invalidates the pinned key on every agent — they'll need re-enrollment. Only rotate if the key was exposed.</p>
+            </div>
+          )}
         </div>
       )}
     </Dialog>

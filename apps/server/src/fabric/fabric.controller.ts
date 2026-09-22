@@ -22,6 +22,7 @@ import type { SessionUser } from '@cerebro/shared';
 import { FabricService } from './fabric.service';
 import { FabricSftpService } from './fabric-sftp.service';
 import { FabricCaService } from './fabric-ca.service';
+import { FabricUpdateSigningService } from './fabric-update-signing.service';
 import { FabricEnrollmentService } from './fabric-enrollment.service';
 import { FabricApprovalService } from './fabric-approval.service';
 import { installPs1, installSh, uninstallPs1, uninstallSh } from './agent-installers';
@@ -358,6 +359,7 @@ export class FabricController {
     private readonly fabric: FabricService,
     private readonly sftp: FabricSftpService,
     private readonly ca: FabricCaService,
+    private readonly updateSigning: FabricUpdateSigningService,
     private readonly enrollment: FabricEnrollmentService,
     private readonly approvals: FabricApprovalService,
   ) {}
@@ -822,6 +824,56 @@ export class FabricController {
     res.setHeader('Content-Type', artifact.contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${artifact.download}"`);
     res.sendFile(path);
+  }
+
+  /** Detached ed25519 signature (base64) over the agent binary's sha256, verified
+   *  by the agent against its pinned key before a self-update. 404 when signing is
+   *  off (or, offline mode, no signature uploaded for this exact binary). */
+  @Public()
+  @Get('agent/binary.sig')
+  async getAgentBinarySig(@Query('os') os: string, @Query('arch') arch: string, @Res() res: Response) {
+    const key = `${(os || '').toLowerCase()}/${(arch || '').toLowerCase()}`;
+    const artifact = AGENT_ARTIFACTS[key];
+    if (!artifact) throw new BadRequestException('Unknown os/arch.');
+    const path = join(AGENT_DIST_DIR, artifact.file);
+    if (!existsSync(path)) throw new NotFoundException('Agent binary not available.');
+    const sig = await this.updateSigning.signatureForBinary(path);
+    if (!sig) throw new NotFoundException('No signature available.');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(sig);
+  }
+
+  // ── Agent-update signing (H3) ──────────────────────────────────────────────
+  @Get('update-signing')
+  @SessionOnly()
+  @RequirePermissions('fabric:read')
+  updateSigningStatus() {
+    return this.updateSigning.status();
+  }
+
+  /** Generate the signing key (vault mode). */
+  @Post('update-signing/enable')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  enableUpdateSigning(@Body() body: { regenerate?: boolean }, @CurrentUser() user: SessionUser) {
+    return this.updateSigning.generate(user, !!body?.regenerate);
+  }
+
+  /** Offline mode: import an externally-generated public key (base64 raw ed25519). */
+  @Post('update-signing/import')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  importUpdateSigningKey(@Body() body: { publicKey: string }, @CurrentUser() user: SessionUser) {
+    return this.updateSigning.importPublicKey(body?.publicKey ?? '', user);
+  }
+
+  /** Offline mode: upload a signature (base64) for a binary's sha256 (hex). */
+  @Post('update-signing/offline-signature')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  async uploadOfflineSignature(@Body() body: { sha256: string; signature: string }, @CurrentUser() user: SessionUser) {
+    await this.updateSigning.storeOfflineSignature(body?.sha256 ?? '', body?.signature ?? '', user);
+    return { ok: true };
   }
 
   @Public()

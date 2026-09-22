@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, writeFile, readFile, rm } from 'fs/promises';
@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 import type { SessionUser } from '@cerebro/shared';
-import { FABRIC_HOST_ALIAS_PREFIX } from '@cerebro/shared';
+import { FABRIC_HOST_ALIAS_PREFIX, hasPermission } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { AuditService } from '../logging/audit.service';
@@ -46,6 +46,13 @@ export interface CaStatus {
 
 /** Host-cert principal must be `cerebro.<slug>` (matches the CLI's HostKeyAlias). */
 const HOST_PRINCIPAL_RE = /^cerebro\.[a-z0-9-]{1,64}$/;
+
+/** Privileged login names: a CA cert for one of these grants administrative access
+ *  to any box trusting the Cerebro CA, so issuing it needs fabric:manage (not just
+ *  the broad fabric:connect). Matched case-insensitively. */
+const PRIVILEGED_PRINCIPALS = new Set([
+  'root', 'admin', 'administrator', 'sudo', 'wheel', 'toor', 'superuser', 'sysadmin',
+]);
 
 /** A username principal on a target box: POSIX-ish, no injection into ssh-keygen args. */
 const PRINCIPAL_RE = /^[a-z_][a-z0-9_-]{0,31}$/i;
@@ -169,6 +176,11 @@ export class FabricCaService {
     const pub = (publicKey || '').trim();
     if (!PUBKEY_RE.test(pub)) throw new BadRequestException('That does not look like an OpenSSH public key.');
     if (!PRINCIPAL_RE.test(principal)) throw new BadRequestException('Invalid principal (login username).');
+    if (PRIVILEGED_PRINCIPALS.has(principal.toLowerCase()) && !hasPermission(user.permissions, 'fabric:manage')) {
+      throw new ForbiddenException(
+        `Signing a certificate for the privileged principal "${principal}" requires the fabric:manage permission.`,
+      );
+    }
 
     const ttlMinutes = fabricConfig.caTtlMinutes;
     const serial = BigInt(`0x${randomBytes(6).toString('hex')}`).toString();

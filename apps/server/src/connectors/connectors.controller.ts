@@ -133,7 +133,7 @@ export class ConnectorsController {
   @Post('instances')
   @RequirePermissions('connectors:write')
   async create(@Body() dto: CreateInstanceDto, @CurrentUser() user: SessionUser) {
-    const inst = await this.instances.create(dto.connectorId, dto.name, dto.values);
+    const inst = await this.instances.create(dto.connectorId, dto.name, dto.values, user);
     await this.audit.record({
       actorId: user.id, actorEmail: user.email,
       action: 'connectors.instance_created', target: inst.name,
@@ -145,7 +145,7 @@ export class ConnectorsController {
   @Put('instances/:id')
   @RequirePermissions('connectors:write')
   async update(@Param('id') id: string, @Body() dto: UpdateInstanceDto, @CurrentUser() user: SessionUser) {
-    const inst = await this.instances.update(id, { name: dto.name, values: dto.values, refreshIntervalSec: dto.refreshIntervalSec });
+    const inst = await this.instances.update(id, { name: dto.name, values: dto.values, refreshIntervalSec: dto.refreshIntervalSec }, user);
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'connectors.instance_updated', target: inst.name });
     return this.summary(inst);
   }

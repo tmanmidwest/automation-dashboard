@@ -11,6 +11,7 @@ import { FabricSessionService } from './fabric-session.service';
 import { FabricSftpService } from './fabric-sftp.service';
 import { FabricGuacService } from './fabric-guac.service';
 import { FabricCaService } from './fabric-ca.service';
+import { FabricUpdateSigningService } from './fabric-update-signing.service';
 import { RemoteBrowserService } from './remote-browser.service';
 import { FabricApprovalService } from './fabric-approval.service';
 
@@ -23,7 +24,7 @@ import { FabricApprovalService } from './fabric-approval.service';
 @Module({
   imports: [PrismaModule, LoggingModule, NotificationsModule, SettingsModule],
   controllers: [FabricController],
-  providers: [FabricService, FabricSftpService, FabricCaService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricApprovalService],
+  providers: [FabricService, FabricSftpService, FabricCaService, FabricUpdateSigningService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricApprovalService],
   exports: [AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService],
 })
 export class FabricModule {}

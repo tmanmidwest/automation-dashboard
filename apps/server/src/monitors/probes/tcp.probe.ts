@@ -1,6 +1,7 @@
 import * as net from 'net';
 import type { Probe, ProbeConfig, ProbeResult } from './probe';
 import { errMessage, num, str } from './probe';
+import { guardedLookup, hostBlockedReason } from './ssrf-guard';
 
 /** TCP connect check — "is something listening on host:port". */
 export class TcpProbe implements Probe {
@@ -31,7 +32,9 @@ export class TcpProbe implements Probe {
     const port = num(config, 'port', 0);
     const started = Date.now();
     return new Promise((resolve) => {
-      const sock = net.connect({ host, port });
+      const blocked = hostBlockedReason(host); // literal-IP guard (hostnames handled by lookup)
+      if (blocked) return resolve({ ok: false, message: blocked });
+      const sock = net.connect({ host, port, lookup: guardedLookup });
       const done = (r: ProbeResult) => {
         sock.destroy();
         resolve(r);
