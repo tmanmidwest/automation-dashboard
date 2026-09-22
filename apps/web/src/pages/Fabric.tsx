@@ -775,6 +775,7 @@ export function Fabric() {
                 <CircleDot className="h-3.5 w-3.5" /> {st.label}
                 {a.hostname && <span className="text-muted-foreground">· {a.hostname}</span>}
                 {a.localIp && <span className="text-muted-foreground font-mono">· {a.localIp}</span>}
+                {a.agentVersion && <span className="text-muted-foreground">· v{a.agentVersion}</span>}
                 {a.lastSeenAt && <span className="text-muted-foreground">· {online ? relTime(a.lastSeenAt) : `seen ${relTime(a.lastSeenAt)}`}</span>}
               </div>
             </div>
