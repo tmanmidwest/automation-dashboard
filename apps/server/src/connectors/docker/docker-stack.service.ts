@@ -1,7 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SecretsService } from '../../secrets/secrets.service';
 import { runSsh, type SshConfig } from './docker-ssh';
+import { dockerHostVerifier, dockerHostKeyPinKey } from './docker-hostkey';
 import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../../common/git-safety';
 import type { GitCredential } from '@cerebro/shared';
 
@@ -56,10 +57,34 @@ const UP_TIMEOUT_MS = 600_000; // 10 min
  */
 @Injectable()
 export class DockerStackService {
+  private readonly logger = new Logger(DockerStackService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly secrets: SecretsService,
   ) {}
+
+  /** Attach TOFU host-key pinning to a deploy target's SSH config, so every runSsh
+   *  on it verifies (and pins on first use) the host key. */
+  private withHostPin(target: StackDeployTarget): StackDeployTarget {
+    if (target.ssh.verifyHostKey) return target; // already pinned
+    const { host, port } = target.ssh;
+    const verify = dockerHostVerifier(this.prisma, host, port, {
+      pinned: (m) => this.logger.log(m),
+      mismatch: (m) => this.logger.warn(m),
+    });
+    return { ...target, ssh: { ...target.ssh, verifyHostKey: verify } };
+  }
+
+  /** Forget a host's pinned SSH key (operator action) so the next connect re-learns
+   *  it — used after a host is legitimately rebuilt/re-imaged. Returns whether a pin
+   *  existed. */
+  async clearHostKeyPin(host: string, port: number): Promise<boolean> {
+    const res = await this.prisma.setting
+      .deleteMany({ where: { key: dockerHostKeyPinKey(host, port) } })
+      .catch(() => ({ count: 0 }));
+    return res.count > 0;
+  }
 
   list(instanceId: string) {
     return this.prisma.dockerStack.findMany({
@@ -105,6 +130,7 @@ export class DockerStackService {
 
   /** Remove the on-host directory Cerebro wrote for a stack (compose/.env, or the cloned git repo). */
   async purgeDir(target: StackDeployTarget, name: string): Promise<void> {
+    target = this.withHostPin(target);
     const project = projectName(name);
     if (!project) return;
     const dir = `${trimSlash(target.stacksDir)}/${project}`;
@@ -126,6 +152,7 @@ export class DockerStackService {
     env = '',
     opts: StackDeployOpts = {},
   ): Promise<StackRunResult> {
+    target = this.withHostPin(target);
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
     if (!compose.trim()) return { ok: false, message: 'The compose file is empty.' };
@@ -191,6 +218,7 @@ export class DockerStackService {
     opts: StackDeployOpts = {},
     onProgress?: (phase: string) => void,
   ): Promise<StackRunResult> {
+    target = this.withHostPin(target);
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
     let ref: string | undefined;
@@ -290,6 +318,7 @@ export class DockerStackService {
    * changes state.
    */
   async checkDrift(target: StackDeployTarget, instanceId: string, name: string): Promise<StackRunResult> {
+    target = this.withHostPin(target);
     const project = projectName(name);
     const stored = await this.get(instanceId, name);
     if (!stored) return { ok: false, message: "This stack isn't managed by Cerebro — no stored compose to compare against." };
@@ -360,6 +389,7 @@ export class DockerStackService {
 
   /** `docker compose down` for a stored stack. */
   async down(target: StackDeployTarget, instanceId: string, name: string): Promise<StackRunResult> {
+    target = this.withHostPin(target);
     const project = projectName(name);
     const file = await this.composeFileFor(target, instanceId, name);
     try {

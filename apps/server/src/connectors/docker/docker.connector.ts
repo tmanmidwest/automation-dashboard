@@ -197,6 +197,19 @@ const OPERATIONS: ConnectorOperation[] = [
     fields: [],
   },
   {
+    id: 'reset-ssh-hostkey',
+    label: 'Reset SSH host key pin',
+    description:
+      "Forget this host's pinned SSH host key so the next deploy re-learns it. Use only after you legitimately rebuilt or re-imaged the host — otherwise a host-key change may indicate a man-in-the-middle.",
+    scope: 'create',
+    kind: HOST_KIND,
+    icon: 'key',
+    submitLabel: 'Reset pin',
+    fields: [
+      { key: 'confirm', label: 'Yes, forget the pinned SSH host key for this host', type: 'boolean' as const, required: true },
+    ],
+  },
+  {
     id: 'stop-stack',
     label: 'Stop (compose down)',
     description: 'Run "docker compose down" — stops and removes the stack\'s containers (named volumes are kept).',
@@ -766,6 +779,21 @@ export class DockerConnector implements Connector {
         if (!instanceId || !_resourceId) return { ok: false, message: 'Missing stack reference.' };
         onProgress(`Checking "${_resourceId}" for drift…`);
         return await this.stacks.checkDrift(this.sshTargetFrom(ctx), instanceId, _resourceId);
+      }
+
+      if (operationId === 'reset-ssh-hostkey') {
+        if (values.confirm !== true) return { ok: false, message: 'Please confirm before resetting the pinned host key.' };
+        const host = str(ctx.config.sshHost);
+        const port = Number(ctx.config.sshPort) || 22;
+        if (!host) return { ok: false, message: 'This connector has no SSH host configured.' };
+        const had = await this.stacks.clearHostKeyPin(host, port);
+        ctx.log('info', `Reset the pinned SSH host key for ${host}:${port} (${had ? 'was pinned' : 'no pin existed'}).`);
+        return {
+          ok: true,
+          message: had
+            ? `Forgot the pinned SSH host key for ${host}:${port}. The next deploy will re-pin it.`
+            : `No pinned SSH host key existed for ${host}:${port}.`,
+        };
       }
 
       if (operationId === 'recreate-container') {

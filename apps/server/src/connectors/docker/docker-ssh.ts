@@ -1,4 +1,5 @@
 import { Client } from 'ssh2';
+import { createHash } from 'crypto';
 
 export interface SshConfig {
   host: string;
@@ -8,6 +9,9 @@ export interface SshConfig {
   privateKey?: string;
   passphrase?: string;
   password?: string;
+  /** TOFU host-key check: given the server key's sha256 (base64), resolve true to
+   *  accept, false to refuse. Omit to skip verification (legacy behavior). */
+  verifyHostKey?: (fingerprint: string) => boolean | Promise<boolean>;
 }
 
 export interface SshResult {
@@ -66,7 +70,14 @@ export function runSsh(cfg: SshConfig, command: string, stdin?: string, timeoutM
         // prompts that way rather than the plain 'password' method.
         tryKeyboard: !!cfg.password,
         readyTimeout: 20_000,
-        // Note: host keys are not pinned (homelab default). Trust the network path.
+        // TOFU host-key pinning when a verifier is supplied: refuse a changed key
+        // (MITM / rebuilt host) instead of trusting the network path.
+        hostVerifier: cfg.verifyHostKey
+          ? (key: Buffer, cb: (ok: boolean) => void) => {
+              const fp = createHash('sha256').update(key).digest('base64');
+              Promise.resolve(cfg.verifyHostKey!(fp)).then((ok) => cb(ok)).catch(() => cb(false));
+            }
+          : undefined,
       });
     } catch (err) {
       clearTimeout(timer);
@@ -77,6 +88,9 @@ export function runSsh(cfg: SshConfig, command: string, stdin?: string, timeoutM
 
 function friendly(err: Error & { level?: string; code?: string }): string {
   const msg = err.message || String(err);
+  if (/host.*verif|verification failed/i.test(msg)) {
+    return 'SSH host key mismatch — refusing to connect (possible MITM, or the host was rebuilt). If the host legitimately changed, clear its pinned key and reconnect.';
+  }
   if (err.level === 'client-authentication' || /authentication/i.test(msg)) {
     return 'SSH authentication failed — check the username and private key.';
   }

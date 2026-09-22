@@ -1,7 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { SecretsService } from '../secrets/secrets.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { runSsh } from '../connectors/docker/docker-ssh';
+import { dockerHostVerifier } from '../connectors/docker/docker-hostkey';
 import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../common/git-safety';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import type { GitCredential } from '@cerebro/shared';
@@ -47,9 +49,12 @@ export interface BuildAndPushInput {
  */
 @Injectable()
 export class EcsBuilderService {
+  private readonly logger = new Logger(EcsBuilderService.name);
+
   constructor(
     private readonly instances: ConnectorInstanceService,
     private readonly secrets: SecretsService,
+    private readonly prisma: PrismaService,
   ) {}
 
   private async builderTarget(instanceId: string): Promise<DockerTarget> {
@@ -64,7 +69,14 @@ export class EcsBuilderService {
 
   async buildAndPush(input: BuildAndPushInput, onPhase: (phase: string) => void): Promise<{ commit: string | null }> {
     const target = await this.builderTarget(input.builderInstanceId);
-    const ssh = target.ssh;
+    // TOFU-pin the builder host's SSH key (learn on first connect, refuse a change).
+    const ssh = {
+      ...target.ssh,
+      verifyHostKey: dockerHostVerifier(this.prisma, target.ssh.host, target.ssh.port, {
+        pinned: (m) => this.logger.log(m),
+        mismatch: (m) => this.logger.warn(m),
+      }),
+    };
     const base = `${trimSlash(target.stacksDir)}/.replicator-ecs/${input.project}`;
     const dir = `${base}/repo`;
     const credFile = `${base}/.gitcred`;
