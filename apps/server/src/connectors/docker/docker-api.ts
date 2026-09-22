@@ -1,6 +1,13 @@
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { readFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+const execFileP = promisify(execFile);
 
 /**
  * Connection config for a Docker Engine API endpoint. The transport is inferred
@@ -230,6 +237,94 @@ export class DockerApi {
   }
   inspectImage(id: string): Promise<{ RepoDigests?: string[]; Id?: string }> {
     return this.get<{ RepoDigests?: string[]; Id?: string }>(`/images/${encodeURIComponent(id)}/json`);
+  }
+  /** True if a local image with this ref (name:tag or id) exists. */
+  async imageExists(ref: string): Promise<boolean> {
+    try {
+      await this.inspectImage(ref);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Build an image from a local directory context and tag it. Used to auto-create
+   * the ephemeral Remote Browser image on first use, so no manual `docker build`
+   * step is needed. The context is tar'd with the system `tar` (Debian base) and
+   * POSTed to the daemon's /build endpoint; build output is streamed and any
+   * {error} line rejects.
+   */
+  async buildImage(contextDir: string, tag: string): Promise<void> {
+    const tar = join(tmpdir(), `cerebro-build-${Date.now()}-${Math.random().toString(36).slice(2)}.tar`);
+    try {
+      await execFileP('tar', ['-C', contextDir, '-cf', tar, '.']);
+      const body = await readFile(tar);
+      await this.postBuild(
+        `/build?t=${encodeURIComponent(tag)}&dockerfile=Dockerfile&rm=1&forcerm=1&pull=0`,
+        body,
+      );
+    } finally {
+      await rm(tar, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** POST a tar build context and stream the NDJSON build output, rejecting on error. */
+  private postBuild(path: string, body: Buffer): Promise<void> {
+    const t = this.transport;
+    const options: http.RequestOptions = {
+      method: 'POST',
+      path,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/x-tar', 'Content-Length': body.length.toString(), Host: 'docker' },
+      timeout: 15 * 60_000, // image builds (chromium install) can take minutes
+    };
+    let mod: typeof http | typeof https = http;
+    if (t.kind === 'unix') {
+      options.socketPath = t.socketPath;
+    } else {
+      options.hostname = t.hostname;
+      options.port = t.port;
+      if (t.kind === 'https') {
+        mod = https;
+        options.agent = new https.Agent({
+          ca: this.auth.tlsCaCert || undefined,
+          cert: this.auth.tlsClientCert || undefined,
+          key: this.auth.tlsClientKey || undefined,
+          rejectUnauthorized: !this.auth.insecureSkipVerify,
+        });
+      }
+    }
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const status = res.statusCode ?? 0;
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (status < 200 || status >= 300) {
+            return reject(new DockerApiError(httpErrorMessage(status, 'POST', text), status));
+          }
+          // Scan the streamed NDJSON for an error line.
+          for (const line of text.split('\n')) {
+            const s = line.trim();
+            if (!s) continue;
+            try {
+              const o = JSON.parse(s) as { error?: string; errorDetail?: { message?: string } };
+              if (o.error || o.errorDetail?.message) {
+                return reject(new DockerApiError(`Image build failed: ${o.errorDetail?.message || o.error}`, status));
+              }
+            } catch {
+              /* non-JSON progress line */
+            }
+          }
+          resolve();
+        });
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('Docker build timed out.')));
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      req.write(body);
+      req.end();
+    });
   }
   async listVolumes(): Promise<DockerVolume[]> {
     const res = await this.get<{ Volumes?: DockerVolume[] }>('/volumes');

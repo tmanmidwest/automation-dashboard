@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { connect as netConnect, isIP } from 'net';
 import { lookup } from 'dns/promises';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 import type { WebSocket } from 'ws';
 import type { FabricSessionTicket, SessionUser } from '@cerebro/shared';
@@ -101,6 +103,9 @@ export class RemoteBrowserService {
 
     let containerId: string;
     try {
+      // Auto-build the image the first time it's needed, so no manual `docker build`
+      // step is required after install/update.
+      await this.ensureImage(docker, image);
       containerId = await docker.createContainer(name, {
         Image: image,
         Env: [
@@ -254,6 +259,36 @@ export class RemoteBrowserService {
       await new Promise((r) => setTimeout(r, 300));
     }
     return null;
+  }
+
+  /** In-flight image build, shared so concurrent launches don't build twice. */
+  private imageBuild?: Promise<void>;
+
+  /**
+   * Ensure the Remote Browser image exists, building it from the bundled context
+   * (docker/remote-browser, shipped in the app image) on first use — so there's no
+   * manual `docker build` step after an install/update. Concurrent launches share
+   * the single in-flight build; once built, the image is cached by the daemon.
+   */
+  private async ensureImage(docker: DockerApi, image: string): Promise<void> {
+    if (await docker.imageExists(image)) return;
+    if (!this.imageBuild) {
+      const context = process.env.REMOTE_BROWSER_BUILD_CONTEXT || join(process.cwd(), 'docker', 'remote-browser');
+      if (!existsSync(join(context, 'Dockerfile'))) {
+        throw new BadRequestException(
+          `The Remote Browser image "${image}" is missing and no build context was found at ${context}. ` +
+            `Build it manually: docker build -t ${image} docker/remote-browser`,
+        );
+      }
+      this.logger.log(`Remote Browser image "${image}" not found — building from ${context} (first use; may take a few minutes)…`);
+      this.imageBuild = docker
+        .buildImage(context, image)
+        .then(() => void this.logger.log(`Remote Browser image "${image}" built.`))
+        .finally(() => {
+          this.imageBuild = undefined;
+        });
+    }
+    await this.imageBuild;
   }
 
   /** The interface IP to bind the SOCKS bridge to: the address `callbackHost`
