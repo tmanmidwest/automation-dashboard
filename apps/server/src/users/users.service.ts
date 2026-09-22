@@ -65,11 +65,39 @@ export class UsersService {
     return { id: user.id, invited: !password };
   }
 
+  /** Ids of roles that can manage users — i.e. the administrator roles. */
+  private async adminRoleIds(): Promise<string[]> {
+    const roles = await this.prisma.role.findMany({ where: { permissions: { has: 'users:write' } }, select: { id: true } });
+    return roles.map((r) => r.id);
+  }
+
+  /**
+   * Refuse an operation that would leave the instance with **zero** active
+   * administrators (demoting/disabling/deleting the last admin) — otherwise nobody
+   * could manage users or roles and there'd be no recovery path. `newRoleId` is the
+   * role the user is moving to (setRole); omit it for disable/delete.
+   */
+  private async assertKeepsAnAdmin(userId: string, newRoleId?: string): Promise<void> {
+    const adminRoleIds = await this.adminRoleIds();
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { roleId: true, disabled: true } });
+    if (!user) return;
+    const isActiveAdmin = !user.disabled && adminRoleIds.includes(user.roleId);
+    if (!isActiveAdmin) return; // not an active admin → this op can't reduce the count
+    if (newRoleId && adminRoleIds.includes(newRoleId)) return; // moving admin→admin
+    const others = await this.prisma.user.count({
+      where: { id: { not: userId }, disabled: false, roleId: { in: adminRoleIds } },
+    });
+    if (others === 0) {
+      throw new BadRequestException('This is the last active administrator — grant the admin role to another active user first.');
+    }
+  }
+
   async setRole(userId: string, roleSlug: string) {
     const role = await this.prisma.role.findUnique({ where: { slug: roleSlug } });
     if (!role) throw new BadRequestException('Unknown role.');
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
+    await this.assertKeepsAnAdmin(userId, role.id);
     await this.prisma.user.update({ where: { id: userId }, data: { roleId: role.id } });
     return { ok: true };
   }
@@ -77,6 +105,7 @@ export class UsersService {
   async setDisabled(userId: string, disabled: boolean) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
+    if (disabled) await this.assertKeepsAnAdmin(userId);
     await this.prisma.user.update({ where: { id: userId }, data: { disabled } });
     return { ok: true };
   }
@@ -100,6 +129,7 @@ export class UsersService {
     if (userId === actingUserId) throw new BadRequestException("You can't delete your own account.");
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
+    await this.assertKeepsAnAdmin(userId);
     await this.prisma.user.delete({ where: { id: userId } });
     return { ok: true };
   }

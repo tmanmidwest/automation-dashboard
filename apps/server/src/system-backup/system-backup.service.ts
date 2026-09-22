@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
 import { join, relative, dirname } from 'path';
 import { promisify } from 'util';
 import { PrismaService } from '../prisma/prisma.service';
@@ -143,8 +144,12 @@ export class SystemBackupService {
     }
 
     // Load the dump in a single transaction (it drops & recreates via --clean --if-exists).
-    const tmp = join('/tmp', `cerebro-restore-${Date.now()}.sql`);
-    await fs.writeFile(tmp, bundle.database, 'utf8');
+    // The decrypted dump contains every secret's ciphertext, so write it to a
+    // private 0700 temp dir (unpredictable name) rather than a world-readable,
+    // guessable /tmp path.
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), 'cerebro-restore-'));
+    const tmp = join(tmpDir, 'restore.sql');
+    await fs.writeFile(tmp, bundle.database, { encoding: 'utf8', mode: 0o600 });
     try {
       await execFileAsync('psql', [this.dbUrl(), '-v', 'ON_ERROR_STOP=1', '--single-transaction', '-f', tmp], { maxBuffer: MAX_BUFFER });
     } catch (err) {
@@ -152,7 +157,7 @@ export class SystemBackupService {
       void this.logging.error('system-backup', `Restore failed loading the database: ${msg}`);
       throw new BadRequestException(`Restore failed while loading the database: ${msg.slice(0, 400)}`);
     } finally {
-      await fs.rm(tmp, { force: true }).catch(() => {});
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
 
     // Re-key the vault + TOTP to THIS machine's key if the backup used a different one.

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { connect as netConnect } from 'net';
+import { connect as netConnect, isIP } from 'net';
+import { lookup } from 'dns/promises';
 import { randomUUID } from 'crypto';
 import type { WebSocket } from 'ws';
 import type { FabricSessionTicket, SessionUser } from '@cerebro/shared';
@@ -89,7 +90,12 @@ export class RemoteBrowserService {
     }
 
     const token = randomUUID();
-    const proxy = await openRemoteBrowserProxy(this.registry, { agentId: params.agentId, logger: this.logger });
+    // Bind the SOCKS bridge to the exact interface the browser reaches us on (the
+    // IP `callbackHost` resolves to) instead of all interfaces, so it isn't a
+    // credential-free pivot open to any peer on another network this container is on.
+    // Fail-open to 0.0.0.0 if we can't resolve it (keeps the feature working).
+    const bindHost = await this.resolveBindHost(callbackHost);
+    const proxy = await openRemoteBrowserProxy(this.registry, { agentId: params.agentId, bindHost, logger: this.logger });
     const name = `cerebro-remote-browser-${token.slice(0, 8)}`;
     const docker = this.dockerApi();
 
@@ -248,5 +254,17 @@ export class RemoteBrowserService {
       await new Promise((r) => setTimeout(r, 300));
     }
     return null;
+  }
+
+  /** The interface IP to bind the SOCKS bridge to: the address `callbackHost`
+   *  resolves to (what the browser dials), or 0.0.0.0 if it can't be resolved. */
+  private async resolveBindHost(callbackHost: string): Promise<string> {
+    if (isIP(callbackHost)) return callbackHost;
+    try {
+      const { address } = await lookup(callbackHost);
+      return address || '0.0.0.0';
+    } catch {
+      return '0.0.0.0';
+    }
   }
 }

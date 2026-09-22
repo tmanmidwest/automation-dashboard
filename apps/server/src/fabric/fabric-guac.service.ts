@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'crypto';
 import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { hostname, networkInterfaces } from 'os';
 import { FABRIC_RDP_SECURITY, type FabricSessionTicket } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -102,11 +103,20 @@ export class FabricGuacService {
       meta: { targetId: desc.targetId, kind: 'rdp', port: desc.port, username: desc.username, recorded: !!recordName },
     });
 
+    // The address guacd dials to reach our forward: explicit override, else this
+    // container's IP on guacd's subnet, else first non-internal IP, else hostname.
+    const callbackHost =
+      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
+    // Bind the ephemeral forward to the exact interface guacd dials (when that's an
+    // IP), not 0.0.0.0 — so a co-tenant on another network this container is on can't
+    // race the listener. Falls back to all-interfaces only when we can't resolve an IP.
+    const bindHost = isIP(callbackHost) ? callbackHost : '0.0.0.0';
+
     const forward = await openTunnelForward(this.registry, {
       agentId: desc.agentId,
       host: desc.host,
       port: desc.port,
-      bindHost: '0.0.0.0',
+      bindHost,
       // A little slack so guacd has time to dial after the browser opens the WS.
       idleTimeoutMs: 45_000,
       logger: this.logger,
@@ -125,11 +135,6 @@ export class FabricGuacService {
         });
       },
     });
-
-    // The address guacd dials to reach our forward: explicit override, else this
-    // container's IP on guacd's subnet, else first non-internal IP, else hostname.
-    const callbackHost =
-      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
     this.logging.info(
       'fabric',
       `RDP forward on ${callbackHost}:${forward.port} -> ${desc.host}:${desc.port} (agent ${desc.agentId})`,

@@ -300,6 +300,15 @@ export class FabricService implements OnModuleInit {
     const ref = input.secretRef || (input.useSaved ? target.secretRef : undefined);
     let creds: VncCredential | undefined;
     if (ref) {
+      // VNC auth runs client-side (noVNC), so the password is returned to the
+      // viewer. A SAVED/vault credential must therefore not become a way for a
+      // connect-only user to read a secret they couldn't otherwise reveal — gate it
+      // on fabric:manage (the same permission that could reveal/save it).
+      if (!user.permissions.includes('fabric:manage')) {
+        throw new ForbiddenException(
+          'Using a saved VNC credential requires fabric:manage (VNC authenticates in your browser). Enter the password to connect, or ask an admin.',
+        );
+      }
       creds = (await this.revealCredential(ref, 'vnc')) as VncCredential;
     } else if (input.password) {
       creds = { username: input.username?.trim() || undefined, password: input.password };

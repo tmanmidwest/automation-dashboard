@@ -2,6 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
 /**
+ * Rough guard against a human-memorable key. A 32-byte random key encoded as
+ * base64/hex is ~43/64 chars with high character diversity; a memorable password
+ * is short with few distinct characters. Flag "short, or long but low-variety".
+ */
+function looksLowEntropy(raw: string): boolean {
+  const distinct = new Set(raw).size;
+  if (raw.length < 24) return true; // shorter than a 16-byte base64 value
+  return distinct < 16; // long but repetitive/low-variety
+}
+
+/**
  * AES-256-GCM encryption for the secrets vault.
  *
  * The key is derived from APP_ENCRYPTION_KEY (via SHA-256 → 32 bytes) so any
@@ -20,6 +31,16 @@ export class CryptoService {
     if (!raw || raw.length < 16) {
       throw new Error(
         'APP_ENCRYPTION_KEY is missing or too short. Generate one with: openssl rand -base64 32',
+      );
+    }
+    // The key is stretched only by a single SHA-256, so its security rests entirely
+    // on its entropy: a high-entropy key (openssl rand -base64 32) is safe, but a
+    // short/memorable one would be brute-forceable offline if the DB ever leaked.
+    // We can't hard-raise the minimum (it would lock existing installs out of their
+    // own vault), so warn loudly instead.
+    if (looksLowEntropy(raw)) {
+      this.logger.warn(
+        'APP_ENCRYPTION_KEY looks low-entropy. If the database is ever exposed, a weak key can be brute-forced offline to decrypt the vault. Rotate to a strong key — `openssl rand -base64 32` — via a backup/restore (which re-keys the vault). See docs/secrets-vault.md.',
       );
     }
     // Derive a stable 32-byte key regardless of the input length.
