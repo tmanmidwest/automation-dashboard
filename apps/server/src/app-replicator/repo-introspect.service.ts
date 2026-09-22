@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
-import { assertSafeGitUrl, gitSafeEnv } from '../common/git-safety';
+import { assertSafeGitUrl, assertSafeGitRef, gitSafeEnv } from '../common/git-safety';
 import type { GitCredential, IntrospectRepoInput, IntrospectResult } from '@cerebro/shared';
 import { introspectCompose, generateComposeWrapper, exposedPortOf } from './compose-introspect';
 
@@ -24,7 +24,7 @@ export class RepoIntrospectService {
 
   async introspect(input: IntrospectRepoInput): Promise<IntrospectResult> {
     const gitUrl = assertSafeGitUrl(input.gitUrl);
-    const ref = input.gitRef?.trim() || '';
+    const ref = assertSafeGitRef(input.gitRef);
 
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-replicator-'));
@@ -102,7 +102,7 @@ export class RepoIntrospectService {
    */
   async fetchComposeText(input: IntrospectRepoInput): Promise<{ text: string; composePath: string; usesGeneratedCompose: boolean }> {
     const gitUrl = assertSafeGitUrl(input.gitUrl);
-    const ref = input.gitRef?.trim() || '';
+    const ref = assertSafeGitRef(input.gitRef);
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-ecs-compose-'));
     const credFile = join(workdir, '.gitcred');
@@ -156,8 +156,8 @@ export class RepoIntrospectService {
    */
   async remoteCommit(input: { gitUrl: string; gitRef?: string | null; gitCredKey?: string | null }): Promise<string | null> {
     let gitUrl: string;
-    try { gitUrl = assertSafeGitUrl(input.gitUrl); } catch { return null; }
-    const ref = input.gitRef?.trim() || 'HEAD';
+    let ref: string;
+    try { gitUrl = assertSafeGitUrl(input.gitUrl); ref = assertSafeGitRef(input.gitRef) || 'HEAD'; } catch { return null; }
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-lsremote-'));
     const credFile = join(workdir, '.gitcred');

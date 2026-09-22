@@ -286,9 +286,11 @@ export function Fabric() {
     setWebBusy((s) => ({ ...s, [t.id]: true }));
     const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
     try {
-      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
+      const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
       const ticket = await awaitSession(resp);
-      launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win);
+      launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win, {
+        vncCreds: ticket.password ? { password: ticket.password } : undefined,
+      });
     } catch (e) {
       win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Browser.');

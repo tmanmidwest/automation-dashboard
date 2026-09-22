@@ -2,7 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { runSsh } from '../connectors/docker/docker-ssh';
-import { assertSafeGitUrl, GIT_SAFE_SH_PREFIX } from '../common/git-safety';
+import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../common/git-safety';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import type { GitCredential } from '@cerebro/shared';
 
@@ -72,7 +72,7 @@ export class EcsBuilderService {
     // Build context = the directory holding the compose file (repo root for a top-level compose).
     const composeFile = `${dir}/${relCompose}`;
     const contextDir = composeFile.replace(/\/[^/]*$/, '') || dir;
-    const ref = input.source.gitRef?.trim();
+    const ref = assertSafeGitRef(input.source.gitRef) || undefined;
     assertSafeGitUrl(input.source.gitUrl);
 
     let cred: GitCredential | null = null;

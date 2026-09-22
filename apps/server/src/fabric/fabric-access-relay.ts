@@ -61,8 +61,9 @@ export function attachFabricAccessRelay(server: Server, deps: FabricAccessDeps):
       // way around a four-eyes agent's requireApproval gate. Refuse those here — the
       // approval-gated flows (browser SSH/RDP/VNC/Remote Browser) remain available.
       const agent = await deps.prisma.agent
-        .findUnique({ where: { id: target.agentId }, select: { requireApproval: true } })
+        .findUnique({ where: { id: target.agentId }, select: { requireApproval: true, status: true } })
         .catch(() => null);
+      if (agent?.status === 'deleting') return reject(409, 'Agent is being removed');
       if (agent?.requireApproval) {
         await deps.audit.record({
           actorId: principal.user.id,

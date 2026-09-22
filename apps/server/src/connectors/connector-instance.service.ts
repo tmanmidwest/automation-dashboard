@@ -119,11 +119,17 @@ export class ConnectorInstanceService implements OnModuleInit {
           this.assertRefAllowed(v.$secretRef, actor); // new instance: no own-id yet
           secretRefs[k] = v.$secretRef;
         } else if (v != null && `${v}` !== '') secrets[k] = String(v);
-      } else {
+      } else if (k !== 'secretRefs') {
+        // Never let a caller-supplied `secretRefs` key land in config directly — it
+        // would bypass the `secrets:read` gate in assertRefAllowed and be resolved
+        // at poll time, exfiltrating an arbitrary vault secret. Only the vetted map
+        // built above is authoritative.
         config[k] = v;
       }
     }
-    if (Object.keys(secretRefs).length) config.secretRefs = secretRefs;
+    // Always write the vetted map (even when empty), mirroring update(), so a planted
+    // value can never survive.
+    config.secretRefs = secretRefs;
     const instance = await this.prisma.connectorInstance.create({
       data: { connectorId, name: name.trim(), config: config as object, enabled: true },
     });

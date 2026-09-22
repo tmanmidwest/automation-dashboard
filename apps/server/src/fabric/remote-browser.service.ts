@@ -6,9 +6,19 @@ import { readdir, readFile } from 'fs/promises';
 import { createHash } from 'crypto';
 import { join } from 'path';
 import { hostname } from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import type { WebSocket } from 'ws';
-import type { FabricSessionTicket, SessionUser } from '@cerebro/shared';
+import type { FabricSessionTicket, FabricVncSessionTicket, SessionUser } from '@cerebro/shared';
+
+// VNC's classic auth is an 8-byte secret; generate 8 chars from a broad alphabet
+// (~47 bits) so a co-resident container can't attach to the browser's VNC without it.
+const VNC_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+function makeVncPassword(): string {
+  const b = randomBytes(8);
+  let out = '';
+  for (let i = 0; i < 8; i++) out += VNC_PW_ALPHABET[b[i] % VNC_PW_ALPHABET.length];
+  return out;
+}
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { SettingsService } from '../settings/settings.service';
@@ -50,6 +60,7 @@ interface RemoteBrowserSession {
   containerId: string;
   proxy: RemoteBrowserProxy;
   vncHost: string;
+  vncPassword: string;
   redeemed: boolean;
   redeemTimer?: NodeJS.Timeout;
   maxTimer?: NodeJS.Timeout;
@@ -102,7 +113,7 @@ export class RemoteBrowserService {
     host: string;
     port: number;
     user: SessionUser;
-  }): Promise<FabricSessionTicket> {
+  }): Promise<FabricVncSessionTicket> {
     const docker = this.dockerApi();
     // Precedence for every setting: UI-stored → env var → auto-detect → default.
     // Auto-detect (put the browser on the app's own Docker network, callback = the
@@ -126,6 +137,7 @@ export class RemoteBrowserService {
     }
 
     const token = randomUUID();
+    const vncPassword = makeVncPassword();
     // Bind the SOCKS bridge to the exact interface the browser reaches us on (the
     // IP `callbackHost` resolves to) instead of all interfaces, so it isn't a
     // credential-free pivot open to any peer on another network this container is on.
@@ -134,7 +146,7 @@ export class RemoteBrowserService {
     const proxy = await openRemoteBrowserProxy(this.registry, { agentId: params.agentId, bindHost, logger: this.logger });
     const name = `cerebro-remote-browser-${token.slice(0, 8)}`;
 
-    let containerId: string;
+    let containerId = '';
     try {
       // Auto-build the image the first time it's needed, so no manual `docker build`
       // step is required. The build runs in the background (it takes minutes — longer
@@ -146,6 +158,7 @@ export class RemoteBrowserService {
           `START_URL=${params.url}`,
           `CHROME_PROXY=socks5://${callbackHost}:${proxy.port}`,
           `GEOMETRY=${geometry}`,
+          `VNC_PASSWORD=${vncPassword}`,
           ...(ignoreCertErrors ? ['IGNORE_CERT_ERRORS=1'] : []),
         ],
         Labels: { 'cerebro.remote-browser': 'true', 'cerebro.remote-browser.session': token },
@@ -158,6 +171,10 @@ export class RemoteBrowserService {
       await docker.startContainer(containerId);
     } catch (e) {
       proxy.close();
+      // createContainer may have succeeded before startContainer threw; AutoRemove
+      // only fires for a container that actually ran, so remove it explicitly to
+      // avoid leaking a created-but-never-started container.
+      if (containerId) await docker.removeContainer(containerId).catch(() => undefined);
       this.logger.warn(`Remote Browser container failed to start: ${e instanceof Error ? e.message : e}`);
       throw new BadRequestException(
         `Could not start the Remote Browser (image "${image}"). ${e instanceof Error ? e.message : ''}`.trim(),
@@ -183,6 +200,7 @@ export class RemoteBrowserService {
       containerId,
       proxy,
       vncHost,
+      vncPassword,
       redeemed: false,
     };
     // If the browser is never opened, reclaim it.
@@ -202,7 +220,7 @@ export class RemoteBrowserService {
       meta: { targetId: params.targetId, url: params.url, host: params.host, port: params.port },
     });
 
-    return { token, wsPath: REMOTE_BROWSER_WS_PATH };
+    return { token, wsPath: REMOTE_BROWSER_WS_PATH, password: vncPassword };
   }
 
   /** Redeem a one-time ticket (called by the WS relay on upgrade). */

@@ -1023,7 +1023,7 @@ func loadPinnedUpdateKey(cfg config) ed25519.PublicKey {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 	if err != nil || len(raw) != ed25519.PublicKeySize {
 		log.Printf("pinned update key is malformed — refusing updates until re-pinned")
-		return ed25519.PublicKey{} // non-nil but wrong length → verify fails closed
+		return ed25519.PublicKey{} // non-nil, wrong length → verifyUpdateSignature refuses (fails closed)
 	}
 	return ed25519.PublicKey(raw)
 }
@@ -1035,6 +1035,12 @@ func verifyUpdateSignature(cfg config, binPath string) error {
 	pub := loadPinnedUpdateKey(cfg)
 	if pub == nil {
 		return nil // no key pinned yet — legacy behavior
+	}
+	// A malformed pin file returns a non-nil, wrong-length key. ed25519.Verify
+	// PANICS on a non-32-byte key, so guard here and fail closed (refuse the
+	// update) rather than crashing the agent into a restart loop.
+	if len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("pinned update key is malformed — refusing update until re-pinned")
 	}
 	sigURL := strings.TrimRight(cfg.URL, "/") + "/api/fabric/agent/binary.sig?os=" + runtime.GOOS + "&arch=" + runtime.GOARCH
 	client := &http.Client{Timeout: 30 * time.Second}

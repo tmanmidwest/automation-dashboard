@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import type { Probe, ProbeConfig, ProbeResult } from './probe';
 import { str } from './probe';
+import { hostBlockedReason } from './ssrf-guard';
 
 /**
  * ICMP echo via the system `ping` binary (the same approach Uptime Kuma uses).
@@ -29,6 +30,11 @@ export class PingProbe implements Probe {
     // A leading '-' would be read by `ping` as a flag (e.g. -f flood) rather than a
     // host, even though we use execFile (no shell). Reject it.
     if (host.startsWith('-')) return 'Hostname cannot start with a dash.';
+    // Block a literal loopback/link-local/metadata target (consistent with the
+    // http/tcp probes). A hostname resolves inside the ping binary, so we can only
+    // gate literal IPs here; ping is a reachability oracle only, so that's enough.
+    const blocked = hostBlockedReason(host);
+    if (blocked) return blocked;
     return null;
   }
 

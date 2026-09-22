@@ -17,8 +17,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.3
 done
 
-# VNC server on :5900 (no password — internal network only, ticket-gated relay).
-x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -quiet -noxdamage -ncache 0
+# VNC server on :5900. The container shares a Docker network with other services,
+# so a per-session password (VNC_PASSWORD, handed only to the operator's noVNC
+# client via the authenticated ticket) keeps a co-resident container from attaching
+# to the live browser. Falls back to no-auth only if unset (older callers).
+if [ -n "${VNC_PASSWORD:-}" ]; then
+  x11vnc -display :0 -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 -bg -quiet -noxdamage -ncache 0
+else
+  x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -quiet -noxdamage -ncache 0
+fi
 
 PROXY_ARG=""
 [ -n "${CHROME_PROXY:-}" ] && PROXY_ARG="--proxy-server=${CHROME_PROXY}"

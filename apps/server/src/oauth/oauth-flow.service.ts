@@ -274,7 +274,25 @@ export class OAuthFlowService {
       throw new OAuthFlowError('invalid_grant', 'Refresh token expired.', false);
     }
 
-    // Rotate: revoke the old token, then issue a fresh access + refresh pair.
+    // Rotate. Atomically CLAIM the old token first (flip revokedAt null→now in a
+    // single conditional write) so two concurrent requests presenting the same
+    // token can't both mint a chain — the race the reuse-detection above would
+    // otherwise miss (it only fires once revokedAt is already set). A lost claim
+    // (count 0) means another request just rotated it: treat it as reuse and kill
+    // the freshly-minted chain too.
+    const claim = await this.prisma.oAuthRefreshToken.updateMany({
+      where: { id: row.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (claim.count === 0) {
+      const cur = await this.prisma.oAuthRefreshToken.findUnique({
+        where: { id: row.id },
+        select: { rotatedTo: true },
+      });
+      if (cur?.rotatedTo) await this.revokeRefreshChain(cur.rotatedTo);
+      throw new OAuthFlowError('invalid_grant', 'Refresh token revoked.', false);
+    }
+    // We won the claim; issue the fresh pair and link it as the successor.
     const issued = await this.issueTokens(
       row.userId,
       client.clientId,
@@ -286,7 +304,7 @@ export class OAuthFlowService {
     });
     await this.prisma.oAuthRefreshToken.update({
       where: { id: row.id },
-      data: { revokedAt: new Date(), rotatedTo: successor?.id ?? null },
+      data: { rotatedTo: successor?.id ?? null },
     });
     return issued;
   }

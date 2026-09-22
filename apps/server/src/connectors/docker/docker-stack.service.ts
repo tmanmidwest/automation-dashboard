@@ -2,7 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SecretsService } from '../../secrets/secrets.service';
 import { runSsh, type SshConfig } from './docker-ssh';
-import { assertSafeGitUrl, GIT_SAFE_SH_PREFIX } from '../../common/git-safety';
+import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../../common/git-safety';
 import type { GitCredential } from '@cerebro/shared';
 
 export interface StackDeployTarget {
@@ -193,7 +193,9 @@ export class DockerStackService {
   ): Promise<StackRunResult> {
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
-    try { assertSafeGitUrl(src.gitUrl); } catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Invalid git repository URL.' }; }
+    let ref: string | undefined;
+    try { assertSafeGitUrl(src.gitUrl); ref = assertSafeGitRef(src.gitRef) || undefined; }
+    catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Invalid git repository URL.' }; }
 
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const dir = `${base}/repo`;
@@ -201,7 +203,6 @@ export class DockerStackService {
     const composeFile = `${dir}/${relCompose}`;
     const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
     const credFile = `${base}/.gitcred`;
-    const ref = src.gitRef?.trim();
 
     // Resolve the vault Git credential (kind='git' JSON), if any.
     let cred: GitCredential | null = null;
@@ -302,7 +303,9 @@ export class DockerStackService {
       if (stored.source === 'git') {
         // Git stacks: compare the deployed commit to the remote tip of the ref.
         const dir = `${trimSlash(target.stacksDir)}/${project}/repo`;
-        const ref = stored.gitRef?.trim();
+        // Defend legacy stored refs (deploy now validates on write); a bad one → HEAD.
+        let ref = '';
+        try { ref = assertSafeGitRef(stored.gitRef); } catch { ref = ''; }
         const local = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD 2>/dev/null || true`)).stdout.trim();
         const remote = (await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ls-remote origin ${ref ? `'${sq(ref)}'` : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
         if (local && remote && local !== remote) { lines.push(`⚠ Repo has moved: deployed ${local.slice(0, 7)}, ${ref || 'HEAD'} is now ${remote.slice(0, 7)}. Redeploy to update.`); drift = true; }

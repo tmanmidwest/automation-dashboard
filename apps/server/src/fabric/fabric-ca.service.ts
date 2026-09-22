@@ -181,6 +181,18 @@ export class FabricCaService {
         `Signing a certificate for the privileged principal "${principal}" requires the fabric:manage permission.`,
       );
     }
+    // Optional operator lever: when FABRIC_CA_ALLOWED_PRINCIPALS is set (comma list),
+    // a non-privileged principal must be on it. A fabric:connect token can otherwise
+    // mint a user cert for any POSIX login name; this lets a deployment pin the set
+    // (e.g. "deploy,ubuntu") without breaking the token-driven `cerebro` CLI. Unset
+    // = unchanged (any valid non-privileged principal). fabric:manage bypasses it.
+    const allowed = (process.env.FABRIC_CA_ALLOWED_PRINCIPALS ?? '')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (allowed.length && !allowed.includes(principal.toLowerCase()) && !hasPermission(user.permissions, 'fabric:manage')) {
+      throw new ForbiddenException(
+        `Principal "${principal}" is not in the allowed set (FABRIC_CA_ALLOWED_PRINCIPALS). Requires fabric:manage.`,
+      );
+    }
 
     const ttlMinutes = fabricConfig.caTtlMinutes;
     const serial = BigInt(`0x${randomBytes(6).toString('hex')}`).toString();

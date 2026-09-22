@@ -340,10 +340,14 @@ export class FabricService implements OnModuleInit {
     agentId: string,
     targetId: string,
     user: SessionUser,
-  ): Promise<FabricSessionTicket | FabricApprovalPending> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+  ): Promise<FabricVncSessionTicket | FabricApprovalPending> {
+    const target = await this.prisma.agentTarget.findFirst({
+      where: { id: targetId, agentId },
+      include: { agent: { select: { status: true } } },
+    });
     if (!target) throw new NotFoundException('Target not found.');
     if (target.kind !== 'web' || !target.webUrl) throw new BadRequestException('This target is not a Remote Browser.');
+    if (target.agent?.status === 'deleting') throw new BadRequestException('This agent is being removed.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Waypoint is offline.');
     const webUrl = target.webUrl;
     return this.gate(
@@ -1025,8 +1029,12 @@ export class FabricService implements OnModuleInit {
    * back — without needing a browser terminal. This is the Phase-2 check.
    */
   async probeTarget(agentId: string, targetId: string, user: SessionUser): Promise<FabricProbeResult> {
-    const target = await this.prisma.agentTarget.findFirst({ where: { id: targetId, agentId } });
+    const target = await this.prisma.agentTarget.findFirst({
+      where: { id: targetId, agentId },
+      include: { agent: { select: { status: true } } },
+    });
     if (!target) throw new NotFoundException('Target not found.');
+    if (target.agent?.status === 'deleting') return { ok: false, error: 'This agent is being removed.' };
     if (!this.registry.isOnline(agentId)) return { ok: false, error: 'Agent is offline.' };
 
     const start = Date.now();

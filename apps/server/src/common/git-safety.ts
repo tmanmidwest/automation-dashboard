@@ -41,3 +41,16 @@ export function assertSafeGitUrl(url: string | null | undefined): string {
   }
   return u;
 }
+
+/**
+ * Sanitize a git ref (branch/tag/commit). A ref is passed to `git checkout`/
+ * `ls-remote`/`--branch` as a positional, where `--` can't shield it (for checkout
+ * `--` marks a pathspec, not a ref), so a `-`-leading ref would be read as an
+ * option (e.g. `--upload-pack=…`). Empty is allowed (caller falls back to HEAD).
+ * Returns the trimmed ref.
+ */
+export function assertSafeGitRef(ref: string | null | undefined): string {
+  const r = (ref ?? '').trim();
+  if (r.startsWith('-')) throw new BadRequestException('Invalid git ref (cannot start with "-").');
+  return r;
+}

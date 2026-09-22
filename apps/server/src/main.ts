@@ -35,9 +35,14 @@ async function bootstrap() {
   const isHttps = (process.env.APP_URL ?? '').startsWith('https://');
 
   // Never run a real deployment with the public dev session secret — a forgeable
-  // signing key would let anyone mint a valid session cookie. Fail closed instead.
-  if (!process.env.SESSION_SECRET && (process.env.NODE_ENV === 'production' || isHttps)) {
-    throw new Error('SESSION_SECRET must be set in production. Generate one with: openssl rand -base64 32');
+  // signing key would let anyone mint a valid session cookie. Fail closed for
+  // anything but an explicit local dev run (NODE_ENV=development). This also covers
+  // the HTTP-behind-a-TLS-proxy case (APP_URL=http, NODE_ENV unset), which the old
+  // production||https check let slip through with the insecure default.
+  if (!process.env.SESSION_SECRET && process.env.NODE_ENV !== 'development') {
+    throw new Error(
+      'SESSION_SECRET must be set outside local development. Generate one with: openssl rand -base64 32 (or set NODE_ENV=development for local dev).',
+    );
   }
   const sessionSecret = process.env.SESSION_SECRET ?? 'insecure-dev-secret-change-me';
 

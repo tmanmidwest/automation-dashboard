@@ -21,6 +21,13 @@ function blockList(): BlockList {
   bl.addAddress('::1', 'ipv6'); // loopback
   bl.addAddress('::', 'ipv6'); // unspecified
   bl.addSubnet('fe80::', 10, 'ipv6'); // link-local
+  // IPv4-mapped IPv6 equivalents of the blocked v4 ranges, so the hex form
+  // (e.g. ::ffff:7f00:1 = 127.0.0.1, ::ffff:a9fe:a9fe = 169.254.169.254) — which
+  // `normalize()` can't fold back to dotted — is caught by the IPv6 check. Mapped
+  // RFC1918 stays allowed (not in these subnets).
+  bl.addSubnet('::ffff:127.0.0.0', 104, 'ipv6'); // loopback
+  bl.addSubnet('::ffff:169.254.0.0', 112, 'ipv6'); // link-local incl. metadata
+  bl.addSubnet('::ffff:0.0.0.0', 104, 'ipv6'); // "this host" / unspecified
   cached = bl;
   return bl;
 }
