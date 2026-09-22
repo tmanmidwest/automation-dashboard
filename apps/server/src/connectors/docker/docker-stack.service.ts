@@ -65,8 +65,9 @@ export class DockerStackService {
   ) {}
 
   /** Attach TOFU host-key pinning to a deploy target's SSH config, so every runSsh
-   *  on it verifies (and pins on first use) the host key. */
-  private withHostPin(target: StackDeployTarget): StackDeployTarget {
+   *  on it verifies (and pins on first use) the host key. Public so the connector can
+   *  pin the target at its single construction point (covers telemetry SSH too). */
+  withHostPin(target: StackDeployTarget): StackDeployTarget {
     if (target.ssh.verifyHostKey) return target; // already pinned
     const { host, port } = target.ssh;
     const verify = dockerHostVerifier(this.prisma, host, port, {

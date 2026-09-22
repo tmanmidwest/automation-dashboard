@@ -4,13 +4,13 @@ import { URL } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, rm } from 'fs/promises';
-
-/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
-const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 const execFileP = promisify(execFile);
+
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 /**
  * Connection config for a Docker Engine API endpoint. The transport is inferred
@@ -310,13 +310,11 @@ export class DockerApi {
     return new Promise<void>((resolve, reject) => {
       const req = mod.request(options, (res) => {
         const status = res.statusCode ?? 0;
+        // No size cap here: this streams image-build output from the LOCAL, trusted
+        // Docker daemon (a long/chatty build — e.g. the Remote Browser image — is
+        // expected). The cap is for untrusted monitored-host JSON responses only.
         const chunks: Buffer[] = [];
-        let total = 0;
-        res.on('data', (c: Buffer) => {
-          total += c.length;
-          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new DockerApiError('Docker response exceeded the size limit.'));
-          chunks.push(c);
-        });
+        res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           if (status < 200 || status >= 300) {

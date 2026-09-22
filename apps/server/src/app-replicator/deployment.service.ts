@@ -6,6 +6,7 @@ import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { projectName } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
+import { dockerHostVerifier } from '../connectors/docker/docker-hostkey';
 import { PortAllocatorService } from './port-allocator.service';
 import { IngressService } from './ingress.service';
 import { DockerDeployTarget } from './docker-deploy-target';
@@ -73,7 +74,12 @@ export class DeploymentService {
     if (!target.deployable) {
       throw new BadRequestException('That Docker connector has no SSH configured — App Replicator deploys over SSH. Set the SSH host + credentials on the connector.');
     }
-    return target;
+    // TOFU-pin the host key on every SSH to this host — deploys and the read-only
+    // port preflight alike — so no runSsh path to a deploy host skips verification.
+    return {
+      ...target,
+      ssh: { ...target.ssh, verifyHostKey: dockerHostVerifier(this.prisma, target.ssh.host, target.ssh.port) },
+    };
   }
 
   /** Used ports + per-variable free-port suggestions for the deploy wizard. */

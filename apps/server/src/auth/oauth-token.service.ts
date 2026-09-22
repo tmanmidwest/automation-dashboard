@@ -89,8 +89,8 @@ export class OAuthTokenService {
       // server — the advertised `<APP_URL>/mcp`. A token minted for a different
       // resource is rejected. Tokens with no `aud` (no resource requested) are
       // accepted as before, so this doesn't disturb the common flow.
-      if (aud && this.issuer && aud !== `${this.issuer.replace(/\/$/, '')}/mcp`) {
-        return null;
+      if (aud && this.issuer && aud.replace(/\/$/, '') !== `${this.issuer.replace(/\/$/, '')}/mcp`) {
+        return null; // token minted for a different resource
       }
       return {
         sub: claims.sub,

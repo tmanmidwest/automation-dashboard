@@ -585,7 +585,9 @@ export class DockerConnector implements Connector {
       privateKey: key,
       password,
     };
-    return { ssh, stacksDir: str(ctx.config.stacksDir) || '/opt/cerebro-stacks' };
+    // Pin the host key on EVERY SSH to this host — deploys and the read-only host
+    // telemetry alike — so no runSsh path to a deploy host skips verification.
+    return this.stacks.withHostPin({ ssh, stacksDir: str(ctx.config.stacksDir) || '/opt/cerebro-stacks' });
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
