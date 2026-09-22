@@ -53,15 +53,4 @@ export class SettingsService {
   deleteSecret(key: string): Promise<void> {
     return this.secrets.remove(key);
   }
-
-  /**
-   * The set of user-managed ("manual") vault secret keys — the only ones a
-   * connector field may {$secretRef}. Internal keys (other connectors, OAuth/SSO,
-   * Fabric, mail) are deliberately excluded so a reference can't be used to
-   * exfiltrate a system secret through a connector's config. See fabric/secrets audit.
-   */
-  async manualSecretKeys(): Promise<Set<string>> {
-    const all = await this.secrets.list();
-    return new Set(all.filter((s) => s.category === 'manual').map((s) => s.key));
-  }
 }

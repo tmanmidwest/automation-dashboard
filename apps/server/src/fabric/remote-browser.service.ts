@@ -128,8 +128,9 @@ export class RemoteBrowserService {
     let containerId: string;
     try {
       // Auto-build the image the first time it's needed, so no manual `docker build`
-      // step is required after install/update.
-      await this.ensureImage(docker, image);
+      // step is required. The build runs in the background (it takes minutes — longer
+      // than a proxied request survives) and this call fails fast with a clear message.
+      await this.ensureImageReady(docker, image);
       containerId = await docker.createContainer(name, {
         Image: image,
         Env: [
@@ -375,25 +376,34 @@ export class RemoteBrowserService {
    * manual `docker build` step after an install/update. Concurrent launches share
    * the single in-flight build; once built, the image is cached by the daemon.
    */
-  private async ensureImage(docker: DockerApi, image: string): Promise<void> {
+  private async ensureImageReady(docker: DockerApi, image: string): Promise<void> {
     if (await docker.imageExists(image)) return;
-    if (!this.imageBuild) {
-      const context = this.buildContextDir();
-      if (!context) {
-        throw new BadRequestException(
-          `The Remote Browser image "${image}" is missing and its build context wasn't found in the app image. ` +
-            `Build it manually on the Docker host: docker build -t ${image} docker/remote-browser`,
-        );
-      }
-      this.logger.log(`Remote Browser image "${image}" not found — building from ${context} (first use; may take a few minutes)…`);
-      this.imageBuild = docker
-        .buildImage(context, image)
-        .then(() => void this.logger.log(`Remote Browser image "${image}" built.`))
-        .finally(() => {
-          this.imageBuild = undefined;
-        });
+
+    // A build is already running — tell the operator to wait rather than piling on.
+    if (this.imageBuild) {
+      throw new BadRequestException('The Remote Browser image is still building (first-time setup). Please try again in a minute.');
     }
-    await this.imageBuild;
+
+    const context = this.buildContextDir();
+    if (!context) {
+      throw new BadRequestException(
+        `The Remote Browser image "${image}" is missing and its build context wasn't found in the app image. ` +
+          `Build it manually on the Docker host: docker build -t ${image} docker/remote-browser`,
+      );
+    }
+
+    // Build in the BACKGROUND — a chromium image build takes minutes, far longer than
+    // a proxied HTTP request survives (e.g. Cloudflare ~100s). Kick it off, log
+    // progress, and fail THIS attempt fast with a clear message.
+    this.logger.log(`Remote Browser image "${image}" not found — building from ${context} in the background (first use; ~a few minutes)…`);
+    this.imageBuild = docker
+      .buildImage(context, image)
+      .then(() => void this.logger.log(`Remote Browser image "${image}" built — sessions can start now.`))
+      .catch((e) => void this.logger.warn(`Remote Browser image build failed: ${e instanceof Error ? e.message : e}`))
+      .finally(() => {
+        this.imageBuild = undefined;
+      });
+    throw new BadRequestException('Preparing the Remote Browser for first use — building its image (this can take a few minutes). Please try again shortly.');
   }
 
   /** Locate the bundled Remote Browser build context. The server's cwd is

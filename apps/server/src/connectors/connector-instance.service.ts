@@ -32,24 +32,40 @@ export class ConnectorInstanceService implements OnModuleInit {
     return `connector:${instanceId}:${field}`;
   }
 
+  /** Keys whose refs already produced a resolution-time warning (log-once). */
+  private readonly warnedRefs = new Set<string>();
+
+  /**
+   * A vault key a connector field must NEVER reference — the auth-forgery / cross-
+   * credential-theft set — regardless of the actor's permission: the OAuth signing
+   * key + SSO secrets, Fabric session/agent creds, and ANOTHER connector's own
+   * credential. Everything else (a user's own shared secret, this connector's own
+   * key) is fine — the `secrets:read` requirement at write time is the real gate.
+   */
+  private isProtectedRefKey(key: string, ownInstanceId?: string): boolean {
+    const k = key.toLowerCase();
+    if (k.startsWith('oauth:') || k.startsWith('idp:')) return true; // JWT signing key / SSO client secrets
+    if (k.startsWith('fabric/')) return true; // Fabric agent/session credentials
+    if (key.startsWith('connector:') && (!ownInstanceId || !key.startsWith(`connector:${ownInstanceId}:`))) return true;
+    return false;
+  }
+
   /**
    * Guard a `{$secretRef}` write. A reference lets a connector field read a shared
-   * vault secret at session time; without this, a `connectors:write` user could
-   * point a field at ANY vault key (another connector's credential, `oauth:jwtSecret`,
-   * Fabric creds, SMTP password) and have it transmitted to a base URL they control —
-   * silently bypassing the audited, step-up-gated `secrets:read` reveal flow. So a
-   * reference is allowed only when the actor can read secrets AND the target is a
-   * user-managed ("manual") vault secret, never an internal system key.
+   * vault secret at session time; without a gate, a `connectors:write` user could
+   * point a field at an internal key and have it transmitted to a base URL they
+   * control. The gate: the actor must hold `secrets:read` (so they could reveal it
+   * anyway — a reference is no new capability), and the target must not be an
+   * internal/cross-connector key (which even a secrets:read user shouldn't wire into
+   * an outbound connector).
    */
-  private async assertRefAllowed(key: string, actor?: SessionUser): Promise<void> {
+  private assertRefAllowed(key: string, actor?: SessionUser, ownInstanceId?: string): void {
     if (!actor || !hasPermission(actor.permissions, 'secrets:read')) {
       throw new ForbiddenException('Referencing a shared vault secret requires the "secrets:read" permission.');
     }
-    const allowed = await this.settings.manualSecretKeys();
-    if (!allowed.has(key)) {
+    if (this.isProtectedRefKey(key, ownInstanceId)) {
       throw new BadRequestException(
-        'A connector field can only reference a vault secret you created in Settings → Secrets. ' +
-          'Internal secrets (other connectors, OAuth/SSO, Fabric, mail) cannot be referenced.',
+        'That vault secret is internal (OAuth/SSO, Fabric, or another connector) and cannot be referenced by a connector field.',
       );
     }
   }
@@ -100,7 +116,7 @@ export class ConnectorInstanceService implements OnModuleInit {
     for (const [k, v] of Object.entries(values)) {
       if (secretKeys.includes(k)) {
         if (isSecretRef(v)) {
-          await this.assertRefAllowed(v.$secretRef, actor);
+          this.assertRefAllowed(v.$secretRef, actor); // new instance: no own-id yet
           secretRefs[k] = v.$secretRef;
         } else if (v != null && `${v}` !== '') secrets[k] = String(v);
       } else {
@@ -139,7 +155,7 @@ export class ConnectorInstanceService implements OnModuleInit {
         if (secretKeys.includes(k)) {
           if (isSecretRef(v)) {
             // Reference a shared vault secret; drop any connector-owned copy.
-            await this.assertRefAllowed(v.$secretRef, actor);
+            this.assertRefAllowed(v.$secretRef, actor, id);
             refs[k] = v.$secretRef;
             await this.settings.deleteSecret(this.secretKey(id, k));
           } else if (v != null && `${v}` !== '') {
@@ -171,14 +187,16 @@ export class ConnectorInstanceService implements OnModuleInit {
     const config: Record<string, unknown> = { ...(instance.config as object) };
     const refs = this.refsOf(instance);
     delete config.secretRefs; // internal bookkeeping — never expose to the connector
-    // Resolution-time guard: only resolve references to user-managed ("manual")
-    // vault secrets, so a reference planted before write-time validation (or one to
-    // a since-recategorized key) can never leak an internal system secret.
-    const allowedRefs = Object.keys(refs).length ? await this.settings.manualSecretKeys() : null;
     for (const field of this.secretFields(instance.connectorId)) {
       const ref = refs[field];
-      if (ref && !allowedRefs?.has(ref)) {
-        void this.logging.warn('connectors', `[${instance.name}] ignoring secret reference for "${field}" → non-shareable key "${ref}".`);
+      // Resolution-time guard: never resolve a reference to an internal/cross-
+      // connector key (a planted-ref defence). User secrets resolve normally.
+      // Warn at most once per key so a per-poll skip can't flood the log.
+      if (ref && this.isProtectedRefKey(ref, instance.id)) {
+        if (!this.warnedRefs.has(ref)) {
+          this.warnedRefs.add(ref);
+          void this.logging.warn('connectors', `[${instance.name}] ignoring internal secret reference for "${field}" ("${ref}").`);
+        }
         continue;
       }
       // A referenced field reveals a shared vault secret; otherwise the connector's own.
