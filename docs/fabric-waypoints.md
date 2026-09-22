@@ -5,6 +5,20 @@
 > Likewise the remote-browser feature was renamed **"Web Jump" → "Remote Browser."** The agent mode is
 > `waypoint`; per-mode services are `cerebro-waypoint` / `com.cerebro.waypoint` / `CerebroWaypoint`.
 
+> **Live status (2026-09-22):** Phases 1–4 are **committed and live-tested**. Agent is
+> **v0.5.2** (adds `uninstall-ack` + `410 Gone` self-clean and **signed auto-updates** —
+> see `docs/fabric-agent-signing.md`). Reliable delete is done: tombstone
+> (`status='deleting'`, migration 0028) → `uninstall-ack` → purge, with a **"Removal
+> pending"** UI (Retry / Force-remove / mode-aware manual command). **Remote Browser is
+> operational and self-maintaining:** the image **auto-builds on first use** and
+> **auto-rebuilds** when `docker/remote-browser/` changes (its build context is
+> fingerprinted into an image label — no manual `docker build`/`docker rmi`); the Docker
+> **network + callback host auto-detect**, with an in-UI **Remote Browser settings** card
+> to override them; and a per-deployment **ignore-TLS-certificate** toggle lets a jump
+> reach self-signed internal sites (e.g. Proxmox). The status blocks below are the
+> original build-time spec — kept for design intent; where they say "still v0.5.0" or
+> "manual `docker build`," this note supersedes them.
+
 Design + implementation plan for **Waypoints**: a second mode of the Cerebro Agent that turns a
 single box into a **network proxy / bastion**, so operators can RDP / SSH / VNC / **Remote Browser** to
 *any host reachable from that box's network* — not just to the box the agent runs on.

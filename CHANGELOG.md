@@ -8,6 +8,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-22
+### Added — Fabric Waypoints (network-gateway mode)
+- **Waypoints** — a second Cerebro Agent mode that turns one box into a network
+  proxy / bastion: install a Waypoint on a segment you otherwise can't reach (a DMZ,
+  a client LAN, an OT/VLAN island behind NAT) and reach **any** host on it —
+  RDP / SSH / VNC / Remote Browser — with zero inbound firewall rules. Curated
+  **routes** plus **ad-hoc** connections and **egress CIDR** allow-lists, pushed to
+  the agent via `hello-ack` / `set-allow`. Endpoint and Waypoint agents coexist per
+  box via per-mode service identity (`cerebro-agent` vs `cerebro-waypoint`).
+  See `docs/fabric-waypoints.md`.
+- **Remote Browser** (was "Web Jump") — a `web` route opens an ephemeral, single-
+  session Chromium + VNC container whose traffic is SOCKS5-proxied through the tunnel
+  and streamed back over noVNC. The image **auto-builds on first use** and
+  **auto-rebuilds** when its build context changes (fingerprinted as an image label —
+  no manual `docker build` or `docker rmi`); its Docker network and callback host are
+  **auto-detected**, with an in-UI **Remote Browser settings** card to override
+  network / callback host / image / geometry.
+- **Ignore-TLS-certificate toggle** for Remote Browser jumps — reach self-signed
+  internal sites (e.g. a Proxmox host) without the "not secure" wall, as an explicit
+  per-deployment setting.
+- **Per-session approval gate (four-eyes)** — a connect request through an agent with
+  `requireApproval` is held (credentials live only in memory) until a `fabric:approve`
+  user approves it. New `fabric:approve` permission, an Approvals panel + badge, and a
+  "waiting for approval" state on every connect path.
+- **Routes UI revamp** — Waypoints get their own section; routes render as full,
+  launchable rows (host · connector · target) instead of ambiguous type chips.
+- The Fabric inventory now shows each agent's **version** on its card.
+
+### Added — Reliable agent/Waypoint delete + uninstall
+- **Delete now always cleans up the install**, even for an offline box. Deleting an
+  agent writes a tombstone (`status='deleting'`); when the box next checks in it is
+  told to **uninstall**, confirms with an `uninstall-ack`, and the record is purged.
+  Revoked-credential boxes self-clean on a `410 Gone`.
+- **"Removal pending" UI** — a box mid-removal shows with **Retry**, **Force-remove**,
+  and a copy-paste **mode-aware manual uninstall** command (endpoint vs Waypoint).
+- **Hardened installer/uninstaller** — atomic download (temp + `mv`, fixing a
+  `curl: (23)` failure when overwriting a running binary), a `curl` precondition, a
+  post-install connect check that rides out transient 502/503/504s (Linux **and**
+  Windows), and a verifying, mode-aware uninstall script.
+
+### Added — Signed agent auto-updates (H3)
+- Agent auto-update is now **verified against a pinned ed25519 public key** and is
+  **fail-closed**: an agent refuses any update it can't verify. The public key rides
+  in `hello-ack` and is pinned at enrollment (TOFU); Cerebro signs `sha256(binary)`
+  and serves a detached signature. **Vault mode** (private key sealed in the vault,
+  included in system backups) with an **offline-ready** upgrade (import only the
+  public key; sign binaries off-server). New **Update signing** UI to generate /
+  rotate / import a key. Requires the **v0.5.2** agent; older agents keep the legacy
+  path until they pin a key. See `docs/fabric-agent-signing.md`.
+
+### Security
+- **Login throttle** — Redis-backed per-IP and per-account lockout on the password
+  and TOTP login paths (fails open if Redis is unavailable).
+- **Security-response headers** — native middleware adds CSP, `X-Frame-Options: DENY`,
+  HSTS, and `X-Content-Type-Options: nosniff` (env-overridable). Startup now fails
+  fast on a missing `SESSION_SECRET`, and warns on a low-entropy encryption key.
+- **SSRF guards** — outbound HTTP/TCP probes and the stream proxy resolve and reject
+  loopback, link-local, and cloud-metadata addresses (RFC1918 still allowed).
+- **git-protocol safety** — repo operations block dangerous transports
+  (`ext::`, `fd::`, `file:`, leading-dash args) and pin `GIT_ALLOW_PROTOCOL`.
+- **Secret-reference authorization** — `{$secretRef}` resolution is gated
+  (`secrets:read`) with a deny-list for protected keys (OAuth / IdP / other
+  connectors' credentials); refusals are logged once, not on every poll.
+- **Least-privilege + hardening** — VNC saved-credential use requires `fabric:manage`;
+  a last-admin guard prevents locking yourself out; the backup restore uses a
+  `0700` temp dir with a path-traversal guard and a 16-char passphrase floor; OAuth
+  refresh-token reuse is detected and revokes the chain.
+
 ## [0.3.0] — 2026-09-20
 ### Added — Fabric (agent-brokered remote access)
 - **Reach Linux/Windows/macOS boxes with no inbound firewall rule.** A tiny **Cerebro Agent** dials
