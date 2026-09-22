@@ -177,4 +177,24 @@ export class FabricUpdateSigningService {
     this.sigCache.set(hex, sig);
     return sig;
   }
+
+  /**
+   * Sign an authorization to uninstall a specific agent, so a compromised/MITM
+   * broker that can talk TLS but lacks the vault key can't trigger a self-destruct.
+   * The message binds the agent's **credential hash** (which the agent recomputes
+   * from its own credential, so a token can't be replayed to a different agent) and
+   * an issue time (freshness). Vault mode only — returns null when signing is off or
+   * offline (the agent then keeps a pinned key's fail-closed refusal, and the
+   * operator uses the manual uninstall command). See docs/fabric-agent-signing.md.
+   */
+  async signUninstallToken(credHash: string): Promise<{ issuedAt: number; signature: string } | null> {
+    const meta = await this.settings.get<SigningMeta>(META_KEY);
+    if (!meta?.publicKey || meta.mode !== 'vault') return null;
+    const pem = await this.settings.getSecret(PRIV_SECRET);
+    if (!pem) return null;
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const msg = Buffer.from(`uninstall:${credHash}:${issuedAt}`, 'utf8');
+    const signature = edSign(null, msg, createPrivateKey(pem)).toString('base64');
+    return { issuedAt, signature };
+  }
 }

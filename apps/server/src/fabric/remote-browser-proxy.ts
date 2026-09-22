@@ -8,12 +8,15 @@ import type { TunnelStream } from './stream-mux';
  *
  * The ephemeral browser container is launched with `--proxy-server=socks5://…`
  * pointing here; every request the page makes arrives as a SOCKS5 CONNECT, and
- * we open a Fabric tunnel stream to that host:port through the Waypoint. The
- * **agent** is the security gate — it refuses any host:port not on its allow-list
- * (the remote browser item's host, plus the Waypoint's egress CIDRs), so a page that
- * pulls a sub-resource from an off-list host simply fails to load, exactly like a
- * restricted network. We keep the bridge itself minimal (no auth: it only listens
- * for the one container on the internal Docker network) with a concurrency cap.
+ * we open a Fabric tunnel stream to that host:port through the Waypoint.
+ *
+ * Security gate (defence in depth): the bridge itself scopes every CONNECT to the
+ * route's own host (`allowHost`) so one `web` route can't be driven — via the
+ * operator's browser — across the Waypoint's whole egress CIDR range. The **agent**
+ * is the second gate (its pushed allow-list). Set REMOTE_BROWSER_SOCKS_OPEN=1 to
+ * disable the broker-side host scope and rely on the agent allow-list alone (for a
+ * page that must legitimately reach other internal hosts). We keep the bridge
+ * minimal (no auth: it only listens for the one container) with a concurrency cap.
  */
 
 const SOCKS_VERSION = 0x05;
@@ -40,10 +43,15 @@ export function openRemoteBrowserProxy(
     agentId: string;
     bindHost?: string;
     maxStreams?: number;
+    /** Route host every CONNECT is scoped to (broker-side gate). Omit to disable. */
+    allowHost?: string;
     logger?: Logger;
   },
 ): Promise<RemoteBrowserProxy> {
   const { agentId, bindHost = '0.0.0.0', maxStreams = 64 } = opts;
+  // Broker-side host scope, unless an operator has explicitly opened it.
+  const scopeOpen = /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_SOCKS_OPEN || '');
+  const allowHost = scopeOpen ? undefined : opts.allowHost?.toLowerCase();
   const server: Server = createServer();
   let closed = false;
   let active = 0;
@@ -63,6 +71,7 @@ export function openRemoteBrowserProxy(
       agentId,
       registry,
       logger: opts.logger,
+      allowHost,
       canOpen: () => active < maxStreams,
       onOpen: () => { active++; },
       onClose: () => { active = Math.max(0, active - 1); },
@@ -87,6 +96,7 @@ function handleSocksConnection(
     agentId: string;
     registry: AgentRegistryService;
     logger?: Logger;
+    allowHost?: string;
     canOpen: () => boolean;
     onOpen: () => void;
     onClose: () => void;
@@ -151,6 +161,13 @@ function handleSocksConnection(
       }
       const port = buf.readUInt16BE(offset);
       buf = buf.subarray(offset + 2);
+
+      // Broker-side scope: only the route's own host may be reached, so this session
+      // can't be driven across the Waypoint's whole egress range. (Agent gate remains.)
+      if (ctx.allowHost && host.toLowerCase() !== ctx.allowHost) {
+        ctx.logger?.debug?.(`remote-browser proxy: blocked off-route host ${host}:${port} (route ${ctx.allowHost})`);
+        return fail(REP_NOT_ALLOWED);
+      }
 
       if (!ctx.canOpen()) return fail(REP_NOT_ALLOWED);
 

@@ -714,6 +714,9 @@ model AgentTarget {
   group     String?
   /// Remote Browser only (Phase 3): full start URL; host/port are parsed from it.
   webUrl    String?
+  /// Remote Browser only: accept invalid/self-signed TLS certs for THIS route only
+  /// (e.g. an internal Proxmox host). Per-route so it never weakens other sessions.
+  webIgnoreCertErrors Boolean @default(false)
 
   @@unique([agentId, kind, host, port])
   @@index([agentId])

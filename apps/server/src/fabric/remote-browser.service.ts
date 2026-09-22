@@ -41,12 +41,14 @@ export interface RemoteBrowserConfig {
   network?: string;
   /** Hostname the browser container dials back to reach Cerebro's SOCKS bridge. */
   callbackHost?: string;
-  /** Accept invalid/self-signed TLS certs (internal sites like a Proxmox host). */
-  ignoreCertErrors?: boolean;
 }
 const REDEEM_TTL_MS = 60_000; // tear the browser down if the ticket is never opened
 const MAX_SESSION_MS = 8 * 60 * 60 * 1000; // hard safety cap on a browser's lifetime
 const VNC_PORT = 5900;
+// Each session spawns a Chromium container with a 1 GiB shm; cap concurrency so a
+// launch loop can't exhaust host memory/PIDs (the app shares the host via docker.sock).
+const MAX_SESSIONS = Math.max(1, Number(process.env.REMOTE_BROWSER_MAX_SESSIONS) || 10);
+const MAX_SESSIONS_PER_USER = Math.max(1, Number(process.env.REMOTE_BROWSER_MAX_PER_USER) || 3);
 
 interface RemoteBrowserSession {
   token: string;
@@ -88,6 +90,24 @@ export class RemoteBrowserService {
     private readonly settings: SettingsService,
   ) {}
 
+  /** Reject a launch that would exceed the global or per-user live-session cap.
+   *  The sessions map counts in-flight (unredeemed) sessions too, so a spawn loop
+   *  is stopped before it can create containers. */
+  private enforceCapacity(userId: string): void {
+    if (this.sessions.size >= MAX_SESSIONS) {
+      throw new BadRequestException(
+        `Too many Remote Browser sessions are open (limit ${MAX_SESSIONS}). Close one and try again.`,
+      );
+    }
+    let mine = 0;
+    for (const s of this.sessions.values()) if (s.userId === userId) mine++;
+    if (mine >= MAX_SESSIONS_PER_USER) {
+      throw new BadRequestException(
+        `You already have ${mine} Remote Browser session(s) open (limit ${MAX_SESSIONS_PER_USER}). Close one and try again.`,
+      );
+    }
+  }
+
   private dockerApi(): DockerApi {
     if (this.docker) return this.docker;
     const auth: DockerAuth = {
@@ -112,8 +132,11 @@ export class RemoteBrowserService {
     url: string;
     host: string;
     port: number;
+    /** Per-route: accept invalid/self-signed TLS certs for THIS session only. */
+    ignoreCertErrors?: boolean;
     user: SessionUser;
   }): Promise<FabricVncSessionTicket> {
+    this.enforceCapacity(params.user.id);
     const docker = this.dockerApi();
     // Precedence for every setting: UI-stored → env var → auto-detect → default.
     // Auto-detect (put the browser on the app's own Docker network, callback = the
@@ -128,8 +151,11 @@ export class RemoteBrowserService {
       process.env.REMOTE_BROWSER_CALLBACK_HOST ||
       process.env.FABRIC_GUACD_CALLBACK_HOST ||
       (await this.resolveSelfName(docker));
+    // Per-route only (never a global toggle), so ignoring a self-signed cert for one
+    // internal target can't silently weaken TLS validation for other sessions. An
+    // env override remains for an all-routes deployment that knowingly wants it.
     const ignoreCertErrors =
-      cfg.ignoreCertErrors || /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_IGNORE_CERT_ERRORS || '');
+      !!params.ignoreCertErrors || /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_IGNORE_CERT_ERRORS || '');
     if (!callbackHost) {
       throw new BadRequestException(
         'Remote Browser could not determine how the browser container reaches Cerebro. Set REMOTE_BROWSER_CALLBACK_HOST (the app’s service/container name on the Docker network).',
@@ -143,7 +169,12 @@ export class RemoteBrowserService {
     // credential-free pivot open to any peer on another network this container is on.
     // Fail-open to 0.0.0.0 if we can't resolve it (keeps the feature working).
     const bindHost = await this.resolveBindHost(callbackHost);
-    const proxy = await openRemoteBrowserProxy(this.registry, { agentId: params.agentId, bindHost, logger: this.logger });
+    const proxy = await openRemoteBrowserProxy(this.registry, {
+      agentId: params.agentId,
+      bindHost,
+      allowHost: params.host, // scope the SOCKS bridge to the route's own host
+      logger: this.logger,
+    });
     const name = `cerebro-remote-browser-${token.slice(0, 8)}`;
 
     let containerId = '';
@@ -352,7 +383,6 @@ export class RemoteBrowserService {
       geometry: clean(c.geometry),
       network: clean(c.network),
       callbackHost: clean(c.callbackHost),
-      ignoreCertErrors: !!c.ignoreCertErrors,
     };
   }
 
@@ -360,7 +390,7 @@ export class RemoteBrowserService {
    *  what auto-detect resolves (shown as placeholders). */
   async getConfig(): Promise<{
     stored: RemoteBrowserConfig;
-    effective: { image: string; geometry: string; network?: string; callbackHost?: string; ignoreCertErrors: boolean };
+    effective: { image: string; geometry: string; network?: string; callbackHost?: string };
     detected: { network?: string; callbackHost?: string };
     env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
   }> {
@@ -388,7 +418,6 @@ export class RemoteBrowserService {
         geometry: stored.geometry || env.geometry || '1280x800',
         network: stored.network || env.network || detectedNetwork,
         callbackHost: stored.callbackHost || env.callbackHost || detectedName,
-        ignoreCertErrors: !!stored.ignoreCertErrors || /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_IGNORE_CERT_ERRORS || ''),
       },
     };
   }
@@ -401,7 +430,6 @@ export class RemoteBrowserService {
       geometry: clean(input.geometry),
       network: clean(input.network),
       callbackHost: clean(input.callbackHost),
-      ignoreCertErrors: !!input.ignoreCertErrors,
     };
     await this.settings.set(REMOTE_BROWSER_CONFIG_KEY, cfg);
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'fabric.remote_browser.configured', meta: { ...cfg } });

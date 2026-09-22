@@ -354,7 +354,7 @@ export class FabricService implements OnModuleInit {
       agentId,
       { kind: 'web', host: target.host, port: target.port, url: webUrl },
       user,
-      () => this.remoteBrowser.launch({ agentId, targetId, url: webUrl, host: target.host, port: target.port, user }),
+      () => this.remoteBrowser.launch({ agentId, targetId, url: webUrl, host: target.host, port: target.port, ignoreCertErrors: target.webIgnoreCertErrors, user }),
     );
   }
 
@@ -744,6 +744,7 @@ export class FabricService implements OnModuleInit {
     group?: string | null;
     secretRef?: string | null;
     webUrl?: string | null;
+    webIgnoreCertErrors?: boolean;
   }): {
     kind: string;
     host: string;
@@ -752,6 +753,7 @@ export class FabricService implements OnModuleInit {
     group: string | null;
     secretRef: string | null;
     webUrl: string | null;
+    webIgnoreCertErrors: boolean;
   } {
     const kind = input.kind;
     if (kind !== 'ssh' && kind !== 'rdp' && kind !== 'vnc' && kind !== 'web') {
@@ -780,7 +782,7 @@ export class FabricService implements OnModuleInit {
         throw new BadRequestException('A Waypoint targets the LAN, not its own loopback.');
       }
       const port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
-      return { kind, host, port, label, group, secretRef: null, webUrl: u.toString() };
+      return { kind, host, port, label, group, secretRef: null, webUrl: u.toString(), webIgnoreCertErrors: !!input.webIgnoreCertErrors };
     }
 
     const host = (input.host ?? '').trim();
@@ -792,7 +794,7 @@ export class FabricService implements OnModuleInit {
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       throw new BadRequestException('port must be 1–65535.');
     }
-    return { kind, host, port, label, group, secretRef, webUrl: null };
+    return { kind, host, port, label, group, secretRef, webUrl: null, webIgnoreCertErrors: false };
   }
 
   async createRoute(
@@ -817,6 +819,7 @@ export class FabricService implements OnModuleInit {
         group: t.group,
         secretRef: t.secretRef,
         webUrl: t.webUrl,
+        webIgnoreCertErrors: t.webIgnoreCertErrors,
         source: 'curated',
       },
     });
@@ -853,6 +856,7 @@ export class FabricService implements OnModuleInit {
         group: t.group,
         secretRef: t.secretRef,
         webUrl: t.webUrl,
+        webIgnoreCertErrors: t.webIgnoreCertErrors,
         source: 'curated',
         ...(identityChanged ? { hostKey: null } : {}),
       },
@@ -940,7 +944,7 @@ export class FabricService implements OnModuleInit {
       where: { id },
       data: { status: 'deleting', pendingUninstallAt: new Date(), pendingUninstallBy: user.email },
     });
-    const online = this.registry.requestUninstall(id);
+    const online = await this.registry.requestUninstall(id);
     await this.audit.record({
       actorId: user.id,
       actorEmail: user.email,
@@ -958,7 +962,7 @@ export class FabricService implements OnModuleInit {
     const agent = await this.prisma.agent.findUnique({ where: { id } });
     if (!agent) throw new NotFoundException('Agent not found.');
     if (agent.status !== 'deleting') throw new BadRequestException('Agent is not pending removal.');
-    const online = this.registry.requestUninstall(id);
+    const online = await this.registry.requestUninstall(id);
     await this.audit.record({
       actorId: user.id,
       actorEmail: user.email,
@@ -1123,6 +1127,7 @@ export class FabricService implements OnModuleInit {
           source: (t.source as FabricTargetDto['source']) ?? 'discovered',
           group: t.group,
           webUrl: t.webUrl,
+          webIgnoreCertErrors: t.webIgnoreCertErrors,
         }),
       ),
     };

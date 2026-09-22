@@ -41,6 +41,8 @@ export interface FabricTargetDto {
   group?: string | null;
   /** Remote Browser (`kind: 'web'`) only: the internal URL opened in the remote browser. */
   webUrl?: string | null;
+  /** Remote Browser only: accept invalid/self-signed TLS certs for this route. */
+  webIgnoreCertErrors?: boolean;
 }
 
 /** Create/update a Waypoint route (curated LAN target). */
@@ -55,6 +57,8 @@ export interface FabricRouteInput {
   secretRef?: string | null;
   /** Remote Browser only: the internal URL the remote browser opens. */
   webUrl?: string | null;
+  /** Remote Browser only: accept invalid/self-signed TLS certs for this route. */
+  webIgnoreCertErrors?: boolean;
 }
 
 export interface FabricAgentDto {
@@ -382,7 +386,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.5.2';
+export const FABRIC_AGENT_VERSION = '0.5.3';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

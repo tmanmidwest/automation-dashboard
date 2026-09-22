@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-22
+### Security — Fabric re-review hardening
+- **Remote Browser session cap** — the number of concurrent Remote Browser
+  containers is now capped globally and per user (`REMOTE_BROWSER_MAX_SESSIONS`,
+  `REMOTE_BROWSER_MAX_PER_USER`), so a launch loop can't exhaust host memory.
+- **Remote Browser egress scoping** — the per-session SOCKS bridge now restricts the
+  browser to the route's own host broker-side (not just via the agent allow-list), so
+  a single `web` route can't be driven across the whole Waypoint egress range. Set
+  `REMOTE_BROWSER_SOCKS_OPEN=1` to fall back to agent-only gating.
+- **Per-route "ignore TLS certificate errors"** — this is now a property of each
+  Remote Browser route instead of a global toggle, so accepting a self-signed cert
+  for one internal host no longer weakens TLS validation for every other session.
+  (New per-route option on the route form; the global setting is removed.)
+- **Signed agent uninstall** — with update signing enabled, an agent now verifies an
+  ed25519 signature (bound to its own credential, time-limited) before uninstalling,
+  and a signing-enabled agent refuses to self-uninstall on a bare `410 Gone` — so a
+  broker that can talk TLS but lacks the signing key can't trigger a fleet-wide
+  self-destruct. Requires the **v0.5.3** agent; unsigned fleets are unaffected.
+- **Also fixed this cycle** (earlier in the re-review): a connector-create path that
+  could reference an unauthorized vault secret; unauthenticated VNC on the Remote
+  Browser container (now per-session password-gated); missing tombstone checks on a
+  few connect paths; a git-ref option-injection guard; an atomic OAuth refresh-token
+  rotation; SSRF-guard coverage for IPv4-mapped IPv6 and the ping probe; and a
+  fail-closed `SESSION_SECRET` check.
+
 ## [0.4.0] — 2026-09-22
 ### Added — Fabric Waypoints (network-gateway mode)
 - **Waypoints** — a second Cerebro Agent mode that turns one box into a network

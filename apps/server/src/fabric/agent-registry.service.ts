@@ -252,7 +252,7 @@ export class AgentRegistryService {
     // bring it online — re-push the uninstall and wait for the ack (which purges the
     // row). Every check-in re-pushes until it sticks.
     if (before.status === 'deleting') {
-      this.requestUninstall(agentId);
+      await this.requestUninstall(agentId);
       await this.audit.record({
         action: 'fabric.agent.uninstall_pushed',
         target: agentId,
@@ -415,11 +415,19 @@ export class AgentRegistryService {
    * flushes. Best-effort: only reaches an online agent. Returns whether the
    * agent was online to receive it.
    */
-  requestUninstall(agentId: string): boolean {
+  async requestUninstall(agentId: string): Promise<boolean> {
     const entry = this.live.get(agentId);
     if (!entry) return false;
+    // Sign an uninstall authorization bound to this agent's credential hash so a
+    // broker that can talk TLS but lacks the vault key can't forge it. Null when
+    // signing is off/offline — a pinned agent then fails closed (manual uninstall).
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId }, select: { credHash: true } }).catch(() => null);
+    const token = agent?.credHash ? await this.updateSigning.signUninstallToken(agent.credHash).catch(() => null) : null;
     try {
-      entry.ws.send(JSON.stringify({ t: 'uninstall' }));
+      entry.ws.send(JSON.stringify({
+        t: 'uninstall',
+        ...(token ? { uninstallSig: token.signature, uninstallIssuedAt: token.issuedAt } : {}),
+      }));
     } catch {
       /* socket gone */
     }

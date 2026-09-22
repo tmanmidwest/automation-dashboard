@@ -15,6 +15,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -36,7 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.5.2"
+const agentVersion = "0.5.3"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
@@ -161,9 +162,23 @@ func agentMain(stop <-chan struct{}) {
 		// and uninstall ourselves (mode-aware). This is the self-cleanup for an
 		// agent/Waypoint removed in Cerebro while we were offline.
 		if errors.Is(err, errAgentGone) {
-			log.Print("this agent was removed in Cerebro — uninstalling now")
-			selfUninstall() // spawns a detached remover and exits
-			return
+			if loadPinnedUpdateKey(cfg) == nil {
+				log.Print("this agent was removed in Cerebro — uninstalling now")
+				selfUninstall() // spawns a detached remover and exits
+				return
+			}
+			// A pinned agent won't self-destruct on a bare 410 (which a MITM could
+			// return without the vault key). A real removal arrives as a signed
+			// control-frame uninstall; otherwise the operator runs the manual
+			// uninstall. Back off hard and keep trying rather than looping fast.
+			log.Print("broker reported 410 Gone, but this agent has a pinned update key — refusing to self-uninstall on an unsigned 410; use the manual uninstall command from Cerebro if this removal is intended")
+			jitter := time.Duration(time.Now().UnixNano()%int64(time.Second)) / 2
+			select {
+			case <-stop:
+				return
+			case <-time.After(5*time.Minute + jitter):
+			}
+			continue
 		}
 
 		switch {
@@ -242,7 +257,7 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 		targets = detectTargets()
 		allow = allowSet(targets)
 	}
-	sess := newSession(conn, allow, cfg)
+	sess := newSession(conn, allow, cfg, cred)
 	defer sess.closeAll()
 
 	writerDone := make(chan struct{})
@@ -445,6 +460,7 @@ type session struct {
 	allow    map[string]bool
 	egress   []*net.IPNet // Waypoint ad-hoc: any host:port whose IP is in-range is allowed
 	cfg      config
+	cred     string // this agent's bearer credential (to verify signed uninstall)
 	out      chan outMsg
 	quit     chan struct{}
 	quitOnce sync.Once
@@ -454,11 +470,12 @@ type session struct {
 	hbReset chan time.Duration
 }
 
-func newSession(conn *websocket.Conn, allow map[string]bool, cfg config) *session {
+func newSession(conn *websocket.Conn, allow map[string]bool, cfg config, cred string) *session {
 	return &session{
 		conn:    conn,
 		allow:   allow,
 		cfg:     cfg,
+		cred:    cred,
 		out:     make(chan outMsg, 128),
 		quit:    make(chan struct{}),
 		streams: map[uint32]net.Conn{},
@@ -565,6 +582,8 @@ type ctrlFrame struct {
 	KeyType            string       `json:"keyType"`
 	Allow              []allowEntry `json:"allow"`
 	EgressCidrs        []string     `json:"egressCidrs"`
+	UninstallSig       string       `json:"uninstallSig"`
+	UninstallIssuedAt  int64        `json:"uninstallIssuedAt"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -578,7 +597,15 @@ func (s *session) onControl(msg []byte) {
 	case "close-stream":
 		s.closeStream(c.StreamID, false)
 	case "uninstall":
-		log.Print("received uninstall command from Cerebro — removing this agent")
+		// Once an update-signing key is pinned, the uninstall must be signed by it
+		// (bound to our credential, fresh timestamp) — so a broker that can talk TLS
+		// but lacks the vault key can't trigger a self-destruct. Unsigned fleets keep
+		// the legacy behavior. See docs/fabric-agent-signing.md.
+		if !uninstallAuthorized(s.cfg, s.cred, c.UninstallIssuedAt, c.UninstallSig) {
+			log.Print("refusing uninstall: not signed by the pinned update key. If this removal is intended, use the manual uninstall command shown in Cerebro (Fabric → Removal pending).")
+			return
+		}
+		log.Print("received signed uninstall command from Cerebro — removing this agent")
 		// Confirm receipt so the broker can purge our (tombstoned) row — the
 		// positive "it's gone" signal. Flush briefly before exit, since
 		// selfUninstall() calls os.Exit and would otherwise drop the in-flight frame.
@@ -1026,6 +1053,54 @@ func loadPinnedUpdateKey(cfg config) ed25519.PublicKey {
 		return ed25519.PublicKey{} // non-nil, wrong length → verifyUpdateSignature refuses (fails closed)
 	}
 	return ed25519.PublicKey(raw)
+}
+
+// credHash mirrors the server (fabric-credentials.ts): sha256(secret) hex, where
+// the credential is cbroagent_<prefix>_<secret>. Returns "" for a malformed cred.
+func credHash(cred string) string {
+	const pfx = "cbroagent_"
+	if !strings.HasPrefix(cred, pfx) {
+		return ""
+	}
+	rest := cred[len(pfx):]
+	i := strings.IndexByte(rest, '_')
+	if i <= 0 || i >= len(rest)-1 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rest[i+1:]))
+	return hex.EncodeToString(sum[:])
+}
+
+// uninstallAuthorized reports whether an uninstall command may proceed. With no
+// pinned update key (signing not set up) it's the legacy path — always allowed.
+// Once a key is pinned, the command must carry a valid ed25519 signature over
+// "uninstall:<credHash>:<issuedAt>", bound to THIS agent's credential (so a token
+// can't be replayed to another agent) and fresh (±1h) — fail-closed otherwise.
+func uninstallAuthorized(cfg config, cred string, issuedAt int64, sigB64 string) bool {
+	pub := loadPinnedUpdateKey(cfg)
+	if pub == nil {
+		return true // no key pinned — legacy behavior
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		log.Print("pinned update key is malformed — refusing uninstall until re-pinned")
+		return false
+	}
+	if sigB64 == "" || issuedAt == 0 {
+		return false
+	}
+	if d := time.Now().Unix() - issuedAt; d > 3600 || d < -3600 {
+		log.Printf("uninstall authorization timestamp out of range (%ds) — refusing", d)
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	ch := credHash(cred)
+	if ch == "" {
+		return false
+	}
+	return ed25519.Verify(pub, []byte(fmt.Sprintf("uninstall:%s:%d", ch, issuedAt)), sig)
 }
 
 // verifyUpdateSignature refuses an update binary that isn't validly signed for a

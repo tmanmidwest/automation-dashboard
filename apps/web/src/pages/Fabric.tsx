@@ -1589,8 +1589,8 @@ function RoutesDialog({
   onClose: () => void;
   onChanged: (updated: FabricAgentDto) => void;
 }) {
-  const blank = { kind: 'ssh', host: '', port: 22, label: '', group: '', secretRef: '', webUrl: '' };
-  const [form, setForm] = useState<{ kind: string; host: string; port: number; label: string; group: string; secretRef: string; webUrl: string }>(blank);
+  const blank = { kind: 'ssh', host: '', port: 22, label: '', group: '', secretRef: '', webUrl: '', webIgnoreCertErrors: false };
+  const [form, setForm] = useState<{ kind: string; host: string; port: number; label: string; group: string; secretRef: string; webUrl: string; webIgnoreCertErrors: boolean }>(blank);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [creds, setCreds] = useState<{ key: string; label: string }[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1640,6 +1640,7 @@ function RoutesDialog({
           webUrl: form.webUrl.trim(),
           label: form.label.trim() || undefined,
           group: form.group.trim() || undefined,
+          webIgnoreCertErrors: form.webIgnoreCertErrors,
         }
       : {
           kind: form.kind,
@@ -1665,7 +1666,7 @@ function RoutesDialog({
   const edit = (t: FabricTargetDto) => {
     setEditingId(t.id);
     setErr(null);
-    setForm({ kind: t.kind, host: t.host, port: t.port, label: t.label ?? '', group: t.group ?? '', secretRef: '', webUrl: t.webUrl ?? '' });
+    setForm({ kind: t.kind, host: t.host, port: t.port, label: t.label ?? '', group: t.group ?? '', secretRef: '', webUrl: t.webUrl ?? '', webIgnoreCertErrors: !!t.webIgnoreCertErrors });
   };
 
   const del = async (t: FabricTargetDto) => {
@@ -1747,10 +1748,21 @@ function RoutesDialog({
             </select>
           </div>
           {form.kind === 'web' ? (
-            <div className="col-span-2 sm:col-span-3">
-              <Label className="text-xs">URL</Label>
-              <Input value={form.webUrl} onChange={(e) => setForm((f) => ({ ...f, webUrl: e.target.value }))} placeholder="https://10.20.0.5" />
-            </div>
+            <>
+              <div className="col-span-2 sm:col-span-3">
+                <Label className="text-xs">URL</Label>
+                <Input value={form.webUrl} onChange={(e) => setForm((f) => ({ ...f, webUrl: e.target.value }))} placeholder="https://10.20.0.5" />
+              </div>
+              <label className="col-span-2 sm:col-span-3 flex items-start gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={form.webIgnoreCertErrors}
+                  onChange={(e) => setForm((f) => ({ ...f, webIgnoreCertErrors: e.target.checked }))}
+                />
+                <span>Ignore TLS certificate errors for this route (self-signed internal sites, e.g. a Proxmox host). Applies to this route only.</span>
+              </label>
+            </>
           ) : (
             <>
               <div className="col-span-2">
@@ -2077,8 +2089,8 @@ function ApprovalsDialog({
 }
 
 interface RemoteBrowserCfg {
-  stored: { image?: string; geometry?: string; network?: string; callbackHost?: string; ignoreCertErrors?: boolean };
-  effective: { image: string; geometry: string; network?: string; callbackHost?: string; ignoreCertErrors: boolean };
+  stored: { image?: string; geometry?: string; network?: string; callbackHost?: string };
+  effective: { image: string; geometry: string; network?: string; callbackHost?: string };
   detected: { network?: string; callbackHost?: string };
   env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
 }
@@ -2086,7 +2098,7 @@ interface RemoteBrowserCfg {
 /** Remote Browser settings: operator overrides on top of auto-detect + env. */
 function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
   const [cfg, setCfg] = useState<RemoteBrowserCfg | null>(null);
-  const [form, setForm] = useState<{ network: string; callbackHost: string; image: string; geometry: string; ignoreCertErrors: boolean }>({ network: '', callbackHost: '', image: '', geometry: '', ignoreCertErrors: false });
+  const [form, setForm] = useState<{ network: string; callbackHost: string; image: string; geometry: string }>({ network: '', callbackHost: '', image: '', geometry: '' });
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -2098,7 +2110,6 @@ function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClo
       callbackHost: c.stored.callbackHost ?? '',
       image: c.stored.image ?? '',
       geometry: c.stored.geometry ?? '',
-      ignoreCertErrors: !!c.stored.ignoreCertErrors,
     });
   };
   useEffect(() => {
@@ -2165,19 +2176,7 @@ function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClo
           <Field label="Callback host" k="callbackHost" help="Hostname the browser dials back to reach Cerebro. Blank = the app's container name." />
           <Field label="Image" k="image" help="Remote Browser image tag. Blank = cerebro-remote-browser:latest (auto-built if missing)." />
           <Field label="Geometry" k="geometry" help="Browser resolution, e.g. 1280x800." />
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={form.ignoreCertErrors}
-              disabled={!canManage}
-              onChange={(e) => { setForm((f) => ({ ...f, ignoreCertErrors: e.target.checked })); setSaved(false); }}
-            />
-            <span>
-              Ignore certificate errors
-              <span className="block text-[0.7rem] text-muted-foreground">Skip the "your connection is not private" warning for self-signed internal sites (e.g. a Proxmox host). Web jumps only reach hosts through the Waypoint, so this stays scoped to your internal targets.</span>
-            </span>
-          </label>
+          <p className="text-[0.7rem] text-muted-foreground">Ignoring TLS certificate errors is now set <span className="text-foreground">per route</span> (on the web route itself), so it never weakens other sessions.</p>
           <p className="text-[0.7rem] text-muted-foreground">Precedence: this form → environment variable → auto-detected → default. Set these only for a non-standard setup (e.g. a remote Docker endpoint).</p>
         </div>
       )}

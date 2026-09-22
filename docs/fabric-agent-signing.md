@@ -82,6 +82,32 @@ The agent side is identical — it just verifies against the pinned public key �
 switching vault → offline needs no agent changes (already-pinned agents keep working
 as long as the public key is the same one you import).
 
+## Signed uninstall (v0.5.3+)
+
+The same pinned key also authorizes **uninstall**, so a broker that can talk TLS
+but lacks the vault key can't trigger a fleet-wide self-destruct.
+
+- **Control-frame uninstall** (the normal delete flow): the broker attaches a
+  signature over `uninstall:<credHash>:<issuedAt>` — bound to that agent's own
+  credential hash (so a token can't be replayed to a different agent) and fresh
+  (±1h). A pinned agent verifies it against the pinned key and **refuses** an
+  unsigned/invalid one, logging loudly. Agents with **no** pinned key keep the
+  legacy behavior (uninstall on command), so nothing changes until you enable
+  signing.
+- **410 Gone** (revoked-credential path): a pinned agent will **not** self-uninstall
+  on a bare 410 (which a MITM could return) — it backs off and keeps running (a
+  revoked agent is harmless). Remove it with the **manual uninstall command** shown
+  in Fabric → *Removal pending*, or it self-cleans via the signed control frame if
+  it reconnects while tombstoned.
+- **Offline mode**: the server holds no private key, so it can't sign an uninstall
+  on demand. A pinned agent therefore won't auto-uninstall — use the **manual
+  uninstall command** from Fabric → *Removal pending* to remove it.
+
+Residual: a **full** server compromise (RCE + the vault key) can still forge an
+uninstall, exactly as it could forge an update — the offline-key upgrade closes
+that for both. Requires the **v0.5.3+** agent (older agents ignore the signature
+and keep the legacy uninstall path).
+
 ## Endpoints (for reference)
 
 - `GET /api/fabric/update-signing` — status (fabric:read)
