@@ -3,6 +3,9 @@ import * as https from 'https';
 import { URL } from 'url';
 import { WebSocket } from 'ws';
 
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 export interface JellyfinAuth {
   /** Base URL of the server, e.g. http://10.0.0.5:8096 */
   baseUrl: string;
@@ -329,7 +332,12 @@ export class JellyfinApi {
     return new Promise((resolve, reject) => {
       const req = transport.request(options, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new JellyfinApiError('Jellyfin response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;

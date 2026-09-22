@@ -4,6 +4,9 @@ import { URL } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, rm } from 'fs/promises';
+
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -308,7 +311,12 @@ export class DockerApi {
       const req = mod.request(options, (res) => {
         const status = res.statusCode ?? 0;
         const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c: Buffer) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new DockerApiError('Docker response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           if (status < 200 || status >= 300) {
@@ -572,7 +580,12 @@ export class DockerApi {
     return new Promise<T>((resolve, reject) => {
       const req = mod.request(options, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new DockerApiError('Docker response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;
@@ -646,7 +659,12 @@ export class DockerApi {
         const status = res.statusCode ?? 0;
         if (status < 200 || status >= 300) {
           const chunks: Buffer[] = [];
-          res.on('data', (c) => chunks.push(c));
+          let total = 0;
+          res.on('data', (c) => {
+            total += c.length;
+            if (total > MAX_RESPONSE_BYTES) return void req.destroy(new DockerApiError('Docker response exceeded the size limit.', status));
+            chunks.push(c);
+          });
           res.on('end', () => {
             reject(new DockerApiError(httpErrorMessage(status, method, Buffer.concat(chunks).toString('utf8')), status));
           });

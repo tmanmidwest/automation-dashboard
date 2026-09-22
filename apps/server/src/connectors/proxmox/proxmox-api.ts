@@ -2,6 +2,9 @@ import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 export interface ProxmoxAuth {
   baseUrl: string;
   /** e.g. "root@pam!cerebro" */
@@ -84,7 +87,13 @@ export class ProxmoxApi {
     return new Promise<T>((resolve, reject) => {
       const req = lib.request(options, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c) => {
+          // Cap the buffered body so a hostile/compromised host can't exhaust memory.
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new ProxmoxApiError('Proxmox response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const body = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;
@@ -133,7 +142,7 @@ export class ProxmoxApi {
 
   /** Change a guest's power state: start | stop | shutdown | reboot | suspend | resume | reset. */
   async setStatus(node: string, type: 'qemu' | 'lxc', vmid: number, action: string): Promise<string> {
-    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/status/${action}`);
+    return this.request('POST', `/nodes/${encodeURIComponent(node)}/${type}/${vmid}/status/${encodeURIComponent(action)}`);
   }
 
   /** The guest's current configuration (cores, memory, disks, nics, ...). */

@@ -136,7 +136,7 @@ export class Restic {
 
   /** List the files in a snapshot (restic ls emits newline-delimited JSON). */
   async listFiles(snapshotId: string): Promise<ResticFile[]> {
-    const raw = await this.run(['ls', snapshotId, '--json']);
+    const raw = await this.run(['ls', '--json', '--', snapshotId]);
     const out: ResticFile[] = [];
     for (const line of raw.split('\n')) {
       const t = line.trim();
@@ -157,7 +157,7 @@ export class Restic {
   /** Read a single small file out of a snapshot as a string, or null if it's not there. */
   async catFile(snapshotId: string, filePath: string): Promise<string | null> {
     try {
-      return await this.run(['dump', snapshotId, filePath], 8 * 1024 * 1024);
+      return await this.run(['dump', '--', snapshotId, filePath], 8 * 1024 * 1024);
     } catch {
       return null; // file absent in this snapshot (e.g. older snapshots) — caller falls back
     }
@@ -182,9 +182,9 @@ export class Restic {
     onStatus?: (s: { percent: number; secondsRemaining?: number }) => void,
     signal?: AbortSignal,
   ): Promise<{ snapshotId?: string; filesNew?: number; filesChanged?: number; bytesAdded?: number; bytesProcessed?: number }> {
-    const args = ['backup', ...paths];
+    const args = ['backup'];
     for (const t of tags) args.push('--tag', t);
-    args.push('--json');
+    args.push('--json', '--', ...paths);
     return new Promise((resolve, reject) => {
       const child = spawn('restic', args, { env: this.env(), signal });
       let stderr = '';
@@ -242,8 +242,9 @@ export class Restic {
    * reference); the actual data is reclaimed by the next retention prune.
    */
   async forget(snapshotId: string, prune = false): Promise<void> {
-    const args = ['forget', snapshotId];
+    const args = ['forget'];
     if (prune) args.push('--prune');
+    args.push('--', snapshotId);
     await this.run(args);
   }
 
@@ -253,7 +254,7 @@ export class Restic {
    */
   async dumpTo(snapshotId: string, filePath: string, dest: Writable, onBytes?: (n: number) => void, signal?: AbortSignal): Promise<number> {
     return new Promise<number>((resolve, reject) => {
-      const child = spawn('restic', ['dump', snapshotId, filePath], { env: this.env(), signal });
+      const child = spawn('restic', ['dump', '--', snapshotId, filePath], { env: this.env(), signal });
       let bytes = 0;
       let stderr = '';
       let settled = false;

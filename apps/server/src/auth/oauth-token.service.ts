@@ -84,11 +84,19 @@ export class OAuthTokenService {
         return null;
       }
       const claims = decoded as jwt.JwtPayload & AccessTokenClaims;
+      const aud = typeof claims.aud === 'string' ? claims.aud : undefined;
+      // If the token carries a resource audience (RFC 8707), bind it to THIS resource
+      // server — the advertised `<APP_URL>/mcp`. A token minted for a different
+      // resource is rejected. Tokens with no `aud` (no resource requested) are
+      // accepted as before, so this doesn't disturb the common flow.
+      if (aud && this.issuer && aud !== `${this.issuer.replace(/\/$/, '')}/mcp`) {
+        return null;
+      }
       return {
         sub: claims.sub,
         scope: typeof claims.scope === 'string' ? claims.scope : '',
         client_id: claims.client_id,
-        aud: typeof claims.aud === 'string' ? claims.aud : undefined,
+        aud,
       };
     } catch {
       return null; // bad signature, expired, wrong issuer, malformed — all "not our token"

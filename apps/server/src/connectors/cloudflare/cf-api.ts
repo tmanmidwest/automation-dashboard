@@ -212,6 +212,8 @@ export class CfApiError extends Error {
 
 const API_HOST = 'api.cloudflare.com';
 const API_BASE = '/client/v4';
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 /**
  * Minimal Cloudflare API v4 client using scoped-token (Bearer) auth. Dependency-free
@@ -250,7 +252,12 @@ export class CfApi {
     return new Promise((resolve, reject) => {
       const req = https.request(options, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new CfApiError('Cloudflare response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;

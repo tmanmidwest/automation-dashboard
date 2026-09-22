@@ -2,6 +2,9 @@ import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 
+/** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 export interface HaAuth {
   /** e.g. "https://ha.example.com" */
   baseUrl: string;
@@ -74,7 +77,12 @@ export class HaApi {
     return new Promise<T>((resolve, reject) => {
       const req = lib.request(options, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) return void req.destroy(new HaApiError('Home Assistant response exceeded the size limit.'));
+          chunks.push(c);
+        });
         res.on('end', () => {
           const body = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode ?? 0;
