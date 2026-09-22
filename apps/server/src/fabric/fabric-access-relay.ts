@@ -39,7 +39,9 @@ export function attachFabricAccessRelay(server: Server, deps: FabricAccessDeps):
 
     const header = req.headers['authorization'];
     const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
-    const token = bearer || url.searchParams.get('token') || '';
+    // Header only — the `cerebro access` CLI always sends Authorization; a query-param
+    // token would leak into proxy/access logs.
+    const token = bearer;
     const targetId = url.searchParams.get('target') || '';
 
     const reject = (code: number, msg: string) => {

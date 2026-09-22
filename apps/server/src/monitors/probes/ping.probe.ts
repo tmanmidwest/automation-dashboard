@@ -26,6 +26,9 @@ export class PingProbe implements Probe {
     const host = str(config, 'host');
     if (!host) return 'Hostname is required.';
     if (/[\s;&|`$]/.test(host)) return 'Hostname contains invalid characters.';
+    // A leading '-' would be read by `ping` as a flag (e.g. -f flood) rather than a
+    // host, even though we use execFile (no shell). Reject it.
+    if (host.startsWith('-')) return 'Hostname cannot start with a dash.';
     return null;
   }
 

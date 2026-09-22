@@ -393,7 +393,10 @@ export class AgentRegistryService {
     if (agent?.mode === 'waypoint') return;
     for (const t of targets) {
       if (t.kind !== 'ssh' && t.kind !== 'rdp' && t.kind !== 'vnc') continue;
-      const host = t.host || '127.0.0.1';
+      // An endpoint agent only ever proxies its own loopback services (its allow-list
+      // is loopback-only), so pin the stored host to 127.0.0.1 — don't let a
+      // compromised/rogue agent self-report a misleading non-loopback target row.
+      const host = '127.0.0.1';
       const port = Number(t.port);
       if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
       await this.prisma.agentTarget

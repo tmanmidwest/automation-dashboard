@@ -18,6 +18,7 @@ import type { Response } from 'express';
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
+import { guardedLookup, hostBlockedReason } from '../monitors/probes/ssrf-guard';
 import type { ConnectorResource } from '@cerebro/shared';
 import { IsBoolean, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 import type { ConnectorJobStatus } from '@cerebro/shared';
@@ -261,6 +262,15 @@ export class ConnectorsController {
     const isHttps = url.protocol === 'https:';
     const lib = isHttps ? https : http;
 
+    // SSRF guard: the resolved upstream must not be loopback/link-local/metadata
+    // (a crafted resourceId shouldn't be able to pivot the proxy at localhost or
+    // 169.254.169.254). Internal RFC1918 camera hosts remain allowed.
+    const blocked = hostBlockedReason(url.hostname);
+    if (blocked) {
+      res.status(400).end();
+      return;
+    }
+
     const upstream = lib.request(
       {
         method: 'GET',
@@ -270,6 +280,7 @@ export class ConnectorsController {
         headers: target.headers,
         rejectUnauthorized: isHttps ? target.rejectUnauthorized : undefined,
         timeout: 30000,
+        lookup: guardedLookup,
       },
       (up) => {
         const status = up.statusCode ?? 502;

@@ -34,6 +34,13 @@ async function bootstrap() {
 
   const isHttps = (process.env.APP_URL ?? '').startsWith('https://');
 
+  // Never run a real deployment with the public dev session secret — a forgeable
+  // signing key would let anyone mint a valid session cookie. Fail closed instead.
+  if (!process.env.SESSION_SECRET && (process.env.NODE_ENV === 'production' || isHttps)) {
+    throw new Error('SESSION_SECRET must be set in production. Generate one with: openssl rand -base64 32');
+  }
+  const sessionSecret = process.env.SESSION_SECRET ?? 'insecure-dev-secret-change-me';
+
   // Baseline security headers (clickjacking, MIME-sniffing, CSP, HSTS) on every
   // response, including the served SPA.
   app.use(securityHeaders({ https: isHttps }));
@@ -43,7 +50,7 @@ async function bootstrap() {
   app.use(
     session({
       store: new RedisStore({ client: redis, prefix: 'cerebro:sess:' }),
-      secret: process.env.SESSION_SECRET ?? 'insecure-dev-secret-change-me',
+      secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
       rolling: true,

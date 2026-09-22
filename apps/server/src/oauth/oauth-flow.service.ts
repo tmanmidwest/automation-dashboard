@@ -264,6 +264,10 @@ export class OAuthFlowService {
       throw new OAuthFlowError('invalid_grant', 'Invalid refresh token.', false);
     }
     if (row.revokedAt) {
+      // Presenting a token that was already rotated away is a theft/replay signal
+      // (OAuth 2.1 BCP): revoke the whole active chain descended from it so the
+      // attacker's and the victim's tokens are both killed.
+      if (row.rotatedTo) await this.revokeRefreshChain(row.rotatedTo);
       throw new OAuthFlowError('invalid_grant', 'Refresh token revoked.', false);
     }
     if (row.expiresAt.getTime() <= Date.now()) {
@@ -285,6 +289,25 @@ export class OAuthFlowService {
       data: { revokedAt: new Date(), rotatedTo: successor?.id ?? null },
     });
     return issued;
+  }
+
+  /** Revoke a refresh token and every active successor down its rotation chain
+   *  (reuse-detection response). Cycle-guarded. */
+  private async revokeRefreshChain(startId: string): Promise<void> {
+    let id: string | null = startId;
+    const seen = new Set<string>();
+    while (id !== null && !seen.has(id)) {
+      seen.add(id);
+      const cur: string = id;
+      const t: { rotatedTo: string | null; revokedAt: Date | null } | null = await this.prisma.oAuthRefreshToken
+        .findUnique({ where: { id: cur }, select: { rotatedTo: true, revokedAt: true } })
+        .catch(() => null);
+      if (!t) break;
+      if (!t.revokedAt) {
+        await this.prisma.oAuthRefreshToken.update({ where: { id: cur }, data: { revokedAt: new Date() } }).catch(() => undefined);
+      }
+      id = t.rotatedTo;
+    }
   }
 
   // ── Revocation (RFC 7009) ────────────────────────────────

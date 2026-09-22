@@ -30,7 +30,9 @@ export function attachFabricAgentRelay(server: Server, registry: AgentRegistrySe
     const header = req.headers['authorization'];
     const bearer =
       typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
-    const credential = bearer || url.searchParams.get('cred') || '';
+    // Header only — the Go agent always sends Authorization; accepting the
+    // credential via a query param would leak it into proxy/access logs.
+    const credential = bearer;
     if (!credential) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();

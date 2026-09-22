@@ -2,7 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
-import { join, relative, dirname } from 'path';
+import { join, relative, dirname, resolve, sep } from 'path';
 import { promisify } from 'util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../common/crypto.service';
@@ -91,7 +91,9 @@ export class SystemBackupService {
   }
 
   async createBackup(passphrase: string): Promise<{ filename: string; data: Buffer }> {
-    if (!passphrase || passphrase.length < 8) throw new BadRequestException('A passphrase of at least 8 characters is required.');
+    // The .cbak holds every secret in the vault, so require a strong passphrase —
+    // it's the only thing standing between a leaked backup file and full decryption.
+    if (!passphrase || passphrase.length < 16) throw new BadRequestException('A passphrase of at least 16 characters is required (this file contains all your secrets).');
     if (!(await this.pgToolsAvailable())) throw new BadRequestException('pg_dump is not available in this image — rebuild with postgresql-client.');
 
     const { stdout } = await execFileAsync(
@@ -221,10 +223,15 @@ export class SystemBackupService {
 
   private async writeSignal(files: Record<string, string>): Promise<void> {
     const dir = this.signalDir();
+    const root = resolve(dir);
     for (const [rel, b64] of Object.entries(files)) {
-      // Guard against path traversal in the archive.
-      if (rel.includes('..')) continue;
-      const dest = join(dir, rel);
+      // Robust traversal guard: the fully-resolved destination must stay under the
+      // signal dir (a substring "\.\." check misses absolute paths and symlink tricks).
+      const dest = resolve(root, rel);
+      if (dest !== root && !dest.startsWith(root + sep)) {
+        void this.logging.warn('system-backup', `Skipped signal file outside the target dir: ${rel}`);
+        continue;
+      }
       try {
         await fs.mkdir(dirname(dest), { recursive: true });
         await fs.writeFile(dest, Buffer.from(b64, 'base64'));

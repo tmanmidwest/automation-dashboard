@@ -7,7 +7,17 @@ export interface HostKeyActor {
   userId: string;
   userEmail?: string | null;
   agentId: string;
+  /** The curated AgentTarget id; empty for an ad-hoc connection (pinned by
+   *  agentId+host+port instead — see below). */
   targetId: string;
+  /** Required for ad-hoc pinning (targetId empty). */
+  host?: string;
+  port?: number;
+}
+
+/** Setting key an ad-hoc connection's host key is pinned under (no AgentTarget row). */
+function adhocPinKey(agentId: string, host: string, port: number): string {
+  return `fabric.adhocHostKey:${agentId}:${host}:${port}`;
 }
 
 /**
@@ -24,15 +34,35 @@ export async function checkHostKey(
   key: Buffer,
 ): Promise<{ ok: boolean; reason?: string }> {
   const fp = createHash('sha256').update(key).digest('base64');
-  const target = await prisma.agentTarget
-    .findUnique({ where: { id: actor.targetId }, select: { hostKey: true } })
-    .catch(() => null);
-  const stored = target?.hostKey ?? null;
+
+  // Ad-hoc connections have no AgentTarget row, so pin by agentId+host+port in a
+  // Setting row instead of silently accepting any key (which left ad-hoc SSH open
+  // to an on-LAN MITM). Curated targets keep pinning against AgentTarget.hostKey.
+  const adhoc = !actor.targetId;
+  if (adhoc && (!actor.host || !actor.port)) return { ok: true }; // nothing to key on
+  const pinKey = adhoc ? adhocPinKey(actor.agentId, actor.host as string, actor.port as number) : null;
+
+  let stored: string | null;
+  if (adhoc) {
+    const row = await prisma.setting.findUnique({ where: { key: pinKey as string } }).catch(() => null);
+    stored = typeof row?.value === 'string' ? row.value : null;
+  } else {
+    const target = await prisma.agentTarget
+      .findUnique({ where: { id: actor.targetId }, select: { hostKey: true } })
+      .catch(() => null);
+    stored = target?.hostKey ?? null;
+  }
 
   if (!stored) {
-    await prisma.agentTarget
-      .update({ where: { id: actor.targetId }, data: { hostKey: fp } })
-      .catch(() => undefined);
+    if (adhoc) {
+      await prisma.setting
+        .upsert({ where: { key: pinKey as string }, update: { value: fp }, create: { key: pinKey as string, value: fp } })
+        .catch(() => undefined);
+    } else {
+      await prisma.agentTarget
+        .update({ where: { id: actor.targetId }, data: { hostKey: fp } })
+        .catch(() => undefined);
+    }
     await audit.record({
       actorId: actor.userId,
       actorEmail: actor.userEmail,

@@ -15,7 +15,10 @@ class MfaCodeDto {
 }
 
 // No @RequirePermissions — any authenticated user may manage their OWN password / MFA.
+// @SessionOnly at the class level: a bearer API token must never change a human's
+// password or MFA, only an interactive session may (matches SecretsController etc.).
 @Controller('api/account')
+@SessionOnly()
 export class AccountController {
   constructor(
     private readonly account: AccountService,

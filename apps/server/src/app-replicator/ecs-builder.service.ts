@@ -12,7 +12,13 @@ const PUSH_TIMEOUT_MS = 20 * 60_000;
 
 /** Single-quote a value for a bash command (wrap and escape embedded quotes). */
 const sq = (s: string) => String(s).replace(/'/g, `'\\''`);
-const trimSlash = (s: string) => s.replace(/\/+$/, '');
+const trimSlash = (s: string) => {
+  const dir = (s || '').replace(/\/+$/, '');
+  // Admin-set path embedded in remote shell commands — keep it to a safe charset
+  // so a stray quote/metacharacter can't break out of the quoting.
+  if (!/^[A-Za-z0-9 _./-]+$/.test(dir)) throw new BadRequestException('The stacks directory contains unsupported characters.');
+  return dir;
+};
 const tail = (s: string, n: number) => (s || '').slice(-n).trim();
 function hostFromUrl(url: string): string {
   try { return new URL(url).host; } catch { return url.match(/^https?:\/\/([^/]+)/i)?.[1] ?? ''; }

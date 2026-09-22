@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SecretsService } from '../../secrets/secrets.service';
 import { runSsh, type SshConfig } from './docker-ssh';
@@ -451,7 +451,14 @@ export function projectName(name: string): string {
 }
 
 function trimSlash(p: string): string {
-  return (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
+  const dir = (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
+  // stacksDir is admin-set config that gets embedded in remote shell commands
+  // (inside single quotes). Reject anything outside a safe path charset so it can't
+  // break out of the quoting (e.g. a single quote or shell metacharacter).
+  if (!/^[A-Za-z0-9 _./-]+$/.test(dir)) {
+    throw new BadRequestException('The stacks directory contains unsupported characters (use letters, digits, spaces, and _ . / -).');
+  }
+  return dir;
 }
 
 /** `docker compose up` flags from the deploy options (shared by compose + git deploys). */

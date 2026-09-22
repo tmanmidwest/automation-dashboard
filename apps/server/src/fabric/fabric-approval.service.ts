@@ -26,6 +26,9 @@ interface PendingApproval {
   createdAt: number;
   expiresAt: number;
   state: FabricApprovalState;
+  /** Set synchronously when an approver starts minting, so two approvers acting at
+   *  once can't both pass the `pending` check and double-provision a session. */
+  minting?: boolean;
   decidedByEmail?: string | null;
   mint: () => Promise<FabricSessionTicket>;
   result?: { ticket?: FabricVncSessionTicket; error?: string };
@@ -131,9 +134,11 @@ export class FabricApprovalService {
     const p = this.pending.get(id);
     if (!p) throw new NotFoundException('Approval request not found or expired.');
     if (p.state !== 'pending') throw new ForbiddenException(`This request is already ${p.state}.`);
+    if (p.minting) throw new ForbiddenException('This request is already being approved.');
     if (p.requesterId === user.id) {
       throw new ForbiddenException('You cannot approve your own session request.');
     }
+    p.minting = true; // synchronous latch — no await before this point
     p.decidedByEmail = user.email;
     try {
       const ticket = await p.mint();
