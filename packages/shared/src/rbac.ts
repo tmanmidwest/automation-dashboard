@@ -119,7 +119,10 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   // Write / action scopes:
   'connectors:action',
   'monitors:write',
-  'automations:write',
+  // NOTE: automations:write is intentionally NOT grantable to a bearer token — the
+  // automation engine runs a rule's actions (connector actions, notifications, raw
+  // webhooks) as an unscoped system actor, so a token holding only automations:write
+  // could otherwise perform infra actions it has no scope for. It stays session-only.
   'notifications:send',
   // Fabric: read (list agents) + connect (open a tunnel) — enables the native
   // `cerebro access` CLI. `fabric:manage` stays session-only (enroll/revoke).

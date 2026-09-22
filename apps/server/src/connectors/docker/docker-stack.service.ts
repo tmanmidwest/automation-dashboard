@@ -194,12 +194,12 @@ export class DockerStackService {
     const project = projectName(name);
     if (!project) return { ok: false, message: 'A valid stack name is required.' };
     let ref: string | undefined;
-    try { assertSafeGitUrl(src.gitUrl); ref = assertSafeGitRef(src.gitRef) || undefined; }
+    let relCompose: string;
+    try { assertSafeGitUrl(src.gitUrl); ref = assertSafeGitRef(src.gitRef) || undefined; relCompose = safeComposeRel(src.gitPath); }
     catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Invalid git repository URL.' }; }
 
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const dir = `${base}/repo`;
-    const relCompose = (src.gitPath?.trim() || 'docker-compose.yml').replace(/^\/+/, '');
     const composeFile = `${dir}/${relCompose}`;
     const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
     const credFile = `${base}/.gitcred`;
@@ -354,7 +354,7 @@ export class DockerStackService {
     const project = projectName(name);
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const stored = await this.get(instanceId, name).catch(() => null);
-    if (stored?.source === 'git') return `${base}/repo/${(stored.gitPath?.trim() || 'docker-compose.yml').replace(/^\/+/, '')}`;
+    if (stored?.source === 'git') return `${base}/repo/${safeComposeRel(stored.gitPath)}`;
     return `${base}/docker-compose.yml`;
   }
 
@@ -462,6 +462,19 @@ function trimSlash(p: string): string {
     throw new BadRequestException('The stacks directory contains unsupported characters (use letters, digits, spaces, and _ . / -).');
   }
   return dir;
+}
+
+/** Validate a git-stack compose file path. It is embedded in remote shell commands
+ *  inside single quotes (`docker compose -f '<dir>/<rel>'`), so — like stacksDir —
+ *  reject quotes/metacharacters and `..` traversal so it can't break out. */
+function safeComposeRel(gitPath?: string | null): string {
+  const rel = (gitPath?.trim() || 'docker-compose.yml').replace(/^\/+/, '');
+  if (!/^[A-Za-z0-9 _./-]+$/.test(rel) || rel.split('/').includes('..')) {
+    throw new BadRequestException(
+      'The compose file path contains unsupported characters — use a plain relative path like "docker-compose.yml" or "stacks/app/compose.yaml".',
+    );
+  }
+  return rel;
 }
 
 /** `docker compose up` flags from the deploy options (shared by compose + git deploys). */

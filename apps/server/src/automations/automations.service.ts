@@ -10,6 +10,9 @@ import { TimelineBus } from '../timeline/timeline-bus';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { MonitorsService } from '../monitors/monitors.service';
+import { hostBlockedReason, isBlockedAddress, allowLocalTargets } from '../monitors/probes/ssrf-guard';
+import { isIP } from 'net';
+import { lookup } from 'dns/promises';
 import type {
   AutomationRule,
   AutomationRuleInput,
@@ -221,6 +224,30 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
     return { status, message };
   }
 
+  /** SSRF guard for a rule's webhook action: the engine runs unscoped, so a webhook
+   *  must not be usable to reach loopback/link-local/cloud-metadata. RFC1918 internal
+   *  targets stay allowed (a rule notifying an internal system is legitimate), matching
+   *  the monitor/stream-proxy policy. Honors MONITOR_ALLOW_LOCAL_TARGETS. */
+  private async assertWebhookAllowed(rawUrl: string): Promise<void> {
+    if (allowLocalTargets()) return;
+    let url: URL;
+    try { url = new URL(rawUrl); } catch { throw new Error('webhook URL is invalid'); }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('webhook URL must be http(s)');
+    const host = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+    const literal = hostBlockedReason(host);
+    if (literal) throw new Error(literal);
+    if (!isIP(host)) {
+      // Resolve the name and reject if ANY address is blocked (a hostname pointing at
+      // loopback/metadata).
+      const addrs = await lookup(host, { all: true }).catch(() => [] as { address: string }[]);
+      for (const a of addrs) {
+        if (isBlockedAddress(a.address)) {
+          throw new Error(`Blocked webhook target ${a.address} (loopback/link-local/metadata).`);
+        }
+      }
+    }
+  }
+
   private async runAction(action: RuleAction, rule: AutomationRule, event?: TimelineEvent): Promise<string> {
     switch (action.type) {
       case 'notify':
@@ -248,6 +275,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
         return `resumed monitor ${m.name}`;
       }
       case 'webhook': {
+        await this.assertWebhookAllowed(action.url);
         const method = action.method ?? 'POST';
         const body = method === 'POST' ? renderTemplate(action.body ?? '', rule, event) : undefined;
         const res = await fetch(action.url, {

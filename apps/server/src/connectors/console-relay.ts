@@ -3,6 +3,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { Logger } from '@nestjs/common';
 import { ConsoleService } from './console.service';
 import { bridgeDockerRaw } from './docker/docker-console-bridge';
+import { hostBlockedReason, guardedLookup } from '../monitors/probes/ssrf-guard';
 
 const CONSOLE_PATH = '/api/console/ws';
 const logger = new Logger('ConsoleRelay');
@@ -42,9 +43,22 @@ export function attachConsoleRelay(server: Server, consoleService: ConsoleServic
         bridgeDockerRaw(client, target.raw, logger);
         return;
       }
+      // SSRF parity with the HTTP media-stream proxy: refuse a console upstream that
+      // resolves to loopback/link-local/metadata (a crafted resourceId or a
+      // DNS-rebinding host can't pivot the relay — carrying the connector's auth
+      // headers — to an internal host). RFC1918 internal targets stay allowed.
+      let upstreamHost = '';
+      try { upstreamHost = new URL(target.url).hostname; } catch { /* handled below */ }
+      const blocked = upstreamHost ? hostBlockedReason(upstreamHost) : 'invalid upstream URL';
+      if (blocked) {
+        logger.warn(`Console upstream refused: ${blocked}`);
+        try { client.close(1008, 'blocked target'); } catch { /* noop */ }
+        return;
+      }
       const upstream = new WebSocket(target.url, target.protocols ?? [], {
         headers: target.headers,
         rejectUnauthorized: target.rejectUnauthorized ?? true,
+        lookup: guardedLookup,
       });
       client.binaryType = 'nodebuffer';
       upstream.binaryType = 'nodebuffer';

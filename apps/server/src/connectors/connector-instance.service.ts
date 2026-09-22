@@ -46,7 +46,10 @@ export class ConnectorInstanceService implements OnModuleInit {
     const k = key.toLowerCase();
     if (k.startsWith('oauth:') || k.startsWith('idp:')) return true; // JWT signing key / SSO client secrets
     if (k.startsWith('fabric/')) return true; // Fabric agent/session credentials
-    if (key.startsWith('connector:') && (!ownInstanceId || !key.startsWith(`connector:${ownInstanceId}:`))) return true;
+    // Use the lower-cased key here too (not the original case) so `Connector:<id>:…`
+    // can't evade the cross-connector deny-list.
+    const own = ownInstanceId?.toLowerCase();
+    if (k.startsWith('connector:') && (!own || !k.startsWith(`connector:${own}:`))) return true;
     return false;
   }
 
