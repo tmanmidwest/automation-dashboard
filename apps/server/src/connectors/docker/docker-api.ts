@@ -235,8 +235,8 @@ export class DockerApi {
   listImages(): Promise<DockerImage[]> {
     return this.get<DockerImage[]>('/images/json');
   }
-  inspectImage(id: string): Promise<{ RepoDigests?: string[]; Id?: string }> {
-    return this.get<{ RepoDigests?: string[]; Id?: string }>(`/images/${encodeURIComponent(id)}/json`);
+  inspectImage(id: string): Promise<{ RepoDigests?: string[]; Id?: string; Config?: { Labels?: Record<string, string> | null } }> {
+    return this.get<{ RepoDigests?: string[]; Id?: string; Config?: { Labels?: Record<string, string> | null } }>(`/images/${encodeURIComponent(id)}/json`);
   }
   /** True if a local image with this ref (name:tag or id) exists. */
   async imageExists(ref: string): Promise<boolean> {
@@ -247,6 +247,15 @@ export class DockerApi {
       return false;
     }
   }
+  /** A label value from an image (name:tag or id), or null if the image/label is absent. */
+  async imageLabel(ref: string, key: string): Promise<string | null> {
+    try {
+      const info = await this.inspectImage(ref);
+      return info.Config?.Labels?.[key] ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Build an image from a local directory context and tag it. Used to auto-create
@@ -255,13 +264,14 @@ export class DockerApi {
    * POSTed to the daemon's /build endpoint; build output is streamed and any
    * {error} line rejects.
    */
-  async buildImage(contextDir: string, tag: string): Promise<void> {
+  async buildImage(contextDir: string, tag: string, labels?: Record<string, string>): Promise<void> {
     const tar = join(tmpdir(), `cerebro-build-${Date.now()}-${Math.random().toString(36).slice(2)}.tar`);
     try {
       await execFileP('tar', ['-C', contextDir, '-cf', tar, '.']);
       const body = await readFile(tar);
+      const labelQuery = labels && Object.keys(labels).length ? `&labels=${encodeURIComponent(JSON.stringify(labels))}` : '';
       await this.postBuild(
-        `/build?t=${encodeURIComponent(tag)}&dockerfile=Dockerfile&rm=1&forcerm=1&pull=0`,
+        `/build?t=${encodeURIComponent(tag)}&dockerfile=Dockerfile&rm=1&forcerm=1&pull=0${labelQuery}`,
         body,
       );
     } finally {

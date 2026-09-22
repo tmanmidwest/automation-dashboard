@@ -2,6 +2,8 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { connect as netConnect, isIP } from 'net';
 import { lookup } from 'dns/promises';
 import { existsSync } from 'fs';
+import { readdir, readFile } from 'fs/promises';
+import { createHash } from 'crypto';
 import { join } from 'path';
 import { hostname } from 'os';
 import { randomUUID } from 'crypto';
@@ -15,6 +17,9 @@ import { DockerApi, type DockerAuth } from '../connectors/docker/docker-api';
 import { openRemoteBrowserProxy, type RemoteBrowserProxy } from './remote-browser-proxy';
 
 const REMOTE_BROWSER_WS_PATH = '/api/fabric/remote-browser/ws';
+/** Image label carrying the build-context fingerprint, so we can rebuild when the
+ *  bundled Dockerfile/entrypoint changes rather than serving a stale image. */
+const CONTEXT_HASH_LABEL = 'cerebro.remote-browser.context-hash';
 /** Settings key for the operator's Remote Browser overrides. */
 const REMOTE_BROWSER_CONFIG_KEY = 'fabric.remoteBrowser';
 
@@ -26,6 +31,8 @@ export interface RemoteBrowserConfig {
   network?: string;
   /** Hostname the browser container dials back to reach Cerebro's SOCKS bridge. */
   callbackHost?: string;
+  /** Accept invalid/self-signed TLS certs (internal sites like a Proxmox host). */
+  ignoreCertErrors?: boolean;
 }
 const REDEEM_TTL_MS = 60_000; // tear the browser down if the ticket is never opened
 const MAX_SESSION_MS = 8 * 60 * 60 * 1000; // hard safety cap on a browser's lifetime
@@ -110,6 +117,8 @@ export class RemoteBrowserService {
       process.env.REMOTE_BROWSER_CALLBACK_HOST ||
       process.env.FABRIC_GUACD_CALLBACK_HOST ||
       (await this.resolveSelfName(docker));
+    const ignoreCertErrors =
+      cfg.ignoreCertErrors || /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_IGNORE_CERT_ERRORS || '');
     if (!callbackHost) {
       throw new BadRequestException(
         'Remote Browser could not determine how the browser container reaches Cerebro. Set REMOTE_BROWSER_CALLBACK_HOST (the app’s service/container name on the Docker network).',
@@ -137,6 +146,7 @@ export class RemoteBrowserService {
           `START_URL=${params.url}`,
           `CHROME_PROXY=socks5://${callbackHost}:${proxy.port}`,
           `GEOMETRY=${geometry}`,
+          ...(ignoreCertErrors ? ['IGNORE_CERT_ERRORS=1'] : []),
         ],
         Labels: { 'cerebro.remote-browser': 'true', 'cerebro.remote-browser.session': token },
         HostConfig: {
@@ -319,14 +329,20 @@ export class RemoteBrowserService {
   private async storedConfig(): Promise<RemoteBrowserConfig> {
     const c = (await this.settings.get<RemoteBrowserConfig>(REMOTE_BROWSER_CONFIG_KEY)) ?? {};
     const clean = (v?: string) => (v && v.trim() ? v.trim() : undefined);
-    return { image: clean(c.image), geometry: clean(c.geometry), network: clean(c.network), callbackHost: clean(c.callbackHost) };
+    return {
+      image: clean(c.image),
+      geometry: clean(c.geometry),
+      network: clean(c.network),
+      callbackHost: clean(c.callbackHost),
+      ignoreCertErrors: !!c.ignoreCertErrors,
+    };
   }
 
   /** Config for the settings UI: what's stored, what's currently in effect, and
    *  what auto-detect resolves (shown as placeholders). */
   async getConfig(): Promise<{
     stored: RemoteBrowserConfig;
-    effective: { image: string; geometry: string; network?: string; callbackHost?: string };
+    effective: { image: string; geometry: string; network?: string; callbackHost?: string; ignoreCertErrors: boolean };
     detected: { network?: string; callbackHost?: string };
     env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
   }> {
@@ -354,6 +370,7 @@ export class RemoteBrowserService {
         geometry: stored.geometry || env.geometry || '1280x800',
         network: stored.network || env.network || detectedNetwork,
         callbackHost: stored.callbackHost || env.callbackHost || detectedName,
+        ignoreCertErrors: !!stored.ignoreCertErrors || /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_IGNORE_CERT_ERRORS || ''),
       },
     };
   }
@@ -366,6 +383,7 @@ export class RemoteBrowserService {
       geometry: clean(input.geometry),
       network: clean(input.network),
       callbackHost: clean(input.callbackHost),
+      ignoreCertErrors: !!input.ignoreCertErrors,
     };
     await this.settings.set(REMOTE_BROWSER_CONFIG_KEY, cfg);
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'fabric.remote_browser.configured', meta: { ...cfg } });
@@ -405,33 +423,60 @@ export class RemoteBrowserService {
    * the single in-flight build; once built, the image is cached by the daemon.
    */
   private async ensureImageReady(docker: DockerApi, image: string): Promise<void> {
-    if (await docker.imageExists(image)) return;
+    const context = this.buildContextDir();
+    const wantHash = context ? await this.contextHash(context) : null;
+    const have = await docker.imageExists(image);
 
-    // A build is already running — tell the operator to wait rather than piling on.
+    if (have) {
+      // Up to date if the image was built from the current context (or we can't tell).
+      if (!wantHash) return;
+      const builtHash = await docker.imageLabel(image, CONTEXT_HASH_LABEL);
+      if (builtHash === wantHash) return;
+      this.logger.log(`Remote Browser image "${image}" is stale (build context changed) — rebuilding in the background.`);
+    }
+
+    // A build is already running — don't pile on.
     if (this.imageBuild) {
+      if (have) return; // usable (stale) image exists — use it this session, fresh one lands next
       throw new BadRequestException('The Remote Browser image is still building (first-time setup). Please try again in a minute.');
     }
 
-    const context = this.buildContextDir();
-    if (!context) {
+    if (!context || !wantHash) {
       throw new BadRequestException(
         `The Remote Browser image "${image}" is missing and its build context wasn't found in the app image. ` +
           `Build it manually on the Docker host: docker build -t ${image} docker/remote-browser`,
       );
     }
 
-    // Build in the BACKGROUND — a chromium image build takes minutes, far longer than
-    // a proxied HTTP request survives (e.g. Cloudflare ~100s). Kick it off, log
-    // progress, and fail THIS attempt fast with a clear message.
-    this.logger.log(`Remote Browser image "${image}" not found — building from ${context} in the background (first use; ~a few minutes)…`);
+    // Build in the BACKGROUND (a chromium build takes minutes — longer than a proxied
+    // request survives), tagging the image with the context fingerprint.
+    this.logger.log(`Remote Browser image "${image}" building from ${context} in the background (~a few minutes)…`);
     this.imageBuild = docker
-      .buildImage(context, image)
-      .then(() => void this.logger.log(`Remote Browser image "${image}" built — sessions can start now.`))
+      .buildImage(context, image, { [CONTEXT_HASH_LABEL]: wantHash })
+      .then(() => void this.logger.log(`Remote Browser image "${image}" built — sessions use it now.`))
       .catch((e) => void this.logger.warn(`Remote Browser image build failed: ${e instanceof Error ? e.message : e}`))
       .finally(() => {
         this.imageBuild = undefined;
       });
+
+    // A stale image is still usable now — let this session run on it while the fresh
+    // build proceeds. Only block when there's no usable image at all.
+    if (have) return;
     throw new BadRequestException('Preparing the Remote Browser for first use — building its image (this can take a few minutes). Please try again shortly.');
+  }
+
+  /** Fingerprint the build context (its files' names + contents) so a changed
+   *  Dockerfile/entrypoint yields a new hash and triggers a rebuild. */
+  private async contextHash(dir: string): Promise<string> {
+    const files = (await readdir(dir)).filter((f) => !f.startsWith('.')).sort();
+    const h = createHash('sha256');
+    for (const f of files) {
+      h.update(f);
+      h.update('\0');
+      h.update(await readFile(join(dir, f)));
+      h.update('\0');
+    }
+    return h.digest('hex').slice(0, 32);
   }
 
   /** Locate the bundled Remote Browser build context. The server's cwd is

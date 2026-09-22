@@ -2075,8 +2075,8 @@ function ApprovalsDialog({
 }
 
 interface RemoteBrowserCfg {
-  stored: { image?: string; geometry?: string; network?: string; callbackHost?: string };
-  effective: { image: string; geometry: string; network?: string; callbackHost?: string };
+  stored: { image?: string; geometry?: string; network?: string; callbackHost?: string; ignoreCertErrors?: boolean };
+  effective: { image: string; geometry: string; network?: string; callbackHost?: string; ignoreCertErrors: boolean };
   detected: { network?: string; callbackHost?: string };
   env: { network?: string; callbackHost?: string; image?: string; geometry?: string };
 }
@@ -2084,7 +2084,7 @@ interface RemoteBrowserCfg {
 /** Remote Browser settings: operator overrides on top of auto-detect + env. */
 function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClose: () => void }) {
   const [cfg, setCfg] = useState<RemoteBrowserCfg | null>(null);
-  const [form, setForm] = useState<{ network: string; callbackHost: string; image: string; geometry: string }>({ network: '', callbackHost: '', image: '', geometry: '' });
+  const [form, setForm] = useState<{ network: string; callbackHost: string; image: string; geometry: string; ignoreCertErrors: boolean }>({ network: '', callbackHost: '', image: '', geometry: '', ignoreCertErrors: false });
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -2096,6 +2096,7 @@ function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClo
       callbackHost: c.stored.callbackHost ?? '',
       image: c.stored.image ?? '',
       geometry: c.stored.geometry ?? '',
+      ignoreCertErrors: !!c.stored.ignoreCertErrors,
     });
   };
   useEffect(() => {
@@ -2162,6 +2163,19 @@ function RemoteBrowserDialog({ canManage, onClose }: { canManage: boolean; onClo
           <Field label="Callback host" k="callbackHost" help="Hostname the browser dials back to reach Cerebro. Blank = the app's container name." />
           <Field label="Image" k="image" help="Remote Browser image tag. Blank = cerebro-remote-browser:latest (auto-built if missing)." />
           <Field label="Geometry" k="geometry" help="Browser resolution, e.g. 1280x800." />
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={form.ignoreCertErrors}
+              disabled={!canManage}
+              onChange={(e) => { setForm((f) => ({ ...f, ignoreCertErrors: e.target.checked })); setSaved(false); }}
+            />
+            <span>
+              Ignore certificate errors
+              <span className="block text-[0.7rem] text-muted-foreground">Skip the "your connection is not private" warning for self-signed internal sites (e.g. a Proxmox host). Web jumps only reach hosts through the Waypoint, so this stays scoped to your internal targets.</span>
+            </span>
+          </label>
           <p className="text-[0.7rem] text-muted-foreground">Precedence: this form → environment variable → auto-detected → default. Set these only for a non-standard setup (e.g. a remote Docker endpoint).</p>
         </div>
       )}

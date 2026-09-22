@@ -23,6 +23,12 @@ x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -quiet -noxdamage -n
 PROXY_ARG=""
 [ -n "${CHROME_PROXY:-}" ] && PROXY_ARG="--proxy-server=${CHROME_PROXY}"
 
+# Optionally accept invalid TLS certs (self-signed internal sites, e.g. a Proxmox
+# host). --test-type suppresses the "unsupported flag" warning bar. Word-splits
+# into two args on purpose.
+CERT_ARG=""
+[ -n "${IGNORE_CERT_ERRORS:-}" ] && CERT_ARG="--ignore-certificate-errors --test-type"
+
 # --disable-dev-shm-usage guards against small /dev/shm; --no-sandbox is required
 # without extra caps. <-loopback> forces even localhost through the proxy so a
 # page can't reach the container itself. Chromium's SOCKS5 does remote DNS.
@@ -39,6 +45,7 @@ exec chromium \
   --window-size="${WIN_SIZE}" \
   --start-maximized \
   ${PROXY_ARG} \
+  ${CERT_ARG} \
   --proxy-bypass-list="<-loopback>" \
   --kiosk \
   "${START_URL}"
