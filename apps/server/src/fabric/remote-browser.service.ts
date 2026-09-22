@@ -204,10 +204,38 @@ export class RemoteBrowserService {
     return s;
   }
 
+  /** Connect to the container's VNC, retrying briefly — x11vnc takes a moment to
+   *  bind :5900 after the container starts, so a single immediate connect would
+   *  race and fail ("connection closed"). Resolves null if it never comes up. */
+  private connectVnc(host: string, ws: WebSocket): Promise<import('net').Socket | null> {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const tryOnce = () => {
+        const s = netConnect(VNC_PORT, host);
+        s.once('connect', () => resolve(s));
+        s.once('error', () => {
+          try { s.destroy(); } catch { /* noop */ }
+          attempts++;
+          if (attempts >= 30 || ws.readyState !== ws.OPEN) return resolve(null); // ~15s
+          setTimeout(tryOnce, 500);
+        });
+      };
+      tryOnce();
+    });
+  }
+
   /** Relay the browser's VNC display to the operator's noVNC client. */
   async handleWs(ws: WebSocket, session: RemoteBrowserSession): Promise<void> {
     ws.binaryType = 'nodebuffer';
-    const tcp = netConnect(VNC_PORT, session.vncHost);
+    const tcp = await this.connectVnc(session.vncHost, ws);
+    if (!tcp) {
+      this.logger.warn(
+        `Remote Browser VNC never became reachable at ${session.vncHost}:${VNC_PORT} — the container may have exited (check its logs) or be on a network Cerebro can't reach (check the Remote Browser network setting).`,
+      );
+      try { ws.close(); } catch { /* noop */ }
+      void this.teardown(session, 'vnc-unreachable');
+      return;
+    }
 
     const row = await this.prisma.fabricSession
       .create({
