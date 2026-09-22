@@ -81,6 +81,11 @@ interface RemoteBrowserSession {
 export class RemoteBrowserService {
   private readonly logger = new Logger('RemoteBrowser');
   private readonly sessions = new Map<string, RemoteBrowserSession>();
+  // Slots reserved synchronously by an in-flight launch() before its container
+  // exists, so a concurrent burst can't all pass the cap check then each create a
+  // container (the sessions map alone only stops a sequential loop).
+  private reservedTotal = 0;
+  private readonly reservedByUser = new Map<string, number>();
   private docker?: DockerApi;
 
   constructor(
@@ -90,22 +95,35 @@ export class RemoteBrowserService {
     private readonly settings: SettingsService,
   ) {}
 
-  /** Reject a launch that would exceed the global or per-user live-session cap.
-   *  The sessions map counts in-flight (unredeemed) sessions too, so a spawn loop
-   *  is stopped before it can create containers. */
-  private enforceCapacity(userId: string): void {
-    if (this.sessions.size >= MAX_SESSIONS) {
+  /** Reserve a live-session slot against the global + per-user caps, synchronously
+   *  (before any await) so a concurrent burst can't bypass the cap (TOCTOU). Counts
+   *  both recorded sessions and slots reserved by other in-flight launches. Returns
+   *  a release fn the caller invokes once the session is recorded (or on failure);
+   *  it's idempotent. Throws when a cap would be exceeded. */
+  private reserveCapacity(userId: string): () => void {
+    if (this.sessions.size + this.reservedTotal >= MAX_SESSIONS) {
       throw new BadRequestException(
         `Too many Remote Browser sessions are open (limit ${MAX_SESSIONS}). Close one and try again.`,
       );
     }
-    let mine = 0;
+    let mine = this.reservedByUser.get(userId) ?? 0;
     for (const s of this.sessions.values()) if (s.userId === userId) mine++;
     if (mine >= MAX_SESSIONS_PER_USER) {
       throw new BadRequestException(
         `You already have ${mine} Remote Browser session(s) open (limit ${MAX_SESSIONS_PER_USER}). Close one and try again.`,
       );
     }
+    this.reservedTotal++;
+    this.reservedByUser.set(userId, (this.reservedByUser.get(userId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.reservedTotal = Math.max(0, this.reservedTotal - 1);
+      const n = (this.reservedByUser.get(userId) ?? 1) - 1;
+      if (n <= 0) this.reservedByUser.delete(userId);
+      else this.reservedByUser.set(userId, n);
+    };
   }
 
   private dockerApi(): DockerApi {
@@ -136,7 +154,11 @@ export class RemoteBrowserService {
     ignoreCertErrors?: boolean;
     user: SessionUser;
   }): Promise<FabricVncSessionTicket> {
-    this.enforceCapacity(params.user.id);
+    // Hold a reserved slot for the whole build; released once the session is in the
+    // map (then it counts there) or on any failure. Held across every await so
+    // concurrent launches see each other's reservations.
+    const releaseSlot = this.reserveCapacity(params.user.id);
+    try {
     const docker = this.dockerApi();
     // Precedence for every setting: UI-stored → env var → auto-detect → default.
     // Auto-detect (put the browser on the app's own Docker network, callback = the
@@ -172,7 +194,8 @@ export class RemoteBrowserService {
     const proxy = await openRemoteBrowserProxy(this.registry, {
       agentId: params.agentId,
       bindHost,
-      allowHost: params.host, // scope the SOCKS bridge to the route's own host
+      allowHost: params.host, // scope the SOCKS bridge to the route's own host…
+      allowPort: params.port, // …and its port (+80/443), blocking non-web pivots
       logger: this.logger,
     });
     const name = `cerebro-remote-browser-${token.slice(0, 8)}`;
@@ -252,6 +275,9 @@ export class RemoteBrowserService {
     });
 
     return { token, wsPath: REMOTE_BROWSER_WS_PATH, password: vncPassword };
+    } finally {
+      releaseSlot();
+    }
   }
 
   /** Redeem a one-time ticket (called by the WS relay on upgrade). */

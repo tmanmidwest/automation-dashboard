@@ -1045,7 +1045,14 @@ func pinUpdateKey(cfg config, b64 string) {
 func loadPinnedUpdateKey(cfg config) ed25519.PublicKey {
 	b, err := os.ReadFile(updateKeyPath(cfg))
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // genuinely no key pinned — legacy path
+		}
+		// The pin file exists but can't be read (permissions/IO). Fail closed — a
+		// non-nil, wrong-length key makes verify + uninstall refuse — rather than
+		// silently dropping to the unsigned path.
+		log.Printf("pinned update key unreadable (%v) — failing closed until it can be read", err)
+		return ed25519.PublicKey{}
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 	if err != nil || len(raw) != ed25519.PublicKeySize {

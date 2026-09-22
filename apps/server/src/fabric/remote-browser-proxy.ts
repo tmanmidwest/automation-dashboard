@@ -45,13 +45,19 @@ export function openRemoteBrowserProxy(
     maxStreams?: number;
     /** Route host every CONNECT is scoped to (broker-side gate). Omit to disable. */
     allowHost?: string;
+    /** Route port; with allowHost, only this port + 80/443 on the host are reachable. */
+    allowPort?: number;
     logger?: Logger;
   },
 ): Promise<RemoteBrowserProxy> {
   const { agentId, bindHost = '0.0.0.0', maxStreams = 64 } = opts;
-  // Broker-side host scope, unless an operator has explicitly opened it.
+  // Broker-side host+port scope, unless an operator has explicitly opened it.
   const scopeOpen = /^(1|true|yes)$/i.test(process.env.REMOTE_BROWSER_SOCKS_OPEN || '');
   const allowHost = scopeOpen ? undefined : opts.allowHost?.toLowerCase();
+  // The route's own port plus the standard web ports (a page commonly pulls https
+  // sub-resources), so a hostile page can't pivot to a non-web admin port (22/3389/db)
+  // on the same host. Undefined when unscoped.
+  const allowPorts = allowHost && opts.allowPort ? new Set([opts.allowPort, 80, 443]) : undefined;
   const server: Server = createServer();
   let closed = false;
   let active = 0;
@@ -72,6 +78,7 @@ export function openRemoteBrowserProxy(
       registry,
       logger: opts.logger,
       allowHost,
+      allowPorts,
       canOpen: () => active < maxStreams,
       onOpen: () => { active++; },
       onClose: () => { active = Math.max(0, active - 1); },
@@ -97,6 +104,7 @@ function handleSocksConnection(
     registry: AgentRegistryService;
     logger?: Logger;
     allowHost?: string;
+    allowPorts?: Set<number>;
     canOpen: () => boolean;
     onOpen: () => void;
     onClose: () => void;
@@ -162,10 +170,15 @@ function handleSocksConnection(
       const port = buf.readUInt16BE(offset);
       buf = buf.subarray(offset + 2);
 
-      // Broker-side scope: only the route's own host may be reached, so this session
-      // can't be driven across the Waypoint's whole egress range. (Agent gate remains.)
+      // Broker-side scope: only the route's own host (and its port + 80/443) may be
+      // reached, so this session can't be driven across the Waypoint's egress range or
+      // pivot to a non-web port on the host. (Agent gate remains.)
       if (ctx.allowHost && host.toLowerCase() !== ctx.allowHost) {
         ctx.logger?.debug?.(`remote-browser proxy: blocked off-route host ${host}:${port} (route ${ctx.allowHost})`);
+        return fail(REP_NOT_ALLOWED);
+      }
+      if (ctx.allowPorts && !ctx.allowPorts.has(port)) {
+        ctx.logger?.debug?.(`remote-browser proxy: blocked off-route port ${host}:${port}`);
         return fail(REP_NOT_ALLOWED);
       }
 
