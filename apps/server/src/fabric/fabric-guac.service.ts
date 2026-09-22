@@ -70,6 +70,27 @@ export class FabricGuacService {
    */
   async issue(desc: RdpDescriptor, ttlMs = 30_000): Promise<FabricSessionTicket> {
     const id = randomUUID();
+
+    // Resolve the address guacd will dial to reach our forward BEFORE creating any
+    // session state, so an unresolvable callback host fails fast without orphaning a
+    // FabricSession row or emitting a spurious session-start event. Explicit override,
+    // else this container's IP on guacd's subnet, else first non-internal IP, else
+    // hostname; a name is resolved to the IP we bind (never 0.0.0.0), and refused if
+    // unresolvable (guacd resolving the same name couldn't reach us either).
+    const callbackHost =
+      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
+    let bindHost = callbackHost;
+    if (!isIP(callbackHost)) {
+      try {
+        const { address } = await lookup(callbackHost);
+        bindHost = address;
+      } catch {
+        throw new BadRequestException(
+          `Could not resolve the guacd callback host "${callbackHost}" to an IP. Set FABRIC_GUACD_CALLBACK_HOST to the Cerebro container's address on guacd's network.`,
+        );
+      }
+    }
+
     this.prune();
 
     const row = await this.prisma.fabricSession
@@ -102,27 +123,6 @@ export class FabricGuacService {
       target: desc.agentId,
       meta: { targetId: desc.targetId, kind: 'rdp', port: desc.port, username: desc.username, recorded: !!recordName },
     });
-
-    // The address guacd dials to reach our forward: explicit override, else this
-    // container's IP on guacd's subnet, else first non-internal IP, else hostname.
-    const callbackHost =
-      process.env.FABRIC_GUACD_CALLBACK_HOST || (await this.guacdReachableIp()) || selfIp() || hostname();
-    // Bind the ephemeral forward to the exact interface guacd dials, never 0.0.0.0 —
-    // so a co-tenant on another network this container is on can't race the listener.
-    // When callbackHost is a name, resolve it to the IP we'll bind. If it can't be
-    // resolved, guacd (resolving the same name) couldn't reach us either, so refuse
-    // the session rather than opening an all-interfaces listener.
-    let bindHost = callbackHost;
-    if (!isIP(callbackHost)) {
-      try {
-        const { address } = await lookup(callbackHost);
-        bindHost = address;
-      } catch {
-        throw new BadRequestException(
-          `Could not resolve the guacd callback host "${callbackHost}" to an IP. Set FABRIC_GUACD_CALLBACK_HOST to the Cerebro container's address on guacd's network.`,
-        );
-      }
-    }
 
     const forward = await openTunnelForward(this.registry, {
       agentId: desc.agentId,
