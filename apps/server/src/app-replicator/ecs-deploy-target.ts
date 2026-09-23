@@ -4,7 +4,7 @@ import { RepoIntrospectService } from './repo-introspect.service';
 import { EcsBuilderService } from './ecs-builder.service';
 import { ecsProfileFrom } from './ecs-target';
 import { composeToTaskDef } from './compose-to-taskdef';
-import { buildEnvMap, type DeployTarget, type DeploySpec, type DeployOutcome, type DestroyContext } from './deploy-target';
+import { buildEnvMap, fileEnvOf, type DeployTarget, type DeploySpec, type DeployOutcome, type DestroyContext } from './deploy-target';
 import type { EcsServiceInput } from '../connectors/aws/aws-api';
 import type { EcsDeploymentRefs, OperationResult } from '@cerebro/shared';
 
@@ -91,12 +91,13 @@ export class EcsDeployTarget implements DeployTarget {
       const composeInfo = await this.repo.fetchComposeText({
         gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef ?? undefined, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
       });
-      const env = buildEnvMap(spec.variables, project, spec.portList, spec.values, spec.secrets);
+      const env = buildEnvMap(spec.variables, project, spec.portList, spec.values, spec.secrets, spec.extras);
       const result = composeToTaskDef({
         family: project,
         composeText: composeInfo.text,
         ecrImageUri: imageRef,
         env,
+        fileEnv: fileEnvOf(spec.variables, env, spec.extras),
         logGroup: logGroupName,
         executionRoleArn: profile.taskExecutionRoleArn,
         taskRoleArn: profile.taskRoleArn,

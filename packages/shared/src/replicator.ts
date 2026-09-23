@@ -3,7 +3,10 @@
 //
 // The compose file IS the manifest: a repo's variables/ports/secrets are derived
 // from Docker Compose's own `${VAR:-default}` interpolation (see the server-side
-// compose introspector), so an app needs no hand-authored manifest.
+// compose introspector), so an app needs no hand-authored manifest. Apps that
+// configure themselves through an `env_file:` instead of compose interpolation
+// contribute their keys too, read from the env file the repo commits (typically
+// `.env.example`); the operator can also add variables by hand.
 
 /** How a detected compose variable is used, which drives how the deploy form treats it. */
 export type ReplicatorVarRole =
@@ -13,6 +16,15 @@ export type ReplicatorVarRole =
   | 'container_name' // appears in `container_name:` — auto-managed per deployment
   | 'secret' // name looks secret (password/token/key/…) — stored in the vault
   | 'plain'; // an ordinary configuration value
+
+/**
+ * Where a variable came from. Compose `${VAR}` tokens are structural (they drive
+ * ports/image/container isolation); env-file entries come from an `env_file:`
+ * target or a committed `.env.example`, which many apps use *instead* of compose
+ * interpolation; manual entries were added by the operator and survive a schema
+ * refresh. See docs/app-replicator.md.
+ */
+export type ReplicatorVarSource = 'compose' | 'env_file' | 'manual';
 
 /** One variable detected in an app's compose file. */
 export interface ReplicatorVariable {
@@ -28,6 +40,12 @@ export interface ReplicatorVariable {
   required: boolean;
   /** Effective secret flag: the role heuristic, overridable per-variable at register time. */
   secret: boolean;
+  /** Provenance; absent on schemas stored before env-file support (treat as 'compose'). */
+  source?: ReplicatorVarSource;
+  /** The env file this came from, relative to the repo root (source === 'env_file'). */
+  envFile?: string | null;
+  /** Comment lines above the entry in an env file — surfaced as help text in the form. */
+  comment?: string | null;
 }
 
 /** A catalog entry: a reusable app template registered once. */
@@ -120,6 +138,23 @@ export interface EcsDeploymentRefs {
   targetContainerName?: string;
 }
 
+/**
+ * One operator-added environment entry on a deployment — a key the app reads that
+ * neither the compose file nor any committed env file mentions, or one that
+ * differs per instance rather than per app (those can't live on the shared app
+ * schema). Written into the deployment's `.env` alongside the schema variables.
+ */
+export interface ExtraEnvEntry {
+  name: string;
+  /**
+   * Plaintext value. On a redeploy a blank value for an entry already marked
+   * secret keeps the stored one, mirroring how schema secrets behave.
+   */
+  value?: string;
+  /** Store the value in the vault rather than on the deployment row. */
+  secret: boolean;
+}
+
 export type ReplicatorDeploymentStatus = 'pending' | 'deployed' | 'error' | 'updating' | 'stopped';
 
 /** One running instance of an app on a target host. */
@@ -147,6 +182,10 @@ export interface ReplicatorDeployment {
   values: Record<string, string>;
   /** Names of variables whose values live in the vault (`deployment:<id>:<name>`). */
   secretVars: string[];
+  /** Operator-added non-secret env entries (keyed by name). */
+  extraEnv: Record<string, string>;
+  /** Names of operator-added entries whose values live in the vault. */
+  extraSecretVars: string[];
   ports: ReplicatorPort[];
   status: ReplicatorDeploymentStatus;
   /** Live sub-step while a deploy/redeploy runs (e.g. "Building images…"); null when settled. */
@@ -179,6 +218,8 @@ export interface IntrospectResult {
   /** Path to the compose file used within the repo (or the generated wrapper name). */
   composePath: string;
   usesGeneratedCompose: boolean;
+  /** Env files read out of the repo, relative to its root (e.g. `.env.example`). */
+  envFiles: string[];
   warnings: string[];
 }
 
@@ -186,7 +227,10 @@ export interface IntrospectResult {
 export interface ReplicatorSchemaDiff {
   /** Variables in the repo now but not in the stored schema. */
   added: string[];
-  /** Variables in the stored schema but no longer in the repo. */
+  /**
+   * Variables in the stored schema but no longer in the repo. Hand-added
+   * variables (`source: 'manual'`) are never listed here — they survive a refresh.
+   */
   removed: string[];
   /** Variables whose role changed (e.g. a bind IP reclassified from host_port → host_ip). */
   roleChanged: { name: string; from: ReplicatorVarRole; to: ReplicatorVarRole }[];
@@ -203,6 +247,8 @@ export interface RefreshSchemaResult {
   diff: ReplicatorSchemaDiff;
   composePath: string;
   usesGeneratedCompose: boolean;
+  /** Env files read out of the repo, relative to its root (e.g. `.env.example`). */
+  envFiles: string[];
   warnings: string[];
 }
 
@@ -234,6 +280,8 @@ export interface DeployInput {
   secrets: Record<string, string>;
   /** Chosen host port per host_port variable name. */
   ports: Record<string, number>;
+  /** Env entries beyond the app's schema, added by the operator for this instance. */
+  extraEnv?: ExtraEnvEntry[];
   /** `docker compose build --no-cache` — for repos that build their own image. */
   forceRebuild?: boolean;
   /** ECS only: Fargate task CPU units (e.g. '256'); default 256. */
@@ -259,6 +307,13 @@ export interface RedeployInput {
   secrets?: Record<string, string>;
   /** Edited host ports (host_port var name→port). A key left out keeps the stored port. */
   ports?: Record<string, number>;
+  /**
+   * The complete set of env extras after the edit — it **replaces** the stored
+   * ones rather than merging, so an entry left out is removed (and its vault
+   * secret deleted). Unlike `values`/`secrets`, extras have no repo schema to
+   * fall back to, so removal has to be expressible.
+   */
+  extraEnv?: ExtraEnvEntry[];
 }
 
 /** A suggested free host port for one host_port variable. */
@@ -274,6 +329,61 @@ export interface DeployTargetInfo {
   hostIp: string;
   usedPorts: number[];
   suggestions: PortSuggestion[];
+}
+
+// ── Environment view (what actually gets written) ─────────────────
+
+/**
+ * Where one line of a deployment's `.env` came from. 'managed' is Cerebro's own
+ * isolation (image tag, container name, allocated host port) and can't be edited;
+ * the rest trace back to the app schema or the operator.
+ */
+export type DeploymentEnvOrigin = 'managed' | 'compose' | 'env_file' | 'manual' | 'extra';
+
+/** One resolved line of a deployment's environment. */
+export interface DeploymentEnvEntry {
+  name: string;
+  /**
+   * The effective value — **null for a secret**. Secrets are never echoed here:
+   * the vault's own step-up-gated reveal is the single audited path to plaintext,
+   * and a second, weaker door to it would undercut that.
+   */
+  value: string | null;
+  secret: boolean;
+  origin: DeploymentEnvOrigin;
+  /** The env file it was read from (origin 'env_file'). */
+  envFile?: string | null;
+  /** The repo's own `#` documentation for the key. */
+  comment?: string | null;
+  /** For a secret: the vault key holding the value, so it can be found there. */
+  vaultKey?: string | null;
+}
+
+/** The environment a deployment will get, exactly as Cerebro would write it. */
+export interface DeploymentEnvView {
+  targetKind: TargetKind;
+  /** Absolute path of the `.env` on the Docker host; null for ECS (no file). */
+  path: string | null;
+  /** How the environment reaches the containers on this target. */
+  note: string;
+  entries: DeploymentEnvEntry[];
+}
+
+/**
+ * How the `.env` on the host compares with what Cerebro would write — catches a
+ * hand-edit that the next redeploy would silently overwrite. Reports **key names
+ * only**, never host values, so it can't become a way to read secrets back.
+ */
+export interface DeploymentEnvDrift {
+  /** False when there's no readable file (ECS) or the host couldn't be reached. */
+  available: boolean;
+  message: string;
+  /** Keys on the host that Cerebro wouldn't write. */
+  onlyOnHost: string[];
+  /** Keys Cerebro would write that the host's file lacks. */
+  missingOnHost: string[];
+  /** Keys in both whose values differ. */
+  differing: string[];
 }
 
 // ── Ingress (Phase 2) ─────────────────────────────────────────────

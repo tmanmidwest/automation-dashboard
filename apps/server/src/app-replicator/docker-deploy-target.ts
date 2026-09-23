@@ -37,7 +37,7 @@ export class DockerDeployTarget implements DeployTarget {
 
   async deploy(spec: DeploySpec, onPhase: (phase: string) => void): Promise<DeployOutcome> {
     const target = await this.targetFor(spec.targetInstanceId);
-    const env = toDotenv(buildEnvMap(spec.variables, spec.project, spec.portList, spec.values, spec.secrets));
+    const env = toDotenv(buildEnvMap(spec.variables, spec.project, spec.portList, spec.values, spec.secrets, spec.extras));
     const result = await this.stacks.deployGit(
       target,
       spec.targetInstanceId,

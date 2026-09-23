@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil, FileText, Lock } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
+  DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -69,6 +70,7 @@ export function Replicator() {
   const [refreshFor, setRefreshFor] = useState<ReplicatorApp | null>(null);
   const [editFor, setEditFor] = useState<{ app: ReplicatorApp; d: ReplicatorDeployment } | null>(null);
   const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
+  const [envFor, setEnvFor] = useState<ReplicatorDeployment | null>(null);
   const [checking, setChecking] = useState(false);
 
   async function checkUpdates() {
@@ -151,6 +153,7 @@ export function Replicator() {
               onRefreshSchema={() => setRefreshFor(app)}
               onEdit={(d) => setEditFor({ app, d })}
               onIngress={setIngressFor}
+              onEnv={setEnvFor}
               onChanged={refresh}
               setErr={setErr}
             />
@@ -192,6 +195,9 @@ export function Replicator() {
           setErr={setErr}
         />
       )}
+      {envFor && (
+        <EnvDialog deployment={envFor} onClose={() => setEnvFor(null)} setErr={setErr} />
+      )}
       {ingressFor && (
         <IngressDialog
           deployment={ingressFor}
@@ -207,14 +213,18 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onEdit, onIngress, onChanged, setErr }: {
+function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onEdit, onIngress, onEnv, onChanged, setErr }: {
   app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
-  onDeploy: () => void; onRefreshSchema: () => void; onEdit: (d: ReplicatorDeployment) => void; onIngress: (d: ReplicatorDeployment) => void; onChanged: () => void; setErr: (s: string | null) => void;
+  onDeploy: () => void; onRefreshSchema: () => void; onEdit: (d: ReplicatorDeployment) => void;
+  onIngress: (d: ReplicatorDeployment) => void; onEnv: (d: ReplicatorDeployment) => void;
+  onChanged: () => void; setErr: (s: string | null) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const ports = app.variables.filter((v) => v.role === 'host_port').length;
   const secrets = app.variables.filter((v) => v.secret).length;
   const isInFlight = (d: ReplicatorDeployment) => d.status === 'pending' || d.status === 'updating';
+  /** How many operator-added env entries an instance carries (shown on its row). */
+  const extraCount = (d: ReplicatorDeployment) => Object.keys(d.extraEnv ?? {}).length + (d.extraSecretVars?.length ?? 0);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id); setErr(null);
@@ -285,17 +295,23 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                         ? (d.ecs?.cluster ? ` · cluster ${d.ecs.cluster}` : '')
                         : d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
                       {d.deployedCommit && ` · ${d.deployedCommit.slice(0, 7)}`}
+                      {extraCount(d) > 0 && ` · ${extraCount(d)} extra env`}
                     </p>
                     {d.lastMessage && d.status === 'error' && <p className="text-xs text-destructive truncate">{d.lastMessage}</p>}
                   </div>
-                  {canWrite && (
-                    <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Read-only, so it stays available without replicator:write. */}
+                    <Button variant="ghost" size="icon" aria-label="View environment"
+                      title="See every variable this instance receives, and where each came from"
+                      onClick={() => onEnv(d)}><FileText className="h-4 w-4" /></Button>
+                    {canWrite && (
+                      <>
                       {hasIngress && (
                         <Button variant="ghost" size="icon" aria-label="Manage ingress" title="Expose via Cloudflare / NPM"
                           disabled={isInFlight(d)} onClick={() => onIngress(d)}><Globe className="h-4 w-4" /></Button>
                       )}
                       <Button variant="ghost" size="icon" aria-label="Edit & redeploy" disabled={busy === d.id || isInFlight(d)}
-                        title="Edit values / secrets / ports, then redeploy"
+                        title="Edit values / secrets / ports / extra env, then redeploy"
                         onClick={() => onEdit(d)}><Pencil className="h-4 w-4" /></Button>
                       <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id || isInFlight(d)}
                         title={d.updateAvailable ? 'Update available — pull latest & redeploy' : 'Pull latest & redeploy'}
@@ -307,8 +323,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                         onClick={() => { if (confirm(`Remove deployment "${d.project}"? This stops the stack, removes any ingress, and deletes its secrets.`)) act(d.id, () => api.delete(`/api/replicator/deployments/${d.id}`)); }}>
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
-                    </div>
-                  )}
+                      </>
+                    )}
+                  </div>
                 </div>
                 {d.ingress && d.ingress.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -365,13 +382,9 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Register failed.'); setBusy(false); }
   }
 
-  const toggleSecret = (name: string) => setVars((vs) => vs.map((v) =>
-    v.name === name && (v.role === 'plain' || v.role === 'secret')
-      ? { ...v, secret: !v.secret, role: !v.secret ? 'secret' : 'plain' } : v));
-
   return (
     <Dialog open onClose={onClose} size="lg" title="Register app"
-      description="Point Cerebro at a Git repo; it reads the compose file to detect variables and ports."
+      description="Point Cerebro at a Git repo; it reads the compose file (and any committed env file) to detect variables and ports."
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -399,27 +412,12 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
             <div><Label>App name</Label><Input value={name} onChange={(e) => setName(e.target.value)} /></div>
             {result.warnings.map((w, i) => <p key={i} className="text-xs text-amber-400">⚠ {w}</p>)}
             <p className="text-xs text-muted-foreground">
-              Detected from <code>{result.composePath}</code> · services: {result.services.join(', ') || '—'}.
+              Detected from <code>{result.composePath}</code>
+              {result.envFiles?.length ? <> and <code>{result.envFiles.join(', ')}</code></> : null}
+              {' '}· services: {result.services.join(', ') || '—'}.
               Image tag &amp; container name are set per deployment automatically.
             </p>
-            <div className="rounded-lg border border-border/60 divide-y divide-border/60 max-h-64 overflow-y-auto">
-              {vars.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name').map((v) => (
-                <div key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
-                  <div className="min-w-0">
-                    <span className="font-mono text-xs">{v.name}</span>
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      {v.role === 'host_port' ? `port →${v.containerPort ?? '?'}` : v.role}
-                      {v.required ? ' · required' : v.default != null ? ` · default ${v.default === '' ? '“”' : v.default}` : ''}
-                    </span>
-                  </div>
-                  {(v.role === 'plain' || v.role === 'secret') && (
-                    <label className="flex items-center gap-1.5 text-xs shrink-0 cursor-pointer">
-                      <input type="checkbox" checked={v.secret} onChange={() => toggleSecret(v.name)} /> secret
-                    </label>
-                  )}
-                </div>
-              ))}
-            </div>
+            <VariableSchemaEditor vars={vars} onChange={setVars} />
           </div>
         )}
       </div>
@@ -454,10 +452,6 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
     return () => { alive = false; };
   }, [app.id, setErr]);
 
-  const toggleSecret = (name: string) => setVars((vs) => vs.map((v) =>
-    v.name === name && (v.role === 'plain' || v.role === 'secret')
-      ? { ...v, secret: !v.secret, role: !v.secret ? 'secret' : 'plain' } : v));
-
   async function apply() {
     setBusy(true); setErr(null);
     try {
@@ -488,7 +482,9 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
         <div className="space-y-4">
           {result.warnings.map((w, i) => <p key={i} className="text-xs text-amber-400">⚠ {w}</p>)}
           <p className="text-xs text-muted-foreground">
-            Detected from <code>{result.composePath}</code>.
+            Detected from <code>{result.composePath}</code>
+            {result.envFiles?.length ? <> and <code>{result.envFiles.join(', ')}</code></> : null}. Variables you added
+            by hand are kept.
           </p>
 
           {noChanges ? (
@@ -509,25 +505,7 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
             </div>
           )}
 
-          <div className="rounded-lg border border-border/60 divide-y divide-border/60 max-h-64 overflow-y-auto">
-            {vars.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name').map((v) => (
-              <div key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
-                <div className="min-w-0">
-                  <span className="font-mono text-xs">{v.name}</span>
-                  {diff!.added.includes(v.name) && <span className="ml-2 text-[0.65rem] text-emerald-400">new</span>}
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    {v.role === 'host_port' ? `port →${v.containerPort ?? '?'}` : v.role === 'host_ip' ? 'bind address' : v.role}
-                    {v.required ? ' · required' : v.default != null ? ` · default ${v.default === '' ? '“”' : v.default}` : ''}
-                  </span>
-                </div>
-                {(v.role === 'plain' || v.role === 'secret') && (
-                  <label className="flex items-center gap-1.5 text-xs shrink-0 cursor-pointer">
-                    <input type="checkbox" checked={v.secret} onChange={() => toggleSecret(v.name)} /> secret
-                  </label>
-                )}
-              </div>
-            ))}
-          </div>
+          <VariableSchemaEditor vars={vars} onChange={setVars} added={diff!.added} />
         </div>
       ) : (
         <p className="text-sm text-destructive py-6">Could not read the repository.</p>
@@ -561,6 +539,8 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   const [configured, setConfigured] = useState(false); // ECS: skips the port-preflight step
   const [values, setValues] = useState<Record<string, string>>({});
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [extras, setExtras] = useState<ExtraRow[]>([]);
+  const schemaNames = useMemo(() => new Set(app.variables.map((v) => v.name)), [app.variables]);
   const [ports, setPorts] = useState<Record<string, number>>({});
   const [taskCpu, setTaskCpu] = useState('256');
   const [taskMemory, setTaskMemory] = useState('512');
@@ -600,7 +580,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
     try {
       await api.post(`/api/replicator/apps/${app.id}/deploy`, {
         dockerInstanceId: instanceId, targetKind, name, values, secrets,
-        ports: isEcs ? {} : ports, forceRebuild,
+        ports: isEcs ? {} : ports, forceRebuild, extraEnv: extraEntriesOf(extras),
         ...(isEcs ? { taskCpu, taskMemory } : {}),
       });
       onDeployed();
@@ -677,6 +657,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                   }} />
               ))}
             </div>
+            <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} />
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
               Force rebuild image{isEcs ? '' : 's'} (repos that build their own image)
@@ -716,6 +697,10 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
     }
     return pr;
   });
+  const [extras, setExtras] = useState<ExtraRow[]>(
+    () => extraRowsFrom(deployment.extraEnv, deployment.extraSecretVars),
+  );
+  const schemaNames = useMemo(() => new Set(app.variables.map((v) => v.name)), [app.variables]);
   const [forceRebuild, setForceRebuild] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -723,7 +708,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
     setBusy(true); setErr(null);
     try {
       await api.post(`/api/replicator/deployments/${deployment.id}/redeploy`, {
-        edit: true, values, secrets, ports, forceRebuild,
+        edit: true, values, secrets, ports, forceRebuild, extraEnv: extraEntriesOf(extras),
       });
       onDone();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Redeploy failed.'); setBusy(false); }
@@ -731,7 +716,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
 
   return (
     <Dialog open onClose={onClose} size="lg" title={`Edit & redeploy · ${deployment.project}`}
-      description="Change values, rotate secrets, or move host ports, then redeploy. The stack restarts with the new config."
+      description="Change values, rotate secrets, move host ports, or edit this instance's extra environment, then redeploy. The stack restarts with the new config."
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -756,6 +741,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
               }} />
           ))}
         </div>
+        <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} allowKeepBlank />
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
           Force rebuild images (repos that build their own image)
@@ -1016,6 +1002,451 @@ function PortIngressRow({ deploymentId, port, routes, targets, onChanged, setErr
   );
 }
 
+/** Human label for a variable's role, in the schema list. */
+function roleLabel(v: ReplicatorVariable): string {
+  if (v.role === 'host_port') return `port →${v.containerPort ?? '?'}`;
+  if (v.role === 'host_ip') return 'bind address';
+  return v.role;
+}
+
+/**
+ * The reviewable variable schema, shared by the register and refresh dialogs.
+ *
+ * Variables are grouped by where they came from, because the groups behave
+ * differently and the operator needs to see which is which: compose tokens carry
+ * the port/image structure, env-file entries came from a committed `.env.example`,
+ * and hand-added ones exist only in Cerebro — they're what you reach for when the
+ * app reads a key the repo never documents. All three are written into the
+ * deployment's `.env` the same way.
+ */
+function VariableSchemaEditor({ vars, onChange, added }: {
+  vars: ReplicatorVariable[]; onChange: (next: ReplicatorVariable[]) => void; added?: string[];
+}) {
+  const [name, setName] = useState('');
+  const [value, setValue] = useState('');
+  const [secret, setSecret] = useState(false);
+
+  const shown = vars.filter((v) => v.role !== 'image_tag' && v.role !== 'container_name');
+  const groups: { key: string; label: string; hint?: string; vars: ReplicatorVariable[] }[] = [];
+  const push = (key: string, label: string, hint: string | undefined, list: ReplicatorVariable[]) => {
+    if (list.length) groups.push({ key, label, hint, vars: list });
+  };
+  push('compose', 'From the compose file', undefined, shown.filter((v) => (v.source ?? 'compose') === 'compose'));
+  for (const file of [...new Set(shown.filter((v) => v.source === 'env_file').map((v) => v.envFile ?? ''))]) {
+    push(`env:${file}`, `From ${file || 'an env file'}`, 'Written to the .env Cerebro creates beside the compose file.',
+      shown.filter((v) => v.source === 'env_file' && (v.envFile ?? '') === file));
+  }
+  push('manual', 'Added here', 'Not in the repo — Cerebro writes these into the deployment’s .env.',
+    shown.filter((v) => v.source === 'manual'));
+
+  const trimmed = name.trim();
+  const nameOk = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed);
+  const duplicate = nameOk && vars.some((v) => v.name === trimmed);
+
+  const toggleSecret = (target: string) => onChange(vars.map((v) =>
+    v.name === target && (v.role === 'plain' || v.role === 'secret')
+      ? { ...v, secret: !v.secret, role: !v.secret ? 'secret' : 'plain' } : v));
+
+  const remove = (target: string) => onChange(vars.filter((v) => v.name !== target));
+
+  function add() {
+    if (!nameOk || duplicate) return;
+    onChange([...vars, {
+      name: trimmed,
+      // A secret is supplied per deployment, so a shared default would be wrong.
+      default: secret || !value ? null : value,
+      role: secret ? 'secret' : 'plain',
+      service: null,
+      containerPort: null,
+      required: secret,
+      secret,
+      source: 'manual',
+      envFile: null,
+      comment: null,
+    }]);
+    setName(''); setValue(''); setSecret(false);
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="rounded-lg border border-border/60 divide-y divide-border/60 max-h-64 overflow-y-auto">
+        {groups.length === 0 && (
+          <p className="px-3 py-3 text-xs text-muted-foreground">
+            No variables detected. Add the ones this app needs below.
+          </p>
+        )}
+        {groups.map((g) => (
+          <div key={g.key}>
+            <div className="px-3 py-1 bg-muted/30">
+              <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">{g.label}</p>
+              {g.hint && <p className="text-[0.65rem] text-muted-foreground/70">{g.hint}</p>}
+            </div>
+            <div className="divide-y divide-border/60">
+              {g.vars.map((v) => (
+                <div key={v.name} className="flex items-start justify-between gap-3 px-3 py-1.5 text-sm">
+                  <div className="min-w-0">
+                    <span className="font-mono text-xs">{v.name}</span>
+                    {added?.includes(v.name) && <span className="ml-2 text-[0.65rem] text-emerald-400">new</span>}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {roleLabel(v)}
+                      {v.required ? ' · required' : v.default != null ? ` · default ${v.default === '' ? '“”' : v.default}` : ''}
+                    </span>
+                    {v.comment && <p className="text-[0.65rem] text-muted-foreground/80 truncate">{v.comment}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {(v.role === 'plain' || v.role === 'secret') && (
+                      <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                        <input type="checkbox" checked={v.secret} onChange={() => toggleSecret(v.name)} /> secret
+                      </label>
+                    )}
+                    {v.source === 'manual' && (
+                      <Button type="button" variant="ghost" size="icon" className="h-6 w-6" title="Remove this variable"
+                        aria-label={`Remove ${v.name}`} onClick={() => remove(v.name)}>
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <Label className="text-xs">Add a variable</Label>
+          <Input className="mt-1 font-mono text-xs" value={name} placeholder="EXTRA_SETTING"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} />
+        </div>
+        <div className="flex-1">
+          <Label className="text-xs">Default <span className="text-muted-foreground font-normal">(optional)</span></Label>
+          <Input className="mt-1" value={value} disabled={secret}
+            placeholder={secret ? 'set per deployment' : 'value'}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} />
+        </div>
+        <label className="flex items-center gap-1.5 text-xs h-9 cursor-pointer">
+          <input type="checkbox" checked={secret} onChange={(e) => setSecret(e.target.checked)} /> secret
+        </label>
+        <Button type="button" variant="outline" size="sm" className="h-9" onClick={add} disabled={!nameOk || duplicate}>
+          <Plus className="h-4 w-4" /> Add
+        </Button>
+      </div>
+      {trimmed && !nameOk && <p className="text-xs text-destructive">Use letters, digits and underscores, starting with a letter or underscore.</p>}
+      {duplicate && <p className="text-xs text-destructive">{trimmed} is already in the schema.</p>}
+    </div>
+  );
+}
+
+// ── Environment view (what actually gets written) ───────────────────
+
+const ENV_ORIGIN: Record<DeploymentEnvOrigin, { label: string; hint: string }> = {
+  managed: { label: 'Managed by Cerebro', hint: 'Image tag, container name and the allocated host port — set per deployment so instances never collide.' },
+  compose: { label: 'From the compose file', hint: 'A ${VAR} the compose interpolates.' },
+  env_file: { label: 'From the repo’s env file', hint: 'Read out of the committed .env.example (or whatever env_file names).' },
+  manual: { label: 'Added to the app schema', hint: 'Not in the repo — added by hand on the app, so every deployment has it.' },
+  extra: { label: 'Added to this deployment', hint: 'Extra environment set on this instance alone.' },
+};
+
+const ENV_ORDER: DeploymentEnvOrigin[] = ['managed', 'compose', 'env_file', 'manual', 'extra'];
+
+/**
+ * The effective `.env` for one deployment — the answer to "what did this instance
+ * actually get?", which the deploy form can only imply: managed values are
+ * assigned at deploy time, env-file defaults are materialized, and a blank falls
+ * back or doesn't depending on where the variable came from.
+ *
+ * Secrets show as masked with their vault key. The vault's own step-up-gated
+ * reveal stays the single audited path to plaintext.
+ */
+function EnvDialog({ deployment, onClose, setErr }: {
+  deployment: ReplicatorDeployment; onClose: () => void; setErr: (s: string | null) => void;
+}) {
+  const [view, setView] = useState<DeploymentEnvView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [drift, setDrift] = useState<DeploymentEnvDrift | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setErr(null);
+    api.get<DeploymentEnvView>(`/api/replicator/deployments/${deployment.id}/env`)
+      .then((v) => { if (alive) setView(v); })
+      .catch((e) => { if (alive) setErr(e instanceof ApiError ? e.message : 'Could not read the environment.'); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [deployment.id, setErr]);
+
+  async function check() {
+    setChecking(true); setErr(null);
+    try { setDrift(await api.get<DeploymentEnvDrift>(`/api/replicator/deployments/${deployment.id}/env/drift`)); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not compare with the host.'); }
+    finally { setChecking(false); }
+  }
+
+  /** The file as text, secrets masked — safe to paste into a ticket or a diff. */
+  function copy() {
+    if (!view) return;
+    const text = view.entries.map((e) => `${e.name}=${e.secret ? '<secret in vault>' : e.value ?? ''}`).join('\n');
+    navigator.clipboard?.writeText(text + '\n').then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => setErr('Could not copy to the clipboard.'));
+  }
+
+  const groups = ENV_ORDER
+    .map((origin) => ({ origin, entries: (view?.entries ?? []).filter((e) => e.origin === origin) }))
+    .filter((g) => g.entries.length > 0);
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Environment · ${deployment.project}`}
+      description="Every variable this deployment receives, and where each one came from."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+          <Button variant="outline" onClick={copy} disabled={!view}>
+            {copied ? 'Copied' : 'Copy (secrets masked)'}
+          </Button>
+          {view?.targetKind !== 'ecs' && (
+            <Button onClick={check} disabled={checking || !view}>
+              {checking ? 'Reading host…' : 'Compare with host'}
+            </Button>
+          )}
+        </>
+      }>
+      {loading ? (
+        <p className="text-muted-foreground flex items-center gap-2 py-6"><Loader2 className="h-4 w-4 animate-spin" /> Resolving…</p>
+      ) : view ? (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            {view.path ? <>Written to <code>{view.path}</code>. </> : null}{view.note}
+          </p>
+
+          {drift && (
+            <div className={`rounded-lg border p-3 space-y-1 ${drift.available && !drift.onlyOnHost.length && !drift.missingOnHost.length && !drift.differing.length ? 'border-emerald-400/40' : 'border-amber-400/40'}`}>
+              <p className={`text-sm ${drift.available ? '' : 'text-muted-foreground'}`}>{drift.message}</p>
+              {drift.differing.length > 0 && (
+                <p className="text-xs"><span className="text-amber-400 font-medium">Different on the host:</span>{' '}
+                  <span className="font-mono">{drift.differing.join(', ')}</span></p>
+              )}
+              {drift.onlyOnHost.length > 0 && (
+                <p className="text-xs"><span className="text-amber-400 font-medium">Only on the host:</span>{' '}
+                  <span className="font-mono">{drift.onlyOnHost.join(', ')}</span></p>
+              )}
+              {drift.missingOnHost.length > 0 && (
+                <p className="text-xs"><span className="text-amber-400 font-medium">Missing on the host:</span>{' '}
+                  <span className="font-mono">{drift.missingOnHost.join(', ')}</span></p>
+              )}
+              {drift.available && <p className="text-[0.65rem] text-muted-foreground">Key names only — host values are never read back.</p>}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-border/60 divide-y divide-border/60 max-h-80 overflow-y-auto">
+            {groups.map((g) => (
+              <div key={g.origin}>
+                <div className="px-3 py-1 bg-muted/30">
+                  <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+                    {g.origin === 'managed' && <Lock className="h-3 w-3" />}
+                    {ENV_ORIGIN[g.origin].label}
+                  </p>
+                  <p className="text-[0.65rem] text-muted-foreground/70">{ENV_ORIGIN[g.origin].hint}</p>
+                </div>
+                <div className="divide-y divide-border/60">
+                  {g.entries.map((e) => (
+                    <div key={e.name} className="px-3 py-1.5">
+                      <p className="font-mono text-xs break-all">
+                        <span className="text-foreground">{e.name}</span>
+                        <span className="text-muted-foreground">=</span>
+                        {e.secret
+                          ? <span className="text-amber-400" title={e.vaultKey ? `Vault key: ${e.vaultKey}` : undefined}>••••••••</span>
+                          : <span className="text-muted-foreground">{e.value || <em className="not-italic opacity-60">(empty)</em>}</span>}
+                      </p>
+                      {e.secret && e.vaultKey && (
+                        <p className="text-[0.65rem] text-muted-foreground/80 break-all">
+                          In the vault as <span className="font-mono">{e.vaultKey}</span> — reveal it there.
+                        </p>
+                      )}
+                      {e.envFile && <p className="text-[0.65rem] text-muted-foreground/70">{e.envFile}</p>}
+                      {e.comment && <p className="text-[0.65rem] text-muted-foreground/80">{e.comment}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {groups.length === 0 && <p className="px-3 py-3 text-xs text-muted-foreground">This deployment receives no variables.</p>}
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-destructive py-6">Could not resolve the environment.</p>
+      )}
+    </Dialog>
+  );
+}
+
+// ── Env extras (per-deployment additions) ───────────────────────────
+//
+// The app schema covers what the repo declares. These are the keys it doesn't:
+// something the app reads that neither the compose nor any committed env file
+// mentions, or a value that differs per instance rather than per app. They're
+// written into the deployment's `.env` alongside everything else.
+
+/** A row in the extras grid. `stored` marks a secret already held in the vault. */
+interface ExtraRow { id: number; name: string; value: string; secret: boolean; stored: boolean }
+
+let extraRowSeq = 0;
+const nextExtraRowId = () => ++extraRowSeq;
+
+/**
+ * Same secret-name heuristic the server applies to compose and env-file variables,
+ * inlined because @cerebro/shared is consumed here as types only (its CommonJS
+ * barrel doesn't expose a runtime value through `export *`).
+ */
+const EXTRA_SECRET_RE = /(secret|password|passwd|token|api[_-]?key|apikey|private[_-]?key|credential)/i;
+
+/** Rebuild the grid from a deployment's stored extras (secret values stay hidden). */
+function extraRowsFrom(extraEnv: Record<string, string>, extraSecretVars: string[]): ExtraRow[] {
+  return [
+    ...Object.entries(extraEnv ?? {}).map(([name, value]) => ({ id: nextExtraRowId(), name, value, secret: false, stored: false })),
+    ...(extraSecretVars ?? []).map((name) => ({ id: nextExtraRowId(), name, value: '', secret: true, stored: true })),
+  ];
+}
+
+/** Grid rows → the wire shape, dropping rows the operator left unnamed. */
+function extraEntriesOf(rows: ExtraRow[]) {
+  return rows.filter((r) => r.name.trim()).map((r) => ({ name: r.name.trim(), value: r.value, secret: r.secret }));
+}
+
+/** Pull `KEY=value` lines out of pasted `.env` text (quotes and `export` handled). */
+function parseEnvPaste(text: string): { name: string; value: string }[] {
+  const out: { name: string; value: string }[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let v = m[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"') && v.length > 1) || (v.startsWith("'") && v.endsWith("'") && v.length > 1)) v = v.slice(1, -1);
+    else v = v.replace(/\s+#.*$/, '').trim();
+    out.push({ name: m[1], value: v });
+  }
+  return out;
+}
+
+function ExtraEnvEditor({ rows, onChange, schemaNames, allowKeepBlank }: {
+  rows: ExtraRow[]; onChange: (next: ExtraRow[]) => void;
+  /** Names already in the app's schema — an extra may not shadow one. */
+  schemaNames: Set<string>;
+  /** Edit mode: a blank secret keeps the stored value instead of being incomplete. */
+  allowKeepBlank?: boolean;
+}) {
+  const [open, setOpen] = useState(rows.length > 0);
+  const [pasting, setPasting] = useState(false);
+  const [paste, setPaste] = useState('');
+
+  const patch = (id: number, next: Partial<ExtraRow>) => onChange(rows.map((r) => (r.id === id ? { ...r, ...next } : r)));
+  const add = () => onChange([...rows, { id: nextExtraRowId(), name: '', value: '', secret: false, stored: false }]);
+  const remove = (id: number) => onChange(rows.filter((r) => r.id !== id));
+
+  function applyPaste() {
+    const parsed = parseEnvPaste(paste);
+    if (!parsed.length) { setPasting(false); setPaste(''); return; }
+    const next = [...rows];
+    for (const { name, value } of parsed) {
+      const existing = next.find((r) => r.name.trim() === name);
+      if (existing) { existing.value = value; continue; }
+      // A pasted credential starts flagged secret; the operator can untick it.
+      const secret = EXTRA_SECRET_RE.test(name);
+      next.push({ id: nextExtraRowId(), name, value, secret, stored: false });
+    }
+    onChange(next);
+    setPaste(''); setPasting(false);
+  }
+
+  const problem = (r: ExtraRow): string | null => {
+    const name = r.name.trim();
+    if (!name) return null;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return 'Letters, digits and underscores only, starting with a letter or underscore.';
+    if (schemaNames.has(name)) return `${name} is one of this app's variables — set it in the form above.`;
+    if (rows.filter((o) => o.name.trim() === name).length > 1) return `${name} is listed twice.`;
+    if (r.secret && !r.value && !(allowKeepBlank && r.stored)) return 'Give this secret a value.';
+    return null;
+  };
+
+  const named = rows.filter((r) => r.name.trim()).length;
+
+  return (
+    <div className="rounded-lg border border-border/60">
+      <button type="button" className="w-full flex items-center justify-between px-3 py-2 text-sm"
+        onClick={() => setOpen((o) => !o)}>
+        <span className="flex items-center gap-2">
+          <FileCog className="h-4 w-4 text-muted-foreground" />
+          Additional environment
+          {named > 0 && <span className="text-xs text-muted-foreground">{named} entr{named === 1 ? 'y' : 'ies'}</span>}
+        </span>
+        <span className="text-xs text-muted-foreground">{open ? 'Hide' : 'Show'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Keys this app needs that aren’t in its schema. Written into this deployment’s <code>.env</code>;
+            secrets go to the vault and are removed with the deployment.
+          </p>
+
+          {rows.map((r) => {
+            const err = problem(r);
+            return (
+              <div key={r.id} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Input className="flex-1 font-mono text-xs" value={r.name} placeholder="EXTRA_SETTING"
+                    onChange={(e) => patch(r.id, { name: e.target.value })} />
+                  <Input className="flex-1" type={r.secret ? 'password' : 'text'} value={r.value}
+                    placeholder={r.secret && r.stored && allowKeepBlank ? 'leave blank to keep current secret' : 'value'}
+                    onChange={(e) => patch(r.id, { value: e.target.value })} />
+                  {r.secret && (
+                    <Button type="button" variant="outline" size="icon" aria-label="Generate" title="Generate a random value"
+                      onClick={() => patch(r.id, { value: randomSecret() })}><Wand2 className="h-4 w-4" /></Button>
+                  )}
+                  <label className="flex items-center gap-1.5 text-xs cursor-pointer shrink-0">
+                    <input type="checkbox" checked={r.secret} onChange={(e) => patch(r.id, { secret: e.target.checked })} /> secret
+                  </label>
+                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                    aria-label="Remove entry" title="Remove this entry" onClick={() => remove(r.id)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {err && <p className="text-xs text-destructive">{err}</p>}
+              </div>
+            );
+          })}
+
+          {pasting ? (
+            <div className="space-y-2">
+              <textarea
+                className="w-full h-28 rounded-md border border-input bg-background/60 p-2 font-mono text-xs"
+                value={paste} autoFocus placeholder={'PASTE=an .env here\nAPI_TOKEN=…'}
+                onChange={(e) => setPaste(e.target.value)} />
+              <div className="flex items-center gap-2">
+                <Button type="button" size="sm" onClick={applyPaste} disabled={!paste.trim()}>Add these</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { setPasting(false); setPaste(''); }}>Cancel</Button>
+                <span className="text-xs text-muted-foreground">Credential-looking names arrive flagged secret.</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={add}><Plus className="h-4 w-4" /> Add entry</Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setPasting(true)}>Paste .env</Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VarField({ v, value, usedPorts, onChange, placeholder, hideRequired }: {
   v: ReplicatorVariable; value: string; usedPorts: number[]; onChange: (val: string) => void;
   placeholder?: string; hideRequired?: boolean;
@@ -1042,6 +1473,7 @@ function VarField({ v, value, usedPorts, onChange, placeholder, hideRequired }: 
             onClick={() => onChange(randomSecret())}><Wand2 className="h-4 w-4" /></Button>
         )}
       </div>
+      {v.comment && <p className="text-xs text-muted-foreground mt-0.5">{v.comment}</p>}
       {conflict && <p className="text-xs text-destructive mt-0.5">Port {value} is already in use on this host.</p>}
     </div>
   );

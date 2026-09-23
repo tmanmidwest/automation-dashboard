@@ -2,14 +2,31 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, resolve, sep } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
 import { assertSafeGitUrl, assertSafeGitRef, gitSafeEnv } from '../common/git-safety';
-import type { GitCredential, IntrospectRepoInput, IntrospectResult } from '@cerebro/shared';
-import { introspectCompose, generateComposeWrapper, exposedPortOf } from './compose-introspect';
+import type { GitCredential, IntrospectRepoInput, IntrospectResult, ReplicatorVariable } from '@cerebro/shared';
+import { introspectCompose, generateComposeWrapper, exposedPortOf, parseDotenv, envFileVariables, mergeEnvFileVars } from './compose-introspect';
 
 /** Standard compose filenames to auto-detect when no explicit path is given. */
 const COMPOSE_CANDIDATES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+
+/**
+ * Suffixes to try for a declared `env_file:` target. The real file is nearly always
+ * gitignored, so what the repo actually commits is a sample alongside it.
+ */
+const ENV_SAMPLE_SUFFIXES = ['', '.example', '.sample', '.template', '.dist'];
+
+/**
+ * Committed env files to look for when compose declares no `env_file:` — compose
+ * auto-loads a `.env` next to the compose file, so a repo documenting that file
+ * is describing variables the app expects just as much as an explicit declaration.
+ */
+const ENV_FALLBACKS = ['.env.example', '.env.sample', '.env.template', '.env.dist', 'example.env', 'env.example'];
+
+/** Guard rails on a repo-supplied env file: it's untrusted content. */
+const ENV_FILE_MAX_BYTES = 256 * 1024;
+const ENV_FILE_MAX_VARS = 300;
 
 /**
  * Reads an app's compose file straight from its Git repo (a shallow clone into a
@@ -69,7 +86,15 @@ export class RepoIntrospectService {
       if (composePath) {
         const text = await readFile(join(repoDir, composePath), 'utf8');
         const parsed = introspectCompose(text);
-        return { ...parsed, composePath, usesGeneratedCompose: false };
+        const env = await this.readEnvFiles(repoDir, composePath, parsed.envFiles);
+        return {
+          variables: mergeEnvFileVars(parsed.variables, env.variables),
+          services: parsed.services,
+          composePath,
+          usesGeneratedCompose: false,
+          envFiles: env.files,
+          warnings: [...parsed.warnings, ...env.warnings],
+        };
       }
 
       // No compose file — synthesize a wrapper from the Dockerfile if present.
@@ -81,7 +106,7 @@ export class RepoIntrospectService {
         parsed.warnings.unshift(
           `No compose file found; generated a wrapper exposing port ${exposed}. Committing a docker-compose.yml is recommended before deploying.`,
         );
-        return { ...parsed, composePath: 'docker-compose.yml (generated)', usesGeneratedCompose: true };
+        return { ...parsed, composePath: 'docker-compose.yml (generated)', usesGeneratedCompose: true, envFiles: [] };
       }
 
       throw new BadRequestException('No docker-compose.yml or Dockerfile found in the repository.');
@@ -91,6 +116,94 @@ export class RepoIntrospectService {
     } finally {
       await rm(workdir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /**
+   * Read the app's env file(s) out of the clone and derive variables from them.
+   *
+   * Which file: every path the compose declares via `env_file:` (each tried as-is
+   * and then with a sample suffix, since the real file is normally gitignored),
+   * or — when compose declares none — the committed `.env.example`-style file
+   * beside the compose or at the repo root, which is what compose's own auto-loaded
+   * `.env` would have contained.
+   *
+   * Everything here is repo-controlled content, so paths are resolved and confined
+   * to the clone, files are size-capped, and the variable count is capped.
+   */
+  private async readEnvFiles(
+    repoDir: string,
+    composePath: string,
+    declared: string[],
+  ): Promise<{ variables: ReplicatorVariable[]; files: string[]; warnings: string[] }> {
+    const composeDir = posix.dirname(composePath.split(sep).join('/'));
+    const rel = (p: string) => posix.normalize(composeDir === '.' ? p : posix.join(composeDir, p));
+    const warnings: string[] = [];
+    const files: string[] = [];
+    let variables: ReplicatorVariable[] = [];
+
+    const candidates = declared.length
+      ? declared.map((d) => ({ declared: d, tries: ENV_SAMPLE_SUFFIXES.map((sfx) => rel(d) + sfx) }))
+      : [{ declared: null, tries: [...ENV_FALLBACKS.map(rel), ...(composeDir === '.' ? [] : ENV_FALLBACKS)] }];
+
+    for (const c of candidates) {
+      let found: string | null = null;
+      for (const t of c.tries) {
+        const abs = this.insideRepo(repoDir, t);
+        if (abs && (await exists(abs))) { found = t; break; }
+      }
+      if (!found) {
+        if (c.declared) {
+          warnings.push(
+            `The compose file reads "${c.declared}" via env_file:, but neither it nor a sample of it is committed — add those variables by hand so Cerebro can write them.`,
+          );
+        }
+        continue;
+      }
+      const abs = this.insideRepo(repoDir, found)!;
+      const text = await readFile(abs, 'utf8').catch(() => null);
+      if (text == null) continue;
+      if (Buffer.byteLength(text) > ENV_FILE_MAX_BYTES) {
+        warnings.push(`Skipped "${found}" — it is larger than ${Math.round(ENV_FILE_MAX_BYTES / 1024)}KB.`);
+        continue;
+      }
+      const entries = parseDotenv(text);
+      if (!entries.length) continue;
+      files.push(found);
+      variables = mergeEnvFileVars(variables, envFileVariables(entries.slice(0, ENV_FILE_MAX_VARS), found));
+      if (entries.length > ENV_FILE_MAX_VARS) {
+        warnings.push(`"${found}" declares ${entries.length} variables; only the first ${ENV_FILE_MAX_VARS} were imported.`);
+      }
+
+      // Cerebro writes exactly one file — `.env` beside the compose, which is both
+      // the compose default and the usual `env_file:` target. When the compose
+      // reads somewhere else, the values are still collected (they're the app's
+      // real settings) but say plainly that they land in `.env`, not there.
+      if (c.declared && rel(c.declared) !== rel('.env')) {
+        warnings.push(
+          `The compose reads "${c.declared}", but Cerebro only ever writes ".env" beside the compose file — the values you set for the variables imported from "${found}" land there, so they take effect only if the repo also loads ".env".`,
+        );
+      }
+    }
+
+    if (files.length) {
+      const secrets = variables.filter((v) => v.secret).length;
+      warnings.push(
+        `Imported ${variables.length} variable(s) from ${files.join(', ')}${secrets ? ` (${secrets} flagged secret — supply a value per deployment; the sample value is never reused)` : ''}.`,
+      );
+    }
+    return { variables, files, warnings };
+  }
+
+  /**
+   * Resolve a repo-relative path to an absolute one, or null when it escapes the
+   * clone — compose content is untrusted, so `env_file: ../../etc/passwd` must not
+   * be readable.
+   */
+  private insideRepo(repoDir: string, relPath: string): string | null {
+    if (posix.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath)) return null;
+    const base = resolve(repoDir);
+    const abs = resolve(base, relPath);
+    return abs === base || abs.startsWith(base + sep) ? abs : null;
   }
 
   /**

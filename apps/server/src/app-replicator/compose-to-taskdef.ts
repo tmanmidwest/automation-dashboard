@@ -8,7 +8,10 @@ import type { EcsTaskDefInput, EcsContainerDef } from '../connectors/aws/aws-api
  * single-host `docker compose up`), plus an optional cloudflared sidecar for
  * ingress. Values are interpolated from the resolved env dictionary the Docker
  * target would hand compose; the image of a `build:` service is replaced with the
- * ECR image Cerebro built and pushed. See docs/app-replicator-ecs-target.md.
+ * ECR image Cerebro built and pushed. Variables the Docker target would deliver by
+ * writing a `.env` (env-file and hand-added ones) are injected as container
+ * environment instead, since there's no file to write. See
+ * docs/app-replicator-ecs-target.md.
  */
 
 /** Resolve compose `${VAR}` interpolation forms against the env dictionary. */
@@ -55,6 +58,21 @@ function envEntries(raw: unknown, env: Map<string, string>): { name: string; val
   return out;
 }
 
+/**
+ * Prepend the file-sourced variables to a container's environment. Explicit
+ * `environment:` entries win, mirroring compose, where `environment:` overrides
+ * `env_file:`.
+ */
+function withFileEnv(
+  fileEnv: Map<string, string> | undefined,
+  explicit: { name: string; value: string }[],
+): { name: string; value: string }[] {
+  if (!fileEnv?.size) return explicit;
+  const set = new Set(explicit.map((e) => e.name));
+  const base = [...fileEnv.entries()].filter(([name]) => !set.has(name)).map(([name, value]) => ({ name, value }));
+  return [...base, ...explicit];
+}
+
 /** Container ports from a compose `ports:` block (short `H:C` or long `{target}` form). */
 function containerPorts(raw: unknown, env: Map<string, string>): number[] {
   const out: number[] = [];
@@ -87,6 +105,13 @@ export interface TaskDefBuildInput {
   ecrImageUri: string;
   /** Resolved interpolation dictionary (buildEnvMap output). */
   env: Map<string, string>;
+  /**
+   * Variables the app reads out of a file rather than through `${VAR}`
+   * interpolation (see `fileEnvOf`). Fargate has no `.env` to write, so these are
+   * injected into every container's environment, beneath anything the compose
+   * `environment:` block sets explicitly.
+   */
+  fileEnv?: Map<string, string>;
   logGroup: string;
   executionRoleArn: string;
   taskRoleArn?: string;
@@ -140,7 +165,7 @@ export function composeToTaskDef(input: TaskDefBuildInput): TaskDefResult {
       name: slug(name),
       image,
       essential: true,
-      environment: envEntries(svc.environment, input.env),
+      environment: withFileEnv(input.fileEnv, envEntries(svc.environment, input.env)),
       portMappings: cports.map((p) => ({ containerPort: p, protocol: 'tcp' as const })),
       command: commandOf(svc.command, input.env),
       logGroup: input.logGroup,

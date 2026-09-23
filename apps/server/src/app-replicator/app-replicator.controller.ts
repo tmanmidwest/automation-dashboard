@@ -105,6 +105,18 @@ export class AppReplicatorController {
     return this.deployments.deploy(id, body, { actorId: user.id, actorEmail: user.email });
   }
 
+  @Get('deployments/:id/env')
+  @RequirePermissions('replicator:read')
+  env(@Param('id') id: string) {
+    return this.deployments.envView(id);
+  }
+
+  @Get('deployments/:id/env/drift')
+  @RequirePermissions('replicator:read')
+  envDrift(@Param('id') id: string) {
+    return this.deployments.envDrift(id);
+  }
+
   @Post('deployments/:id/redeploy')
   @RequirePermissions('replicator:write')
   @SessionOnly()

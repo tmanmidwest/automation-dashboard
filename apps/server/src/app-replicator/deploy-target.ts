@@ -22,6 +22,12 @@ export function slug(s: string): string {
  * get Cerebro-assigned isolation values; plain/host_ip/secret take the operator's
  * value. Docker serializes this to a compose `.env`; ECS uses it to interpolate
  * `${VAR}` tokens when translating the compose into a task definition.
+ *
+ * Provenance decides what an omitted value means. A compose `${VAR:-default}`
+ * left blank is simply left out — compose applies the default itself. A variable
+ * that came from an env file or was added by hand has no such fallback: its
+ * default only exists in Cerebro's schema, so it must be written out or the key
+ * reaches the container unset.
  */
 export function buildEnvMap(
   variables: ReplicatorVariable[],
@@ -29,18 +35,59 @@ export function buildEnvMap(
   portList: ReplicatorPort[],
   values: Record<string, string>,
   secrets: Record<string, string>,
+  /** Operator-added entries, already resolved to plaintext (secrets included). */
+  extras: Record<string, string> = {},
 ): Map<string, string> {
   const env = new Map<string, string>();
   const portByVar = new Map(portList.map((p) => [p.variable, p.hostPort]));
   for (const v of variables) {
     const svc = slug(v.service ?? 'app');
+    // Only compose can fall back to its own `${VAR:-default}` when we write nothing.
+    const fallback = (v.source ?? 'compose') === 'compose' ? null : v.default ?? null;
     if (v.role === 'image_tag') env.set(v.name, `${project}-${svc}:latest`);
     else if (v.role === 'container_name') env.set(v.name, `${project}-${svc}`);
     else if (v.role === 'host_port') { const p = portByVar.get(v.name); if (p != null) env.set(v.name, String(p)); }
-    else if (v.role === 'secret') { const s = secrets[v.name]; if (s != null && s !== '') env.set(v.name, s); }
-    else if (v.role === 'plain' || v.role === 'host_ip') { const val = values[v.name]; if (val != null && val !== '') env.set(v.name, String(val)); }
+    else if (v.role === 'secret') {
+      // A secret's schema default is never a fallback — an env file's sample
+      // credential must not become a live deployment's password.
+      const s = secrets[v.name];
+      if (s != null && s !== '') env.set(v.name, s);
+    } else if (v.role === 'plain' || v.role === 'host_ip') {
+      const val = values[v.name];
+      if (val != null && val !== '') env.set(v.name, String(val));
+      else if (fallback != null) env.set(v.name, fallback);
+    }
   }
+  // Extras last. They can't collide with a schema name — DeploymentService rejects
+  // that at the edge — so this only ever appends.
+  for (const [name, val] of Object.entries(extras)) if (val != null && val !== '') env.set(name, String(val));
   return env;
+}
+
+/**
+ * The subset of the env map that only a written `.env` would deliver: variables
+ * sourced from an env file or added by hand. A compose `${VAR}` token reaches the
+ * container through interpolation, but these keys are read straight out of the
+ * file by the app, so the ECS target — which has no `.env` to write — has to inject
+ * them into each container's `environment` instead.
+ */
+export function fileEnvOf(
+  variables: ReplicatorVariable[],
+  env: Map<string, string>,
+  extras: Record<string, string> = {},
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const v of variables) {
+    if ((v.source ?? 'compose') === 'compose') continue;
+    const val = env.get(v.name);
+    if (val != null) out.set(v.name, val);
+  }
+  // An extra exists only in Cerebro, so nothing interpolates it either.
+  for (const name of Object.keys(extras)) {
+    const val = env.get(name);
+    if (val != null) out.set(name, val);
+  }
+  return out;
 }
 
 /** Serialize an env map to a single-line-per-entry compose `.env` string. */
@@ -59,6 +106,8 @@ export interface DeploySpec {
   portList: ReplicatorPort[];
   values: Record<string, string>;
   secrets: Record<string, string>;
+  /** Operator-added env entries, resolved to plaintext (secrets revealed). */
+  extras: Record<string, string>;
   forceRebuild: boolean;
   /** ECS only. */
   taskCpu?: string;

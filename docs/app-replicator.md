@@ -46,7 +46,9 @@ does.
 ## The compose file *is* the manifest
 
 The central trick: we don't ask you to author a manifest. We read the app's compose file and derive
-everything from Docker Compose's own `${VAR:-default}` interpolation. From the demo app:
+everything from Docker Compose's own `${VAR:-default}` interpolation — plus, for apps that configure
+themselves through an `env_file:` instead, the env file the repo commits (see [Env
+files](#env-files-env_file--envexample)). From the demo app:
 
 ```yaml
 image:          ${HRSOT_IMAGE:-demo-hr-sot:local}      # → per-instance image tag (auto-managed)
@@ -66,6 +68,9 @@ interface VariableSpec {
   service: string;            // which compose service it belongs to
   containerPort?: number;     // for host_port: the fixed internal port (":8000")
   required: boolean;          // true when there is no default
+  source: 'compose' | 'env_file' | 'manual';  // provenance — see "Env files" below
+  envFile?: string;           // which env file it came from (source === 'env_file')
+  comment?: string;           // the repo's own `#` documentation for the key
 }
 ```
 
@@ -84,6 +89,112 @@ Role detection:
 
 A multi-service app (the demo publishes **two** ports — `hr-sot:8000` and `hr-mcp:8100`) yields
 **two** `host_port` specs. Ingress is therefore modeled **per published port**, not per app.
+
+### Env files (`env_file:` / `.env.example`)
+
+Plenty of apps don't interpolate anything — the compose says `env_file: .env` and the repo commits a
+`.env.example` documenting every key. Compose interpolation alone would find **nothing** there, so
+the introspector reads the env file too and folds its keys into the same `VariableSpec[]`.
+
+Which file it reads:
+
+- **Every path the compose declares** via `env_file:` (scalar, list, and long `- path:` forms). The
+  real file is almost always gitignored, so each path is tried as-is and then with `.example`,
+  `.sample`, `.template`, `.dist`.
+- **When compose declares none:** the committed `.env.example`-style file beside the compose, else
+  at the repo root — compose auto-loads a `.env` from the project directory, so that file describes
+  variables the app expects just as much as an explicit declaration.
+
+How an entry becomes a variable:
+
+| Env-file entry | Becomes |
+| --- | --- |
+| `TZ=Etc/UTC` | plain, default `Etc/UTC` |
+| `DB_PASSWORD=changeme` | **secret, required, no default** — a committed sample credential must never become a live deployment's password |
+| `SMTP_HOST=` | plain, no default, optional (a blank sample is ambiguous; blocking the deploy on it would be worse than leaving the key unset) |
+| `# The location…` above an entry | that variable's help text in the form |
+
+**Compose wins on overlap.** Only compose knows a name is a published port, an image tag or a
+container name, so a variable in both keeps its compose role — but the env file's sample value fills
+a default compose didn't declare, and its comment becomes the field's help text.
+
+**Provenance changes what "leave it blank" means.** A compose `${VAR:-default}` left blank is simply
+omitted from the `.env` — compose applies its own default. An env-file or hand-added variable has no
+such fallback: its default exists only in Cerebro's schema, so `buildEnvMap` writes it out, or the
+key would reach the container unset. Secrets are excluded from that — the sample is never reused.
+
+**Caveat — Cerebro writes exactly one file:** `.env` beside the compose file. That's both the
+compose default and the overwhelmingly common `env_file:` target, but a compose reading
+`config/app.env` gets a warning at register time saying the values will land in `.env` instead.
+
+**ECS:** Fargate has no `.env` to write, so `fileEnvOf()` picks out the env-file and hand-added
+variables and `composeToTaskDef` injects them into every container's `environment`, beneath anything
+the compose `environment:` block sets explicitly (mirroring compose, where `environment:` overrides
+`env_file:`).
+
+### Adding variables by hand (app-wide)
+
+Some apps read a key that neither the compose nor any committed env file mentions. The register and
+refresh dialogs both carry an **Add a variable** row (name, optional default, `secret` toggle) that
+appends a `source: 'manual'` variable to the app's schema. It flows through the deploy form, the
+vault and the written `.env` exactly like a detected one.
+
+Hand-added variables are **preserved across a schema refresh** — they have no counterpart in the
+repo, so re-reading it could never "find" them; `mergeSchema` carries them through instead of
+reporting them removed. If the repo later declares the same name, the repo's version wins.
+
+These are **app-wide** — every deployment gets the variable, with its own value. For a key only one
+instance needs, use the per-deployment extras below.
+
+### Per-deployment extras
+
+The app schema is shared by every instance of an app. Some keys aren't: something one instance needs
+and the others don't, or a value that differs per deployment. The deploy wizard and the
+**Edit & redeploy** dialog both carry an **Additional environment** grid — name, value, `secret`
+toggle — plus a **Paste .env** box that parses pasted `KEY=value` lines into rows (credential-looking
+names arrive pre-flagged secret).
+
+Storage mirrors the schema variables: non-secret entries live on the deployment row
+(`extraEnv` JSON), secret ones in the vault under the *same* `deployment:<id>:<name>` keys as
+`secretVars`, so teardown cleans both up in one pass.
+
+`splitExtras()` in `DeploymentService` is the edge that keeps free-form input safe to write into a
+`.env`: a shell-safe name, no duplicates, and **no shadowing a schema variable** — an extra named
+`APP_HOST_PORT` would silently fight the port allocator, so it's rejected rather than merged.
+
+**Extras replace, they don't merge.** `RedeployInput.values`/`secrets` merge (a key left out keeps
+its stored value, falling back to the repo default when cleared). Extras have no repo to fall back
+to, so removal has to be expressible: the edit dialog submits the whole grid, an entry left out is
+deleted, and its vault secret is removed right then rather than waiting for teardown. A blank value
+on an entry already marked secret still means "keep the stored one".
+
+### Seeing what actually got written
+
+`GET /api/replicator/deployments/:id/env` resolves a deployment's environment **through the same
+`buildEnvMap` call a redeploy makes** — same variables, same stored values, same revealed secrets and
+extras — and labels every line with where it came from (`managed` / `compose` / `env_file` / `manual`
+/ `extra`). The **Environment** button on a deployment row opens it.
+
+This is the answer to "what did this instance actually get?", which the deploy form can only imply:
+managed values are assigned at deploy time, env-file defaults are materialized, and a blank falls
+back or doesn't depending on provenance. Resolving it through the real code path — rather than
+re-deriving it for display — is the point: a preview that could disagree with the file would be worse
+than none.
+
+**Secrets are never echoed.** An entry's `value` is `null` when it's a secret; the response carries
+the `vaultKey` instead. The vault's step-up-gated reveal stays the single audited path to plaintext —
+a second, weaker door to the same value through a read-only screen would undercut it. The route needs
+only `replicator:read`, which is safe precisely because of that.
+
+**Drift check.** `GET …/env/drift` reads the `.env` actually on the host and compares it with what
+Cerebro would write, so a hand-edit is visible *before* the next redeploy silently overwrites it. It
+returns **key names only** — `onlyOnHost`, `missingOnHost`, `differing` — never host values, so it
+can't become a side channel for reading secrets back off the box. ECS returns `available: false`
+(no file to compare).
+
+The host path comes from `gitStackEnvPath()`, exported from `DockerStackService` so the reader and
+the writer derive it from the same validated logic instead of re-deriving it and silently comparing
+against the wrong file.
 
 **Dockerfile-only repos (no compose):** Cerebro generates a minimal compose wrapper
 (`build: .`, one parameterized published port from the Dockerfile's `EXPOSE`, an

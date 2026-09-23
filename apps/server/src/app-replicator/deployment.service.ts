@@ -4,7 +4,7 @@ import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
-import { projectName } from '../connectors/docker/docker-stack.service';
+import { projectName, gitStackEnvPath } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { dockerHostVerifier } from '../connectors/docker/docker-hostkey';
 import { PortAllocatorService } from './port-allocator.service';
@@ -12,16 +12,64 @@ import { IngressService } from './ingress.service';
 import { DockerDeployTarget } from './docker-deploy-target';
 import { EcsDeployTarget } from './ecs-deploy-target';
 import { ecsProfileFrom } from './ecs-target';
+import { buildEnvMap } from './deploy-target';
+import { parseDotenv } from './compose-introspect';
+import { runSsh } from '../connectors/docker/docker-ssh';
 import type { DeployTarget, DestroyContext } from './deploy-target';
 import type {
   DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
-  ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs,
+  ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs, ExtraEnvEntry,
+  DeploymentEnvView, DeploymentEnvEntry, DeploymentEnvOrigin, DeploymentEnvDrift,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
 
 /** The vault key holding one deployment's secret variable value. */
 function secretKey(deploymentId: string, varName: string): string {
   return `deployment:${deploymentId}:${varName}`;
+}
+
+/**
+ * Validate the operator's env extras and split them into the non-secret map that
+ * lives on the row and the secret values headed for the vault.
+ *
+ * Extras are free-form, so this is the edge that keeps them safe to write into a
+ * `.env`: a shell-safe name, no duplicates, and no shadowing of a schema variable
+ * — an extra named `APP_HOST_PORT` would silently fight the port allocator, so it
+ * is rejected rather than merged.
+ */
+function splitExtras(
+  entries: ExtraEnvEntry[] | undefined,
+  variables: ReplicatorVariable[],
+): { values: Record<string, string>; secrets: Record<string, string>; secretNames: string[] } {
+  const values: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
+  const secretNames: string[] = [];
+  const schema = new Set(variables.map((v) => v.name));
+  const seen = new Set<string>();
+
+  for (const raw of entries ?? []) {
+    const name = String(raw?.name ?? '').trim();
+    if (!name) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new BadRequestException(`"${name}" isn't a usable environment variable name — use letters, digits and underscores, starting with a letter or underscore.`);
+    }
+    if (schema.has(name)) {
+      throw new BadRequestException(`${name} is already one of this app's variables — set it in the form above instead of adding it here.`);
+    }
+    if (seen.has(name)) throw new BadRequestException(`${name} is listed twice in the extra variables.`);
+    seen.add(name);
+
+    const value = raw.value == null ? '' : String(raw.value);
+    if (raw.secret) {
+      secretNames.push(name);
+      // A blank secret means "keep what's stored" — the caller decides whether
+      // that's legal (it isn't on a first deploy).
+      if (value !== '') secrets[name] = value;
+    } else if (value !== '') {
+      values[name] = value;
+    }
+  }
+  return { values, secrets, secretNames };
 }
 
 /**
@@ -140,6 +188,14 @@ export class DeploymentService {
     }
     const secretVars = variables.filter((v) => v.secret && input.secrets[v.name] != null && input.secrets[v.name] !== '').map((v) => v.name);
 
+    // Operator-added env entries. On a first deploy there's nothing stored to keep,
+    // so a secret extra must actually carry a value.
+    const extras = splitExtras(input.extraEnv, variables);
+    const blankExtraSecret = extras.secretNames.filter((n) => extras.secrets[n] == null);
+    if (blankExtraSecret.length) {
+      throw new BadRequestException(`Give the extra secret variable(s) a value: ${blankExtraSecret.join(', ')}.`);
+    }
+
     const row = await this.prisma.replicatorDeployment.create({
       data: {
         appId: app.id,
@@ -149,6 +205,8 @@ export class DeploymentService {
         project,
         values: nonSecretValues,
         secretVars,
+        extraEnv: extras.values,
+        extraSecretVars: extras.secretNames,
         ports: portList as unknown as object,
         status: 'pending',
         phase: 'Queued…',
@@ -161,6 +219,11 @@ export class DeploymentService {
         label: `Replicator · ${project} · ${name}`,
       }, actor);
     }
+    for (const name of extras.secretNames) {
+      await this.secrets.set(secretKey(row.id, name), String(extras.secrets[name]), {
+        label: `Replicator · ${project} · ${name}`,
+      }, actor);
+    }
 
     // Hand the slow clone/build/up to the background so the request returns now;
     // the row's status + phase reflect progress and the final outcome. All the
@@ -168,7 +231,9 @@ export class DeploymentService {
     // the caller, so only genuinely long work goes async.
     void this.runDeployment({
       deploymentId: row.id, app, variables, project, targetKind, targetInstanceId: input.dockerInstanceId,
-      portList, values: nonSecretValues, secrets: input.secrets, forceRebuild: !!input.forceRebuild,
+      portList, values: nonSecretValues, secrets: input.secrets,
+      extras: { ...extras.values, ...extras.secrets },
+      forceRebuild: !!input.forceRebuild,
       taskCpu: input.taskCpu, taskMemory: input.taskMemory, actor, kind: 'deploy',
     });
     return this.map(row, app.name);
@@ -189,12 +254,11 @@ export class DeploymentService {
     let portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
     let nonSecretValues = (row.values as unknown as Record<string, string>) ?? {};
 
-    // Reveal stored secrets so they flow into the env map (and satisfy required checks).
-    const secrets: Record<string, string> = {};
-    for (const name of row.secretVars) {
-      const v = await this.secrets.reveal(secretKey(row.id, name)).catch(() => null);
-      if (v != null) secrets[name] = v;
-    }
+    // Stored secrets and extras, revealed, so they flow into the env map (and
+    // satisfy the required-value checks below).
+    const stored = await this.resolveStored(row);
+    const secrets = stored.secrets;
+    let extras = stored.extras;
 
     // Edit mode: merge the supplied changes over the stored config, validate, and
     // persist BEFORE running — so a failed validation never mutates the deployment.
@@ -238,18 +302,53 @@ export class DeploymentService {
         secretVarSet.add(v.name);
       }
 
+      // Env extras replace rather than merge: the operator edits the whole list, so
+      // an entry they deleted has to actually disappear (schema variables can fall
+      // back to a repo default, extras have nothing to fall back to).
+      const nextExtras = opts.extraEnv === undefined
+        ? { values: (row.extraEnv as unknown as Record<string, string>) ?? {}, secrets: {}, secretNames: row.extraSecretVars ?? [] }
+        : splitExtras(opts.extraEnv, variables);
+
+      const resolvedExtras: Record<string, string> = { ...nextExtras.values };
+      for (const name of nextExtras.secretNames) {
+        const provided = nextExtras.secrets[name];
+        if (provided != null) {
+          await this.secrets.set(secretKey(row.id, name), provided, { label: `Replicator · ${row.project} · ${name}` }, actor);
+          resolvedExtras[name] = provided;
+          continue;
+        }
+        // Blank → keep the stored value, but only if there is one to keep.
+        const stored = extras[name];
+        if (stored == null) throw new BadRequestException(`Give the extra secret variable "${name}" a value.`);
+        resolvedExtras[name] = stored;
+      }
+
+      // Drop the vault entries for extras the operator removed or un-flagged as
+      // secret, so teardown isn't the only thing that cleans up after them.
+      const keptSecrets = new Set(nextExtras.secretNames);
+      for (const name of row.extraSecretVars ?? []) {
+        if (!keptSecrets.has(name)) await this.secrets.remove(secretKey(row.id, name), actor).catch(() => {});
+      }
+
       portList = newPortList;
       nonSecretValues = mergedValues;
+      extras = resolvedExtras;
       await this.prisma.replicatorDeployment.update({
         where: { id: row.id },
-        data: { values: nonSecretValues, ports: portList as unknown as object, secretVars: [...secretVarSet] },
+        data: {
+          values: nonSecretValues,
+          ports: portList as unknown as object,
+          secretVars: [...secretVarSet],
+          extraEnv: nextExtras.values,
+          extraSecretVars: nextExtras.secretNames,
+        },
       });
     }
 
     const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
     void this.runDeployment({
       deploymentId: row.id, app, variables, project: row.project, targetKind, targetInstanceId: row.dockerInstanceId,
-      portList, values: nonSecretValues, secrets, forceRebuild: !!opts.forceRebuild,
+      portList, values: nonSecretValues, secrets, extras, forceRebuild: !!opts.forceRebuild,
       existingEcs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null, actor, kind: 'redeploy',
     });
     return this.map(updated, app.name);
@@ -264,9 +363,10 @@ export class DeploymentService {
     deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string;
     targetKind: TargetKind; targetInstanceId: string;
     portList: ReplicatorPort[]; values: Record<string, string>; secrets: Record<string, string>;
+    extras: Record<string, string>;
     forceRebuild: boolean; taskCpu?: string; taskMemory?: string; existingEcs?: EcsDeploymentRefs | null; actor: ActorCtx; kind: 'deploy' | 'redeploy';
   }): Promise<void> {
-    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, forceRebuild, taskCpu, taskMemory, existingEcs, actor, kind } = args;
+    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, extras, forceRebuild, taskCpu, taskMemory, existingEcs, actor, kind } = args;
     const setPhase = (phase: string | null) => {
       void this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { phase } }).catch(() => {});
       if (phase) void this.logging.info('replicator', `[${project}] ${phase}`);
@@ -281,7 +381,7 @@ export class DeploymentService {
         {
           deploymentId, targetInstanceId, project,
           source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey },
-          variables, portList, values, secrets, forceRebuild, taskCpu, taskMemory, existingEcs,
+          variables, portList, values, secrets, extras, forceRebuild, taskCpu, taskMemory, existingEcs,
         },
         (phase) => setPhase(phase),
       );
@@ -303,6 +403,138 @@ export class DeploymentService {
       await this.audit.record({ ...actor, action: finalAction(false), target: `${app.name}/${project}`, meta: { error: message.slice(0, 300) } }).catch(() => {});
       void this.logging.error('replicator', `[${project}] ${kind} error: ${message.slice(0, 300)}`);
     }
+  }
+
+  // ── Environment view (what actually gets written) ──────────────────
+
+  /**
+   * Resolve a deployment's environment exactly as a redeploy would — same
+   * `buildEnvMap` call, same inputs — and annotate every line with where it came
+   * from. This is the answer to "what did this instance actually get?", which the
+   * deploy form can only imply: managed values are assigned by Cerebro, env-file
+   * defaults are materialized, and blanks fall back (or don't) by provenance.
+   *
+   * Secret values are withheld. The vault's step-up-gated reveal is the single
+   * audited path to plaintext, so this returns the vault key instead — enough to
+   * confirm a secret is set and to go read it deliberately.
+   */
+  async envView(id: string): Promise<DeploymentEnvView> {
+    const { row, app } = await this.load(id);
+    const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
+    const portList = (row.ports as unknown as ReplicatorPort[]) ?? [];
+    const values = (row.values as unknown as Record<string, string>) ?? {};
+    const { secrets, extras } = await this.resolveStored(row);
+    const env = buildEnvMap(variables, row.project, portList, values, secrets, extras);
+
+    const byName = new Map(variables.map((v) => [v.name, v]));
+    const extraSecrets = new Set(row.extraSecretVars ?? []);
+    const entries: DeploymentEnvEntry[] = [...env.entries()].map(([name, value]) => {
+      const v = byName.get(name);
+      const origin: DeploymentEnvOrigin = !v
+        ? 'extra'
+        : v.role === 'image_tag' || v.role === 'container_name' || v.role === 'host_port'
+          ? 'managed'
+          : ((v.source ?? 'compose') as DeploymentEnvOrigin);
+      const secret = v ? !!v.secret : extraSecrets.has(name);
+      return {
+        name,
+        value: secret ? null : value,
+        secret,
+        origin,
+        envFile: v?.envFile ?? null,
+        comment: v?.comment ?? null,
+        vaultKey: secret ? secretKey(row.id, name) : null,
+      };
+    });
+
+    const targetKind: TargetKind = (row.targetKind as TargetKind) ?? 'docker';
+    let path: string | null = null;
+    if (targetKind === 'docker') {
+      // Best-effort: a target whose SSH config has since been removed shouldn't
+      // make the whole view unavailable.
+      try {
+        const target = await this.targetFor(row.dockerInstanceId);
+        path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath);
+      } catch { path = null; }
+    }
+    return {
+      targetKind,
+      path,
+      note: targetKind === 'ecs'
+        ? 'Fargate has no .env file — these are interpolated into the task definition, and the file-sourced ones are injected as container environment.'
+        : 'Written to the host on every deploy, replacing whatever is there.',
+      entries,
+    };
+  }
+
+  /**
+   * Compare the `.env` actually on the host with what Cerebro would write, so a
+   * hand-edit on the box is visible *before* the next redeploy silently overwrites
+   * it. Reports key names only — never host values — so this can't become a side
+   * channel for reading secrets back off the host.
+   */
+  async envDrift(id: string): Promise<DeploymentEnvDrift> {
+    const empty = { onlyOnHost: [], missingOnHost: [], differing: [] };
+    const { row, app } = await this.load(id);
+    const targetKind: TargetKind = (row.targetKind as TargetKind) ?? 'docker';
+    if (targetKind !== 'docker') {
+      return { available: false, message: 'This deployment runs on ECS, which has no .env file to compare.', ...empty };
+    }
+
+    let target: DockerTarget;
+    let path: string;
+    try {
+      target = await this.targetFor(row.dockerInstanceId);
+      path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath);
+    } catch (err) {
+      return { available: false, message: err instanceof Error ? err.message : 'The Docker target is unavailable.', ...empty };
+    }
+
+    const res = await runSsh(target.ssh, `cat '${path}' 2>/dev/null || true`).catch(() => null);
+    if (!res) return { available: false, message: 'Could not reach the host to read the file.', ...empty };
+    if (!res.stdout.trim()) {
+      return { available: false, message: `No .env at ${path} — the deployment may not have run yet.`, ...empty };
+    }
+
+    const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
+    const { secrets, extras } = await this.resolveStored(row);
+    const expected = buildEnvMap(
+      variables, row.project, (row.ports as unknown as ReplicatorPort[]) ?? [],
+      (row.values as unknown as Record<string, string>) ?? {}, secrets, extras,
+    );
+    const onHost = new Map(parseDotenv(res.stdout).map((e) => [e.name, e.value]));
+
+    const onlyOnHost = [...onHost.keys()].filter((k) => !expected.has(k)).sort();
+    const missingOnHost = [...expected.keys()].filter((k) => !onHost.has(k)).sort();
+    const differing = [...expected.entries()].filter(([k, v]) => onHost.has(k) && onHost.get(k) !== v).map(([k]) => k).sort();
+    const drifted = onlyOnHost.length + missingOnHost.length + differing.length;
+
+    return {
+      available: true,
+      message: drifted === 0
+        ? `The file on the host matches what Cerebro would write (${expected.size} variables).`
+        : `${drifted} difference(s) — a redeploy would overwrite the file on the host with Cerebro's version.`,
+      onlyOnHost, missingOnHost, differing,
+    };
+  }
+
+  /**
+   * A deployment's stored secret and extra values, revealed from the vault — the
+   * inputs `buildEnvMap` needs that aren't on the row itself. Shared by the
+   * environment view and the drift check.
+   */
+  private async resolveStored(row: DeploymentRow): Promise<{ secrets: Record<string, string>; extras: Record<string, string> }> {
+    const secrets: Record<string, string> = {};
+    for (const name of row.secretVars ?? []) {
+      const v = await this.secrets.reveal(secretKey(row.id, name)).catch(() => null);
+      if (v != null) secrets[name] = v;
+    }
+    const extras: Record<string, string> = { ...((row.extraEnv as unknown as Record<string, string>) ?? {}) };
+    for (const name of row.extraSecretVars ?? []) {
+      const v = await this.secrets.reveal(secretKey(row.id, name)).catch(() => null);
+      if (v != null) extras[name] = v;
+    }
+    return { secrets, extras };
   }
 
   // ── Teardown (stack down + vault cleanup) ──────────────────────────
@@ -331,7 +563,7 @@ export class DeploymentService {
     }
 
     // Always clean up the vault secrets and the row, so nothing is left stale.
-    for (const name of row.secretVars) {
+    for (const name of [...row.secretVars, ...(row.extraSecretVars ?? [])]) {
       await this.secrets.remove(secretKey(row.id, name), actor).catch(() => {});
     }
     await this.prisma.replicatorDeployment.delete({ where: { id: row.id } });
@@ -427,6 +659,8 @@ export class DeploymentService {
       ecs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null,
       values: (row.values as unknown as Record<string, string>) ?? {},
       secretVars: row.secretVars ?? [],
+      extraEnv: (row.extraEnv as unknown as Record<string, string>) ?? {},
+      extraSecretVars: row.extraSecretVars ?? [],
       ports: (row.ports as unknown as ReplicatorPort[]) ?? [],
       status: row.status as ReplicatorDeploymentStatus,
       phase: row.phase,

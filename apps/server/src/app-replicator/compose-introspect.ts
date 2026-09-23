@@ -7,7 +7,14 @@ import type { ReplicatorVariable, ReplicatorVarRole } from '@cerebro/shared';
  * published host port; `image:`/`container_name:` → auto-managed per deployment;
  * a secret-looking name → a vault-backed secret). Dependency-free, line/indent
  * based — good enough for standard compose; the demo hrDemoWebApp is the
- * acceptance case. See docs/app-replicator.md.
+ * acceptance case.
+ *
+ * Plenty of apps don't interpolate at all — they declare `env_file: .env` and ship
+ * a committed `.env.example` documenting the keys. Those files are parsed here too
+ * (see `parseDotenv` / `envFileVariables`) and folded into the same schema, so the
+ * register form, deploy wizard and vault work identically either way. Compose stays
+ * authoritative where the two overlap, since only it carries port/image structure.
+ * See docs/app-replicator.md.
  */
 
 /** Names that look like a credential get flagged secret even when they carry a default. */
@@ -22,7 +29,17 @@ const NOT_SECRET_RE = /(_seconds|_days|_minutes|_hours|_ms|_lifetime|_timeout|_t
 export interface ParsedCompose {
   variables: ReplicatorVariable[];
   services: string[];
+  /** Paths named by `env_file:`, relative to the compose file's own directory. */
+  envFiles: string[];
   warnings: string[];
+}
+
+/** One `KEY=value` assignment read out of an env file, with its leading comment. */
+export interface DotenvEntry {
+  name: string;
+  value: string;
+  /** The `#` lines directly above the entry, joined — the repo's own documentation. */
+  comment: string | null;
 }
 
 interface RawToken {
@@ -126,6 +143,7 @@ function addVar(
       containerPort,
       required: tok.default === null,
       secret: false, // decided after the whole file is parsed
+      source: 'compose',
     });
     return;
   }
@@ -142,6 +160,7 @@ export function introspectCompose(text: string): ParsedCompose {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const services = new Set<string>();
   const vars = new Map<string, ReplicatorVariable>();
+  const envFiles = new Set<string>();
   const warnings: string[] = [];
 
   // Stack of open mapping keys (indent + key), so we know the path to each line.
@@ -162,6 +181,12 @@ export function introspectCompose(text: string): ParsedCompose {
     if (keyM && parentKey === 'services') services.add(keyM[1]);
 
     const fieldKey = keyM ? keyM[1] : undefined;
+
+    // `env_file:` targets, in either compose form: the scalar `env_file: .env`,
+    // or a list whose items are bare paths or the long `- path: ./x.env`.
+    if (fieldKey === 'env_file' && keyM![2].trim()) addEnvFile(envFiles, keyM![2]);
+    else if (parentKey === 'env_file' && listM) addEnvFile(envFiles, listM[1].replace(/^path:\s*/, ''));
+
     const toks = tokensIn(raw);
     if (toks.length) {
       if (parentKey === 'ports' && listM) {
@@ -196,14 +221,125 @@ export function introspectCompose(text: string): ParsedCompose {
   return {
     variables: [...vars.values()].sort(sortVars),
     services: [...services],
+    envFiles: [...envFiles],
     warnings,
   };
+}
+
+/** Record one `env_file:` path, skipping empties and unresolvable interpolations. */
+function addEnvFile(into: Set<string>, raw: string): void {
+  const p = raw.trim().replace(/\s+#.*$/, '').replace(/^["']|["']$/g, '').trim();
+  // A path built from a `${VAR}` can't be resolved at register time — skip it.
+  if (!p || p.includes('${')) return;
+  into.add(p.replace(/^\.\//, ''));
 }
 
 /** Order the form sensibly: ports first, then secrets, then plain; managed vars last. */
 function sortVars(a: ReplicatorVariable, b: ReplicatorVariable): number {
   const order: Record<ReplicatorVarRole, number> = { host_ip: 0, host_port: 0, secret: 1, plain: 2, image_tag: 3, container_name: 3 };
   return order[a.role] - order[b.role] || a.name.localeCompare(b.name);
+}
+
+// ── Env files ─────────────────────────────────────────────────────
+//
+// An app that reads its config from `env_file:` has no `${VAR}` tokens for the
+// compose introspector to find, so its keys come from whichever env file the repo
+// actually commits — usually `.env.example` (a real `.env` is nearly always
+// gitignored). RepoIntrospectService picks the file; these functions turn its
+// contents into the same ReplicatorVariable shape the rest of the flow speaks.
+
+/** Strip matching surrounding quotes, or a trailing ` # comment` on a bare value. */
+function unquote(v: string): string {
+  const t = v.trim();
+  if ((t.startsWith('"') && t.endsWith('"') && t.length > 1) || (t.startsWith("'") && t.endsWith("'") && t.length > 1)) {
+    return t.slice(1, -1);
+  }
+  // Only whitespace-preceded `#` starts a comment; `pass#word` is a literal value.
+  return t.replace(/\s+#.*$/, '').trim();
+}
+
+/**
+ * Parse an env file into its assignments. Deliberately forgiving and
+ * dependency-free (same posture as the compose parser): `export` prefixes,
+ * quoted values and inline comments are handled; multi-line values are not.
+ * The `#` lines directly above an entry are kept as its comment — that's the
+ * repo's own documentation for the key, and it's what makes the generated form
+ * readable.
+ */
+export function parseDotenv(text: string): DotenvEntry[] {
+  const out: DotenvEntry[] = [];
+  const seen = new Set<string>();
+  let comment: string[] = [];
+  for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
+    const line = raw.trim();
+    if (!line) { comment = []; continue; } // a blank line ends the comment block
+    if (line.startsWith('#')) {
+      const body = line.replace(/^#+\s?/, '').trim();
+      // A commented-out assignment (`#SMTP_HOST=…`) is a disabled key, not prose.
+      if (body && !/^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(body)) comment.push(body);
+      continue;
+    }
+    const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) { comment = []; continue; }
+    if (!seen.has(m[1])) {
+      seen.add(m[1]);
+      out.push({ name: m[1], value: unquote(m[2]), comment: comment.join(' ') || null });
+    }
+    comment = [];
+  }
+  return out;
+}
+
+/**
+ * Turn parsed env-file entries into variables. Everything is plain config or a
+ * secret — an env file carries no port/image structure — and the sample value
+ * becomes the default so the deploy form starts from the repo's own working
+ * config.
+ *
+ * A secret is the exception: a committed sample credential (`DB_PASSWORD=changeme`)
+ * must never become a real deployment's value, so it keeps no default and is
+ * marked required, forcing the operator to supply one. A blank non-secret stays
+ * optional — `.env.example` blanks are ambiguous, and blocking the deploy on one
+ * would be worse than leaving the key unset.
+ */
+export function envFileVariables(entries: DotenvEntry[], envFile: string): ReplicatorVariable[] {
+  return entries.map((e) => {
+    const secret = SECRET_RE.test(e.name) && !NOT_SECRET_RE.test(e.name);
+    return {
+      name: e.name,
+      default: secret || e.value === '' ? null : e.value,
+      role: secret ? 'secret' : 'plain',
+      service: null,
+      containerPort: null,
+      required: secret,
+      secret,
+      source: 'env_file',
+      envFile,
+      comment: e.comment,
+    } satisfies ReplicatorVariable;
+  });
+}
+
+/**
+ * Fold env-file variables into a compose-derived schema. Compose wins wherever
+ * the two name the same variable — only it knows that a name is a published port,
+ * an image tag or a container name — but an env file's sample value and comment
+ * fill gaps compose left, which is how an app that does both ends up fully
+ * documented in the form.
+ */
+export function mergeEnvFileVars(composeVars: ReplicatorVariable[], envVars: ReplicatorVariable[]): ReplicatorVariable[] {
+  const byName = new Map(composeVars.map((v) => [v.name, { ...v }]));
+  for (const e of envVars) {
+    const existing = byName.get(e.name);
+    if (!existing) { byName.set(e.name, e); continue; }
+    if (!existing.comment && e.comment) existing.comment = e.comment;
+    // `${VAR}` with no `:-default` + a sample value in the env file → use it.
+    if ((existing.role === 'plain' || existing.role === 'secret') && existing.default == null && e.default != null) {
+      existing.default = e.default;
+      existing.required = false;
+    }
+  }
+  return [...byName.values()].sort(sortVars);
 }
 
 /**

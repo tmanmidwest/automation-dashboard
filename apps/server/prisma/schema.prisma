@@ -361,6 +361,12 @@ model ReplicatorDeployment {
   values           Json                @default("{}")
   /// Names of variables whose values live in the vault (deployment:<id>:<name>).
   secretVars       String[]            @default([])
+  /// Operator-added env entries that aren't in the app's variable schema, as JSON
+  /// ({ NAME: value }) — non-secret ones only.
+  extraEnv         Json                @default("{}")
+  /// Names of operator-added entries whose values live in the vault, in the same
+  /// `deployment:<id>:<name>` namespace as `secretVars`.
+  extraSecretVars  String[]            @default([])
   /// Published ports (ReplicatorPort[]) as JSON.
   ports            Json                @default("[]")
   status           String              @default("pending")

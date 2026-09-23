@@ -80,9 +80,10 @@ export class ReplicatorService {
   /**
    * Re-introspect a registered app's repo and merge the fresh compose schema
    * against the stored one — surfacing new/removed variables and role changes,
-   * while preserving the operator's per-variable secret toggles. Read-only: the
-   * returned proposal is applied by the caller via `updateApp` (PATCH), so the
-   * operator can review the diff before committing it.
+   * while preserving the operator's per-variable secret toggles and any variables
+   * they added by hand (those aren't in the repo, so a refresh must not drop them).
+   * Read-only: the returned proposal is applied by the caller via `updateApp`
+   * (PATCH), so the operator can review the diff before committing it.
    */
   async refreshSchema(id: string): Promise<RefreshSchemaResult> {
     const app = await this.prisma.replicatorApp.findUnique({ where: { id } });
@@ -100,6 +101,7 @@ export class ReplicatorService {
       diff,
       composePath: introspected.composePath,
       usesGeneratedCompose: introspected.usesGeneratedCompose,
+      envFiles: introspected.envFiles,
       warnings: introspected.warnings,
     };
   }
@@ -189,8 +191,14 @@ function mergeSchema(
     return merged;
   });
 
-  const removed = existing.filter((e) => !freshNames.has(e.name)).map((e) => e.name);
-  return { variables: sanitizeVariables(variables), diff: { added, removed, roleChanged } };
+  // Hand-added variables have no counterpart in the repo, so re-reading it can
+  // never "find" them — carry them through untouched rather than reporting them
+  // removed. A repo that later declares the same name wins (it's in `fresh`).
+  const manual = existing.filter((e) => e.source === 'manual' && !freshNames.has(e.name));
+  const kept = new Set(manual.map((m) => m.name));
+
+  const removed = existing.filter((e) => !freshNames.has(e.name) && !kept.has(e.name)).map((e) => e.name);
+  return { variables: sanitizeVariables([...variables, ...manual]), diff: { added, removed, roleChanged } };
 }
 
 /** Keep only well-formed variables and normalize the effective secret flag. */
@@ -207,6 +215,11 @@ function sanitizeVariables(vars?: ReplicatorVariable[]): ReplicatorVariable[] {
       required: !!v.required,
       // Managed/port roles are never secret; otherwise honor the (possibly toggled) flag.
       secret: v.role === 'secret' ? true : v.role === 'plain' ? !!v.secret : false,
+      // Schemas stored before env-file support carry no provenance — they were
+      // all compose tokens.
+      source: v.source ?? 'compose',
+      envFile: v.envFile ?? null,
+      comment: typeof v.comment === 'string' ? v.comment.slice(0, 400) : null,
     }))
     // A plain var toggled secret becomes role 'secret'; a secret toggled off becomes 'plain'.
     .map((v) => ({ ...v, role: v.secret && v.role === 'plain' ? 'secret' : !v.secret && v.role === 'secret' ? 'plain' : v.role }));

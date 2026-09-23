@@ -484,6 +484,19 @@ export function projectName(name: string): string {
   return s;
 }
 
+/**
+ * Where a git-sourced stack's `.env` lives on the host: beside its compose file,
+ * under `<stacksDir>/<project>/repo/`. Exported so a caller that reads the file
+ * back — the App Replicator's environment drift check — derives the path from the
+ * same validated logic that wrote it, rather than re-deriving it and silently
+ * comparing against the wrong file.
+ */
+export function gitStackEnvPath(stacksDir: string, name: string, gitPath?: string | null): string {
+  const dir = `${trimSlash(stacksDir)}/${projectName(name)}/repo`;
+  const composeFile = `${dir}/${safeComposeRel(gitPath)}`;
+  return `${composeFile.replace(/\/[^/]*$/, '') || dir}/.env`;
+}
+
 function trimSlash(p: string): string {
   const dir = (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
   // stacksDir is admin-set config that gets embedded in remote shell commands
