@@ -402,6 +402,8 @@ export function ConnectorDetail() {
   })();
   const hasTags = tagKeys.length > 0;
   const hasIp = resources.some((r) => r.details?.ip != null && r.details.ip !== '');
+  // Published ports (Docker containers and anything else that reports a `ports` detail).
+  const hasPorts = resources.some((r) => r.details?.ports != null && r.details.ports !== '');
   // Node + CPU/RAM columns are VM-oriented (Proxmox) — only show them when a resource actually has them.
   const hasNode = resources.some((r) => r.details?.node != null && r.details.node !== '');
   const hasResources = resources.some((r) => r.details?.cpu != null || r.details?.memory != null || r.details?.uptime != null);
@@ -425,7 +427,7 @@ export function ConnectorDetail() {
   );
 
   // Base columns: Name, ID, Status (+ Actions) + the conditional ones.
-  const colSpan = 3 + (canAct ? 1 : 0) + (hasNode ? 1 : 0) + (hasResources ? 1 : 0) + (hasIp ? 1 : 0) + (hasTags ? 1 : 0);
+  const colSpan = 3 + (canAct ? 1 : 0) + (hasNode ? 1 : 0) + (hasResources ? 1 : 0) + (hasIp ? 1 : 0) + (hasPorts ? 1 : 0) + (hasTags ? 1 : 0);
   function toggleSort(col: typeof sortCol) {
     if (sortCol === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortCol(col); setSortDir('asc'); }
@@ -672,6 +674,7 @@ export function ConnectorDetail() {
                     {hasNode && <SortHead col="node" label="Node" />}
                     {hasResources && <th className="px-4 py-3 font-medium">Resources</th>}
                     {hasIp && <th className="px-4 py-3 font-medium">IP</th>}
+                    {hasPorts && <th className="px-4 py-3 font-medium">Ports</th>}
                     <SortHead col="status" label="Status" />
                     {hasTags && <th className="px-4 py-3 font-medium">Tags</th>}
                     {canAct && <th className="px-4 py-3 font-medium text-right">Actions</th>}
@@ -704,6 +707,9 @@ export function ConnectorDetail() {
                           )}
                           {hasIp && (
                             <td className="px-4 py-3 text-muted-foreground font-mono text-xs">{r.details?.ip ? String(r.details.ip) : '—'}</td>
+                          )}
+                          {hasPorts && (
+                            <td className="px-4 py-3 text-muted-foreground font-mono text-xs whitespace-nowrap">{r.details?.ports ? String(r.details.ports) : '—'}</td>
                           )}
                           <td className="px-4 py-3">
                             <span className={cn('text-xs rounded-full px-2 py-0.5 capitalize', statusColor(r.status))}>
@@ -912,6 +918,7 @@ export function ConnectorDetail() {
                           <p className="text-sm font-medium truncate">{s.name}
                             {s.status && <span className="ml-2 text-xs text-muted-foreground">({s.status})</span>}</p>
                           {s.details?.summary && <p className="text-xs text-muted-foreground truncate">{String(s.details.summary)}</p>}
+                          {s.details?.ports && <p className="text-xs text-muted-foreground font-mono truncate">{String(s.details.ports)}</p>}
                           {s.details?.created && <p className="text-xs text-muted-foreground">{String(s.details.created)}</p>}
                           {s.details?.description && <p className="text-xs text-muted-foreground italic">{String(s.details.description)}</p>}
                         </div>

@@ -222,6 +222,7 @@ function buildStacks(instanceId: string, stacks: ConnectorResource[], containers
       name: c.name,
       image: str(c.details?.image) || '',
       service: str(c.details?.service) || undefined,
+      ports: str(c.details?.ports) || undefined,
       status: c.status ?? 'unknown',
       hasUpdate: c.tags?.updates === 'available',
     });

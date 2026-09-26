@@ -9,6 +9,8 @@ export interface FleetMember {
   name: string;
   image: string;
   service?: string;
+  /** Published ports, pre-formatted by the connector (e.g. "8080→80/tcp"). Absent when none are published. */
+  ports?: string;
   /** running | exited | paused | unhealthy | created | restarting | dead | … */
   status: string;
   /** A newer image is available in the registry. */

@@ -499,12 +499,13 @@ function ContainersView(p: {
               <th className="px-3 py-2 text-left">Host</th>
               <th className="px-3 py-2 text-left">Stack</th>
               <th className="px-3 py-2 text-left">Image</th>
+              <th className="px-3 py-2 text-left">Ports</th>
               <th className="px-3 py-2 text-left">Status</th>
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border/50">
-            {p.members.length === 0 && <tr><td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">No containers match.</td></tr>}
+            {p.members.length === 0 && <tr><td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">No containers match.</td></tr>}
             {p.members.map(({ m, host, stack }) => (
               <tr key={p.memberKey(m)} className="hover:bg-muted/20">
                 <td className="px-3 py-2">
@@ -516,6 +517,7 @@ function ContainersView(p: {
                 <td className="px-3 py-2 text-muted-foreground">{host.name}</td>
                 <td className="px-3 py-2 text-muted-foreground">{stack.name}</td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.image}{m.hasUpdate && <span className="ml-2 text-[11px] rounded-md border border-amber-500/50 bg-amber-500/15 text-amber-400 px-1.5 py-0.5">update</span>}</td>
+                <td className="px-3 py-2 font-mono text-xs text-muted-foreground whitespace-nowrap">{m.ports || '—'}</td>
                 <td className="px-3 py-2"><span className={cn('text-[11px] rounded-full px-2 py-0.5 capitalize', statusBadgeColor(m.status))}>{m.status}</span></td>
                 <td className="px-3 py-2"><div className="flex items-center justify-end gap-0.5"><MemberActions m={m} {...p} /></div></td>
               </tr>
@@ -543,6 +545,12 @@ function MemberRow(p: {
       <span className={cn('h-2 w-2 rounded-full shrink-0', statusDot(m.status))} title={m.status} />
       <span className="text-sm truncate">{m.service || m.name}</span>
       <span className="font-mono text-xs text-muted-foreground truncate hidden sm:inline">{m.image}</span>
+      {m.ports && (
+        <span title={`Published ports: ${m.ports}`}
+          className="font-mono text-[11px] rounded-md border border-border bg-muted/40 text-muted-foreground px-1.5 py-0.5 shrink-0 hidden md:inline">
+          {m.ports}
+        </span>
+      )}
       {m.hasUpdate && <span className="text-[11px] rounded-md border border-amber-500/50 bg-amber-500/15 text-amber-400 px-1.5 py-0.5 shrink-0">update</span>}
       <div className="ml-auto flex items-center gap-0.5 shrink-0"><MemberActions {...p} /></div>
     </div>

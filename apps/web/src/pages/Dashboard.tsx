@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, ChevronRight, RefreshCw } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary, MonitorStatus } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -37,6 +37,139 @@ function monitorColor(status: MonitorStatus): string {
   if (status === 'down') return 'hsl(var(--destructive))';
   if (status === 'pending') return 'hsl(43 96% 56%)';
   return 'hsl(var(--muted-foreground) / 0.6)';
+}
+
+/** One compact row in the Monitors / Connectors status panels. */
+function StatusRow({ to, title, name, shape, color, glow, hollow, meta, alert }: Omit<StatusItem, 'key' | 'healthy'>) {
+  return (
+    <Link
+      to={to}
+      title={title}
+      className="flex items-center gap-2.5 rounded-md px-2 py-1 min-h-[40px] sm:min-h-[30px] hover:bg-muted/60 transition-colors"
+    >
+      <Glyph shape={shape} color={color} glow={glow} hollow={hollow} />
+      <span className={cn('text-sm truncate', alert && 'text-destructive')}>{name}</span>
+      <span className="ml-auto font-lcars text-[11px] tracking-wider text-muted-foreground shrink-0 tabular-nums">
+        {meta}
+      </span>
+    </Link>
+  );
+}
+
+/** One entry in a status panel, normalized across monitors and connectors. */
+type StatusItem = {
+  key: string;
+  to: string;
+  name: string;
+  title?: string;
+  shape: 'diamond' | 'dot';
+  color: string;
+  glow?: boolean;
+  hollow?: boolean;
+  meta: string;
+  /** Healthy items collapse into the glyph strip; the rest stay as full rows. */
+  healthy: boolean;
+  alert?: boolean;
+};
+
+/** The dot/diamond used by both the rows and the collapsed strip. */
+function Glyph({ shape, color, glow, hollow }: Pick<StatusItem, 'shape' | 'color' | 'glow' | 'hollow'>) {
+  return (
+    <span
+      className={cn('h-2 w-2 shrink-0', shape === 'diamond' ? 'rotate-45' : 'rounded-full')}
+      style={hollow
+        ? { border: `1px solid ${color}` }
+        : { background: color, boxShadow: glow ? `0 0 6px ${color}` : undefined }}
+    />
+  );
+}
+
+/** Remembers a boolean across reloads; falls back to in-memory if storage is unavailable. */
+function usePersistedFlag(key: string, initial = false) {
+  const [on, setOn] = useState(() => {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? initial : v === '1';
+    } catch {
+      return initial;
+    }
+  });
+  const set = useCallback((next: boolean) => {
+    setOn(next);
+    try {
+      localStorage.setItem(key, next ? '1' : '0');
+    } catch {
+      /* private mode / storage disabled — the toggle just won't persist */
+    }
+  }, [key]);
+  return [on, set] as const;
+}
+
+/**
+ * Status list that collapses the healthy majority into a strip of glyphs, leaving
+ * only what needs attention as readable rows. Expandable back to the full list.
+ */
+function StatusList({ items, storageKey, nominal, unitPlural }: {
+  items: StatusItem[];
+  storageKey: string;
+  /** Shown when nothing needs attention. */
+  nominal: string;
+  /** e.g. "monitors" — used in the expand affordance. */
+  unitPlural: string;
+}) {
+  const [showAll, setShowAll] = usePersistedFlag(storageKey);
+  const attention = items.filter((i) => !i.healthy);
+  const healthy = items.filter((i) => i.healthy);
+
+  return (
+    <div className="space-y-2">
+      {showAll ? (
+        <div className="grid gap-x-4 gap-y-0.5 sm:grid-cols-2 content-start overflow-y-auto max-h-[268px] pr-1">
+          {items.map(({ key, healthy: _h, ...row }) => (
+            <StatusRow key={key} {...row} />
+          ))}
+        </div>
+      ) : attention.length > 0 ? (
+        <div className={cn('grid gap-x-4 gap-y-0.5 content-start', attention.length > 3 && 'sm:grid-cols-2')}>
+          {attention.map(({ key, healthy: _h, ...row }) => (
+            <StatusRow key={key} {...row} />
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 px-2 py-1 min-h-[30px] text-sm text-muted-foreground">
+          <ShieldCheck className="h-4 w-4 text-emerald-400/80" />
+          {nominal}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        {!showAll && healthy.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1">
+            {healthy.map((i) => (
+              <Link
+                key={i.key}
+                to={i.to}
+                title={i.title ?? `${i.name} · ${i.meta}`}
+                aria-label={`${i.name} — ${i.meta}`}
+                className="grid h-5 w-5 place-items-center rounded transition-colors hover:bg-muted/60"
+              >
+                <Glyph shape={i.shape} color={i.color} glow={i.glow} hollow={i.hollow} />
+              </Link>
+            ))}
+          </div>
+        )}
+        {items.length > attention.length && (
+          <button
+            type="button"
+            onClick={() => setShowAll(!showAll)}
+            className="ml-auto shrink-0 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {showAll ? 'Collapse \u2039' : `All ${items.length} ${unitPlural} \u203a`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /** Card shell with the LCARS accent header. */
@@ -201,6 +334,40 @@ export function Dashboard() {
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
 
+  // Normalized rows for the two status panels; healthy entries collapse to glyphs.
+  const monitorItems: StatusItem[] = (monitors ?? [])
+    .slice()
+    .sort((a, b) => rank(a.status) - rank(b.status))
+    .map((m) => ({
+      key: m.id,
+      to: `/monitors/${m.id}`,
+      name: m.name,
+      title: `${m.name} \u00b7 ${m.status}${m.lastLatencyMs != null ? ` \u00b7 ${m.lastLatencyMs} ms` : ''}`,
+      shape: 'diamond',
+      color: monitorColor(m.status),
+      glow: m.status !== 'pending' && m.status !== 'paused',
+      hollow: m.status === 'paused',
+      meta: m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status,
+      healthy: m.status === 'up' || m.status === 'paused',
+      alert: m.status === 'down',
+    }));
+
+  const connectorItems: StatusItem[] = sources
+    .map((src, i) => ({ src, i }))
+    .sort((a, b) => Number(a.src.ok) - Number(b.src.ok))
+    .map(({ src, i }) => ({
+      key: String(i),
+      to: '/connectors',
+      name: src.name,
+      title: src.message ?? `${src.name} \u00b7 ${src.ok ? 'online' : 'unreachable'}`,
+      shape: 'dot',
+      color: src.ok ? 'hsl(160 84% 55%)' : 'hsl(var(--destructive))',
+      glow: src.ok,
+      meta: src.ok ? 'online' : 'offline',
+      healthy: src.ok,
+      alert: !src.ok,
+    }));
+
   const vms = useCountUp(metric('vmsRunning'));
   const cts = useCountUp(metric('ctsRunning'));
   const nodes = useCountUp(metric('nodes'));
@@ -233,38 +400,28 @@ export function Dashboard() {
       </div>
 
       {/* Monitors + Connectors — the at-a-glance status row */}
-      <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-[1fr_340px]')}>
+      <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-2')}>
         {canMonitors && (
           <Panel
             title="Monitors"
             to="/monitors"
             accent="primary"
-            tag={monitors && monitors.length > 0 ? <span className="tabular-nums">{monUp}/{monitors.length - monPaused} up</span> : undefined}
+            tag={monitors && monitors.length > 0 ? (
+              <span className="tabular-nums">
+                {monDown.length > 0 && <span className="text-destructive">{monDown.length} down · </span>}
+                {monUp}/{monitors.length - monPaused} up
+              </span>
+            ) : undefined}
           >
-            {monitors && monitors.length > 0 ? (
-              <div className="grid gap-1.5 sm:grid-cols-2 overflow-y-auto max-h-[380px] pr-1">
-                {[...monitors].sort((a, b) => rank(a.status) - rank(b.status)).map((m) => (
-                  <Link
-                    key={m.id}
-                    to={`/monitors/${m.id}`}
-                    className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
-                  >
-                    <span
-                      className="h-2.5 w-2.5 rotate-45 shrink-0"
-                      style={m.status === 'paused'
-                        ? { border: `1px solid ${monitorColor(m.status)}` }
-                        : { background: monitorColor(m.status), boxShadow: m.status !== 'pending' ? `0 0 6px ${monitorColor(m.status)}` : undefined }}
-                    />
-                    <span className={cn('text-sm truncate', m.status === 'down' && 'text-destructive')}>{m.name}</span>
-                    <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
-                      {m.status === 'up' && m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : m.status}
-                    </span>
-                    <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
-                  </Link>
-                ))}
-              </div>
+            {monitorItems.length > 0 ? (
+              <StatusList
+                items={monitorItems}
+                storageKey="cerebro.dash.monitors.showAll"
+                nominal="All monitors reporting."
+                unitPlural="monitors"
+              />
             ) : (
-              <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">
+              <div className="grid place-items-center text-center text-sm text-muted-foreground py-8">
                 {monitors ? 'No monitors configured.' : 'Loading monitors…'}
               </div>
             )}
@@ -275,37 +432,20 @@ export function Dashboard() {
           title="Connectors"
           to="/connectors"
           accent="accent"
-          tag={<span className="tabular-nums">{connOk}/{connTotal} up</span>}
+          tag={<span className="tabular-nums">{offline.length > 0 && <span className="text-destructive">{offline.length} down · </span>}{connOk}/{connTotal} up</span>}
           className={cn(offline.length > 0 && 'border-amber-500/40')}
         >
-          {sources.length === 0 ? (
-            <div className="grid place-items-center text-center text-sm text-muted-foreground py-10">
+          {connectorItems.length === 0 ? (
+            <div className="grid place-items-center text-center text-sm text-muted-foreground py-8">
               {overview ? 'No connectors configured.' : 'Scanning…'}
             </div>
           ) : (
-            <div className="space-y-1.5 overflow-y-auto max-h-[380px] pr-1">
-              {[...sources].sort((a, b) => Number(a.ok) - Number(b.ok)).map((s, i) => (
-                <Link
-                  key={i}
-                  to="/connectors"
-                  title={s.message ?? (s.ok ? 'online' : 'unreachable')}
-                  className="flex items-center gap-3 rounded-md px-2.5 py-2 min-h-[44px] hover:bg-muted/60 transition-colors"
-                >
-                  <span
-                    className="h-2.5 w-2.5 rounded-full shrink-0"
-                    style={{
-                      background: s.ok ? 'hsl(160 84% 55%)' : 'hsl(var(--destructive))',
-                      boxShadow: s.ok ? '0 0 6px hsl(160 84% 55%)' : undefined,
-                    }}
-                  />
-                  <span className={cn('text-sm truncate', !s.ok && 'text-destructive')}>{s.name}</span>
-                  <span className="ml-auto font-lcars text-xs tracking-wider text-muted-foreground shrink-0">
-                    {s.ok ? 'online' : 'offline'}
-                  </span>
-                  <ChevronRight className="h-4 w-4 text-muted-foreground/60 shrink-0" />
-                </Link>
-              ))}
-            </div>
+            <StatusList
+              items={connectorItems}
+              storageKey="cerebro.dash.connectors.showAll"
+              nominal="All connectors online."
+              unitPlural="connectors"
+            />
           )}
         </Panel>
       </div>
