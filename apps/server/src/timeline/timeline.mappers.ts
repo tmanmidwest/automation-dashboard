@@ -44,6 +44,28 @@ interface BackupRunRow {
   status: string;
   message?: string | null;
 }
+interface StackBackupRunRow {
+  id: string;
+  startedAt: Date;
+  finishedAt?: Date | null;
+  connectorInstanceId: string;
+  stackName: string;
+  trigger: string;
+  status: string;
+  message?: string | null;
+  snapshotId?: string | null;
+}
+interface StackRestoreRunRow {
+  id: string;
+  startedAt: Date;
+  finishedAt?: Date | null;
+  destInstanceId: string;
+  sourceStackName: string;
+  destStackName: string;
+  status: string;
+  message?: string | null;
+  snapshotId: string;
+}
 interface MonitorHeartbeatRow {
   id: number;
   at: Date;
@@ -100,6 +122,49 @@ export function mapNotificationRow(r: NotificationRow): TimelineEvent {
     actor: null,
     source: r.connectorId ?? r.source ?? null,
     meta: { channel: r.channel, status: r.status, recipients: r.recipients, alertKey: r.alertKey },
+  };
+}
+
+/** A stack backup run. Shares the 'job' kind with the connector-level runs above
+ *  — from the timeline's point of view they are the same sort of event. */
+export function mapStackBackupRunRow(r: StackBackupRunRow): TimelineEvent {
+  return {
+    id: `stackbackup:${r.id}`,
+    ts: r.startedAt.toISOString(),
+    kind: 'job',
+    severity: r.status === 'error' ? 'critical' : r.status === 'success' ? 'success' : 'info',
+    title: `${capitalize(r.trigger)} stack backup ${r.status}: ${r.stackName}`,
+    detail: r.message ?? null,
+    actor: null,
+    source: r.connectorInstanceId,
+    meta: {
+      stack: r.stackName,
+      trigger: r.trigger,
+      status: r.status,
+      snapshotId: r.snapshotId ?? null,
+      finishedAt: r.finishedAt?.toISOString() ?? null,
+    },
+  };
+}
+
+/** A stack restore. Always worth seeing in the log — it overwrites data. */
+export function mapStackRestoreRunRow(r: StackRestoreRunRow): TimelineEvent {
+  return {
+    id: `stackrestore:${r.id}`,
+    ts: r.startedAt.toISOString(),
+    kind: 'job',
+    severity: r.status === 'error' ? 'critical' : r.status === 'success' ? 'success' : 'warning',
+    title: `Stack restore ${r.status}: ${r.sourceStackName} → ${r.destStackName}`,
+    detail: r.message ?? null,
+    actor: null,
+    source: r.destInstanceId,
+    meta: {
+      sourceStack: r.sourceStackName,
+      destStack: r.destStackName,
+      snapshotId: r.snapshotId,
+      status: r.status,
+      finishedAt: r.finishedAt?.toISOString() ?? null,
+    },
   };
 }
 

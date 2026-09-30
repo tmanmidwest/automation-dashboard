@@ -1,10 +1,12 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 import { BackupTargetService } from './backup-target.service';
 import { StackBackupService } from './stack-backup.service';
 import { StackRestoreService } from './stack-restore.service';
 import type {
-  ExecuteRestoreInput, RestorePlanInput, RunBackupInput, SaveBackupPolicyInput, SaveBackupTargetInput, SessionUser,
+  BindSecretInput, ExecuteRestoreInput, RestorePlanInput, RunBackupInput, SaveBackupPolicyInput,
+  SaveBackupTargetInput, SessionUser, VerifyRestoreInput,
 } from '@cerebro/shared';
 
 /**
@@ -105,6 +107,45 @@ export class StackBackupController {
     return this.backups.startBackup(id, body?.passphrase, 'manual');
   }
 
+  // ── Secret bindings ──
+  /** What the vault knows about a stack's credentials — live off the host. */
+  @Get('secrets/:instanceId/:stackName')
+  @RequirePermissions('backup:read')
+  stackSecrets(@Param('instanceId') instanceId: string, @Param('stackName') stackName: string) {
+    return this.backups.secretsReport(instanceId, stackName);
+  }
+
+  /** Bind a variable to a vault key, optionally promoting its live value first. */
+  @Post('secrets/:instanceId/:stackName/bind')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  bindSecret(
+    @Param('instanceId') instanceId: string,
+    @Param('stackName') stackName: string,
+    @Body() body: BindSecretInput,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.backups.bindSecret(instanceId, stackName, body, { actorId: user.id, actorEmail: user.email });
+  }
+
+  @Delete('secrets/:instanceId/:stackName/bind/:varName')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  unbindSecret(
+    @Param('instanceId') instanceId: string,
+    @Param('stackName') stackName: string,
+    @Param('varName') varName: string,
+  ) {
+    return this.backups.unbindSecret(instanceId, stackName, varName);
+  }
+
+  /** The vault's reverse index: which stacks reference each key. */
+  @Get('secret-usage')
+  @RequirePermissions('backup:read')
+  secretUsage() {
+    return this.backups.secretUsage();
+  }
+
   // ── Runs ──
   @Get('runs')
   @RequirePermissions('backup:read')
@@ -154,6 +195,35 @@ export class StackBackupController {
   @SessionOnly()
   restore(@Body() body: ExecuteRestoreInput) {
     return this.restores.start(body);
+  }
+
+  /**
+   * Prove a snapshot restores: bring it up in a throwaway sandbox with no
+   * published ports, health-check it, tear it down. Gated on backup:restore —
+   * it runs real containers on a real host.
+   */
+  @Post('restore/verify')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  verify(@Body() body: VerifyRestoreInput) {
+    return this.restores.startVerify(body);
+  }
+
+  /** Download one file out of a snapshot. backup:restore — it hands back stack data. */
+  @Get('targets/:targetId/snapshots/:snapshotId/file')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  async downloadFile(
+    @Param('targetId') targetId: string,
+    @Param('snapshotId') snapshotId: string,
+    @Query('path') path: string,
+    @Res() res: Response,
+  ) {
+    if (!path) throw new BadRequestException('A path is required.');
+    const file = await this.restores.readSnapshotFile(targetId, snapshotId, path);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+    res.send(file.content);
   }
 
   @Get('restores')

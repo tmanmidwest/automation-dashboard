@@ -36,6 +36,9 @@ export interface StackContainerInfo {
   /** The resolved image id/digest actually running — what a faithful restore needs. */
   imageId?: string;
   state?: string;
+  /** Unix seconds. Compose creates dependencies first, so this approximates the
+   *  dependency order well enough to stop dependents first and start them last. */
+  created?: number;
   restartPolicy?: string;
   labels: Record<string, string>;
   ports: { hostIp?: string; hostPort?: string; containerPort: string }[];
@@ -131,6 +134,7 @@ export async function inspectStack(api: DockerApi, project: string): Promise<Sta
       image: c.Image ?? inspect?.Config?.Image,
       imageId: c.ImageID ?? inspect?.Image,
       state: c.State,
+      created: c.Created,
       labels: c.Labels ?? {},
       ports,
       mounts,

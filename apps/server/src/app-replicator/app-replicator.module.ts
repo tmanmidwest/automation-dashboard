@@ -22,6 +22,8 @@ import { AppReplicatorController } from './app-replicator.controller';
   providers: [ReplicatorService, DeploymentService, RepoIntrospectService, PortAllocatorService, IngressService, UpdateCheckService, DockerDeployTarget, EcsDeployTarget, EcsBuilderService],
   // Exported so the shared tool catalog (assistant / MCP) can read apps, deployments, update
   // status, and drive deploy / redeploy / teardown / ingress (Computer-only write tools).
-  exports: [ReplicatorService, DeploymentService, UpdateCheckService, IngressService],
+  // PortAllocatorService is also used by stack restore's port preflight — one
+  // definition of "which host ports are taken", not two.
+  exports: [ReplicatorService, DeploymentService, UpdateCheckService, IngressService, PortAllocatorService],
 })
 export class AppReplicatorModule {}

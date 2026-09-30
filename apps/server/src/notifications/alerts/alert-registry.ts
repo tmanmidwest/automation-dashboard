@@ -52,6 +52,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: true,
   },
   {
+    key: 'backup.stale',
+    label: 'Backup overdue',
+    description: 'A scheduled backup has not succeeded for well past its own interval — it may have silently stopped running.',
+    category: 'Backups',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
     key: 'retention.failure',
     label: 'Retention prune failed',
     description: 'Applying backup retention (pruning old snapshots) failed.',

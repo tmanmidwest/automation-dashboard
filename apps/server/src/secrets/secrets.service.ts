@@ -74,6 +74,43 @@ export class SecretsService implements OnModuleInit {
     return value;
   }
 
+  /**
+   * Keyed digests of every stored value, as digest → the keys holding it.
+   *
+   * Lets a caller answer "is this value one of ours?" — has a vault credential
+   * been pasted into a stack's `.env`, has a value drifted since a backup — with
+   * no plaintext leaving this service. Deliberately does NOT stamp `lastUsedAt`:
+   * a background scan touching every secret would make them all look freshly
+   * used and turn the rotation metadata into noise.
+   *
+   * Cached against the vault's own shape (row count + newest write) so a
+   * per-backup scan costs one cheap aggregate rather than N decryptions.
+   */
+  async digestAll(): Promise<Map<string, string[]>> {
+    const stamp = await this.prisma.secret.aggregate({ _count: { key: true }, _max: { updatedAt: true } });
+    const token = `${stamp._count.key}:${stamp._max.updatedAt?.getTime() ?? 0}`;
+    if (this.digestCache && this.digestCache.token === token) return this.digestCache.map;
+
+    const rows = await this.prisma.secret.findMany();
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      let value: string;
+      try {
+        value = this.crypto.decrypt(row.ciphertext);
+      } catch {
+        continue; // a value encrypted under a previous key can't be matched; skip it
+      }
+      const digest = this.crypto.valueDigest(value);
+      const keys = map.get(digest);
+      if (keys) keys.push(row.key);
+      else map.set(digest, [row.key]);
+    }
+    this.digestCache = { token, map };
+    return map;
+  }
+
+  private digestCache: { token: string; map: Map<string, string[]> } | null = null;
+
   async has(key: string): Promise<boolean> {
     const row = await this.prisma.secret.findUnique({ where: { key }, select: { key: true } });
     return !!row;

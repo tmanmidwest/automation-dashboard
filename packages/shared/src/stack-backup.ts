@@ -89,10 +89,19 @@ export interface StackBackupPolicy {
   secretMode: SecretMode;
   includeBinds: string[];
   excludes: string[];
+  preHooks: StackHook[];
+  postHooks: StackHook[];
   lastRunAt?: string | null;
   /** never | running | success | error. */
   lastStatus: string;
   lastMessage?: string | null;
+  /** A sealing passphrase is stored in the vault, so scheduled runs can seal
+   *  without an operator present. Required before a sealed backup can be scheduled. */
+  hasSealPassphrase: boolean;
+  /** ISO8601 of the next scheduled fire, or null when the schedule is off. */
+  nextRunAt?: string | null;
+  /** Human rendering of the schedule, e.g. "Weekly on Sunday at 04:00 (server time)". */
+  scheduleText: string;
   createdAt: string;
 }
 
@@ -111,6 +120,15 @@ export interface SaveBackupPolicyInput {
   secretMode?: SecretMode;
   includeBinds?: string[];
   excludes?: string[];
+  preHooks?: StackHook[];
+  postHooks?: StackHook[];
+  /**
+   * Passphrase used to seal this stack's secrets on every run, stored in the
+   * vault so the scheduler can run unattended. Omit to keep the stored one; pass
+   * an empty string to clear it. Record it somewhere outside Cerebro — it is what
+   * makes a sealed backup restorable when Cerebro itself is gone.
+   */
+  sealPassphrase?: string;
 }
 
 /** One backup attempt. */
@@ -168,9 +186,11 @@ export interface StackBackupCandidate {
   managed: boolean;
   /** A policy already exists for this stack. */
   configured: boolean;
-  /** False when the host has no SSH configured — Phase 1 cannot back it up. */
+  /** False only when nothing can back this stack up at all. */
   backupable: boolean;
-  /** Why not, when backupable is false. */
+  /** The host has no SSH, so only relay transfer can reach it. */
+  requiresRelay: boolean;
+  /** Extra context for the operator (e.g. why relay is required). */
   reason?: string;
 }
 
@@ -204,7 +224,8 @@ export interface SnapshotEntry {
 /** What a restore does with the stack's configuration. */
 export type RestoreMode =
   | 'full' // volumes + compose/.env, and optionally bring the stack up
-  | 'data'; // volumes/binds only — leave the running stack's configuration alone
+  | 'data' // volumes/binds only — leave the running stack's configuration alone
+  | 'verify'; // restore into a throwaway sandbox stack, health-check it, tear it down
 
 /** Per-variable outcome of resolving a snapshot's secrets against the live vault. */
 export type SecretState =
@@ -228,6 +249,8 @@ export interface RestorePlanInput {
   destInstanceId: string;
   /** Defaults to the original compose project name. */
   destStackName?: string;
+  /** Captured bind path → where to write it on the destination. Absent paths restore in place. */
+  bindMap?: Record<string, string>;
 }
 
 /** One volume the restore would write, and where it would land. */
@@ -248,6 +271,17 @@ export interface RestoreBindPlan {
   source: string;
   /** Host path to write on the destination. */
   dest: string;
+  /** The destination path already exists on the target host. */
+  exists: boolean;
+  /** The operator remapped this path rather than restoring it in place. */
+  remapped: boolean;
+}
+
+/** One host port the restored stack would publish, and whether it is free. */
+export interface RestorePortPlan {
+  hostPort: number;
+  containerPort?: string;
+  inUse: boolean;
 }
 
 /** The reviewable plan. Nothing is written until it is executed. */
@@ -266,6 +300,13 @@ export interface RestorePlan {
   /** The snapshot carries an `.env`. */
   hasEnv: boolean;
   secrets: RestoreSecret[];
+  /** Host ports the restored stack would publish, checked against the destination. */
+  ports: RestorePortPlan[];
+  /** Credential files held in this snapshot (sealed), and whether they can be written back. */
+  credentialFiles: { path: string; writable: boolean }[];
+  /** Where the snapshot's tree is rooted — '/data' for a direct capture, a staging
+   *  path for a relay one. Restore derives its paths from this. */
+  captureRoot: string;
   /** True when executing needs the sealing passphrase. */
   needsPassphrase: boolean;
   /** Blocking problems — the restore refuses until they are resolved or overridden. */
@@ -280,6 +321,9 @@ export interface ExecuteRestoreInput extends RestorePlanInput {
   volumes?: string[];
   /** Bind source paths to restore. Omit for none — binds overwrite host paths. */
   binds?: string[];
+  /** Write captured credential files back to their host paths. Off by default: it
+   *  writes outside the stack's own volumes. */
+  restoreCredentialFiles?: boolean;
   /** Required when the snapshot's secrets are sealed and a 'full' restore is writing `.env`. */
   passphrase?: string;
   /** 'full' only: run `docker compose up -d` after writing the configuration. */
@@ -318,4 +362,101 @@ export interface BackupHost {
   enabled: boolean;
   /** False when the connector has no SSH — backup and restore both need it. */
   backupable: boolean;
+}
+
+// ── Secret bindings (Phase 2) ────────────────────────────────────────────────
+
+/** Where a variable→vault-key binding came from, strongest first. */
+export type BindingOrigin =
+  | 'declared' // an operator said so — outranks everything
+  | 'replicator' // the App Replicator put this value in the vault itself
+  | 'git-credential' // the vault git credential a git-sourced stack clones with
+  | 'inferred'; // the live value's keyed digest matches a vault entry
+
+/** How a stack variable currently stands against the vault. */
+export type BindingState =
+  | 'bound' // the vault holds this exact value
+  | 'drifted' // bound to a key whose value has since changed
+  | 'missing' // bound to a key that no longer exists
+  | 'unbound'; // nothing in the vault matches
+
+/** One variable of a stack, as the secrets view shows it. Never carries a value. */
+export interface StackSecretView {
+  name: string;
+  /** Containers in the stack that carry this variable. */
+  containers: string[];
+  /** The name looks like a credential. */
+  secretish: boolean;
+  vaultKey?: string | null;
+  origin?: BindingOrigin | null;
+  state: BindingState;
+}
+
+/** The secrets picture for one stack, plus what it means for the backup modes. */
+export interface StackSecretsReport {
+  connectorInstanceId: string;
+  stackName: string;
+  variables: StackSecretView[];
+  /** Secret-looking variables with no vault binding. */
+  unbound: string[];
+  /** Credentials written literally inside the compose file. */
+  inlineComposeSecrets: string[];
+  /** Host files that are themselves credentials (`*_FILE`, compose `secrets:`). Not captured. */
+  fileSecrets: string[];
+  /** True when `reference` mode could be used for this stack right now. */
+  referenceReady: boolean;
+  /** Why not, when referenceReady is false. */
+  referenceBlockedBy?: string;
+}
+
+/** Bind a variable to an existing vault key, or promote its live value into a new one. */
+export interface BindSecretInput {
+  varName: string;
+  /** Bind to this existing key. Omit with `promote` to have a key generated. */
+  vaultKey?: string;
+  /** Read the live value off the host and write it into the vault under `vaultKey`. */
+  promote?: boolean;
+}
+
+/** Which stacks reference each vault key — the vault's reverse index. */
+export interface SecretUsage {
+  vaultKey: string;
+  uses: { connectorInstanceId: string; hostName?: string; stackName: string; varName: string; origin: BindingOrigin }[];
+}
+
+// ── Quiesce & hooks (Phase 5) ────────────────────────────────────────────────
+
+/**
+ * A command run inside one of the stack's own containers, around the capture.
+ *
+ * The usual shape is a database dump in a pre-hook, which is what lets a live
+ * database be backed up consistently without stopping the stack: redirect the
+ * dump into a path inside a volume that is already being captured, e.g.
+ * `pg_dump -U postgres app > /var/lib/postgresql/data/cerebro-dump.sql`.
+ */
+export interface StackHook {
+  /** Target by compose service name… */
+  service?: string;
+  /** …or by exact container name. One of the two is required. */
+  container?: string;
+  /** Run with `sh -c`, so redirects and pipes work. */
+  cmd: string;
+  /**
+   * Also capture the command's stdout into the snapshot under this filename.
+   * For small outputs only (config dumps, `mysqldump` of a tiny schema) — a large
+   * dump should redirect into a captured volume instead of being buffered.
+   */
+  captureTo?: string;
+}
+
+/** Restore a snapshot into a throwaway sandbox, health-check it, and tear it down. */
+export interface VerifyRestoreInput {
+  targetId: string;
+  snapshotId: string;
+  /** Where to run the trial. Defaults to the host the snapshot came from. */
+  destInstanceId: string;
+  /** Needed when the snapshot's secrets are sealed. */
+  passphrase?: string;
+  /** Leave the sandbox running instead of tearing it down (for poking at it). */
+  keep?: boolean;
 }

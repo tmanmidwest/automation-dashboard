@@ -107,6 +107,25 @@ export async function writeHostDir(
   }
 }
 
+/**
+ * Add files to a staging directory that already exists — hook output joins the
+ * metadata that was staged before the hooks ran.
+ */
+export async function appendHostFiles(
+  ssh: SshConfig,
+  dir: string,
+  files: Record<string, string>,
+): Promise<void> {
+  if (!dir.startsWith('/var/tmp/') && !dir.startsWith('/tmp/')) {
+    throw new Error(`Refusing to write into a directory outside /tmp or /var/tmp: ${dir}`);
+  }
+  for (const [name, content] of Object.entries(files)) {
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`Bad metadata file name: ${name}`);
+    const res = await runSsh(ssh, `umask 077; cat > ${q(`${dir}/${name}`)}`, content);
+    if (res.code !== 0) throw new Error(`Could not write ${name} to the host: ${res.stderr.trim() || `exit ${res.code}`}`);
+  }
+}
+
 /** Remove a staging directory written by {@link writeHostDir}. Best-effort. */
 export async function removeHostDir(ssh: SshConfig, dir: string): Promise<void> {
   if (!dir.startsWith('/var/tmp/') && !dir.startsWith('/tmp/')) return;

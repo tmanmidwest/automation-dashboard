@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock, Eye, Copy, Check, Radio } from 'lucide-react';
-import type { RevealSecretResult, SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput } from '@cerebro/shared';
+import type { RevealSecretResult, SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput, SecretUsage } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -125,11 +125,21 @@ export function Secrets() {
   const [creating, setCreating] = useState(false);
   const [newSecret, setNewSecret] = useState<NewSecret>(emptyNewSecret());
 
+  /** vault key → the stacks whose backups reference it (see docs/stack-backup.md). */
+  const [usage, setUsage] = useState<Record<string, SecretUsage['uses']>>({});
+
   async function load() {
     try {
       setSecrets(await api.get<SecretSummary[]>('/api/secrets'));
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to load secrets');
+    }
+    // Best-effort: needs backup:read, and the page is fine without it.
+    try {
+      const rows = await api.get<SecretUsage[]>('/api/stack-backup/secret-usage');
+      setUsage(Object.fromEntries(rows.map((r) => [r.vaultKey, r.uses])));
+    } catch {
+      setUsage({});
     }
   }
   useEffect(() => {
@@ -224,11 +234,19 @@ export function Secrets() {
   }
 
   async function remove(s: SecretSummary) {
+    const uses = usage[s.key] ?? [];
     const warn =
       s.category === 'connector'
         ? 'A connector may still use this credential and stop working. '
         : '';
-    if (!confirm(`Delete secret "${s.label}"? ${warn}This cannot be undone.`)) return;
+    // A vault-reference backup restores its .env FROM this key, so deleting it
+    // quietly makes those snapshots unrestorable.
+    const stackWarn = uses.length
+      ? `${uses.length} stack backup${uses.length === 1 ? '' : 's'} reference it (${uses
+          .map((u) => `${u.stackName}/${u.varName}`)
+          .join(', ')}) and may no longer be restorable. `
+      : '';
+    if (!confirm(`Delete secret "${s.label}"? ${warn}${stackWarn}This cannot be undone.`)) return;
     try {
       await api.delete(`/api/secrets/${encodeURIComponent(s.key)}`);
       await load();
@@ -410,6 +428,14 @@ export function Secrets() {
                               <Link to={`/connectors/${s.owningConnectorId}`} className="text-accent hover:underline">
                                 open connector
                               </Link>
+                            </>
+                          )}
+                          {(usage[s.key]?.length ?? 0) > 0 && (
+                            <>
+                              {' · '}
+                              <span title={usage[s.key].map((u) => `${u.stackName} (${u.varName}) on ${u.hostName ?? u.connectorInstanceId}`).join('\n')}>
+                                used by {usage[s.key].length} stack{usage[s.key].length === 1 ? '' : 's'}
+                              </span>
                             </>
                           )}
                         </p>

@@ -26,6 +26,15 @@ const SECRET_RE = /(secret|password|passwd|token|api[_-]?key|apikey|private[_-]?
  */
 const NOT_SECRET_RE = /(_seconds|_days|_minutes|_hours|_ms|_lifetime|_timeout|_ttl|_retention|_max_age|_file|_path|_url|_enabled|_algorithm)$/i;
 
+/**
+ * Does this variable name look like it holds a credential? Exported because stack
+ * backup asks the same question of a running stack's environment — one heuristic,
+ * so the two features agree on what counts as a secret.
+ */
+export function looksSecret(name: string): boolean {
+  return SECRET_RE.test(name) && !NOT_SECRET_RE.test(name);
+}
+
 export interface ParsedCompose {
   variables: ReplicatorVariable[];
   services: string[];
@@ -206,7 +215,7 @@ export function introspectCompose(text: string): ParsedCompose {
 
   // Finalize secret flags: a secret-looking name that isn't a managed/port var.
   for (const v of vars.values()) {
-    if (v.role === 'plain' && SECRET_RE.test(v.name) && !NOT_SECRET_RE.test(v.name)) { v.role = 'secret'; v.secret = true; }
+    if (v.role === 'plain' && looksSecret(v.name)) { v.role = 'secret'; v.secret = true; }
     else v.secret = v.role === 'secret';
   }
 
@@ -304,7 +313,7 @@ export function parseDotenv(text: string): DotenvEntry[] {
  */
 export function envFileVariables(entries: DotenvEntry[], envFile: string): ReplicatorVariable[] {
   return entries.map((e) => {
-    const secret = SECRET_RE.test(e.name) && !NOT_SECRET_RE.test(e.name);
+    const secret = looksSecret(e.name);
     return {
       name: e.name,
       default: secret || e.value === '' ? null : e.value,

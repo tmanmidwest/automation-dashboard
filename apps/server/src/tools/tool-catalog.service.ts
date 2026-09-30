@@ -22,6 +22,8 @@ import { ReplicatorService } from '../app-replicator/replicator.service';
 import { DeploymentService } from '../app-replicator/deployment.service';
 import { UpdateCheckService } from '../app-replicator/update-check.service';
 import { IngressService } from '../app-replicator/ingress.service';
+import { StackBackupService } from '../stack-backup/stack-backup.service';
+import { StackRestoreService } from '../stack-backup/stack-restore.service';
 
 /**
  * One tool in the shared catalog: a name, an LLM-facing description, a zod input shape,
@@ -68,6 +70,8 @@ export class ToolCatalogService {
     private readonly deployments: DeploymentService,
     private readonly updateCheck: UpdateCheckService,
     private readonly ingress: IngressService,
+    private readonly stackBackups: StackBackupService,
+    private readonly stackRestores: StackRestoreService,
   ) {}
 
   /** Every tool the given user is permitted to use. */
@@ -448,6 +452,122 @@ export class ToolCatalogService {
         destructive: true,
         inputSchema: { ruleId: z.string().describe('Automation rule id') },
         run: ({ ruleId }) => this.automations.test(ruleId as string),
+      });
+    }
+
+    // ── Stack backups (backup:read / backup:write / backup:restore) ──
+    if (has('backup:read')) {
+      read({
+        name: 'list_stack_backups',
+        description:
+          'List the configured Compose-stack backups: which stack on which Docker host, its repository, schedule, consistency mode, and the outcome and time of its last run.',
+        permission: 'backup:read',
+        inputSchema: {},
+        run: () => this.stackBackups.listPolicies(),
+      });
+
+      read({
+        name: 'list_stack_backup_runs',
+        description:
+          'Recent stack backup runs with status, snapshot id, bytes added and duration. Poll this after backup_stack_now until status stops being "running".',
+        permission: 'backup:read',
+        inputSchema: {
+          policyId: z.string().optional().describe('Only runs for this stack backup'),
+          limit: z.number().optional().describe('How many runs to return (default 25)'),
+        },
+        run: ({ policyId, limit }) => this.stackBackups.listRuns(policyId as string | undefined, limit as number | undefined),
+      });
+
+      read({
+        name: 'list_stack_snapshots',
+        description:
+          'List the stack snapshots in a backup repository, newest first, with the stack and host each came from. Use list_stack_backup_targets for repository ids.',
+        permission: 'backup:read',
+        inputSchema: {
+          targetId: z.string().describe('Backup repository (target) id'),
+          stack: z.string().optional().describe('Only snapshots of this compose stack'),
+        },
+        run: ({ targetId, stack }) => this.stackRestores.listSnapshots(targetId as string, stack as string | undefined),
+      });
+
+      read({
+        name: 'list_stack_backup_targets',
+        description: 'List the restic repositories stack backups are written to, with their retention and last check result.',
+        permission: 'backup:read',
+        inputSchema: {},
+        run: () => this.stackBackups.listTargets(),
+      });
+
+      read({
+        name: 'get_stack_secrets',
+        description:
+          "What the vault knows about one stack's credentials: each environment variable, whether the vault holds that exact value, and whether the stack is ready for vault-reference backups. Never returns a secret value.",
+        permission: 'backup:read',
+        inputSchema: {
+          connectorInstanceId: z.string().describe('Docker connector instance id (the host)'),
+          stackName: z.string().describe('Compose project name'),
+        },
+        run: ({ connectorInstanceId, stackName }) =>
+          this.stackBackups.secretsReport(connectorInstanceId as string, stackName as string),
+      });
+    }
+
+    if (has('backup:write')) {
+      action({
+        name: 'backup_stack_now',
+        description:
+          'Start a backup of one configured stack immediately. Returns as soon as the run is created — poll list_stack_backup_runs for the outcome.',
+        permission: 'backup:write',
+        inputSchema: {
+          policyId: z.string().describe('Stack backup id, from list_stack_backups'),
+          passphrase: z.string().optional().describe('Only when the stack seals its secrets and no passphrase is stored on the policy'),
+        },
+        redactKeys: ['passphrase'],
+        run: ({ policyId, passphrase }) =>
+          this.stackBackups.startBackup(policyId as string, passphrase as string | undefined, 'manual'),
+      });
+    }
+
+    if (has('backup:restore')) {
+      action({
+        name: 'verify_stack_backup',
+        description:
+          'Prove a snapshot restores: bring it up on a Docker host under a throwaway name with no published ports, wait for it to report healthy, then tear it down. Use this to check a backup is actually usable — it does not touch the real stack.',
+        permission: 'backup:restore',
+        inputSchema: {
+          targetId: z.string().describe('Backup repository (target) id'),
+          snapshotId: z.string().describe('Snapshot id, from list_stack_snapshots'),
+          destInstanceId: z.string().describe('Docker host to run the trial on'),
+          passphrase: z.string().optional().describe('Only when the snapshot seals its secrets'),
+        },
+        redactKeys: ['passphrase'],
+        run: ({ targetId, snapshotId, destInstanceId, passphrase }) =>
+          this.stackRestores.startVerify({
+            targetId: targetId as string,
+            snapshotId: snapshotId as string,
+            destInstanceId: destInstanceId as string,
+            passphrase: passphrase as string | undefined,
+          }),
+      });
+
+      read({
+        name: 'plan_stack_restore',
+        description:
+          'Dry-run a restore: what volumes and bind paths would be written where, which secrets resolve against the vault, which host ports are taken, and what conflicts block it. Writes nothing.',
+        permission: 'backup:restore',
+        inputSchema: {
+          targetId: z.string().describe('Backup repository (target) id'),
+          snapshotId: z.string().describe('Snapshot id'),
+          destInstanceId: z.string().describe('Docker host to restore onto'),
+          destStackName: z.string().optional().describe('Restore under a different stack name (a copy)'),
+        },
+        run: ({ targetId, snapshotId, destInstanceId, destStackName }) =>
+          this.stackRestores.plan({
+            targetId: targetId as string,
+            snapshotId: snapshotId as string,
+            destInstanceId: destInstanceId as string,
+            destStackName: destStackName as string | undefined,
+          }),
       });
     }
 

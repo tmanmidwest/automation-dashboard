@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Archive, CheckCircle2, Database, Folder, FolderOpen, HardDriveDownload, HardDriveUpload, Loader2,
-  Lock, Plus, RefreshCw, ScrollText, Trash2, TriangleAlert,
+  Archive, CalendarClock, CheckCircle2, Database, Download, Folder, FolderOpen, HardDriveDownload,
+  HardDriveUpload, KeyRound, Loader2, Lock, Plus, RefreshCw, ScrollText, ShieldCheck, Trash2,
+  TriangleAlert,
 } from 'lucide-react';
 import type {
-  BackupHost, BackupTargetKind, SaveBackupPolicyInput, SaveBackupTargetInput, SecretMode,
+  BackupFrequency, BackupHost, BackupTargetKind, SaveBackupPolicyInput, SaveBackupTargetInput, SecretMode,
   SnapshotEntry, StackBackupCandidate, StackBackupPolicy, StackBackupRun, StackBackupTarget,
-  StackRestoreRun, StackSnapshot,
+  QuiesceMode, StackHook, StackRestoreRun, StackSecretsReport, StackSnapshot, TransferMode,
+  VerifyRestoreInput,
 } from '@cerebro/shared';
 import { RestoreWizard } from '@/components/RestoreWizard';
+import { StackSecretsDialog } from '@/components/StackSecretsDialog';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -35,6 +38,18 @@ function fmtBytes(n?: number | null): string {
   let i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+/** "keeps 7 daily, 4 weekly" — or null when nothing is ever deleted. */
+function describeRetention(t: StackBackupTarget): string | null {
+  const parts = [
+    t.keepLast ? `${t.keepLast} last` : null,
+    t.keepDaily ? `${t.keepDaily} daily` : null,
+    t.keepWeekly ? `${t.keepWeekly} weekly` : null,
+    t.keepMonthly ? `${t.keepMonthly} monthly` : null,
+    t.keepWithinDays ? `everything within ${t.keepWithinDays}d` : null,
+  ].filter(Boolean);
+  return parts.length ? `keeps ${parts.join(', ')}` : null;
 }
 
 function fmtWhen(iso?: string | null): string {
@@ -68,12 +83,14 @@ export function StackBackups() {
   const [busy, setBusy] = useState<string | null>(null);
 
   const [targetDialog, setTargetDialog] = useState<StackBackupTarget | 'new' | null>(null);
-  const [policyDialog, setPolicyDialog] = useState(false);
+  const [policyDialog, setPolicyDialog] = useState<StackBackupPolicy | 'new' | null>(null);
   const [runPrompt, setRunPrompt] = useState<StackBackupPolicy | null>(null);
   const [logRun, setLogRun] = useState<StackBackupRun | null>(null);
   const [logRestore, setLogRestore] = useState<StackRestoreRun | null>(null);
   const [restoreFor, setRestoreFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
   const [browseFor, setBrowseFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
+  const [secretsFor, setSecretsFor] = useState<StackBackupPolicy | null>(null);
+  const [verifyFor, setVerifyFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -109,7 +126,8 @@ export function StackBackups() {
   }
 
   function startBackup(policy: StackBackupPolicy) {
-    if (policy.secretMode === 'embed') { setRunPrompt(policy); return; }
+    // A stored passphrase covers manual runs too — don't ask for what Cerebro holds.
+    if (policy.secretMode === 'embed' && !policy.hasSealPassphrase) { setRunPrompt(policy); return; }
     void act(`run:${policy.id}`, () => api.post(`/api/stack-backup/policies/${policy.id}/run`, {}));
   }
 
@@ -124,7 +142,7 @@ export function StackBackups() {
               <RefreshCw className="h-4 w-4 mr-2" /> Refresh
             </Button>
             {canWrite && (
-              <Button onClick={() => setPolicyDialog(true)} disabled={!targets.length}>
+              <Button onClick={() => setPolicyDialog('new')} disabled={!targets.length}>
                 <Plus className="h-4 w-4 mr-2" /> Back up a stack
               </Button>
             )}
@@ -179,12 +197,24 @@ export function StackBackups() {
                       <span>→ {p.targetName}</span>
                       <span>·</span>
                       <span className="inline-flex items-center gap-1">
-                        {p.secretMode === 'embed' ? <Lock className="h-3 w-3" /> : <TriangleAlert className="h-3 w-3" />}
-                        {p.secretMode === 'embed' ? 'secrets sealed' : 'secrets raw'}
+                        {p.secretMode === 'raw' ? <TriangleAlert className="h-3 w-3" /> : <Lock className="h-3 w-3" />}
+                        {p.secretMode === 'embed' ? 'secrets sealed'
+                          : p.secretMode === 'reference' ? 'secrets by vault reference'
+                          : 'secrets raw'}
                       </span>
                       {p.includeBinds.length > 0 && <><span>·</span><span>{p.includeBinds.length} bind path(s)</span></>}
                       <span>·</span>
-                      <span>{p.frequency === 'off' ? 'manual only' : p.frequency}</span>
+                      <span>{p.quiesce === 'hot' ? 'hot' : p.quiesce === 'pause' ? 'paused for capture' : 'stopped for capture'}</span>
+                      {p.transfer === 'relay' && <><span>·</span><span>relay</span></>}
+                      {p.preHooks.length + p.postHooks.length > 0 && (
+                        <><span>·</span><span>{p.preHooks.length + p.postHooks.length} hook(s)</span></>
+                      )}
+                      <span>·</span>
+                      <span className="inline-flex items-center gap-1">
+                        <CalendarClock className="h-3 w-3" />
+                        {p.frequency === 'off' ? 'manual only' : p.scheduleText}
+                      </span>
+                      {p.nextRunAt && <><span>·</span><span>next {fmtWhen(p.nextRunAt)}</span></>}
                     </div>
                   </div>
                   <div className="text-xs text-right">
@@ -199,6 +229,10 @@ export function StackBackups() {
                           : <HardDriveDownload className="h-4 w-4 mr-2" />}
                         Back up now
                       </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setSecretsFor(p)} title="What the vault knows about this stack">
+                        <KeyRound className="h-4 w-4" />
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setPolicyDialog(p)}>Edit</Button>
                       <Button
                         size="icon"
                         variant="ghost"
@@ -235,7 +269,9 @@ export function StackBackups() {
                 </div>
                 <div className="text-xs text-right max-w-xs">
                   <div className={STATUS_COLOR[t.lastStatus] ?? ''}>{t.lastStatus}</div>
-                  {t.lastMessage && <div className="text-muted-foreground truncate" title={t.lastMessage}>{t.lastMessage}</div>}
+                  <div className="text-muted-foreground truncate" title={t.lastMessage ?? undefined}>
+                    {describeRetention(t) ?? t.lastMessage ?? ''}
+                  </div>
                 </div>
                 {canWrite && (
                   <div className="flex items-center gap-2">
@@ -285,6 +321,7 @@ export function StackBackups() {
           canRestore={canRestore}
           onRestore={(targetId, snapshot) => setRestoreFor({ targetId, snapshot })}
           onBrowse={(targetId, snapshot) => setBrowseFor({ targetId, snapshot })}
+          onVerify={(targetId, snapshot) => setVerifyFor({ targetId, snapshot })}
         />
       )}
 
@@ -376,8 +413,9 @@ export function StackBackups() {
       {policyDialog && (
         <PolicyDialog
           targets={targets}
-          onClose={() => setPolicyDialog(false)}
-          onSaved={() => { setPolicyDialog(false); void refresh(); }}
+          policy={policyDialog === 'new' ? null : policyDialog}
+          onClose={() => setPolicyDialog(null)}
+          onSaved={() => { setPolicyDialog(null); void refresh(); }}
         />
       )}
       {runPrompt && (
@@ -420,11 +458,30 @@ export function StackBackups() {
           onStarted={(run) => { setRestoreFor(null); setRestores((p) => [run, ...p]); void refresh(); }}
         />
       )}
+      {secretsFor && (
+        <StackSecretsDialog
+          instanceId={secretsFor.connectorInstanceId}
+          stackName={secretsFor.stackName}
+          canWrite={canWrite}
+          onClose={() => setSecretsFor(null)}
+          onChanged={() => void refresh()}
+        />
+      )}
       {browseFor && (
         <SnapshotContents
           targetId={browseFor.targetId}
           snapshot={browseFor.snapshot}
+          canRestore={canRestore}
           onClose={() => setBrowseFor(null)}
+        />
+      )}
+      {verifyFor && (
+        <VerifyDialog
+          targetId={verifyFor.targetId}
+          snapshot={verifyFor.snapshot}
+          hosts={hosts.filter((h) => h.enabled)}
+          onClose={() => setVerifyFor(null)}
+          onStarted={(run) => { setVerifyFor(null); setRestores((p) => [run, ...p]); void refresh(); }}
         />
       )}
     </div>
@@ -444,11 +501,12 @@ async function openRestoreLog(
 }
 
 /** Pick a repository and list its stack snapshots — the entry point to a restore. */
-function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse }: {
+function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse, onVerify }: {
   targets: StackBackupTarget[];
   canRestore: boolean;
   onRestore: (targetId: string, snapshot: StackSnapshot) => void;
   onBrowse: (targetId: string, snapshot: StackSnapshot) => void;
+  onVerify: (targetId: string, snapshot: StackSnapshot) => void;
 }) {
   const [targetId, setTargetId] = useState(targets[0]?.id ?? '');
   const [stack, setStack] = useState('');
@@ -516,6 +574,15 @@ function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse }: {
                 <Button size="sm" variant="ghost" onClick={() => onBrowse(targetId, s)}>
                   <FolderOpen className="h-4 w-4 mr-2" /> Browse
                 </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!canRestore}
+                  onClick={() => onVerify(targetId, s)}
+                  title="Bring it up in a throwaway sandbox and check it comes up healthy"
+                >
+                  <ShieldCheck className="h-4 w-4 mr-2" /> Verify
+                </Button>
                 <Button size="sm" variant="outline" disabled={!canRestore} onClick={() => onRestore(targetId, s)}>
                   <HardDriveUpload className="h-4 w-4 mr-2" /> Restore…
                 </Button>
@@ -529,9 +596,10 @@ function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse }: {
 }
 
 /** Walk a snapshot's tree, one level at a time — proof the data is really in there. */
-function SnapshotContents({ targetId, snapshot, onClose }: {
+function SnapshotContents({ targetId, snapshot, canRestore, onClose }: {
   targetId: string;
   snapshot: StackSnapshot;
+  canRestore: boolean;
   onClose: () => void;
 }) {
   const [path, setPath] = useState('/data');
@@ -570,6 +638,15 @@ function SnapshotContents({ targetId, snapshot, onClose }: {
                 <span className="font-mono text-xs break-all">{e.name}</span>
               )}
               <span className="ml-auto text-xs text-muted-foreground shrink-0">{e.type === 'dir' ? '' : fmtBytes(e.size)}</span>
+              {e.type !== 'dir' && canRestore && (
+                <a
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  href={`/api/stack-backup/targets/${targetId}/snapshots/${snapshot.id}/file?path=${encodeURIComponent(e.path)}`}
+                  title={`Download ${e.name}`}
+                >
+                  <Download className="h-4 w-4" />
+                </a>
+              )}
             </div>
           ))}
         </div>
@@ -606,6 +683,11 @@ function TargetDialog({ target, onClose, onSaved }: {
     secretAccessKey: '',
     hostAccessKeyId: '',
     hostSecretAccessKey: '',
+    keepLast: target?.keepLast ?? null,
+    keepDaily: target?.keepDaily ?? null,
+    keepWeekly: target?.keepWeekly ?? null,
+    keepMonthly: target?.keepMonthly ?? null,
+    keepWithinDays: target?.keepWithinDays ?? null,
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -693,6 +775,32 @@ function TargetDialog({ target, onClose, onSaved }: {
             <Input type="password" placeholder="Application key" value={form.hostSecretAccessKey ?? ''} onChange={(e) => set('hostSecretAccessKey', e.target.value)} autoComplete="new-password" />
           </div>
         </div>
+        <div className="rounded-md border border-border p-3">
+          <div className="text-sm font-medium">Retention</div>
+          <p className="text-xs text-muted-foreground mt-1 mb-2">
+            Applied per stack each night, then the repository is pruned. Leave every field blank and
+            nothing is ever deleted — snapshots accumulate until you say otherwise.
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              ['keepLast', 'Last'],
+              ['keepDaily', 'Daily'],
+              ['keepWeekly', 'Weekly'],
+              ['keepMonthly', 'Monthly'],
+              ['keepWithinDays', 'Within (days)'],
+            ] as const).map(([key, label]) => (
+              <div key={key}>
+                <Label className="text-xs">{label}</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={form[key] ?? ''}
+                  onChange={(e) => set(key, e.target.value === '' ? null : Number(e.target.value))}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
         <div>
           <Label>Helper image</Label>
           <Input value={form.helperImage ?? ''} onChange={(e) => set('helperImage', e.target.value)} />
@@ -703,45 +811,82 @@ function TargetDialog({ target, onClose, onSaved }: {
   );
 }
 
-/** Pick a host + stack, see what would be captured, and save the configuration. */
-function PolicyDialog({ targets, onClose, onSaved }: {
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Pick a host + stack, see what would be captured, choose a schedule, and save. */
+function PolicyDialog({ targets, policy, onClose, onSaved }: {
   targets: StackBackupTarget[];
+  /** Editing an existing configuration, or null to add one. */
+  policy?: StackBackupPolicy | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const editing = !!policy;
   const [candidates, setCandidates] = useState<StackBackupCandidate[] | null>(null);
-  const [selected, setSelected] = useState<string>('');
+  const [selected, setSelected] = useState<string>(
+    policy ? `${policy.connectorInstanceId}/${policy.stackName}` : '',
+  );
   const [detail, setDetail] = useState<StackBackupCandidate | null>(null);
+  const [secrets, setSecrets] = useState<StackSecretsReport | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
-  const [targetId, setTargetId] = useState(targets[0]?.id ?? '');
-  const [secretMode, setSecretMode] = useState<SecretMode>('embed');
-  const [binds, setBinds] = useState<string[]>([]);
+  const [targetId, setTargetId] = useState(policy?.targetId ?? targets[0]?.id ?? '');
+  const [secretMode, setSecretMode] = useState<SecretMode>(policy?.secretMode ?? 'embed');
+  const [binds, setBinds] = useState<string[]>(policy?.includeBinds ?? []);
+  const [quiesce, setQuiesce] = useState<QuiesceMode>(policy?.quiesce ?? 'hot');
+  const [transfer, setTransfer] = useState<TransferMode>(policy?.transfer ?? 'direct');
+  const [excludes, setExcludes] = useState((policy?.excludes ?? []).join('\n'));
+  const [preHooks, setPreHooks] = useState<StackHook[]>(policy?.preHooks ?? []);
+  const [postHooks, setPostHooks] = useState<StackHook[]>(policy?.postHooks ?? []);
+  const [frequency, setFrequency] = useState<BackupFrequency>(policy?.frequency ?? 'off');
+  const [dayOfWeek, setDayOfWeek] = useState(policy?.dayOfWeek ?? 0);
+  const [dayOfMonth, setDayOfMonth] = useState(policy?.dayOfMonth ?? 1);
+  const [hour, setHour] = useState(policy?.hour ?? 3);
+  const [minute, setMinute] = useState(policy?.minute ?? 0);
+  const [sealPassphrase, setSealPassphrase] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
+    if (editing) return; // the stack is fixed when editing — no need to list them all
     api.get<StackBackupCandidate[]>('/api/stack-backup/candidates')
       .then(setCandidates)
       .catch((e) => { setErr(e instanceof ApiError ? e.message : 'Could not list stacks.'); setCandidates([]); });
-  }, []);
+  }, [editing]);
 
   const available = useMemo(() => (candidates ?? []).filter((c) => !c.configured), [candidates]);
 
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
+    if (!selected) { setDetail(null); setSecrets(null); return; }
     const [instanceId, stackName] = splitKey(selected);
-    setLoadingDetail(true); setBinds([]);
+    setLoadingDetail(true);
+    if (!editing) setBinds([]);
     api.get<StackBackupCandidate>(`/api/stack-backup/candidates/${instanceId}/${encodeURIComponent(stackName)}`)
-      .then(setDetail)
+      .then((d) => { setDetail(d); if (d.requiresRelay) setTransfer('relay'); })
       .catch((e) => setErr(e instanceof ApiError ? e.message : 'Could not inspect that stack.'))
       .finally(() => setLoadingDetail(false));
-  }, [selected]);
+    // Whether vault-reference mode is even possible depends on this stack's own
+    // bindings, so the option is offered only when it would actually work.
+    api.get<StackSecretsReport>(`/api/stack-backup/secrets/${instanceId}/${encodeURIComponent(stackName)}`)
+      .then(setSecrets)
+      .catch(() => setSecrets(null));
+  }, [selected, editing]);
+
+  // A scheduled sealed backup has nobody to prompt, so the passphrase has to be
+  // stored first. The server enforces this; saying so here avoids a pointless round trip.
+  const needsStoredPass =
+    frequency !== 'off' && secretMode === 'embed' && !policy?.hasSealPassphrase && !sealPassphrase;
 
   async function save() {
     if (!selected || !targetId) return;
     const [connectorInstanceId, stackName] = splitKey(selected);
     const body: SaveBackupPolicyInput = {
       connectorInstanceId, stackName, targetId, secretMode, includeBinds: binds,
+      quiesce, transfer,
+      excludes: excludes.split('\n').map((x) => x.trim()).filter(Boolean),
+      preHooks: preHooks.filter((h) => h.cmd.trim()),
+      postHooks: postHooks.filter((h) => h.cmd.trim()),
+      frequency, dayOfWeek, dayOfMonth, hour, minute,
+      ...(sealPassphrase ? { sealPassphrase } : {}),
     };
     setSaving(true); setErr(null);
     try {
@@ -759,12 +904,12 @@ function PolicyDialog({ targets, onClose, onSaved }: {
       open
       onClose={onClose}
       size="lg"
-      title="Back up a stack"
+      title={editing ? `${policy!.stackName} backup` : 'Back up a stack'}
       description="Named volumes and the stack's config are always captured. Bind mounts are opt-in, one path at a time."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button onClick={() => void save()} disabled={saving || !selected || !targetId || detail?.backupable === false}>
+          <Button onClick={() => void save()} disabled={saving || !selected || !targetId || needsStoredPass || detail?.backupable === false}>
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />} Save
           </Button>
         </>
@@ -774,7 +919,9 @@ function PolicyDialog({ targets, onClose, onSaved }: {
       <div className="space-y-4">
         <div>
           <Label>Stack</Label>
-          {candidates === null ? (
+          {editing ? (
+            <p className="text-sm mt-1">{policy!.stackName} <span className="text-muted-foreground">on {policy!.hostName}</span></p>
+          ) : candidates === null ? (
             <div className="py-3"><Loader2 className="h-4 w-4 animate-spin" /></div>
           ) : (
             <select className={selectCls} value={selected} onChange={(e) => setSelected(e.target.value)}>
@@ -786,7 +933,7 @@ function PolicyDialog({ targets, onClose, onSaved }: {
               ))}
             </select>
           )}
-          {candidates !== null && !available.length && (
+          {!editing && candidates !== null && !available.length && (
             <p className="text-xs text-muted-foreground mt-1">Every stack Cerebro can see already has a backup configured.</p>
           )}
         </div>
@@ -814,7 +961,7 @@ function PolicyDialog({ targets, onClose, onSaved }: {
                   Host paths these containers mount. None are captured unless you tick them — a media
                   library would otherwise be swept into every snapshot.
                 </p>
-                <div className="space-y-1.5 max-h-48 overflow-auto">
+                <div className="space-y-1.5 max-h-40 overflow-auto">
                   {detail.binds.map((b) => (
                     <label key={b.path} className="flex items-start gap-2 text-sm">
                       <input
@@ -846,18 +993,284 @@ function PolicyDialog({ targets, onClose, onSaved }: {
           </select>
         </div>
 
+        {/* ── Schedule ── */}
+        <div className="rounded-md border border-border p-3">
+          <Label>Schedule</Label>
+          <div className="flex items-end gap-2 flex-wrap mt-1">
+            <select className={`${selectCls} w-auto`} value={frequency} onChange={(e) => setFrequency(e.target.value as BackupFrequency)}>
+              <option value="off">Manual only</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            {frequency === 'weekly' && (
+              <select className={`${selectCls} w-auto`} value={dayOfWeek} onChange={(e) => setDayOfWeek(Number(e.target.value))}>
+                {DAY_NAMES.map((d, i) => <option key={d} value={i}>{d}</option>)}
+              </select>
+            )}
+            {frequency === 'monthly' && (
+              <select className={`${selectCls} w-auto`} value={dayOfMonth} onChange={(e) => setDayOfMonth(Number(e.target.value))}>
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>Day {d}</option>)}
+              </select>
+            )}
+            {frequency !== 'off' && (
+              <>
+                <select className={`${selectCls} w-auto`} value={hour} onChange={(e) => setHour(Number(e.target.value))}>
+                  {Array.from({ length: 24 }, (_, i) => i).map((h) => (
+                    <option key={h} value={h}>{String(h).padStart(2, '0')}</option>
+                  ))}
+                </select>
+                <span className="pb-2">:</span>
+                <select className={`${selectCls} w-auto`} value={minute} onChange={(e) => setMinute(Number(e.target.value))}>
+                  {[0, 15, 30, 45].map((m) => <option key={m} value={m}>{String(m).padStart(2, '0')}</option>)}
+                </select>
+              </>
+            )}
+          </div>
+          {frequency !== 'off' && (
+            <p className="text-xs text-muted-foreground mt-2">Server local time. A scheduled run captures exactly what “Back up now” does.</p>
+          )}
+        </div>
+
+        {/* ── Transfer ── */}
+        <div className="rounded-md border border-border p-3">
+          <Label>Transfer</Label>
+          <select
+            className={`${selectCls} mt-1`}
+            value={transfer}
+            onChange={(e) => setTransfer(e.target.value as TransferMode)}
+          >
+            <option value="direct" disabled={detail?.requiresRelay}>
+              Direct — a helper container on the host writes to the repository{detail?.requiresRelay ? ' (needs SSH)' : ''}
+            </option>
+            <option value="relay">Relay — Cerebro pulls the data and writes the snapshot itself</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            {transfer === 'direct'
+              ? 'Bulk data goes straight from the host to the repository and never touches Cerebro. The host needs SSH, outbound network, and to be able to pull the helper image.'
+              : 'For a host with no SSH or no outbound network. Every byte crosses the network twice and is staged on Cerebro’s disk, and dump hooks, compose capture and credential files are unavailable.'}
+          </p>
+        </div>
+
+        {/* ── Consistency ── */}
+        <div className="rounded-md border border-border p-3">
+          <Label>Consistency</Label>
+          <select className={`${selectCls} mt-1`} value={quiesce} onChange={(e) => setQuiesce(e.target.value as QuiesceMode)}>
+            <option value="hot">Hot — never interrupt the stack</option>
+            <option value="pause">Pause — freeze the containers for the capture</option>
+            <option value="stop">Stop — take the stack down for the capture</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            {quiesce === 'hot'
+              ? 'Fastest, but a copy of a live database’s files is mid-write and may not restore. Pair it with a dump hook below.'
+              : quiesce === 'pause'
+                ? 'Processes are frozen, so on-disk state stops changing. Open connections survive; clients see a stall for the length of the capture.'
+                : 'The cleanest copy, and real downtime: the stack is stopped for the capture and started again afterwards, whether or not the backup succeeds.'}
+          </p>
+        </div>
+
+        {/* ── Hooks ── */}
+        {detail && transfer === 'direct' && (
+          <div className="rounded-md border border-border p-3 space-y-3">
+            <div>
+              <Label>Dump hooks</Label>
+              <p className="text-xs text-muted-foreground mt-1">
+                Commands run in the stack’s own containers, before and after the capture. The usual
+                use is a database dump redirected into a path inside a captured volume, which is how
+                a live database gets a consistent backup without stopping.
+              </p>
+            </div>
+            <HookEditor
+              label="Before the capture"
+              hooks={preHooks}
+              onChange={setPreHooks}
+              placeholder="pg_dump -U postgres app > /var/lib/postgresql/data/cerebro-dump.sql"
+            />
+            <HookEditor
+              label="After the capture"
+              hooks={postHooks}
+              onChange={setPostHooks}
+              placeholder="rm -f /var/lib/postgresql/data/cerebro-dump.sql"
+            />
+          </div>
+        )}
+
+        <div>
+          <Label>Exclude patterns <span className="text-muted-foreground font-normal">(one per line)</span></Label>
+          <textarea
+            className="mt-1 w-full min-h-16 rounded-md border border-input bg-background/60 px-2 py-1.5 text-sm font-mono"
+            value={excludes}
+            onChange={(e) => setExcludes(e.target.value)}
+            placeholder={'*.tmp\n**/cache/**'}
+          />
+          <p className="text-xs text-muted-foreground mt-1">Passed to restic as <code>--exclude</code>. Useful for caches and thumbnails inside a captured volume.</p>
+        </div>
+
         <div>
           <Label>Secrets</Label>
           <select className={selectCls} value={secretMode} onChange={(e) => setSecretMode(e.target.value as SecretMode)}>
-            <option value="embed">Sealed — values encrypted with a passphrase you supply per run</option>
+            <option value="embed">Sealed — values encrypted with a passphrase</option>
+            <option value="reference" disabled={!secrets?.referenceReady}>
+              Vault reference — store no values at all{secrets?.referenceReady ? '' : ' (not available for this stack)'}
+            </option>
             <option value="raw">Raw — values stored as-is (restic encryption only)</option>
           </select>
           <p className="text-xs text-muted-foreground mt-1">
             {secretMode === 'embed'
               ? 'The stack can be restored even if Cerebro and its vault are gone, and the repository alone never yields credentials.'
-              : 'Simplest to restore, but anyone who can read the repository can read the stack’s credentials.'}
+              : secretMode === 'reference'
+                ? 'The snapshot holds only vault keys, so it carries no credentials whatsoever — but restoring it needs this Cerebro’s vault, so restore the system backup first in a full disaster.'
+                : 'Simplest to restore, but anyone who can read the repository can read the stack’s credentials.'}
+          </p>
+          {secrets && !secrets.referenceReady && (
+            <p className="text-xs text-muted-foreground mt-1">
+              Vault reference unavailable: {secrets.referenceBlockedBy} Open the stack’s secrets view to promote them into the vault.
+            </p>
+          )}
+        </div>
+
+        {secretMode === 'embed' && (
+          <div className={needsStoredPass ? 'rounded-md border border-amber-500/40 bg-amber-500/10 p-3' : ''}>
+            <Label>
+              Stored sealing passphrase
+              {policy?.hasSealPassphrase && <span className="text-muted-foreground font-normal"> (set — leave blank to keep)</span>}
+            </Label>
+            <Input
+              type="password"
+              value={sealPassphrase}
+              onChange={(e) => setSealPassphrase(e.target.value)}
+              autoComplete="new-password"
+              placeholder={policy?.hasSealPassphrase ? '••••••••' : ''}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              {needsStoredPass
+                ? 'A scheduled sealed backup has nobody to prompt, so the passphrase must be stored in the vault first.'
+                : 'Held in the vault so scheduled runs can seal unattended. Write it down somewhere outside Cerebro — it is what makes a sealed backup restorable when Cerebro itself is gone.'}
+            </p>
+          </div>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+/** A small list editor for pre/post hooks. */
+function HookEditor({ label, hooks, onChange, placeholder }: {
+  label: string;
+  hooks: StackHook[];
+  onChange: (h: StackHook[]) => void;
+  placeholder: string;
+}) {
+  const set = (i: number, patch: Partial<StackHook>) =>
+    onChange(hooks.map((h, n) => (n === i ? { ...h, ...patch } : h)));
+
+  return (
+    <div>
+      <div className="text-xs font-medium text-muted-foreground mb-1">{label}</div>
+      {hooks.map((h, i) => (
+        <div key={i} className="flex items-start gap-2 mb-1.5">
+          <Input
+            className="h-8 text-xs w-40 shrink-0"
+            placeholder="service"
+            value={h.service ?? ''}
+            onChange={(e) => set(i, { service: e.target.value })}
+          />
+          <Input
+            className="h-8 text-xs font-mono flex-1"
+            placeholder={placeholder}
+            value={h.cmd}
+            onChange={(e) => set(i, { cmd: e.target.value })}
+          />
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Remove hook"
+            onClick={() => onChange(hooks.filter((_, n) => n !== i))}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      <Button size="sm" variant="ghost" onClick={() => onChange([...hooks, { service: '', cmd: '' }])}>
+        <Plus className="h-3.5 w-3.5 mr-1.5" /> Add
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Trial-restore a snapshot. The sandbox runs with no published ports and is torn
+ * down afterwards, so this is safe to run against a production host — but it does
+ * start real containers, which is why it asks first.
+ */
+function VerifyDialog({ targetId, snapshot, hosts, onClose, onStarted }: {
+  targetId: string;
+  snapshot: StackSnapshot;
+  hosts: BackupHost[];
+  onClose: () => void;
+  onStarted: (run: StackRestoreRun) => void;
+}) {
+  const [destInstanceId, setDestInstanceId] = useState(
+    snapshot.hostId && hosts.some((h) => h.id === snapshot.hostId) ? snapshot.hostId : hosts[0]?.id ?? '',
+  );
+  const [passphrase, setPassphrase] = useState('');
+  const [keep, setKeep] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function start() {
+    setBusy(true); setErr(null);
+    const body: VerifyRestoreInput = {
+      targetId, snapshotId: snapshot.id, destInstanceId,
+      passphrase: passphrase || undefined, keep,
+    };
+    try {
+      onStarted(await api.post<StackRestoreRun>('/api/stack-backup/restore/verify', body));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not start the trial restore.');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Verify ${snapshot.stackName ?? 'stack'} · ${snapshot.shortId}`}
+      description="Restores into a throwaway stack, waits for it to report healthy, then removes it and its volumes."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => void start()} disabled={busy || !destInstanceId}>
+            {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />} Start trial
+          </Button>
+        </>
+      }
+    >
+      {err && <div className="mb-3 text-sm text-destructive">{err}</div>}
+      <div className="space-y-3">
+        <div>
+          <Label>Run the trial on</Label>
+          <select className={selectCls} value={destInstanceId} onChange={(e) => setDestInstanceId(e.target.value)}>
+            {hosts.map((h) => (
+              <option key={h.id} value={h.id} disabled={!h.backupable}>{h.name}{h.backupable ? '' : ' (no SSH)'}</option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            The sandbox publishes no host ports, so it cannot collide with anything already running here.
           </p>
         </div>
+        <div>
+          <Label>Sealing passphrase <span className="text-muted-foreground font-normal">(only if this snapshot is sealed)</span></Label>
+          <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} autoComplete="off" />
+        </div>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+          <span>
+            Leave the sandbox running
+            <span className="block text-xs text-muted-foreground">To poke at it yourself. Remember to remove it afterwards.</span>
+          </span>
+        </label>
       </div>
     </Dialog>
   );

@@ -811,6 +811,10 @@ model StackBackupPolicy {
   transfer   String @default("direct")
   /// How the stack's .env is captured: 'embed' (sealed blob) | 'raw' | 'reference' (Phase 2).
   secretMode String @default("embed")
+  /// Commands run in the stack's own containers before the capture (typically a
+  /// database dump) and after it. StackHook[] as JSON. See docs/stack-backup.md.
+  preHooks  Json @default("[]")
+  postHooks Json @default("[]")
   /// Bind-mount host paths explicitly included (opt-in — never swept in automatically).
   includeBinds String[] @default([])
   /// Restic --exclude patterns.
@@ -889,4 +893,33 @@ model StackRestoreRun {
 
   @@index([destInstanceId, startedAt])
   @@index([snapshotId])
+}
+
+/// Which vault key backs one of a stack's environment variables (Phase 2 of
+/// docs/stack-backup.md). Built from three sources — what the App Replicator put
+/// in the vault, what a value-digest match infers, and what an operator declares
+/// — so a restore knows which values it can re-materialize and which only exist
+/// inside the snapshot.
+model StackSecretBinding {
+  id                  String  @id @default(cuid())
+  connectorInstanceId String
+  stackName           String
+  /// Environment variable name, or a pseudo-name like '@git' for a non-env credential.
+  varName             String
+  /// The vault key holding this value; null for a variable we know about but cannot resolve.
+  vaultKey            String?
+  /// 'replicator' | 'git-credential' | 'inferred' | 'declared'. A declared binding is
+  /// the operator's word and outranks the other three.
+  origin              String
+  /// Keyed digest (CryptoService.valueDigest) of the value last seen on the host.
+  valueDigest         String?
+  /// The name looks like a credential (shared heuristic with the App Replicator).
+  secretish           Boolean  @default(false)
+  lastSeenAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([connectorInstanceId, stackName, varName])
+  @@index([connectorInstanceId, stackName])
+  @@index([vaultKey])
 }

@@ -52,6 +52,9 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
   const [deploy, setDeploy] = useState(false);
   const [volumes, setVolumes] = useState<string[]>([]);
   const [binds, setBinds] = useState<string[]>([]);
+  /** Captured bind path → where to write it here. Only set when remapped. */
+  const [bindMap, setBindMap] = useState<Record<string, string>>({});
+  const [restoreCredentialFiles, setRestoreCredentialFiles] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [force, setForce] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -67,7 +70,7 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
     setPlanning(true); setErr(null);
     try {
       const p = await api.post<RestorePlan>('/api/stack-backup/restore/plan', {
-        targetId, snapshotId: snapshot.id, destInstanceId, destStackName: name || undefined,
+        targetId, snapshotId: snapshot.id, destInstanceId, destStackName: name || undefined, bindMap,
       });
       setPlan(p);
       if (!seeded.current) {
@@ -82,7 +85,7 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
     } finally {
       setPlanning(false);
     }
-  }, [targetId, snapshot.id, destInstanceId]);
+  }, [targetId, snapshot.id, destInstanceId, bindMap]);
 
   useEffect(() => { void runPlan(destStackName); }, [runPlan]);
 
@@ -100,7 +103,8 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
     if (!plan) return;
     const body: ExecuteRestoreInput = {
       targetId, snapshotId: snapshot.id, destInstanceId, destStackName,
-      mode, volumes, binds, deploy: mode === 'full' && deploy,
+      mode, volumes, binds, bindMap, deploy: mode === 'full' && deploy,
+      restoreCredentialFiles,
       passphrase: passphrase || undefined,
       force,
     };
@@ -234,22 +238,71 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
                 <p className="text-xs text-muted-foreground mb-1">
                   These write over directories on the destination host. Unticked by default.
                 </p>
-                <div className="space-y-1.5 max-h-32 overflow-auto">
+                <div className="space-y-2 max-h-48 overflow-auto">
                   {plan.binds.map((b) => (
-                    <label key={b.source} className="flex items-start gap-2 text-sm">
+                    <div key={b.source} className="flex items-start gap-2 text-sm">
                       <input
                         type="checkbox"
-                        className="mt-1"
+                        className="mt-2"
                         checked={binds.includes(b.source)}
                         onChange={(e) =>
                           setBinds((p) => (e.target.checked ? [...p, b.source] : p.filter((x) => x !== b.source)))
                         }
                       />
-                      <span className="font-mono text-xs break-all">{b.dest}</span>
-                    </label>
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-xs text-muted-foreground break-all">{b.source}</div>
+                        <Input
+                          className="h-8 text-xs font-mono mt-0.5"
+                          value={bindMap[b.source] ?? b.dest}
+                          onChange={(e) => setBindMap((m) => ({ ...m, [b.source]: e.target.value }))}
+                          placeholder={b.source}
+                        />
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {b.remapped ? 'remapped · ' : ''}
+                          {b.exists ? 'exists on the destination — will be written into' : 'will be created'}
+                        </div>
+                      </div>
+                    </div>
                   ))}
                 </div>
               </div>
+            )}
+
+            {plan.ports.length > 0 && (
+              <div>
+                <Label>Published ports</Label>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {plan.ports.map((p) => (
+                    <span
+                      key={p.hostPort}
+                      className={`text-xs font-mono rounded px-1.5 py-0.5 border ${
+                        p.inUse ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-border text-muted-foreground'
+                      }`}
+                      title={p.inUse ? 'already in use on the destination' : 'free'}
+                    >
+                      {p.hostPort}{p.containerPort ? `→${p.containerPort}` : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {plan.credentialFiles.some((f) => f.writable) && mode === 'full' && (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={restoreCredentialFiles}
+                  onChange={(e) => setRestoreCredentialFiles(e.target.checked)}
+                />
+                <span>
+                  Write back {plan.credentialFiles.filter((f) => f.writable).length} credential file(s)
+                  <span className="block text-xs text-muted-foreground font-mono break-all">
+                    {plan.credentialFiles.filter((f) => f.writable).map((f) => f.path).join(', ')}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">These live outside the stack’s volumes, so they are off by default.</span>
+                </span>
+              </label>
             )}
 
             {plan.secrets.length > 0 && (

@@ -7,11 +7,13 @@ import {
   mapBackupRunRow,
   mapMonitorHeartbeatRow,
   mapNotificationRow,
+  mapStackBackupRunRow,
+  mapStackRestoreRunRow,
 } from './timeline.mappers';
 
 /**
  * Read-model over the existing event tables (AuditLog, AppLog, NotificationLog,
- * BackupRun, MonitorHeartbeat). It owns no table of its own — see
+ * BackupRun, StackBackupRun, StackRestoreRun, MonitorHeartbeat). It owns no table of its own — see
  * docs/event-timeline.md. Each source is queried for its most-recent page older
  * than the cursor, mapped to a normalized TimelineEvent, then merge-sorted.
  */
@@ -108,17 +110,47 @@ export class TimelineService {
     return rows.map(mapNotificationRow);
   }
 
+  /**
+   * Job-shaped runs from all three tables: connector backups, stack backups and
+   * stack restores. Each is asked for its own most-recent page and the results
+   * merge-sort with every other source in query(), so no single table can crowd
+   * the others out of a page.
+   */
   private async fromJobs(q: TimelineQuery, before: Date | undefined, limit: number): Promise<TimelineEvent[]> {
-    const rows = await this.prisma.backupRun.findMany({
-      where: {
-        connectorInstanceId: q.source ? { contains: q.source, mode: 'insensitive' } : undefined,
-        startedAt: before ? { lt: before } : undefined,
-        ...this.textWhere(q.text, ['message', 'trigger']),
-      },
-      orderBy: { startedAt: 'desc' },
-      take: limit,
-    });
-    return rows.map(mapBackupRunRow);
+    const [connectorRuns, stackRuns, restoreRuns] = await Promise.all([
+      this.prisma.backupRun.findMany({
+        where: {
+          connectorInstanceId: q.source ? { contains: q.source, mode: 'insensitive' } : undefined,
+          startedAt: before ? { lt: before } : undefined,
+          ...this.textWhere(q.text, ['message', 'trigger']),
+        },
+        orderBy: { startedAt: 'desc' },
+        take: limit,
+      }),
+      this.prisma.stackBackupRun.findMany({
+        where: {
+          connectorInstanceId: q.source ? { contains: q.source, mode: 'insensitive' } : undefined,
+          startedAt: before ? { lt: before } : undefined,
+          ...this.textWhere(q.text, ['message', 'stackName', 'trigger']),
+        },
+        orderBy: { startedAt: 'desc' },
+        take: limit,
+      }),
+      this.prisma.stackRestoreRun.findMany({
+        where: {
+          destInstanceId: q.source ? { contains: q.source, mode: 'insensitive' } : undefined,
+          startedAt: before ? { lt: before } : undefined,
+          ...this.textWhere(q.text, ['message', 'sourceStackName', 'destStackName']),
+        },
+        orderBy: { startedAt: 'desc' },
+        take: limit,
+      }),
+    ]);
+    return [
+      ...connectorRuns.map(mapBackupRunRow),
+      ...stackRuns.map(mapStackBackupRunRow),
+      ...restoreRuns.map(mapStackRestoreRunRow),
+    ];
   }
 
   private async fromMonitors(q: TimelineQuery, before: Date | undefined, limit: number): Promise<TimelineEvent[]> {

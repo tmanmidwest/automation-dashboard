@@ -94,6 +94,30 @@ export async function runResticLocal(
   }
 }
 
+/**
+ * Run restic locally but hand back the exit code instead of throwing on it, so a
+ * caller can treat restic's exit 3 ("snapshot written, some files unreadable")
+ * as the warning it is. Still throws when restic cannot be run at all.
+ */
+export function runResticLocalTolerant(
+  auth: ResticRepoAuth,
+  args: string[],
+  timeoutMs = 6 * 60 * 60 * 1000,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'restic',
+      args,
+      { env: { ...process.env, ...resticEnv(auth) }, maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs },
+      (err, stdout, stderr) => {
+        const code = (err as { code?: number } | null)?.code;
+        if (err && typeof code !== 'number') return reject(friendlyRestic(err));
+        resolve({ code: code ?? 0, stdout: stdout ?? '', stderr: stderr ?? '' });
+      },
+    );
+  });
+}
+
 /** Does the repository exist and do the credentials open it? */
 export async function probeRepo(auth: ResticRepoAuth): Promise<{ exists: boolean; message: string }> {
   try {

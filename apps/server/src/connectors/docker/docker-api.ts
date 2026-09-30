@@ -76,7 +76,7 @@ export interface DockerDf {
   LayersSize?: number;
   Images?: { Size?: number; SharedSize?: number }[];
   Containers?: { SizeRw?: number; SizeRootFs?: number }[];
-  Volumes?: { UsageData?: { Size?: number } }[];
+  Volumes?: { Name?: string; UsageData?: { Size?: number } }[];
   BuildCache?: { Size?: number }[];
 }
 
@@ -567,6 +567,90 @@ export class DockerApi {
   /** POST/PUT with a JSON body, returning parsed JSON. */
   private requestJson<T>(method: string, path: string, body: unknown): Promise<T> {
     return this.request<T>(method, path, JSON.stringify(body));
+  }
+
+  /**
+   * Shared request options for every transport (unix socket, socket-proxy over
+   * HTTP, direct daemon over mTLS). Factored out so the streaming archive calls
+   * below reach a host exactly the way the JSON calls do.
+   */
+  private requestOptions(method: string, path: string, headers: Record<string, string>, timeoutMs: number) {
+    const t = this.transport;
+    const options: http.RequestOptions = { method, path, headers: { ...headers, Host: 'docker' }, timeout: timeoutMs };
+    let mod: typeof http | typeof https = http;
+    if (t.kind === 'unix') {
+      options.socketPath = t.socketPath;
+    } else {
+      options.hostname = t.hostname;
+      options.port = t.port;
+      if (t.kind === 'https') {
+        mod = https;
+        options.agent = new https.Agent({
+          ca: this.auth.tlsCaCert || undefined,
+          cert: this.auth.tlsClientCert || undefined,
+          key: this.auth.tlsClientKey || undefined,
+          rejectUnauthorized: !this.auth.insecureSkipVerify,
+        });
+      }
+    }
+    return { mod, options };
+  }
+
+  /**
+   * Stream a path out of a container as a tar, into `sink`.
+   *
+   * This is `docker cp` in reverse, and it is how a **relay** backup reads a
+   * volume from a host that cannot run a helper container of its own: the
+   * container need not even be running, and any container that mounts the volume
+   * will do. See docs/stack-backup.md.
+   */
+  getArchive(containerId: string, path: string, sink: NodeJS.WritableStream, timeoutMs = 6 * 60 * 60 * 1000): Promise<void> {
+    const url = `/containers/${encodeURIComponent(containerId)}/archive?path=${encodeURIComponent(path)}`;
+    const { mod, options } = this.requestOptions('GET', url, { Accept: 'application/x-tar' }, timeoutMs);
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => { if (chunks.length < 64) chunks.push(c); });
+          res.on('end', () => reject(new DockerApiError(httpErrorMessage(status, 'GET', Buffer.concat(chunks).toString('utf8')), status)));
+          return;
+        }
+        res.on('error', reject);
+        sink.on('error', reject);
+        sink.on('finish', () => resolve());
+        res.pipe(sink);
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('Reading the container archive timed out.')));
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      req.end();
+    });
+  }
+
+  /**
+   * Stream a tar into a path inside a container — `docker cp` the other way,
+   * which is how a relay **restore** writes data back into a volume.
+   */
+  putArchive(containerId: string, path: string, source: NodeJS.ReadableStream, timeoutMs = 6 * 60 * 60 * 1000): Promise<void> {
+    const url = `/containers/${encodeURIComponent(containerId)}/archive?path=${encodeURIComponent(path)}`;
+    const { mod, options } = this.requestOptions('PUT', url, { 'Content-Type': 'application/x-tar' }, timeoutMs);
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => { if (chunks.length < 64) chunks.push(c); });
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            return reject(new DockerApiError(httpErrorMessage(status, 'PUT', Buffer.concat(chunks).toString('utf8')), status));
+          }
+          resolve();
+        });
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('Writing the container archive timed out.')));
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      source.on('error', (err: Error) => req.destroy(err));
+      source.pipe(req);
+    });
   }
 
   private request<T>(method: string, path: string, body?: string): Promise<T> {
