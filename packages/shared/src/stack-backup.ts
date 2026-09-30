@@ -173,3 +173,149 @@ export interface StackBackupCandidate {
   /** Why not, when backupable is false. */
   reason?: string;
 }
+
+// ── Restore (Phase 3) ────────────────────────────────────────────────────────
+
+/** A stack snapshot in a repository, with Cerebro's tags decoded. */
+export interface StackSnapshot {
+  id: string;
+  shortId: string;
+  /** ISO8601. */
+  time: string;
+  /** The Docker host the snapshot was taken from, as restic recorded it. */
+  hostname?: string;
+  stackName?: string;
+  /** Source connector instance id, when the tag is still resolvable. */
+  hostId?: string;
+  /** Resolved source host name, when that connector instance still exists. */
+  hostLabel?: string;
+  policyId?: string;
+  runId?: string;
+}
+
+/** One entry when browsing a snapshot's contents. */
+export interface SnapshotEntry {
+  path: string;
+  name: string;
+  type: string;
+  size?: number;
+}
+
+/** What a restore does with the stack's configuration. */
+export type RestoreMode =
+  | 'full' // volumes + compose/.env, and optionally bring the stack up
+  | 'data'; // volumes/binds only — leave the running stack's configuration alone
+
+/** Per-variable outcome of resolving a snapshot's secrets against the live vault. */
+export type SecretState =
+  | 'resolved' // vault holds the same value the snapshot was taken with
+  | 'drifted' // vault holds a DIFFERENT value than at capture time
+  | 'missing' // the bound vault key is gone
+  | 'sealed' // the value comes from the snapshot's sealed blob (needs the passphrase)
+  | 'plain'; // the value comes from the snapshot in the clear (raw mode)
+
+export interface RestoreSecret {
+  name: string;
+  vaultKey?: string;
+  origin?: string;
+  state: SecretState;
+}
+
+export interface RestorePlanInput {
+  targetId: string;
+  snapshotId: string;
+  /** Where to restore. Defaults to the host the snapshot came from, when it still exists. */
+  destInstanceId: string;
+  /** Defaults to the original compose project name. */
+  destStackName?: string;
+}
+
+/** One volume the restore would write, and where it would land. */
+export interface RestoreVolumePlan {
+  /** Volume name as stored in the snapshot. */
+  source: string;
+  /** Volume name to create/write on the destination. */
+  dest: string;
+  exists: boolean;
+  driver?: string;
+  /** The restore renamed it because the stack was renamed — compose derives volume
+   *  names from the project, so keeping the old name would orphan the data. */
+  renamed: boolean;
+}
+
+export interface RestoreBindPlan {
+  /** Host path as captured. */
+  source: string;
+  /** Host path to write on the destination. */
+  dest: string;
+}
+
+/** The reviewable plan. Nothing is written until it is executed. */
+export interface RestorePlan {
+  snapshot: StackSnapshot;
+  targetId: string;
+  destInstanceId: string;
+  destHostName: string;
+  destStackName: string;
+  sourceStackName: string;
+  secretMode: SecretMode;
+  volumes: RestoreVolumePlan[];
+  binds: RestoreBindPlan[];
+  /** The snapshot carries a compose file, so a 'full' restore can redeploy. */
+  hasCompose: boolean;
+  /** The snapshot carries an `.env`. */
+  hasEnv: boolean;
+  secrets: RestoreSecret[];
+  /** True when executing needs the sealing passphrase. */
+  needsPassphrase: boolean;
+  /** Blocking problems — the restore refuses until they are resolved or overridden. */
+  conflicts: string[];
+  /** Non-blocking things the operator should read before saying yes. */
+  warnings: string[];
+}
+
+export interface ExecuteRestoreInput extends RestorePlanInput {
+  mode: RestoreMode;
+  /** Volume source names to restore. Omit for all of them. */
+  volumes?: string[];
+  /** Bind source paths to restore. Omit for none — binds overwrite host paths. */
+  binds?: string[];
+  /** Required when the snapshot's secrets are sealed and a 'full' restore is writing `.env`. */
+  passphrase?: string;
+  /** 'full' only: run `docker compose up -d` after writing the configuration. */
+  deploy?: boolean;
+  /** Proceed despite conflicts (existing volumes, a stack already running there). */
+  force?: boolean;
+}
+
+/** One restore attempt. */
+export interface StackRestoreRun {
+  id: string;
+  snapshotId: string;
+  targetId: string;
+  sourceStackName: string;
+  destInstanceId: string;
+  destHostName?: string;
+  destStackName: string;
+  mode: RestoreMode;
+  /** running | success | error. */
+  status: string;
+  message?: string | null;
+  volumes: number;
+  binds: number;
+  deployed: boolean;
+  durationMs?: number | null;
+  /** Only returned by the single-run endpoint. */
+  log?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+}
+
+/** A Docker host a backup can be taken from or restored onto. */
+export interface BackupHost {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** False when the connector has no SSH — backup and restore both need it. */
+  backupable: boolean;
+}

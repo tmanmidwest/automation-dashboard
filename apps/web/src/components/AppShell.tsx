@@ -4,6 +4,7 @@ import { useAuth } from '@/auth/AuthContext';
 import { Brand } from './Brand';
 import { SidebarNav } from './SidebarNav';
 import { CommandPalette } from './CommandPalette';
+import { PageTitleContext } from './PageTitleContext';
 import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
 
@@ -38,6 +39,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [pageTitle, setPageTitle] = useState('');
   const clock = useClock();
 
   // Global ⌘K / Ctrl+K opens the command palette.
@@ -71,6 +73,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const railW = collapsed ? 'md:w-16' : 'md:w-60';
 
   return (
+    <PageTitleContext.Provider value={setPageTitle}>
     <div className="h-screen flex flex-col p-2.5 gap-2.5 bg-background text-foreground">
       {/* ── LCARS elbow header: brand block curving into the status sweep ── */}
       <header className="flex gap-2.5 h-16 shrink-0">
@@ -110,7 +113,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           <span className="md:hidden font-lcars font-semibold text-lg text-[hsl(210_40%_96%)]">CEREBRO</span>
 
-          <div className="ml-auto flex items-center gap-2 min-w-0">
+          {/* Current page name, lifted here from the in-page PageHeader. */}
+          {pageTitle && (
+            <span className="font-lcars font-semibold text-lg md:text-2xl leading-none tracking-wide text-[hsl(210_40%_96%)] truncate min-w-0">
+              {pageTitle}
+            </span>
+          )}
+
+          <div className="ml-auto flex items-center gap-2 min-w-0 shrink-0">
             <button
               onClick={() => setPaletteOpen(true)}
               className="flex items-center gap-2 rounded-md px-2.5 py-1 text-xs text-[hsl(210_40%_96%)] bg-white/10 hover:bg-white/20 transition-colors"
@@ -170,5 +180,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
+    </PageTitleContext.Provider>
   );
 }

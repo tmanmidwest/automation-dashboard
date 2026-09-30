@@ -4,6 +4,7 @@ import { SecretsModule } from '../secrets/secrets.module';
 import { BackupTargetService } from './backup-target.service';
 import { SecretCaptureService } from './secret-capture';
 import { StackBackupService } from './stack-backup.service';
+import { StackRestoreService } from './stack-restore.service';
 import { StackBackupController } from './stack-backup.controller';
 
 /**
@@ -15,8 +16,8 @@ import { StackBackupController } from './stack-backup.controller';
 @Module({
   imports: [ConnectorsModule, SecretsModule],
   controllers: [StackBackupController],
-  providers: [BackupTargetService, SecretCaptureService, StackBackupService],
+  providers: [BackupTargetService, SecretCaptureService, StackBackupService, StackRestoreService],
   // Exported for the Phase 4 scheduler and the shared tool catalog.
-  exports: [BackupTargetService, StackBackupService],
+  exports: [BackupTargetService, StackBackupService, StackRestoreService],
 })
 export class StackBackupModule {}

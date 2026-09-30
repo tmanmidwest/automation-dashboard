@@ -110,6 +110,19 @@ export class DockerStackService {
     });
   }
 
+  /**
+   * Adopt a compose file as a Cerebro-managed stack WITHOUT deploying it — the
+   * stack row plus a first revision, no host interaction. Used by a restore that
+   * writes a stack's configuration but leaves bringing it up to the operator, so
+   * a recovered stack can be reviewed before it starts touching the network.
+   */
+  async store(instanceId: string, name: string, compose: string, env = ''): Promise<void> {
+    const project = projectName(name);
+    if (!project) throw new BadRequestException('A valid stack name is required.');
+    await this.saveCompose(instanceId, project, compose, env);
+    await this.recordRevision(instanceId, project, { compose, env, source: 'compose' });
+  }
+
   private saveGit(instanceId: string, name: string, src: StackGitSource) {
     const project = projectName(name);
     const data = {

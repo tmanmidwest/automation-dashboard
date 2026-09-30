@@ -150,3 +150,94 @@ export function parseBackupSummary(stdout: string): ResticBackupSummary {
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
+
+/** One snapshot as restic reports it, with Cerebro's tags already decoded. */
+export interface ResticSnapshot {
+  id: string;
+  shortId: string;
+  time: string;
+  hostname?: string;
+  tags: string[];
+}
+
+/**
+ * List Cerebro's stack snapshots, newest first. Note restic's tag semantics: a
+ * comma-separated `--tag a,b` matches snapshots carrying BOTH, while repeating
+ * `--tag` is an OR — so the filters below intentionally build one comma list.
+ */
+export async function listSnapshots(
+  auth: ResticRepoAuth,
+  filter: { stackName?: string; hostId?: string } = {},
+): Promise<ResticSnapshot[]> {
+  const tags = ['cerebro', 'type:stack'];
+  if (filter.stackName) tags.push(`stack:${filter.stackName}`);
+  if (filter.hostId) tags.push(`host:${filter.hostId}`);
+
+  const raw = await runResticLocal(auth, ['snapshots', '--json', '--tag', tags.join(',')], 120_000);
+  const arr = JSON.parse(raw || '[]') as {
+    id: string; short_id?: string; time: string; hostname?: string; tags?: string[];
+  }[];
+  return arr
+    .map((s) => ({
+      id: s.id,
+      shortId: s.short_id || s.id.slice(0, 8),
+      time: s.time,
+      hostname: s.hostname,
+      tags: s.tags ?? [],
+    }))
+    .sort((a, b) => (b.time > a.time ? 1 : -1));
+}
+
+/** Read one file out of a snapshot, from the server. Used to plan a restore
+ *  without touching the destination host. */
+export async function dumpFile(auth: ResticRepoAuth, snapshotId: string, path: string): Promise<string> {
+  return runResticLocal(auth, ['dump', snapshotId, path], 120_000);
+}
+
+/** One entry from `restic ls`. */
+export interface ResticLsEntry {
+  path: string;
+  name: string;
+  type: string;
+  size?: number;
+}
+
+/**
+ * List one level of a snapshot's contents. `--recursive=false` is explicit rather
+ * than relying on the default: a recursive listing of a volume with a million
+ * files would blow the output buffer and is useless to render anyway.
+ */
+export async function listFiles(
+  auth: ResticRepoAuth,
+  snapshotId: string,
+  subtree?: string,
+): Promise<ResticLsEntry[]> {
+  const args = ['ls', '--json', '--recursive=false', snapshotId];
+  if (subtree) args.push(subtree);
+  const raw = await runResticLocal(auth, args, 180_000);
+  const out: ResticLsEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('{')) continue;
+    try {
+      const o = JSON.parse(t) as { struct_type?: string; message_type?: string; path?: string; name?: string; type?: string; size?: number };
+      // The first line is the snapshot header; only node records carry a path.
+      if ((o.struct_type ?? o.message_type) !== 'node' || !o.path) continue;
+      out.push({ path: o.path, name: o.name ?? o.path.split('/').pop() ?? o.path, type: o.type ?? 'file', size: o.size });
+    } catch {
+      /* not a node line */
+    }
+  }
+  return out;
+}
+
+/** Pull `stack:` / `host:` / `policy:` / `run:` back out of a snapshot's tags. */
+export function decodeTags(tags: string[]): { stackName?: string; hostId?: string; policyId?: string; runId?: string } {
+  const find = (prefix: string) => tags.find((t) => t.startsWith(prefix))?.slice(prefix.length);
+  return {
+    stackName: find('stack:'),
+    hostId: find('host:'),
+    policyId: find('policy:'),
+    runId: find('run:'),
+  };
+}

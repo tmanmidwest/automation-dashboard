@@ -2,7 +2,10 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 import { BackupTargetService } from './backup-target.service';
 import { StackBackupService } from './stack-backup.service';
-import type { RunBackupInput, SaveBackupPolicyInput, SaveBackupTargetInput, SessionUser } from '@cerebro/shared';
+import { StackRestoreService } from './stack-restore.service';
+import type {
+  ExecuteRestoreInput, RestorePlanInput, RunBackupInput, SaveBackupPolicyInput, SaveBackupTargetInput, SessionUser,
+} from '@cerebro/shared';
 
 /**
  * Stack backup & restore. Writes are session-only: configuring a target stores
@@ -14,6 +17,7 @@ export class StackBackupController {
   constructor(
     private readonly targets: BackupTargetService,
     private readonly backups: StackBackupService,
+    private readonly restores: StackRestoreService,
   ) {}
 
   // ── Targets ──
@@ -53,7 +57,13 @@ export class StackBackupController {
     return this.targets.check(id, init === '1' || init === 'true');
   }
 
-  // ── Candidates ──
+  // ── Hosts & candidates ──
+  @Get('hosts')
+  @RequirePermissions('backup:read')
+  hosts() {
+    return this.backups.hosts();
+  }
+
   @Get('candidates')
   @RequirePermissions('backup:read')
   candidates() {
@@ -106,5 +116,55 @@ export class StackBackupController {
   @RequirePermissions('backup:read')
   getRun(@Param('id') id: string) {
     return this.backups.getRun(id);
+  }
+
+  // ── Snapshots ──
+  @Get('targets/:targetId/snapshots')
+  @RequirePermissions('backup:read')
+  snapshots(
+    @Param('targetId') targetId: string,
+    @Query('stack') stack?: string,
+    @Query('host') host?: string,
+  ) {
+    return this.restores.listSnapshots(targetId, stack, host);
+  }
+
+  @Get('targets/:targetId/snapshots/:snapshotId/browse')
+  @RequirePermissions('backup:read')
+  browse(
+    @Param('targetId') targetId: string,
+    @Param('snapshotId') snapshotId: string,
+    @Query('path') path?: string,
+  ) {
+    return this.restores.browse(targetId, snapshotId, path);
+  }
+
+  // ── Restore ──
+  /** Dry run: resolves the snapshot against the destination and reports conflicts.
+   *  Writes nothing, which is why it is a read permission with a POST body. */
+  @Post('restore/plan')
+  @RequirePermissions('backup:read')
+  @SessionOnly()
+  plan(@Body() body: RestorePlanInput) {
+    return this.restores.plan(body);
+  }
+
+  @Post('restore')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  restore(@Body() body: ExecuteRestoreInput) {
+    return this.restores.start(body);
+  }
+
+  @Get('restores')
+  @RequirePermissions('backup:read')
+  listRestores(@Query('limit') limit?: string) {
+    return this.restores.listRuns(limit ? Number(limit) : undefined);
+  }
+
+  @Get('restores/:id')
+  @RequirePermissions('backup:read')
+  getRestore(@Param('id') id: string) {
+    return this.restores.getRun(id);
   }
 }

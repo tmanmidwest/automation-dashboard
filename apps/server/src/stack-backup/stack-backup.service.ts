@@ -2,13 +2,13 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
-import { DockerApi } from '../connectors/docker/docker-api';
 import { DockerStackService } from '../connectors/docker/docker-stack.service';
 import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
+import { hostAccess, NO_SSH_REASON } from './docker-host';
 import type { ConnectorContext } from '@cerebro/shared';
 import type {
-  QuiesceMode, SaveBackupPolicyInput, SecretMode, StackBackupCandidate, StackBackupPolicy,
-  StackBackupRun, TransferMode,
+  BackupHost, QuiesceMode, SaveBackupPolicyInput, SecretMode, StackBackupCandidate,
+  StackBackupPolicy, StackBackupRun, TransferMode,
 } from '@cerebro/shared';
 import { BackupTargetService } from './backup-target.service';
 import { SecretCaptureService } from './secret-capture';
@@ -48,6 +48,29 @@ export class StackBackupService {
     private readonly logging: LoggingService,
   ) {}
 
+  /**
+   * Every Docker host, with whether it can take part in a backup or restore. A
+   * plain DB read plus a config check — no fan-out — so a picker never waits on
+   * unreachable hosts.
+   */
+  async hosts(): Promise<BackupHost[]> {
+    const rows = await this.prisma.connectorInstance.findMany({
+      where: { connectorId: DOCKER },
+      orderBy: { name: 'asc' },
+    });
+    const out: BackupHost[] = [];
+    for (const row of rows) {
+      let backupable = false;
+      try {
+        backupable = !!hostAccess(await this.instances.contextFor(row), this.stacks).ssh;
+      } catch {
+        backupable = false;
+      }
+      out.push({ id: row.id, name: row.name, enabled: row.enabled, backupable });
+    }
+    return out;
+  }
+
   // ── Candidates ────────────────────────────────────────────────────
 
   /**
@@ -73,12 +96,11 @@ export class StackBackupService {
       } catch {
         continue;
       }
-      const ssh = this.sshFrom(ctx);
+      const { api, ssh } = hostAccess(ctx, this.stacks);
       const managedNames = new Set((await this.stacks.list(host.id)).map((s) => s.name));
 
       let projects: string[];
       try {
-        const api = this.apiFrom(ctx);
         const containers = await api.listContainers(true);
         projects = [...new Set(containers.map((c) => (c.Labels ?? {})[PROJECT_LABEL]).filter(Boolean))].sort();
       } catch (err) {
@@ -97,7 +119,7 @@ export class StackBackupService {
           managed: managedNames.has(project),
           configured: configuredKeys.has(`${host.id}/${project}`),
           backupable: !!ssh,
-          reason: ssh ? undefined : 'This host has no SSH configured — a backup runs a helper container over SSH.',
+          reason: ssh ? undefined : NO_SSH_REASON,
         });
       }
     }
@@ -108,8 +130,8 @@ export class StackBackupService {
   async inspectCandidate(instanceId: string, stackName: string): Promise<StackBackupCandidate> {
     const host = await this.hostOrThrow(instanceId);
     const ctx = await this.instances.contextFor(host);
-    const ssh = this.sshFrom(ctx);
-    const inspection = await inspectStack(this.apiFrom(ctx), stackName);
+    const { api, ssh } = hostAccess(ctx, this.stacks);
+    const inspection = await inspectStack(api, stackName);
     const managed = !!(await this.stacks.get(instanceId, stackName));
     const policy = await this.prisma.stackBackupPolicy.findUnique({
       where: { connectorInstanceId_stackName: { connectorInstanceId: instanceId, stackName } },
@@ -124,7 +146,7 @@ export class StackBackupService {
       managed,
       configured: !!policy,
       backupable: !!ssh,
-      reason: ssh ? undefined : 'This host has no SSH configured — a backup runs a helper container over SSH.',
+      reason: ssh ? undefined : NO_SSH_REASON,
     };
   }
 
@@ -253,13 +275,12 @@ export class StackBackupService {
       const policy = await this.prisma.stackBackupPolicy.findUniqueOrThrow({ where: { id: policyId } });
       const host = await this.hostOrThrow(policy.connectorInstanceId);
       const ctx = await this.instances.contextFor(host);
-      ssh = this.sshFrom(ctx);
-      if (!ssh) {
-        throw new Error('This host has no SSH configured — a backup runs a helper container over SSH. Add SSH to the Docker connector.');
-      }
+      const access = hostAccess(ctx, this.stacks);
+      ssh = access.ssh;
+      if (!ssh) throw new Error(NO_SSH_REASON);
       say(`Backing up stack "${policy.stackName}" on ${host.name}.`);
 
-      const inspection = await inspectStack(this.apiFrom(ctx), policy.stackName);
+      const inspection = await inspectStack(access.api, policy.stackName);
       say(`Found ${inspection.containers.length} container(s), ${inspection.volumes.length} named volume(s), ${inspection.binds.length} bind path(s).`);
 
       const { compose, envFile, composeSource } = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh);
@@ -279,6 +300,13 @@ export class StackBackupService {
         `${bound} with a known vault binding, ${captured.inventory.unbound.length} unbound.`,
       );
 
+      // Decide the capture set before writing the manifest: a restore must know
+      // which of the stack's bind paths this snapshot actually contains, and the
+      // policy that decided may have changed (or be gone) by then.
+      const included = new Set(policy.includeBinds);
+      const includedBinds = inspection.binds.filter((b) => included.has(b.path));
+      const bindCount = includedBinds.length;
+
       const files: Record<string, string> = {
         'manifest.json': manifestOf(inspection, {
           host: host.name,
@@ -286,6 +314,12 @@ export class StackBackupService {
           policyId: policy.id,
           runId,
           secretMode: policy.secretMode,
+          capture: {
+            volumes: inspection.volumes.map((v) => v.name),
+            binds: includedBinds.map((b) => b.path),
+            hasCompose: !!compose,
+            hasEnv: !!envFile,
+          },
         }),
         ...captured.files,
       };
@@ -295,9 +329,6 @@ export class StackBackupService {
       await writeHostDir(ssh, hostDir, files);
       say(`Staged ${Object.keys(files).length} metadata file(s) on the host.`);
 
-      const included = new Set(policy.includeBinds);
-      const includedBinds = inspection.binds.filter((b) => included.has(b.path));
-      const bindCount = includedBinds.length;
       const mounts: HelperMount[] = [
         ...inspection.volumes.map((v) => ({
           source: v.name,
@@ -458,35 +489,6 @@ export class StackBackupService {
       envFile,
       composeSource: paths.join(', ') || 'the host',
     };
-  }
-
-  private apiFrom(ctx: ConnectorContext): DockerApi {
-    return new DockerApi({
-      endpoint: str(ctx.config.endpoint),
-      tlsCaCert: str(ctx.config.tlsCaCert),
-      tlsClientCert: str(ctx.config.tlsClientCert),
-      tlsClientKey: str(ctx.config.tlsClientKey),
-      insecureSkipVerify: ctx.config.insecureSkipVerify === true,
-    });
-  }
-
-  /** The host's SSH config with its key pinned, or null when SSH isn't configured. */
-  private sshFrom(ctx: ConnectorContext): SshConfig | null {
-    const host = str(ctx.config.sshHost);
-    const privateKey = str(ctx.config.sshPrivateKey);
-    const password = str(ctx.config.sshPassword);
-    if (!host || (!privateKey && !password)) return null;
-    const target = this.stacks.withHostPin({
-      ssh: {
-        host,
-        port: Number(ctx.config.sshPort) || 22,
-        username: str(ctx.config.sshUser) || 'root',
-        privateKey,
-        password,
-      },
-      stacksDir: str(ctx.config.stacksDir) || '/opt/cerebro-stacks',
-    });
-    return target.ssh;
   }
 
   private async hostOrThrow(id: string) {

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Archive, CheckCircle2, Database, HardDriveDownload, Loader2, Lock, Plus, RefreshCw,
-  ScrollText, Trash2, TriangleAlert,
+  Archive, CheckCircle2, Database, Folder, FolderOpen, HardDriveDownload, HardDriveUpload, Loader2,
+  Lock, Plus, RefreshCw, ScrollText, Trash2, TriangleAlert,
 } from 'lucide-react';
 import type {
-  BackupTargetKind, SaveBackupPolicyInput, SaveBackupTargetInput, SecretMode,
-  StackBackupCandidate, StackBackupPolicy, StackBackupRun, StackBackupTarget,
+  BackupHost, BackupTargetKind, SaveBackupPolicyInput, SaveBackupTargetInput, SecretMode,
+  SnapshotEntry, StackBackupCandidate, StackBackupPolicy, StackBackupRun, StackBackupTarget,
+  StackRestoreRun, StackSnapshot,
 } from '@cerebro/shared';
+import { RestoreWizard } from '@/components/RestoreWizard';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -55,10 +57,13 @@ function fmtDuration(ms?: number | null): string {
 export function StackBackups() {
   const { can } = useAuth();
   const canWrite = can('backup:write');
+  const canRestore = can('backup:restore');
 
   const [targets, setTargets] = useState<StackBackupTarget[]>([]);
   const [policies, setPolicies] = useState<StackBackupPolicy[] | null>(null);
   const [runs, setRuns] = useState<StackBackupRun[]>([]);
+  const [hosts, setHosts] = useState<BackupHost[]>([]);
+  const [restores, setRestores] = useState<StackRestoreRun[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -66,15 +71,20 @@ export function StackBackups() {
   const [policyDialog, setPolicyDialog] = useState(false);
   const [runPrompt, setRunPrompt] = useState<StackBackupPolicy | null>(null);
   const [logRun, setLogRun] = useState<StackBackupRun | null>(null);
+  const [logRestore, setLogRestore] = useState<StackRestoreRun | null>(null);
+  const [restoreFor, setRestoreFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
+  const [browseFor, setBrowseFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [t, p, r] = await Promise.all([
+      const [t, p, r, h, rr] = await Promise.all([
         api.get<StackBackupTarget[]>('/api/stack-backup/targets'),
         api.get<StackBackupPolicy[]>('/api/stack-backup/policies'),
         api.get<StackBackupRun[]>('/api/stack-backup/runs?limit=25'),
+        api.get<BackupHost[]>('/api/stack-backup/hosts'),
+        api.get<StackRestoreRun[]>('/api/stack-backup/restores?limit=15'),
       ]);
-      setTargets(t); setPolicies(p); setRuns(r);
+      setTargets(t); setPolicies(p); setRuns(r); setHosts(h); setRestores(rr);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to load.');
       setPolicies([]);
@@ -84,7 +94,7 @@ export function StackBackups() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   // Follow a run in flight without making the user reload.
-  const hasRunning = runs.some((r) => r.status === 'running');
+  const hasRunning = runs.some((r) => r.status === 'running') || restores.some((r) => r.status === 'running');
   useEffect(() => {
     if (!hasRunning) return;
     const t = setInterval(() => { void refresh(); }, 3000);
@@ -268,6 +278,54 @@ export function StackBackups() {
         </CardContent>
       </Card>
 
+      {/* ── Snapshots ── */}
+      {targets.length > 0 && (
+        <SnapshotBrowser
+          targets={targets}
+          canRestore={canRestore}
+          onRestore={(targetId, snapshot) => setRestoreFor({ targetId, snapshot })}
+          onBrowse={(targetId, snapshot) => setBrowseFor({ targetId, snapshot })}
+        />
+      )}
+
+      {/* ── Restores ── */}
+      {restores.length > 0 && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Restores</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="divide-y divide-border">
+              {restores.map((r) => (
+                <button
+                  key={r.id}
+                  className="w-full py-3 flex items-center gap-4 text-left hover:bg-muted/40 px-2 -mx-2 rounded"
+                  onClick={() => void openRestoreLog(r.id, setLogRestore, setErr)}
+                >
+                  <HardDriveUpload className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium truncate">
+                      {r.sourceStackName} → {r.destStackName}
+                      <span className="text-muted-foreground font-normal"> on {r.destHostName ?? r.destInstanceId}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate">{r.message ?? '—'}</div>
+                  </div>
+                  <div className="text-xs text-muted-foreground hidden sm:block">{r.volumes} vol · {r.binds} bind</div>
+                  <div className="text-xs text-muted-foreground hidden sm:block">{r.deployed ? 'deployed' : 'not started'}</div>
+                  <div className="text-xs text-right w-40">
+                    <div className={`inline-flex items-center gap-1 ${STATUS_COLOR[r.status] ?? ''}`}>
+                      {r.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+                      {r.status}
+                    </div>
+                    <div className="text-muted-foreground">{fmtWhen(r.startedAt)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Runs ── */}
       <Card>
         <CardHeader>
@@ -339,7 +397,184 @@ export function StackBackups() {
           </pre>
         </Dialog>
       )}
+      {logRestore && (
+        <Dialog
+          open
+          onClose={() => setLogRestore(null)}
+          size="lg"
+          title={`Restore ${logRestore.sourceStackName} → ${logRestore.destStackName} — ${logRestore.status}`}
+          description={fmtWhen(logRestore.startedAt)}
+        >
+          <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-background/60 border border-border rounded p-3 max-h-[60vh] overflow-auto">
+            {logRestore.log || 'No log recorded.'}
+          </pre>
+        </Dialog>
+      )}
+      {restoreFor && (
+        <RestoreWizard
+          targetId={restoreFor.targetId}
+          snapshot={restoreFor.snapshot}
+          hosts={hosts.filter((h) => h.enabled)}
+          canRestore={canRestore}
+          onClose={() => setRestoreFor(null)}
+          onStarted={(run) => { setRestoreFor(null); setRestores((p) => [run, ...p]); void refresh(); }}
+        />
+      )}
+      {browseFor && (
+        <SnapshotContents
+          targetId={browseFor.targetId}
+          snapshot={browseFor.snapshot}
+          onClose={() => setBrowseFor(null)}
+        />
+      )}
     </div>
+  );
+}
+
+async function openRestoreLog(
+  id: string,
+  set: (r: StackRestoreRun) => void,
+  onErr: (m: string) => void,
+): Promise<void> {
+  try {
+    set(await api.get<StackRestoreRun>(`/api/stack-backup/restores/${id}`));
+  } catch (e) {
+    onErr(e instanceof ApiError ? e.message : 'Could not load the restore log.');
+  }
+}
+
+/** Pick a repository and list its stack snapshots — the entry point to a restore. */
+function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse }: {
+  targets: StackBackupTarget[];
+  canRestore: boolean;
+  onRestore: (targetId: string, snapshot: StackSnapshot) => void;
+  onBrowse: (targetId: string, snapshot: StackSnapshot) => void;
+}) {
+  const [targetId, setTargetId] = useState(targets[0]?.id ?? '');
+  const [stack, setStack] = useState('');
+  const [snapshots, setSnapshots] = useState<StackSnapshot[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function load() {
+    if (!targetId) return;
+    setLoading(true); setErr(null);
+    try {
+      const q = stack.trim() ? `?stack=${encodeURIComponent(stack.trim())}` : '';
+      setSnapshots(await api.get<StackSnapshot[]>(`/api/stack-backup/targets/${targetId}/snapshots${q}`));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not list snapshots.');
+      setSnapshots([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle>Snapshots</CardTitle>
+        <CardDescription>Everything in a repository, newest first. Restoring writes to a host you choose.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-end gap-2 flex-wrap mb-4">
+          <div className="min-w-48">
+            <Label>Repository</Label>
+            <select className={selectCls} value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+              {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+          <div className="min-w-48">
+            <Label>Stack <span className="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input value={stack} onChange={(e) => setStack(e.target.value)} placeholder="all stacks" />
+          </div>
+          <Button variant="outline" onClick={() => void load()} disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+            List snapshots
+          </Button>
+        </div>
+
+        {err && <div className="mb-3 text-sm text-destructive">{err}</div>}
+
+        {snapshots === null ? (
+          <p className="text-sm text-muted-foreground">Choose a repository and list its snapshots.</p>
+        ) : !snapshots.length ? (
+          <p className="text-sm text-muted-foreground">No stack snapshots in this repository yet.</p>
+        ) : (
+          <div className="divide-y divide-border">
+            {snapshots.map((s) => (
+              <div key={s.id} className="py-3 flex items-center gap-4 flex-wrap">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium truncate">
+                    {s.stackName ?? 'unknown stack'}
+                    <span className="text-muted-foreground font-normal font-mono text-xs"> {s.shortId}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {fmtWhen(s.time)}{s.hostLabel ? ` · from ${s.hostLabel}` : s.hostname ? ` · from ${s.hostname}` : ''}
+                  </div>
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => onBrowse(targetId, s)}>
+                  <FolderOpen className="h-4 w-4 mr-2" /> Browse
+                </Button>
+                <Button size="sm" variant="outline" disabled={!canRestore} onClick={() => onRestore(targetId, s)}>
+                  <HardDriveUpload className="h-4 w-4 mr-2" /> Restore…
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Walk a snapshot's tree, one level at a time — proof the data is really in there. */
+function SnapshotContents({ targetId, snapshot, onClose }: {
+  targetId: string;
+  snapshot: StackSnapshot;
+  onClose: () => void;
+}) {
+  const [path, setPath] = useState('/data');
+  const [entries, setEntries] = useState<SnapshotEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEntries(null); setErr(null);
+    api.get<SnapshotEntry[]>(`/api/stack-backup/targets/${targetId}/snapshots/${snapshot.id}/browse?path=${encodeURIComponent(path)}`)
+      .then(setEntries)
+      .catch((e) => { setErr(e instanceof ApiError ? e.message : 'Could not read the snapshot.'); setEntries([]); });
+  }, [targetId, snapshot.id, path]);
+
+  const up = path === '/data' ? null : path.slice(0, path.lastIndexOf('/')) || '/data';
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Snapshot ${snapshot.shortId}`} description={path}>
+      {err && <div className="mb-3 text-sm text-destructive">{err}</div>}
+      {up !== null && (
+        <Button size="sm" variant="ghost" className="mb-2" onClick={() => setPath(up)}>← up</Button>
+      )}
+      {entries === null ? (
+        <div className="py-6 text-center"><Loader2 className="h-5 w-5 animate-spin mx-auto" /></div>
+      ) : !entries.length ? (
+        <p className="text-sm text-muted-foreground">Empty.</p>
+      ) : (
+        <div className="divide-y divide-border">
+          {entries.map((e) => (
+            <div key={e.path} className="py-1.5 flex items-center gap-2 text-sm">
+              {e.type === 'dir'
+                ? <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
+                : <ScrollText className="h-4 w-4 text-muted-foreground shrink-0" />}
+              {e.type === 'dir' ? (
+                <button className="font-mono text-xs hover:underline text-left" onClick={() => setPath(e.path)}>{e.name}/</button>
+              ) : (
+                <span className="font-mono text-xs break-all">{e.name}</span>
+              )}
+              <span className="ml-auto text-xs text-muted-foreground shrink-0">{e.type === 'dir' ? '' : fmtBytes(e.size)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Dialog>
   );
 }
 

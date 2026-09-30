@@ -462,6 +462,24 @@ export class DockerApi {
   removeImage(id: string): Promise<void> {
     return this.request<void>('DELETE', `/images/${encodeURIComponent(id)}?force=1`);
   }
+  /**
+   * Create a named volume, reproducing a backed-up volume's driver and options so a
+   * restore onto a new host recreates an NFS/CIFS-backed volume as one, not as a
+   * plain local directory that silently holds a copy of the data.
+   */
+  createVolume(body: { Name: string; Driver?: string; DriverOpts?: Record<string, string>; Labels?: Record<string, string> }): Promise<void> {
+    return this.requestJson<void>('POST', '/volumes/create', body);
+  }
+  /** Does a volume already exist on this host? */
+  async volumeExists(name: string): Promise<boolean> {
+    try {
+      await this.inspectVolume(name);
+      return true;
+    } catch (err) {
+      if (err instanceof DockerApiError && err.status === 404) return false;
+      throw err;
+    }
+  }
   /** Remove a volume — NOT forced, so an in-use volume returns a clear 409 instead of data loss. */
   removeVolume(name: string): Promise<void> {
     return this.request<void>('DELETE', `/volumes/${encodeURIComponent(name)}`);

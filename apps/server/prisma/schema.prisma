@@ -859,3 +859,34 @@ model StackBackupRun {
   @@index([policyId, startedAt])
   @@index([connectorInstanceId, stackName, startedAt])
 }
+
+/// One restore attempt (docs/stack-backup.md, Phase 3). Append-only history: a
+/// restore overwrites data, so what was restored where is worth keeping even when
+/// the policy or the destination host is later removed.
+model StackRestoreRun {
+  id         String @id @default(cuid())
+  /// The restic snapshot restored from.
+  snapshotId String
+  targetId   String
+  /// Compose project name as captured.
+  sourceStackName String
+  /// Where it went — may differ from the source host and name.
+  destInstanceId  String
+  destStackName   String
+  /// 'full' (volumes + config, optionally redeployed) | 'data' (volumes/binds only).
+  mode   String @default("full")
+  /// running | success | error.
+  status String
+  message String?
+  volumes Int     @default(0)
+  binds   Int     @default(0)
+  /// `docker compose up -d` ran as part of the restore.
+  deployed   Boolean @default(false)
+  durationMs Int?
+  log        String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([destInstanceId, startedAt])
+  @@index([snapshotId])
+}

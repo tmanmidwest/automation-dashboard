@@ -1,8 +1,10 @@
 # Stack backup & restore
 
-> **Status: Phase 1 BUILT (2026-09-26)** — targets, capture, manual backup, run history, and the
-> `/backups` screen. Phases 2–6 are designed below and not yet built. Nothing here is committed or
-> deployed (this repo's edit-only workflow: the user commits, builds, and deploys).
+> **Status: Phases 1 and 3 BUILT (P1 2026-09-26, P3 2026-09-30)** — targets, capture, manual backup,
+> run history, snapshot browsing, and the review-then-execute restore wizard. P3 pulled snapshot
+> listing/browsing forward from P2, since a restore cannot be driven without it. Phases 2, 4, 5 and 6
+> are designed below and not yet built. Nothing here is committed or deployed (this repo's edit-only
+> workflow: the user commits, builds, and deploys).
 
 Back up a **Compose stack** — its data, its config, and everything needed to stand it up again —
 from any Docker host Cerebro knows about, and restore it to the same host or a different one.
@@ -193,22 +195,47 @@ Per-policy `quiesce` mode, because a hot tar of a live Postgres or SQLite volume
 Plus `preHooks` / `postHooks` — `{service, cmd[], captureTo}` exec'd in-container so a dump lands in
 the capture set and the volumes can stay `hot`.
 
-## Restore (Phase 3)
+## Restore (Phase 3 — built)
 
 A wizard, not a button — restore is the half that gets skipped and then does not work when needed.
 
-1. **Snapshot** — browse by stack / host / date, with a file tree from `restic ls`.
-2. **Destination** — any Docker connector instance, so cross-host is the same code path as same-host.
-3. **Plan review** — volume name map, bind path remap, secret resolution (above), and port conflicts
-   checked with the App Replicator's existing preflight. Anything that already exists on the target
-   is called out; a running stack is never clobbered without a typed confirmation.
-4. **Execute** — create volumes → helper container with volumes mounted **rw** runs `restic restore`
-   → write compose/`.env` through `DockerStackService` (so the restored stack becomes Cerebro-managed
-   with revision history at the destination) → `docker compose up -d`.
+1. **Snapshot** — list a repository's stack snapshots (tags decoded back into host/stack/policy/run)
+   and walk the tree one level at a time with `restic ls --recursive=false`, so an operator can see
+   the data really is in there before trusting it.
+2. **Destination** — any Docker connector instance, so restoring to a different host is the same
+   code path as restoring in place.
+3. **Plan** — recomputed server-side whenever the destination changes, and it writes nothing. It
+   reports every volume with where it would land and whether that already exists, the bind paths
+   (opt-in, unticked), the secret resolution, plus conflicts and warnings.
+4. **Execute** — create the volumes → run the helper with them mounted **rw** → restore the data →
+   write the configuration through `DockerStackService` → optionally `docker compose up -d`.
 
-Also worth having: single-volume and single-file restore, and **verify restore** — restore into a
-sandbox stack name with offset ports, health-check it, tear it down. That is what turns a backup
-from a hope into a fact.
+**The mount trick that makes renaming work.** The helper mounts each *destination* volume at the
+path the snapshot *stored* it under (`-v newproj_db:/data/volumes/oldproj_db`), so `restic restore
+--target /` writes straight into it with no path rewriting. Renaming then falls out for free — and it
+has to, because compose derives a volume's name from the project: restoring `oldproj_db` and
+deploying a stack called `newproj` would leave the copy pointing at freshly created empty volumes
+while the restored data sat in the old names. The plan renames any volume carrying the source
+project's prefix and warns about the ones it cannot (external or anonymous volumes keep their name
+and are therefore shared with the original).
+
+**Hard stops vs. warnings.** A **running** stack under the destination name is a conflict — writing
+into the volumes of a live database is how a restore corrupts the thing it was meant to rescue. A
+*stopped* stack of that name, or an existing volume, is a warning plus an explicit
+"restore anyway, overwriting what is already there" checkbox.
+
+**Secrets come from the snapshot, not the vault.** The restored volumes hold whatever state those
+values produced, so pairing them with a newer rotated credential is how a restore "succeeds" into a
+stack that cannot start. Drift is surfaced in the plan (per variable: matches the vault / changed
+since / key is gone / sealed / stored in the clear) rather than silently resolved.
+
+**Restoring without starting.** A `full` restore can write the configuration and stop there —
+`DockerStackService.store()` adopts the compose as a Cerebro-managed stack with a first revision but
+touches no host — so a recovered stack can be reviewed before it comes up and starts talking to the
+network. Ticking "bring the stack up" goes through the normal `deploy()` path instead.
+
+Still to come: single-*file* restore, and **verify restore** — restore into a sandbox stack name with
+offset ports, health-check it, tear it down. That is what turns a backup from a hope into a fact.
 
 ## Scheduling (Phase 4)
 
@@ -238,7 +265,15 @@ StackBackupRun      id, policyId, connectorInstanceId, stackName, targetId, trig
                     durationMs, message, log, startedAt, finishedAt
 ```
 
-Later phases add `StackSecretBinding` (Phase 2) and `StackRestoreRun` (Phase 3). The Backblaze
+Phase 3 (migration `0032_stack_restore`) adds:
+
+```
+StackRestoreRun     id, snapshotId, targetId, sourceStackName, destInstanceId, destStackName,
+                    mode, status, message, volumes, binds, deployed, durationMs, log, timestamps
+```
+
+Append-only on purpose: a restore overwrites data, so the record of what went where should outlive
+the policy and even the destination host. Phase 2 adds `StackSecretBinding`. The Backblaze
 connector's existing `BackupRun` table is left alone — it means something different.
 
 Repository credentials live in the vault, never in these rows:
@@ -271,10 +306,10 @@ the vault came back first. `embed` mode is the escape hatch for when that orderi
 |---|---|---|
 | **P1** | Targets + vault creds + repo probe/init; SSH helper runner; manual backup (`hot`, named volumes + compose + manifest, `raw`/`embed` secrets, known bindings); runs + log; `/backups` screen | **BUILT** |
 | **P2** | Binding discovery (inferred + declared), `StackSecretBinding`, `reference` mode, snapshot browser, promote-to-vault | planned |
-| **P3** | Restore wizard (same host, then new stack name), single-volume restore, secret resolution step | planned |
+| **P3** | Snapshot listing + browsing, restore plan/execute (any host, rename-aware), per-volume and per-bind selection, secret resolution, restore history | **BUILT** |
 | **P4** | Scheduling, retention, nightly prune/check, timeline + notification wiring | planned |
 | **P5** | Quiesce modes, pre/post hooks, bind include/exclude UI, `relay` transfer, Engine-API launcher | planned |
-| **P6** | Cross-host restore (path remap + port preflight), verify-restore sandbox, MCP tools | planned |
+| **P6** | Bind-path remapping + port preflight on restore, verify-restore sandbox, single-file restore, MCP tools | planned |
 
 ## Known sharp edges
 
@@ -298,3 +333,8 @@ the vault came back first. `embed` mode is the escape hatch for when that orderi
   kills the channel and the backup dies half-done.
 - **Swarm/compose `secrets:` and `configs:`**, and the `*_FILE` convention, point at files on the
   host that are themselves credentials. They need the same three-mode treatment (Phase 2).
+- **Bind paths restore to the path they were captured from.** Restoring a stack whose binds live
+  under a path that does not exist (or means something else) on the destination host needs the
+  remapping Phase 6 adds; until then the plan shows the exact paths and each one is opt-in.
+- **`container_name:` survives a rename.** It is global to the host, so a renamed copy collides with
+  the original if both run there. The plan warns when the compose file pins it.
