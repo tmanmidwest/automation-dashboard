@@ -159,6 +159,11 @@ export interface DockerVolume {
   Labels?: Record<string, string> | null;
 }
 
+export interface DockerVolumeInspect extends DockerVolume {
+  /** Driver-specific creation options (e.g. an NFS volume's device/o/type). */
+  Options?: Record<string, string> | null;
+}
+
 export interface DockerNetwork {
   Id: string;
   Name: string;
@@ -348,6 +353,11 @@ export class DockerApi {
   }
   listNetworks(): Promise<DockerNetwork[]> {
     return this.get<DockerNetwork[]>('/networks');
+  }
+  /** One volume with its driver options — a stack backup's manifest needs these to
+   *  recreate an NFS/CIFS-backed volume on the restore target, not just a local one. */
+  inspectVolume(name: string): Promise<DockerVolumeInspect> {
+    return this.get<DockerVolumeInspect>(`/volumes/${encodeURIComponent(name)}`);
   }
 
   // ── Container lifecycle (Phase 2) ───────────────────────────────

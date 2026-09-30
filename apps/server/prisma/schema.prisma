@@ -749,3 +749,113 @@ model FabricSession {
 
   @@index([agentId, startedAt])
 }
+
+// ── Stack backup & restore (docs/stack-backup.md) ─────────────────────────────
+
+/// A restic repository Cerebro writes stack backups into. Credentials never live
+/// here — only the vault keys that hold them (`stack-backup:<id>:password`,
+/// `…:provider`, `…:provider-host`).
+model StackBackupTarget {
+  id         String  @id @default(cuid())
+  name       String  @unique
+  /// Storage backend: 'b2' (Backblaze native) | 's3' (any S3-compatible endpoint).
+  kind       String  @default("b2")
+  /// The restic repository string, e.g. "b2:trevor-stacks:/" or "s3:https://nas:9000/stacks".
+  repository String
+  /// Vault key holding the restic repository password.
+  passwordKey String
+  /// Vault key holding the provider credentials as JSON.
+  credKey     String
+  /// Optional vault key for an APPEND-ONLY provider key handed to Docker hosts, so a
+  /// compromised host can add snapshots but never delete history. Falls back to credKey.
+  hostCredKey String?
+  /// Helper container image run on the Docker host. Pin this in production.
+  helperImage String  @default("restic/restic:latest")
+  /// Retention defaults applied by the Phase 4 prune tick (null = don't pass that flag).
+  keepLast       Int?
+  keepDaily      Int?
+  keepWeekly     Int?
+  keepMonthly    Int?
+  keepWithinDays Int?
+  /// Result of the last repository probe: never | ok | error.
+  lastStatus    String    @default("never")
+  lastMessage   String?
+  lastCheckedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  policies StackBackupPolicy[]
+}
+
+/// What to back up for one stack on one Docker host, and (from Phase 4) when.
+/// One policy per stack — "back up now" runs the policy, so manual and scheduled
+/// backups capture exactly the same thing.
+model StackBackupPolicy {
+  id                  String @id @default(cuid())
+  /// The Docker ConnectorInstance the stack lives on.
+  connectorInstanceId String
+  /// Compose project name.
+  stackName           String
+  targetId            String
+  target              StackBackupTarget @relation(fields: [targetId], references: [id], onDelete: Restrict)
+  enabled             Boolean @default(true)
+  /// Structured schedule (Phase 4) — 'off' | 'daily' | 'weekly' | 'monthly'. No cron.
+  frequency  String @default("off")
+  dayOfWeek  Int    @default(0)
+  dayOfMonth Int    @default(1)
+  hour       Int    @default(3)
+  minute     Int    @default(0)
+  /// Capture consistency: 'hot' (Phase 1) | 'pause' | 'stop' (Phase 5).
+  quiesce    String @default("hot")
+  /// How bytes reach the repo: 'direct' (helper on the host) | 'relay' (Phase 5).
+  transfer   String @default("direct")
+  /// How the stack's .env is captured: 'embed' (sealed blob) | 'raw' | 'reference' (Phase 2).
+  secretMode String @default("embed")
+  /// Bind-mount host paths explicitly included (opt-in — never swept in automatically).
+  includeBinds String[] @default([])
+  /// Restic --exclude patterns.
+  excludes     String[] @default([])
+  lastRunAt   DateTime?
+  lastStatus  String    @default("never")
+  lastMessage String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  runs StackBackupRun[]
+
+  @@unique([connectorInstanceId, stackName])
+  @@index([targetId])
+}
+
+/// One backup attempt. Holds the restic summary plus the full run log.
+model StackBackupRun {
+  id       String             @id @default(cuid())
+  policyId String?
+  policy   StackBackupPolicy? @relation(fields: [policyId], references: [id], onDelete: SetNull)
+  connectorInstanceId String
+  stackName           String
+  targetId            String
+  /// 'manual' | 'schedule'.
+  trigger String @default("manual")
+  /// running | success | error.
+  status  String
+  /// The restic snapshot id, once the backup succeeds.
+  snapshotId String?
+  /// restic summary counters (bytes are BigInt; DTOs convert with Number()).
+  bytesAdded BigInt?
+  bytesTotal BigInt?
+  filesNew   Int?
+  filesTotal Int?
+  /// How many named volumes / bind paths were in the capture set.
+  volumes Int @default(0)
+  binds   Int @default(0)
+  durationMs Int?
+  message    String?
+  /// Combined helper output, trimmed — what the UI's log drawer shows.
+  log        String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([policyId, startedAt])
+  @@index([connectorInstanceId, stackName, startedAt])
+}

@@ -26,6 +26,7 @@ import { SecretsRevealModule } from './secrets/secrets-reveal.module';
 import { AutomationsModule } from './automations/automations.module';
 import { DockerFleetModule } from './docker-fleet/docker-fleet.module';
 import { SystemBackupModule } from './system-backup/system-backup.module';
+import { StackBackupModule } from './stack-backup/stack-backup.module';
 import { SearchModule } from './search/search.module';
 import { AppReplicatorModule } from './app-replicator/app-replicator.module';
 import { FabricModule } from './fabric/fabric.module';
@@ -66,6 +67,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     AutomationsModule,
     DockerFleetModule,
     SystemBackupModule,
+    StackBackupModule,
     SearchModule,
     AppReplicatorModule,
     FabricModule,

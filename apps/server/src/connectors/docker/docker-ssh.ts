@@ -70,6 +70,11 @@ export function runSsh(cfg: SshConfig, command: string, stdin?: string, timeoutM
         // prompts that way rather than the plain 'password' method.
         tryKeyboard: !!cfg.password,
         readyTimeout: 20_000,
+        // Long-running commands (a --no-cache build, a stack backup) can go many
+        // minutes without writing a byte; without keepalives an idle NAT or sshd
+        // ClientAliveInterval drops the channel and the command dies half-done.
+        keepaliveInterval: 15_000,
+        keepaliveCountMax: 240,
         // TOFU host-key pinning when a verifier is supplied: refuse a changed key
         // (MITM / rebuilt host) instead of trusting the network path.
         hostVerifier: cfg.verifyHostKey

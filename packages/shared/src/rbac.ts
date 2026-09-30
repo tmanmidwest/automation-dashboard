@@ -24,6 +24,11 @@ export type Permission =
   // App Replicator (deploy apps from Git; session-only — deploying runs infra)
   | 'replicator:read'
   | 'replicator:write'
+  // Stack backup & restore (docs/stack-backup.md). Distinct from the system backup
+  // at /settings/backup, which is gated by settings:write.
+  | 'backup:read' // see targets, policies, runs
+  | 'backup:write' // configure targets/policies, start a backup
+  | 'backup:restore' // restore a stack (Phase 3) — separately gated, it overwrites data
   // Connectors (extension host)
   | 'connectors:read'
   | 'connectors:write' // install / configure / enable
@@ -55,6 +60,7 @@ export const BUILTIN_ROLES = {
       'connectors:read',
       'monitors:read',
       'replicator:read',
+      'backup:read',
       'fabric:read',
       'assistant:use',
     ] as Permission[],
@@ -82,6 +88,9 @@ export const BUILTIN_ROLES = {
       'automations:write',
       'replicator:read',
       'replicator:write',
+      'backup:read',
+      'backup:write',
+      'backup:restore',
       'fabric:read',
       'fabric:connect',
       'fabric:manage',
@@ -116,6 +125,7 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   'settings:read',
   'automations:read',
   'replicator:read',
+  'backup:read',
   // Write / action scopes:
   'connectors:action',
   'monitors:write',

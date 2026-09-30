@@ -4,15 +4,15 @@ export function PageHeader({ title, description, actions }: {
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 mb-6">
-      <div className="flex items-start gap-3 min-w-0">
-        <span className="lcars-accentbar mt-2" aria-hidden />
-        <div className="min-w-0">
+    <div className="mb-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3 min-w-0">
+          <span className="lcars-accentbar mt-2" aria-hidden />
           <h1 className="font-lcars text-3xl font-semibold leading-none text-balance">{title}</h1>
-          {description && <p className="text-sm text-muted-foreground mt-1.5">{description}</p>}
         </div>
+        {actions && <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">{actions}</div>}
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+      {description && <p className="text-sm text-muted-foreground mt-1.5 max-w-3xl">{description}</p>}
     </div>
   );
 }

@@ -24,6 +24,7 @@ import { Timeline } from '@/pages/Timeline';
 import { Automations } from '@/pages/Automations';
 import { DockerFleet } from '@/pages/DockerFleet';
 import { Replicator } from '@/pages/Replicator';
+import { StackBackups } from '@/pages/StackBackups';
 import { Fabric } from '@/pages/Fabric';
 import { FabricSession } from '@/pages/FabricSession';
 import { Computer } from '@/pages/Computer';
@@ -106,6 +107,7 @@ function Router() {
       <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
       <Route path="/docker-fleet" element={<Protected><RequirePerm perm="connectors:read"><DockerFleet /></RequirePerm></Protected>} />
       <Route path="/replicator" element={<Protected><RequirePerm perm="replicator:read"><Replicator /></RequirePerm></Protected>} />
+      <Route path="/backups" element={<Protected><RequirePerm perm="backup:read"><StackBackups /></RequirePerm></Protected>} />
       <Route path="/fabric" element={<Protected><RequirePerm perm="fabric:read"><Fabric /></RequirePerm></Protected>} />
       <Route path="/fabric/session" element={<ProtectedBare><FabricSession /></ProtectedBare>} />
       <Route path="/computer" element={<Protected><RequirePerm perm="assistant:use"><Computer /></RequirePerm></Protected>} />

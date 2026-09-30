@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'crypto';
 
 /**
  * Rough guard against a human-memorable key. A 32-byte random key encoded as
@@ -66,6 +66,19 @@ export class CryptoService {
     const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64'));
     decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
     return Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]).toString('utf8');
+  }
+
+  /**
+   * A keyed, one-way digest of a secret value. Lets Cerebro answer "is this the
+   * same value?" — has a vault credential been pasted into a stack's .env, has a
+   * value drifted since a backup was taken — without ever storing or comparing
+   * plaintext. Keyed (not a bare hash) so a digest in a backup manifest can't be
+   * brute-forced back to a weak password, and domain-separated so it can never
+   * assist decryption. See docs/stack-backup.md.
+   */
+  valueDigest(value: string): string {
+    const subkey = createHash('sha256').update(this.key).update('cerebro:value-digest:v1').digest();
+    return createHmac('sha256', subkey).update(value, 'utf8').digest('hex').slice(0, 32);
   }
 
   encrypt(plaintext: string): string {

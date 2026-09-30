@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Puzzle, Ship, Video, Activity, Users, History, Zap, ScrollText,
   Settings, Info, Search, CornerDownLeft, ChevronRight, ChevronLeft, Plus, DatabaseBackup,
-  LogOut, Lock, KeyRound, Bell, Mail, ShieldCheck, Boxes, Play, Cpu,
+  LogOut, Lock, KeyRound, Bell, Mail, ShieldCheck, Boxes, Play, Cpu, Archive,
 } from 'lucide-react';
 import type { Permission, ConnectorInstanceSummary, MonitorSummary, SearchHit, ConnectorManifest } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -138,6 +138,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'nav-dashboard', group: 'Go to', label: 'Dashboard', icon: LayoutDashboard, run: () => go('/'), track: { label: 'Dashboard', to: '/' } },
       { id: 'nav-connectors', group: 'Go to', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', run: () => go('/connectors'), track: { label: 'Connectors', to: '/connectors' } },
       { id: 'nav-fleet', group: 'Go to', label: 'Docker Fleet', icon: Ship, perm: 'connectors:read', run: () => go('/docker-fleet'), track: { label: 'Docker Fleet', to: '/docker-fleet' } },
+      { id: 'nav-backups', group: 'Go to', label: 'Stack Backups', icon: Archive, perm: 'backup:read', run: () => go('/backups'), track: { label: 'Stack Backups', to: '/backups' } },
       { id: 'nav-viewscreen', group: 'Go to', label: 'Viewscreen', icon: Video, perm: 'connectors:read', run: () => go('/viewscreen'), track: { label: 'Viewscreen', to: '/viewscreen' } },
       { id: 'nav-monitors', group: 'Go to', label: 'Monitors', icon: Activity, perm: 'monitors:read', run: () => go('/monitors'), track: { label: 'Monitors', to: '/monitors' } },
       { id: 'nav-automations', group: 'Go to', label: 'Automations', icon: Zap, perm: 'automations:read', run: () => go('/automations'), track: { label: 'Automations', to: '/automations' } },

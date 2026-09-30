@@ -16,6 +16,7 @@ import {
   Boxes,
   Cpu,
   Radio,
+  Archive,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -36,6 +37,7 @@ const NAV: NavItem[] = [
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
   { to: '/docker-fleet', label: 'Docker Fleet', icon: Ship, perm: 'connectors:read', code: '02-DKR' },
   { to: '/replicator', label: 'App Replicator', icon: Boxes, perm: 'replicator:read', code: '02-REP' },
+  { to: '/backups', label: 'Stack Backups', icon: Archive, perm: 'backup:read', code: '02-BAK' },
   { to: '/fabric', label: 'Fabric', icon: Radio, perm: 'fabric:read', code: '02-FAB' },
   { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
