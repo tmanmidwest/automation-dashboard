@@ -229,7 +229,7 @@ export function Fabric() {
   type Reconnect = () => Promise<FabricSessionTicket>;
   const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string; reopen?: () => void; reconnect?: Reconnect } | null>(null);
   const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean; reopen?: () => void; reconnect?: Reconnect } | null>(null);
-  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string }; reopen?: () => void; reconnect?: Reconnect } | null>(null);
+  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string }; reopen?: () => void; reconnect?: Reconnect; remoteBrowser?: boolean } | null>(null);
 
   /**
    * Launch a session either in a new tab (default) or an in-page overlay. `win`
@@ -246,14 +246,13 @@ export function Fabric() {
       dynamicResize?: boolean;
       vncCreds?: { username?: string; password?: string };
       reopen?: () => void;
-      /** Present when the target has a saved credential, enabling auto-reconnect. */
-      reconnectCtx?: { agentId: string; targetId: string };
+      /** Present when the session can be re-minted after a drop — a saved
+       *  credential (SSH/RDP/VNC) or a Remote Browser route (relaunched). */
+      reconnectCtx?: ReconnectCtx;
     },
   ) => {
-    // Auto-reconnect re-mints with the saved credential; only offered when there is one.
-    const reconnect = extra?.reconnectCtx
-      ? () => reconnectSession(extra.reconnectCtx!.agentId, extra.reconnectCtx!.targetId, kind)
-      : undefined;
+    // Auto-reconnect re-mints after a drop; only offered when we have the ingredients.
+    const reconnect = extra?.reconnectCtx ? makeReconnect(extra.reconnectCtx, kind) : undefined;
     if (win) {
       // New-tab sessions run on the standalone page; pass the reconnect ingredients
       // (not the closure) so that page can auto-reconnect too.
@@ -271,7 +270,7 @@ export function Fabric() {
     }
     if (kind === 'ssh') setSession({ ticket, title, reopen: extra?.reopen, reconnect });
     else if (kind === 'rdp') setRdpSession({ ticket, title, dynamicResize: !!extra?.dynamicResize, reopen: extra?.reopen, reconnect });
-    else setVncSession({ ticket, title, creds: extra?.vncCreds, reopen: extra?.reopen, reconnect });
+    else setVncSession({ ticket, title, creds: extra?.vncCreds, reopen: extra?.reopen, reconnect, remoteBrowser: extra?.reconnectCtx?.remoteBrowser });
   };
 
   const openConnect = (agent: FabricAgentDto, t: FabricTargetDto) => {
@@ -290,6 +289,10 @@ export function Fabric() {
       const ticket = await awaitSession(resp);
       launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win, {
         vncCreds: ticket.password ? { password: ticket.password } : undefined,
+        // On a drop, relaunch a fresh Remote Browser container for this route
+        // (auto-reconnect + the manual "Reconnect" button). No saved credential
+        // needed — the server re-derives everything from the route.
+        reconnectCtx: { agentId: agent.id, targetId: t.id, remoteBrowser: true },
       });
     } catch (e) {
       win?.close();
@@ -1181,7 +1184,7 @@ export function Fabric() {
           reconnect={rdpSession.reconnect}
         />
       )}
-      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} creds={vncSession.creds} onClose={() => setVncSession(null)} onReconnect={vncSession.reopen} reconnect={vncSession.reconnect} />}
+      {vncSession && <VncViewer session={vncSession.ticket} title={vncSession.title} creds={vncSession.creds} onClose={() => setVncSession(null)} onReconnect={vncSession.reopen} reconnect={vncSession.reconnect} remoteBrowser={vncSession.remoteBrowser} />}
     </div>
   );
 }
@@ -3113,6 +3116,15 @@ function RdpConnectDialog({
  * the same remote session; SSH gets a fresh shell). Requires a saved credential —
  * throws if the target has none (the caller then falls back to a manual reconnect).
  */
+/** Ingredients to re-mint a session after a drop. `remoteBrowser` picks the
+ *  Remote Browser relaunch (a fresh ephemeral container) over the saved-credential
+ *  reconnect used by SSH/RDP/VNC targets. */
+export interface ReconnectCtx {
+  agentId: string;
+  targetId: string;
+  remoteBrowser?: boolean;
+}
+
 export async function reconnectSession(
   agentId: string,
   targetId: string,
@@ -3124,6 +3136,23 @@ export async function reconnectSession(
     { useSaved: true },
   );
   return awaitSession(resp);
+}
+
+/** Re-mint a Remote Browser session: spins up a brand-new ephemeral container for
+ *  the same web route (the original was torn down on disconnect, so re-attaching
+ *  isn't possible — we relaunch). */
+export async function reconnectRemoteBrowser(agentId: string, targetId: string): Promise<FabricSessionTicket> {
+  const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(
+    `/api/fabric/agents/${agentId}/targets/${targetId}/remote-browser-session`,
+  );
+  return awaitSession(resp);
+}
+
+/** Build the reconnect closure for a viewer from its saved reconnect ingredients. */
+export function makeReconnect(ctx: ReconnectCtx, kind: 'ssh' | 'rdp' | 'vnc'): () => Promise<FabricSessionTicket> {
+  return ctx.remoteBrowser
+    ? () => reconnectRemoteBrowser(ctx.agentId, ctx.targetId)
+    : () => reconnectSession(ctx.agentId, ctx.targetId, kind);
 }
 
 /**
@@ -3182,20 +3211,28 @@ function ReconnectingOverlay() {
 }
 
 /**
- * Shown over a session viewer when the tunnel drops after it had connected — a
- * proxy recycling the agent's WebSocket kills the in-flight session, so instead of
- * a silently frozen frame the operator gets a clear "connection lost" state and,
- * when reconnect context is available (in-page sessions), a one-click reconnect.
+ * Shown over a session viewer when it drops after having connected — the viewer
+ * WebSocket closed (an agent-tunnel blip, a proxy recycling the socket, or a
+ * server redeploy) — so instead of a silently frozen frame the operator gets a
+ * clear "connection lost" state and, when a reconnect path is available, a
+ * one-click reconnect. `description` is tailored per session kind (e.g. Remote
+ * Browser relaunches a fresh container rather than re-attaching).
  */
-function SessionLostOverlay({ onReconnect, onClose }: { onReconnect?: () => void; onClose: () => void }) {
+function SessionLostOverlay({
+  onReconnect,
+  onClose,
+  description = 'The tunnel to the agent dropped — it usually reconnects within a few seconds. Reconnect to resume the session.',
+}: {
+  onReconnect?: () => void;
+  onClose: () => void;
+  description?: string;
+}) {
   return (
     <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">
       <div className="max-w-sm text-center rounded-lg border border-border bg-card p-5 shadow-xl">
         <WifiOff className="h-8 w-8 mx-auto mb-2 text-amber-400" />
         <p className="text-sm font-medium">Connection lost</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          The tunnel to the agent dropped — it usually reconnects within a few seconds. Reconnect to resume the session.
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
         <div className="mt-4 flex justify-center gap-2">
           {onReconnect && (
             <Button size="sm" onClick={onReconnect}>
@@ -3389,6 +3426,7 @@ export function VncViewer({
   onClose,
   onReconnect,
   reconnect,
+  remoteBrowser,
 }: {
   session: FabricSessionTicket;
   title: string;
@@ -3397,6 +3435,9 @@ export function VncViewer({
   onClose: () => void;
   onReconnect?: () => void;
   reconnect?: () => Promise<FabricSessionTicket>;
+  /** This viewer is a Remote Browser (ephemeral container), not a VNC target —
+   *  tailors the "connection lost" copy (reconnect relaunches a fresh browser). */
+  remoteBrowser?: boolean;
 }) {
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
@@ -3499,6 +3540,22 @@ export function VncViewer({
     }
   }
 
+  // Manual reconnect for the "Connection lost" overlay. Prefer the caller's handler
+  // (in-page viewers reopen the connect dialog); otherwise, when we can re-mint —
+  // e.g. a Remote Browser opened in its own tab, which relaunches a fresh container —
+  // do it here and swap in the new ticket (the effect reconnects on the token change).
+  const manualReconnect = onReconnect
+    ? onReconnect
+    : reconnect
+      ? () => {
+          setStatus('connecting');
+          setError(null);
+          void reconnect()
+            .then((t) => setTicket(t))
+            .catch(() => setStatus('disconnected'));
+        }
+      : undefined;
+
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
       <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
@@ -3543,7 +3600,15 @@ export function VncViewer({
         <div ref={screenRef} className="absolute inset-0 overflow-auto grid place-items-center" />
         {reconnecting && <ReconnectingOverlay />}
         {status === 'disconnected' && wasConnected && !credTypes && !reconnecting && (
-          <SessionLostOverlay onReconnect={onReconnect} onClose={onClose} />
+          <SessionLostOverlay
+            onReconnect={manualReconnect}
+            onClose={onClose}
+            description={
+              remoteBrowser
+                ? 'The remote browser session ended (the screen stream closed). Reconnect to open a fresh browser on this page.'
+                : undefined
+            }
+          />
         )}
         {credTypes && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm">

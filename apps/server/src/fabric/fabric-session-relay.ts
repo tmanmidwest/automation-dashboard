@@ -2,6 +2,7 @@ import type { Server } from 'http';
 import { WebSocketServer } from 'ws';
 import { Logger } from '@nestjs/common';
 import { FabricSessionService } from './fabric-session.service';
+import { attachWsKeepalive } from './ws-keepalive';
 
 const SESSION_PATH = '/api/fabric/session/ws';
 const logger = new Logger('FabricSessionRelay');
@@ -34,6 +35,9 @@ export function attachFabricSessionRelay(server: Server, sessions: FabricSession
     }
 
     wss.handleUpgrade(req, socket, head, (client) => {
+      // An idle SSH shell or a static VNC screen sends no frames; keep the socket
+      // warm so the ingress doesn't idle-close it mid-session.
+      attachWsKeepalive(client);
       void sessions.handleSession(client, desc);
     });
   });

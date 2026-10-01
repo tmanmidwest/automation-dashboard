@@ -2,6 +2,7 @@ import type { Server } from 'http';
 import { WebSocketServer } from 'ws';
 import { Logger } from '@nestjs/common';
 import { RemoteBrowserService } from './remote-browser.service';
+import { attachWsKeepalive } from './ws-keepalive';
 
 const REMOTE_BROWSER_PATH = '/api/fabric/remote-browser/ws';
 const logger = new Logger('FabricRemoteBrowserRelay');
@@ -33,6 +34,10 @@ export function attachFabricRemoteBrowserRelay(server: Server, remoteBrowser: Re
     }
 
     wss.handleUpgrade(req, socket, head, (client) => {
+      // A Remote Browser screen is static most of the time (no VNC framebuffer
+      // updates, no operator input) — keep the socket warm so the ingress doesn't
+      // idle-close it out from under the viewer.
+      attachWsKeepalive(client);
       void remoteBrowser.handleWs(client, session);
     });
   });
