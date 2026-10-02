@@ -16,10 +16,12 @@ import type {
   FabricTargetDto,
   FabricVncConnectInput,
   FabricVncSessionTicket,
+  FabricWebAutofillMode,
   RdpCredential,
   SessionUser,
   SshCredential,
   VncCredential,
+  WebCredential,
 } from '@cerebro/shared';
 
 /** Create/edit input for a route (kind validated at runtime in normalizeRoute). */
@@ -31,11 +33,13 @@ type RouteInput = {
   group?: string;
   secretRef?: string;
   webUrl?: string;
+  webIgnoreCertErrors?: boolean;
+  webAutofill?: string;
 };
 
 /** Structured Fabric credential kinds that live in the vault. */
-type FabricCredKind = 'ssh' | 'rdp' | 'vnc';
-type FabricCredValue = SshCredential | RdpCredential | VncCredential;
+type FabricCredKind = 'ssh' | 'rdp' | 'vnc' | 'web';
+type FabricCredValue = SshCredential | RdpCredential | VncCredential | WebCredential;
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { SecretsService } from '../secrets/secrets.service';
@@ -350,11 +354,33 @@ export class FabricService implements OnModuleInit {
     if (target.agent?.status === 'deleting') throw new BadRequestException('This agent is being removed.');
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Waypoint is offline.');
     const webUrl = target.webUrl;
+    const secretRef = target.secretRef || undefined;
+    const autofill = this.normalizeAutofill(target.webAutofill);
+    const injectArmed = !!secretRef && autofill !== 'off';
     return this.gate(
       agentId,
       { kind: 'web', host: target.host, port: target.port, url: webUrl },
       user,
-      () => this.remoteBrowser.launch({ agentId, targetId, url: webUrl, host: target.host, port: target.port, ignoreCertErrors: target.webIgnoreCertErrors, user }),
+      async () => {
+        // Resolve the web credential only now — inside the mint closure — so it is
+        // never read (or held) while a four-eyes approval is pending, mirroring the
+        // ssh/rdp/vnc flows. The plaintext is handed to the broker for in-container
+        // injection and never returned to the operator's client.
+        const cred = injectArmed
+          ? ((await this.revealCredential(secretRef!, 'web')) as WebCredential)
+          : undefined;
+        return this.remoteBrowser.launch({
+          agentId,
+          targetId,
+          url: webUrl,
+          host: target.host,
+          port: target.port,
+          ignoreCertErrors: target.webIgnoreCertErrors,
+          autofill: injectArmed ? autofill : 'off',
+          cred,
+          user,
+        });
+      },
     );
   }
 
@@ -745,6 +771,7 @@ export class FabricService implements OnModuleInit {
     secretRef?: string | null;
     webUrl?: string | null;
     webIgnoreCertErrors?: boolean;
+    webAutofill?: string | null;
   }): {
     kind: string;
     host: string;
@@ -754,6 +781,7 @@ export class FabricService implements OnModuleInit {
     secretRef: string | null;
     webUrl: string | null;
     webIgnoreCertErrors: boolean;
+    webAutofill: FabricWebAutofillMode | null;
   } {
     const kind = input.kind;
     if (kind !== 'ssh' && kind !== 'rdp' && kind !== 'vnc' && kind !== 'web') {
@@ -764,7 +792,10 @@ export class FabricService implements OnModuleInit {
     const secretRef = input.secretRef?.trim() ? input.secretRef.trim().slice(0, 256) : null;
 
     // Remote Browser: host/port are parsed from the URL (the remote browser dials them
-    // through the tunnel), and the full URL is what the browser opens.
+    // through the tunnel), and the full URL is what the browser opens. A `web`-kind
+    // secretRef (optional) is injected INTO the page by the in-container autofill
+    // helper; `webAutofill` picks when (default `manual`). Kind of the referenced
+    // secret is enforced at inject time (revealCredential), as for ssh/rdp/vnc.
     if (kind === 'web') {
       const raw = (input.webUrl ?? '').trim();
       if (!raw) throw new BadRequestException('A Remote Browser needs a URL.');
@@ -782,7 +813,8 @@ export class FabricService implements OnModuleInit {
         throw new BadRequestException('A Waypoint targets the LAN, not its own loopback.');
       }
       const port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
-      return { kind, host, port, label, group, secretRef: null, webUrl: u.toString(), webIgnoreCertErrors: !!input.webIgnoreCertErrors };
+      const webAutofill = this.normalizeAutofill(input.webAutofill);
+      return { kind, host, port, label, group, secretRef, webUrl: u.toString(), webIgnoreCertErrors: !!input.webIgnoreCertErrors, webAutofill };
     }
 
     const host = (input.host ?? '').trim();
@@ -794,7 +826,12 @@ export class FabricService implements OnModuleInit {
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       throw new BadRequestException('port must be 1–65535.');
     }
-    return { kind, host, port, label, group, secretRef, webUrl: null, webIgnoreCertErrors: false };
+    return { kind, host, port, label, group, secretRef, webUrl: null, webIgnoreCertErrors: false, webAutofill: null };
+  }
+
+  /** Coerce a web-autofill mode to a valid value, defaulting to `manual`. */
+  private normalizeAutofill(v?: string | null): FabricWebAutofillMode {
+    return v === 'off' || v === 'auto' || v === 'manual' ? v : 'manual';
   }
 
   async createRoute(
@@ -820,6 +857,7 @@ export class FabricService implements OnModuleInit {
         secretRef: t.secretRef,
         webUrl: t.webUrl,
         webIgnoreCertErrors: t.webIgnoreCertErrors,
+        webAutofill: t.webAutofill,
         source: 'curated',
       },
     });
@@ -857,6 +895,7 @@ export class FabricService implements OnModuleInit {
         secretRef: t.secretRef,
         webUrl: t.webUrl,
         webIgnoreCertErrors: t.webIgnoreCertErrors,
+        webAutofill: t.webAutofill,
         source: 'curated',
         ...(identityChanged ? { hostKey: null } : {}),
       },
@@ -1128,6 +1167,7 @@ export class FabricService implements OnModuleInit {
           group: t.group,
           webUrl: t.webUrl,
           webIgnoreCertErrors: t.webIgnoreCertErrors,
+          webAutofill: (t.webAutofill as FabricWebAutofillMode | null) ?? undefined,
         }),
       ),
     };

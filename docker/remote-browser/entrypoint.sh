@@ -30,6 +30,20 @@ fi
 PROXY_ARG=""
 [ -n "${CHROME_PROXY:-}" ] && PROXY_ARG="--proxy-server=${CHROME_PROXY}"
 
+# Web-credential autofill (optional). When the broker arms a credential it passes
+# AUTOFILL_REDEEM_URL; we then enable the DevTools protocol on loopback ONLY (never
+# published, never on the SOCKS bridge) and start the helper, which redeems the
+# credential one-shot and fills the login form over CDP. Without the URL, CDP stays
+# off. See docs/fabric-remote-browser-credential-injection.md.
+CDP_ARG=""
+if [ -n "${AUTOFILL_REDEEM_URL:-}" ]; then
+  CDP_PORT="${CDP_PORT:-9222}"
+  export CDP_PORT
+  # --remote-debugging-port binds 127.0.0.1 by default; keep it loopback-only.
+  CDP_ARG="--remote-debugging-port=${CDP_PORT}"
+  node /usr/local/bin/autofill-helper.js &
+fi
+
 # Optionally accept invalid TLS certs (self-signed internal sites, e.g. a Proxmox
 # host). --test-type suppresses the "unsupported flag" warning bar. Word-splits
 # into two args on purpose.
@@ -53,6 +67,7 @@ exec chromium \
   --start-maximized \
   ${PROXY_ARG} \
   ${CERT_ARG} \
+  ${CDP_ARG} \
   --proxy-bypass-list="<-loopback>" \
   --kiosk \
   "${START_URL}"

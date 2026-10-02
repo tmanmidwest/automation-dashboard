@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { connect as netConnect, isIP } from 'net';
 import { lookup } from 'dns/promises';
 import { existsSync } from 'fs';
@@ -7,8 +7,15 @@ import { createHash } from 'crypto';
 import { join } from 'path';
 import { hostname } from 'os';
 import { randomUUID, randomBytes } from 'crypto';
+import type { Response } from 'express';
 import type { WebSocket } from 'ws';
-import type { FabricSessionTicket, FabricVncSessionTicket, SessionUser } from '@cerebro/shared';
+import type {
+  FabricInjectResult,
+  FabricRemoteBrowserTicket,
+  FabricWebAutofillMode,
+  SessionUser,
+  WebCredential,
+} from '@cerebro/shared';
 
 // VNC's classic auth is an 8-byte secret; generate 8 chars from a broad alphabet
 // (~47 bits) so a co-resident container can't attach to the browser's VNC without it.
@@ -67,6 +74,17 @@ interface RemoteBrowserSession {
   redeemTimer?: NodeJS.Timeout;
   maxTimer?: NodeJS.Timeout;
   sessionRowId?: string;
+  // --- Web-credential autofill (see docs/fabric-remote-browser-credential-injection.md) ---
+  /** 'off' when no web credential is attached; else how the fill fires. */
+  autofill: FabricWebAutofillMode;
+  /** Resolved web credential, held in memory only and nulled once delivered to the helper. */
+  cred?: WebCredential | null;
+  /** Single-use redemption token the in-container helper authenticates with. */
+  autofillToken?: string;
+  /** Whether the credential may be handed over yet ('auto' arms at launch; 'manual' on Inject). */
+  autofillArmed: boolean;
+  /** True once the helper has redeemed the credential (one-shot). */
+  autofillRedeemed: boolean;
 }
 
 /**
@@ -81,6 +99,8 @@ interface RemoteBrowserSession {
 export class RemoteBrowserService {
   private readonly logger = new Logger('RemoteBrowser');
   private readonly sessions = new Map<string, RemoteBrowserSession>();
+  /** autofill redemption token → session token, for the in-container helper lookup. */
+  private readonly autofillIndex = new Map<string, string>();
   // Slots reserved synchronously by an in-flight launch() before its container
   // exists, so a concurrent burst can't all pass the cap check then each create a
   // container (the sessions map alone only stops a sequential loop).
@@ -152,8 +172,12 @@ export class RemoteBrowserService {
     port: number;
     /** Per-route: accept invalid/self-signed TLS certs for THIS session only. */
     ignoreCertErrors?: boolean;
+    /** Web-credential autofill mode ('off' when no credential is attached). */
+    autofill?: FabricWebAutofillMode;
+    /** Resolved web credential to inject (already revealed by FabricService). */
+    cred?: WebCredential | null;
     user: SessionUser;
-  }): Promise<FabricVncSessionTicket> {
+  }): Promise<FabricRemoteBrowserTicket> {
     // Hold a reserved slot for the whole build; released once the session is in the
     // map (then it counts there) or on any failure. Held across every await so
     // concurrent launches see each other's reservations.
@@ -186,6 +210,12 @@ export class RemoteBrowserService {
 
     const token = randomUUID();
     const vncPassword = makeVncPassword();
+    // Arm web-credential autofill only when a credential was resolved and the route
+    // asks for it. The helper redeems the credential ONCE from inside the container
+    // over the internal Docker network (never via env/disk/URL).
+    const autofill: FabricWebAutofillMode = params.autofill && params.autofill !== 'off' && params.cred ? params.autofill : 'off';
+    const autofillToken = autofill !== 'off' ? randomUUID() : undefined;
+    const redeemUrl = autofillToken ? this.redeemUrl(callbackHost, autofillToken) : undefined;
     // Bind the SOCKS bridge to the exact interface the browser reaches us on (the
     // IP `callbackHost` resolves to) instead of all interfaces, so it isn't a
     // credential-free pivot open to any peer on another network this container is on.
@@ -214,6 +244,10 @@ export class RemoteBrowserService {
           `GEOMETRY=${geometry}`,
           `VNC_PASSWORD=${vncPassword}`,
           ...(ignoreCertErrors ? ['IGNORE_CERT_ERRORS=1'] : []),
+          // Presence of AUTOFILL_REDEEM_URL makes the entrypoint enable CDP (bound to
+          // 127.0.0.1 only) and start the autofill helper. The credential itself is
+          // NOT in the env — the helper fetches it one-shot from this URL.
+          ...(redeemUrl ? [`AUTOFILL_REDEEM_URL=${redeemUrl}`] : []),
         ],
         Labels: { 'cerebro.remote-browser': 'true', 'cerebro.remote-browser.session': token },
         HostConfig: {
@@ -256,7 +290,13 @@ export class RemoteBrowserService {
       vncHost,
       vncPassword,
       redeemed: false,
+      autofill,
+      cred: autofill !== 'off' ? params.cred : null,
+      autofillToken,
+      autofillArmed: autofill === 'auto', // 'manual' arms on an operator Inject
+      autofillRedeemed: false,
     };
+    if (autofillToken) this.autofillIndex.set(autofillToken, token);
     // If the browser is never opened, reclaim it.
     session.redeemTimer = setTimeout(() => {
       if (!session.redeemed) void this.teardown(session, 'unredeemed');
@@ -274,10 +314,91 @@ export class RemoteBrowserService {
       meta: { targetId: params.targetId, url: params.url, host: params.host, port: params.port },
     });
 
-    return { token, wsPath: REMOTE_BROWSER_WS_PATH, password: vncPassword };
+    return {
+      token,
+      wsPath: REMOTE_BROWSER_WS_PATH,
+      password: vncPassword,
+      autofill: autofill === 'off' ? undefined : autofill,
+    };
     } finally {
       releaseSlot();
     }
+  }
+
+  /** The internal URL the in-container helper redeems its one-shot credential from.
+   *  Reachable container→app over the shared Docker network (app listens on PORT). */
+  private redeemUrl(callbackHost: string, autofillToken: string): string {
+    const port = process.env.PORT ?? '3000';
+    return `http://${callbackHost}:${port}/api/fabric/internal/autofill/${autofillToken}`;
+  }
+
+  /**
+   * Arm web-credential autofill for a live session (the operator's manual "Inject").
+   * The helper picks up the armed credential on its next redemption poll. Scoped to
+   * the requesting operator's own session; the credential is never returned here.
+   */
+  armInject(token: string, user: SessionUser): FabricInjectResult {
+    const s = this.sessions.get(token);
+    if (!s) throw new NotFoundException('Remote Browser session not found or already closed.');
+    if (s.userId !== user.id) throw new ForbiddenException('Not your Remote Browser session.');
+    if (s.autofill === 'off' || !s.autofillToken) {
+      throw new BadRequestException('No web credential is attached to this route.');
+    }
+    if (s.autofillRedeemed) return { ok: true, detail: 'Credentials already injected.' };
+    s.autofillArmed = true;
+    this.logger.log(`Remote Browser ${token.slice(0, 8)} autofill armed by ${user.email ?? user.id}.`);
+    return { ok: true, detail: 'Injecting credentials…' };
+  }
+
+  /**
+   * INTERNAL one-shot credential redemption for the in-container autofill helper.
+   * Authenticated solely by the single-use token and scoped to the browser
+   * container's own source IP. Returns the credential at most once, and only while
+   * armed (always for 'auto'; after an operator Inject for 'manual'); 204 otherwise.
+   */
+  async redeemAutofill(autofillToken: string, clientIp: string, res: Response): Promise<void> {
+    const sessionToken = this.autofillIndex.get(autofillToken);
+    const s = sessionToken ? this.sessions.get(sessionToken) : undefined;
+    if (!s || s.autofillToken !== autofillToken) {
+      res.status(404).end();
+      return;
+    }
+    // Defence-in-depth: only the browser container we launched may redeem, so a
+    // co-resident container on the shared network can't lift the credential.
+    if (s.vncHost && clientIp && clientIp !== s.vncHost) {
+      this.logger.warn(
+        `Remote Browser autofill redemption from ${clientIp} (expected ${s.vncHost}) — refused.`,
+      );
+      res.status(403).end();
+      return;
+    }
+    if (!s.autofillArmed || !s.cred) {
+      res.status(204).end(); // not armed yet (manual waiting on Inject) — poll again
+      return;
+    }
+    if (s.autofillRedeemed) {
+      res.status(204).end();
+      return;
+    }
+    s.autofillRedeemed = true;
+    this.autofillIndex.delete(autofillToken);
+    const payload = {
+      mode: s.autofill,
+      username: s.cred.username,
+      password: s.cred.password,
+      recipe: s.cred.loginRecipe ?? null,
+      // TOTP computed server-side is P3 — see docs/fabric-remote-browser-credential-injection.md
+    };
+    // Zero the retained plaintext now it's been handed to the (in-container) helper.
+    s.cred = null;
+    void this.audit.record({
+      actorId: s.userId,
+      actorEmail: s.userEmail ?? undefined,
+      action: 'fabric.remoteBrowser.autofill',
+      target: s.agentId,
+      meta: { targetId: s.targetId, url: s.url, mode: payload.mode, recipe: !!payload.recipe },
+    });
+    res.status(200).json(payload);
   }
 
   /** Redeem a one-time ticket (called by the WS relay on upgrade). */
@@ -370,6 +491,8 @@ export class RemoteBrowserService {
   private async teardown(session: RemoteBrowserSession, reason: string): Promise<void> {
     if (!this.sessions.has(session.token)) return;
     this.sessions.delete(session.token);
+    if (session.autofillToken) this.autofillIndex.delete(session.autofillToken);
+    session.cred = null;
     if (session.redeemTimer) clearTimeout(session.redeemTimer);
     if (session.maxTimer) clearTimeout(session.maxTimer);
     try { session.proxy.close(); } catch { /* noop */ }

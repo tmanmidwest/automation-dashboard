@@ -723,6 +723,10 @@ model AgentTarget {
   /// Remote Browser only: accept invalid/self-signed TLS certs for THIS route only
   /// (e.g. an internal Proxmox host). Per-route so it never weakens other sessions.
   webIgnoreCertErrors Boolean @default(false)
+  /// Remote Browser only: web-credential autofill behavior when a `web`-kind
+  /// secretRef is attached — "off" | "auto" | "manual" (default "manual"). Null for
+  /// non-web routes. See docs/fabric-remote-browser-credential-injection.md.
+  webAutofill String?
 
   @@unique([agentId, kind, host, port])
   @@index([agentId])

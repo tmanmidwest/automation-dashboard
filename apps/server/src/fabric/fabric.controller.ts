@@ -90,6 +90,12 @@ class RouteDto {
   @IsOptional()
   @IsBoolean()
   webIgnoreCertErrors?: boolean;
+
+  /** Remote Browser only: web-credential autofill behavior ('off'|'auto'|'manual'). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  webAutofill?: string;
 }
 
 class EnrollDto {
@@ -359,6 +365,15 @@ const CLI_ARTIFACTS: Record<string, { file: string; download: string }> = {
   'windows/amd64': { file: 'cerebro-windows-amd64.exe', download: 'cerebro.exe' },
 };
 
+/** The raw peer IP of a request. For the internal autofill redemption this is the
+ *  browser container's own address on the Docker network; use the socket's remote
+ *  address (not req.ip / X-Forwarded-For, which a peer could spoof) and strip the
+ *  IPv4-mapped-IPv6 prefix. */
+function clientIp(req: Request): string {
+  const raw = req.socket?.remoteAddress || '';
+  return raw.replace(/^::ffff:/, '');
+}
+
 @Controller('api/fabric')
 export class FabricController {
   constructor(
@@ -502,12 +517,14 @@ export class FabricController {
     return this.fabric.listSessions(agentId);
   }
 
-  /** Vault credentials selectable in the connect dialog (ssh/rdp). */
+  /** Vault credentials selectable in the connect/route dialog (ssh/rdp/vnc/web). */
   @Get('credentials')
   @SessionOnly()
   @RequirePermissions('fabric:connect')
   listCredentials(@Query('kind') kind?: string) {
-    return this.fabric.listCredentials(kind === 'rdp' ? 'rdp' : kind === 'vnc' ? 'vnc' : 'ssh');
+    return this.fabric.listCredentials(
+      kind === 'rdp' ? 'rdp' : kind === 'vnc' ? 'vnc' : kind === 'web' ? 'web' : 'ssh',
+    );
   }
 
   /** Stream a session's recording for playback (Guacamole recording format). */
@@ -603,6 +620,32 @@ export class FabricController {
   @RequirePermissions('fabric:connect')
   openRemoteBrowser(@Param('id') id: string, @Param('targetId') targetId: string, @CurrentUser() user: SessionUser) {
     return this.fabric.openRemoteBrowserSession(id, targetId, user);
+  }
+
+  /**
+   * Arm web-credential autofill for a live Remote Browser session (manual trigger).
+   * The in-container helper picks up the armed credential on its next redemption poll
+   * and fills the currently-visible login form. Scoped to the caller's own session;
+   * the credential itself is never returned to the client.
+   */
+  @Post('remote-browser/:token/inject')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  injectRemoteBrowser(@Param('token') token: string, @CurrentUser() user: SessionUser) {
+    return this.remoteBrowser.armInject(token, user);
+  }
+
+  /**
+   * INTERNAL: one-shot credential redemption for the in-container autofill helper.
+   * Public (no user session) — authenticated solely by the unguessable, single-use
+   * token and scoped to the browser container's own source IP. Returns the resolved
+   * web credential at most once, and only while autofill is armed (always for `auto`,
+   * after an operator "Inject" for `manual`); otherwise 204. Never user-facing.
+   */
+  @Post('internal/autofill/:token')
+  @Public()
+  redeemAutofill(@Param('token') token: string, @Req() req: Request, @Res() res: Response) {
+    return this.remoteBrowser.redeemAutofill(token, clientIp(req), res);
   }
 
   // --- SSH certificate authority ---------------------------------------------

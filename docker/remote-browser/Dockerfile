@@ -3,9 +3,11 @@
 # A headless Chromium behind an Xvfb display, exposed over VNC (x11vnc :5900).
 # Cerebro launches ONE ephemeral container of this image per Remote Browser session,
 # passing:
-#   START_URL     the internal page to open
-#   CHROME_PROXY  socks5://<cerebro>:<port>  (rides the Waypoint tunnel)
-#   GEOMETRY      e.g. 1280x800
+#   START_URL           the internal page to open
+#   CHROME_PROXY        socks5://<cerebro>:<port>  (rides the Waypoint tunnel)
+#   GEOMETRY            e.g. 1280x800
+#   AUTOFILL_REDEEM_URL (optional) when set, enables CDP on loopback + starts the
+#                       web-credential autofill helper (see autofill-helper.js)
 # Chromium does remote DNS over SOCKS5, so internal hostnames resolve on the
 # Waypoint, not here. The container has no VNC password — it is only reachable on
 # the internal Docker network, and the session is gated by a one-time ticket.
@@ -20,9 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       fonts-liberation \
       dumb-init \
+      nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# The web-credential autofill helper (runs only when AUTOFILL_REDEEM_URL is set):
+# redeems the credential one-shot from the broker and fills the login form over CDP.
+# See docs/fabric-remote-browser-credential-injection.md.
+COPY autofill-helper.js /usr/local/bin/autofill-helper.js
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 5900

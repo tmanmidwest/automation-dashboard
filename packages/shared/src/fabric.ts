@@ -25,6 +25,14 @@ export type FabricAgentMode = 'endpoint' | 'waypoint';
 /** Route protocols. A Waypoint additionally supports `web` (a Remote Browser). */
 export type FabricRouteKind = FabricTargetKind | 'web';
 
+/**
+ * Remote Browser web-credential autofill behavior for a `web` route.
+ * `off` — never inject. `auto` — attempt fill on page load. `manual` — only when
+ * the operator clicks "Inject" in the viewer (default). Only meaningful when a
+ * `web`-kind `secretRef` is attached. See docs/fabric-remote-browser-credential-injection.md.
+ */
+export type FabricWebAutofillMode = 'off' | 'auto' | 'manual';
+
 export interface FabricTargetDto {
   id: string;
   kind: FabricRouteKind;
@@ -43,6 +51,11 @@ export interface FabricTargetDto {
   webUrl?: string | null;
   /** Remote Browser only: accept invalid/self-signed TLS certs for this route. */
   webIgnoreCertErrors?: boolean;
+  /**
+   * Remote Browser only: web-credential autofill behavior. Only meaningful when a
+   * `web`-kind credential is attached (`hasCredential`). Defaults to `manual`.
+   */
+  webAutofill?: FabricWebAutofillMode;
 }
 
 /** Create/update a Waypoint route (curated LAN target). */
@@ -53,12 +66,19 @@ export interface FabricRouteInput {
   port?: number;
   label?: string | null;
   group?: string | null;
-  /** Attach a vault credential (ssh/rdp/vnc kind) for server-side injection. */
+  /**
+   * Attach a vault credential for server-side injection. For ssh/rdp/vnc routes a
+   * matching ssh/rdp/vnc-kind secret; for `web` routes a `web`-kind secret whose
+   * username/password are injected INTO the remote browser page (not returned to
+   * the client). See docs/fabric-remote-browser-credential-injection.md.
+   */
   secretRef?: string | null;
   /** Remote Browser only: the internal URL the remote browser opens. */
   webUrl?: string | null;
   /** Remote Browser only: accept invalid/self-signed TLS certs for this route. */
   webIgnoreCertErrors?: boolean;
+  /** Remote Browser only: web-credential autofill behavior (defaults to `manual`). */
+  webAutofill?: FabricWebAutofillMode;
 }
 
 export interface FabricAgentDto {
@@ -485,6 +505,26 @@ export interface FabricVncConnectInput {
 export interface FabricVncSessionTicket extends FabricSessionTicket {
   username?: string;
   password?: string;
+}
+
+/**
+ * A Remote Browser session ticket. Reuses the VNC transport (noVNC over the raw
+ * pipe), so `password` is the per-session VNC transport password — NOT a web
+ * credential. `autofill` reports whether a web credential is armed for this
+ * session and how it fires (`manual` → the viewer shows an "Inject" button;
+ * `auto` → the in-container helper fills on load; absent/`off` → no autofill).
+ * The web credential itself is never sent to the client.
+ * See docs/fabric-remote-browser-credential-injection.md.
+ */
+export interface FabricRemoteBrowserTicket extends FabricVncSessionTicket {
+  autofill?: FabricWebAutofillMode;
+}
+
+/** Result of a manual "Inject" request (POST .../remote-browser/:token/inject). */
+export interface FabricInjectResult {
+  ok: boolean;
+  /** Human-readable status, e.g. "filled" or "no login form found". Never a secret. */
+  detail?: string;
 }
 
 // ---------------------------------------------------------------------------

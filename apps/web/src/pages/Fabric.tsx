@@ -16,6 +16,7 @@ import type {
   FabricSshConnectInput, FabricRdpConnectInput, FabricVncConnectInput, FabricSessionTicket,
   FabricVncSessionTicket, FabricSessionDto, FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
   FabricApprovalPending, FabricApprovalStatus, FabricApprovalDto,
+  FabricRemoteBrowserTicket, FabricInjectResult,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -285,7 +286,7 @@ export function Fabric() {
     setWebBusy((s) => ({ ...s, [t.id]: true }));
     const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
     try {
-      const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
+      const resp = await api.post<FabricRemoteBrowserTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
       const ticket = await awaitSession(resp);
       launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win, {
         vncCreds: ticket.password ? { password: ticket.password } : undefined,
@@ -1592,8 +1593,8 @@ function RoutesDialog({
   onClose: () => void;
   onChanged: (updated: FabricAgentDto) => void;
 }) {
-  const blank = { kind: 'ssh', host: '', port: 22, label: '', group: '', secretRef: '', webUrl: '', webIgnoreCertErrors: false };
-  const [form, setForm] = useState<{ kind: string; host: string; port: number; label: string; group: string; secretRef: string; webUrl: string; webIgnoreCertErrors: boolean }>(blank);
+  const blank = { kind: 'ssh', host: '', port: 22, label: '', group: '', secretRef: '', webUrl: '', webIgnoreCertErrors: false, webAutofill: 'manual' };
+  const [form, setForm] = useState<{ kind: string; host: string; port: number; label: string; group: string; secretRef: string; webUrl: string; webIgnoreCertErrors: boolean; webAutofill: string }>(blank);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [creds, setCreds] = useState<{ key: string; label: string }[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1644,6 +1645,8 @@ function RoutesDialog({
           label: form.label.trim() || undefined,
           group: form.group.trim() || undefined,
           webIgnoreCertErrors: form.webIgnoreCertErrors,
+          secretRef: form.secretRef || undefined,
+          webAutofill: form.webAutofill,
         }
       : {
           kind: form.kind,
@@ -1669,7 +1672,7 @@ function RoutesDialog({
   const edit = (t: FabricTargetDto) => {
     setEditingId(t.id);
     setErr(null);
-    setForm({ kind: t.kind, host: t.host, port: t.port, label: t.label ?? '', group: t.group ?? '', secretRef: '', webUrl: t.webUrl ?? '', webIgnoreCertErrors: !!t.webIgnoreCertErrors });
+    setForm({ kind: t.kind, host: t.host, port: t.port, label: t.label ?? '', group: t.group ?? '', secretRef: '', webUrl: t.webUrl ?? '', webIgnoreCertErrors: !!t.webIgnoreCertErrors, webAutofill: t.webAutofill ?? 'manual' });
   };
 
   const del = async (t: FabricTargetDto) => {
@@ -1765,6 +1768,26 @@ function RoutesDialog({
                 />
                 <span>Ignore TLS certificate errors for this route (self-signed internal sites, e.g. a Proxmox host). Applies to this route only.</span>
               </label>
+              <div className="col-span-2">
+                <Label className="text-xs">Web credential (optional)</Label>
+                <select className={selectCls} value={form.secretRef} onChange={(e) => setForm((f) => ({ ...f, secretRef: e.target.value }))}>
+                  <option value="">None</option>
+                  {creds.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs">Autofill</Label>
+                <select
+                  className={selectCls}
+                  value={form.webAutofill}
+                  disabled={!form.secretRef}
+                  onChange={(e) => setForm((f) => ({ ...f, webAutofill: e.target.value }))}
+                >
+                  <option value="manual">On “Inject” click</option>
+                  <option value="auto">On page load</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
             </>
           ) : (
             <>
@@ -3460,6 +3483,29 @@ export function VncViewer({
     target: '',
   });
 
+  // Remote Browser web-credential autofill (manual trigger). The server never sends
+  // the credential here — this just arms the in-container helper to fill the login
+  // form. Shown only for a Remote Browser session whose route has a `web` credential
+  // in `manual` mode. See docs/fabric-remote-browser-credential-injection.md.
+  const rbTicket = ticket as FabricRemoteBrowserTicket;
+  const canInject = !!remoteBrowser && rbTicket.autofill === 'manual';
+  const [injecting, setInjecting] = useState(false);
+  const [injected, setInjected] = useState(false);
+  useEffect(() => {
+    setInjected(false); // a reconnect re-mints the session token → allow injecting again
+  }, [ticket.token]);
+  const injectCredentials = async () => {
+    setInjecting(true);
+    try {
+      await api.post<FabricInjectResult>(`/api/fabric/remote-browser/${ticket.token}/inject`);
+      setInjected(true);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not inject credentials.');
+    } finally {
+      setInjecting(false);
+    }
+  };
+
   useEffect(() => {
     if (!screenRef.current) return;
     setStatus('connecting');
@@ -3584,6 +3630,18 @@ export function VncViewer({
             />
             {status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
           </span>
+          {canInject && status === 'connected' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={injectCredentials}
+              disabled={injecting || injected}
+              title="Fill the login form on this page with the route's saved web credential"
+            >
+              <KeyRound className="h-4 w-4 mr-1" />
+              {injected ? 'Credentials sent' : injecting ? 'Injecting…' : 'Inject login'}
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={onClose}>
             <X className="h-4 w-4 mr-1" /> Close
           </Button>

@@ -29,7 +29,7 @@ export interface SecretSummary {
 
 /** Editable metadata fields (PUT /api/secrets/:key). */
 /** Shape of a stored secret value: a single string, or a structured JSON credential. */
-export type SecretKind = 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc';
+export type SecretKind = 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc' | 'web';
 
 /** A Git credential's decoded value (stored as the secret's JSON plaintext, kind='git'). */
 export interface GitCredential {
@@ -63,6 +63,38 @@ export interface RdpCredential {
 export interface VncCredential {
   username?: string;
   password: string;
+}
+
+/**
+ * One step of a web login recipe (P2). Executed in order by the in-container
+ * autofill helper over CDP. `value` names which field of the WebCredential to type.
+ * See docs/fabric-remote-browser-credential-injection.md.
+ */
+export type LoginStep =
+  | { op: 'fill'; selector: string; value: 'username' | 'password' | 'totp' }
+  | { op: 'click'; selector: string }
+  | { op: 'waitFor'; selector: string; timeoutMs?: number }
+  | { op: 'submit'; selector?: string };
+
+/** An ordered web-login recipe for multi-step / SSO forms (P2). */
+export interface LoginRecipe {
+  /** Optional: only run when the current URL matches this origin or glob. */
+  matchUrl?: string;
+  steps: LoginStep[];
+}
+
+/**
+ * A web credential's decoded value (stored as the secret's JSON plaintext,
+ * kind='web'), injected INTO a Remote Browser page — never returned to the
+ * operator's client. See docs/fabric-remote-browser-credential-injection.md.
+ */
+export interface WebCredential {
+  username: string;
+  password: string;
+  /** Optional base32 TOTP seed; the broker computes the current code at inject time (P3). */
+  totpSecret?: string;
+  /** Optional per-credential login recipe override (P2). */
+  loginRecipe?: LoginRecipe;
 }
 
 export interface SecretMetaInput {

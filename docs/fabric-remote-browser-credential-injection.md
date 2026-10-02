@@ -1,12 +1,28 @@
 # Cerebro Fabric — Remote Browser credential injection (web autofill)
 
-> **Status: DESIGN (2026-09-30).** Not built. This is the buildable spec for adding
-> **web credential injection** to the Fabric **Remote Browser** (the ephemeral
-> Chromium-in-a-container jump, formerly "Web Jump"). It extends the existing Remote
-> Browser broker (`remote-browser.service.ts`) and reuses the vault, `secretRef`-on-target
-> model, four-eyes gate, audit, and `/fabric` UI. The only genuinely new infrastructure is
-> an **in-container autofill helper driven over CDP** and a **one-shot credential
-> redemption** path to feed it.
+> **Status: P1 BUILT (2026-10-01) — green, NOT committed / not live-tested.** This is the
+> buildable spec for adding **web credential injection** to the Fabric **Remote Browser**
+> (the ephemeral Chromium-in-a-container jump, formerly "Web Jump"). It extends the existing
+> Remote Browser broker (`remote-browser.service.ts`) and reuses the vault,
+> `secretRef`-on-target model, four-eyes gate, audit, and `/fabric` UI. The genuinely new
+> infrastructure is an **in-container autofill helper driven over CDP** and a **one-shot
+> credential redemption** path to feed it.
+>
+> **P1 as built (shared/server/web compile clean; `docker build` + image rebuild needed):**
+> `web` secret kind + `WebCredential`/`LoginRecipe` (`packages/shared/src/secrets.ts`);
+> `secretRef` + `webAutofill` on `web` routes (migration `0035_fabric_web_autofill`, forced-null
+> lifted in `normalizeRoute`); broker resolves the credential inside the gate closure, mints a
+> single-use redemption token, passes `AUTOFILL_REDEEM_URL` + enables CDP on loopback
+> (`remote-browser.service.ts`); `POST /api/fabric/remote-browser/:token/inject` (manual arm)
+> + `@Public() POST /api/fabric/internal/autofill/:token` (one-shot, IP-scoped redemption);
+> in-container `autofill-helper.js` (dependency-free CDP client) + entrypoint/Dockerfile wiring
+> (`docker/remote-browser/`); route-dialog credential picker + autofill selector and an
+> **"Inject login"** button in the Remote Browser viewer (`apps/web/src/pages/Fabric.tsx`).
+> Heuristic fill only (no auto-submit); recipes (P2) and TOTP (P3) not yet wired — the helper
+> logs and falls back to heuristic when a recipe is present. **Decisions (2026-10-01): HTTP
+> redemption endpoint; `manual` default.** Default autofill mode stays at `fabric:connect`
+> (the credential never reaches the operator's client). Needs the Remote Browser image to
+> rebuild (its context fingerprint changed → auto-rebuilds on next use) so Node + the helper land.
 
 This is the web analogue of the credential injection Fabric already does for SSH / RDP / VNC
 (see `docs/fabric-waypoints.md` and `docs/fabric-remote-access.md`). It is deliberately
@@ -240,18 +256,19 @@ as a file and spreads it across the Docker API surface; the redemption path keep
 
 ## 7. Phased build plan
 
-**P1 — Heuristic + manual inject (smallest working slice).**
-- `web` secret kind + `WebCredential` (`packages/shared/src/secrets.ts`).
-- Allow `secretRef` + `webAutofill` on `web` routes; lift the forced-null
-  (`fabric.service.ts:785`); migration for `webAutofill`.
-- Broker: resolve `secretRef` at launch, mint redemption token, pass `AUTOFILL_REDEEM_URL`
-  + enable CDP (`remote-browser.service.ts:launch`); `/internal/autofill/:token` endpoint;
-  `/remote-browser/:token/inject` endpoint + relay signal.
-- Container: add autofill helper + CDP flag to `docker/remote-browser/` (image auto-rebuilds
-  via the context fingerprint — no manual `docker build`).
-- UI: credential picker on the `web` route dialog (reuse `listCredentials`-style picker, add
-  `kind=web`); **Inject** button in the Remote Browser viewer (`Fabric.tsx`).
-- Audit event + docs.
+**P1 — Heuristic + manual inject (smallest working slice). ✅ BUILT 2026-10-01.**
+- ✅ `web` secret kind + `WebCredential`/`LoginRecipe` (`packages/shared/src/secrets.ts`).
+- ✅ Allow `secretRef` + `webAutofill` on `web` routes; forced-null lifted in `normalizeRoute`;
+  migration `0035_fabric_web_autofill`.
+- ✅ Broker: resolve `secretRef` inside the gate closure, mint redemption token, pass
+  `AUTOFILL_REDEEM_URL` + enable CDP (`remote-browser.service.ts`); `POST internal/autofill/:token`
+  (one-shot, IP-scoped); `POST remote-browser/:token/inject` (manual arm).
+- ✅ Container: `autofill-helper.js` (dependency-free CDP client) + CDP flag/helper launch in
+  `entrypoint.sh`, Node added to the `Dockerfile` (image auto-rebuilds via context fingerprint).
+- ✅ UI: credential picker + autofill selector on the `web` route dialog (`kind=web`); **Inject
+  login** button in the Remote Browser viewer (`Fabric.tsx`, both overlay + new-tab paths).
+- ✅ Audit event `fabric.remoteBrowser.autofill` + this doc.
+- ⏳ Not done in P1: auto-submit (deliberately off), recipes (P2), TOTP (P3), live test.
 
 **P2 — Recipes.** `LoginRecipe` type + per-route/per-cred editor; helper executes step
 sequences; a few built-in templates (Google / Microsoft / Okta).
@@ -281,10 +298,9 @@ recording during the inject window.
 
 ## 9. Open questions
 
-1. **Redemption transport** — a dedicated `/internal/autofill/:token` HTTP endpoint on the
-   broker, or fold the handshake into the existing Remote Browser relay WS? HTTP is simpler and
-   maps to the one-shot ticket model already used everywhere; WS avoids opening another path.
-2. **`webAutofill` default** — `manual` (recommended, safest) vs. `auto`. Lean `manual`.
+1. ~~**Redemption transport**~~ **RESOLVED (2026-10-01): dedicated `/internal/autofill/:token`
+   HTTP endpoint** on the broker — maps to the one-shot ticket model used everywhere.
+2. ~~**`webAutofill` default**~~ **RESOLVED (2026-10-01): `manual`** (operator clicks Inject).
 3. **Credential scope** — one `web` secret per route, or a small set selectable at launch (an
    operator picks which login to inject)? P1 = one per route; selectable can follow.
 4. **CDP vs. injected content script** — pure CDP (`Runtime.evaluate` + `Input`) vs. a
