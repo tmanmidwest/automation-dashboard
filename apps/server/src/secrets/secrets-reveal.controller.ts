@@ -14,6 +14,7 @@ import { IsOptional, IsString, MaxLength } from 'class-validator';
 import { SecretsService } from './secrets.service';
 import { AuthService } from '../auth/auth.service';
 import { TotpService } from '../auth/totp.service';
+import { LoginThrottleService } from '../auth/login-throttle.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 import type { RevealSecretResult, SessionUser } from '@cerebro/shared';
@@ -70,6 +71,7 @@ export class SecretsRevealController {
     private readonly auth: AuthService,
     private readonly totp: TotpService,
     private readonly prisma: PrismaService,
+    private readonly throttle: LoginThrottleService,
   ) {}
 
   /** Which factors the current user must supply to reveal a value (drives the dialog). */
@@ -96,15 +98,25 @@ export class SecretsRevealController {
         'This account has no way to re-authenticate. Set an account password, enable two-factor authentication, or link a single sign-on provider before revealing secrets.',
       );
     }
+
+    // Brute-force brake: this step-up re-checks the account password + a live TOTP
+    // every call, so an attacker with a valid session could otherwise guess them
+    // unlimited. Reuse the login throttle (per-IP cap + per-account lockout) on a
+    // reveal-scoped account key so reveal failures don't lock the victim out of login.
+    const throttleId = `reveal:${user.id}`;
+    await this.throttle.assertAllowed(req.ip, throttleId);
     if (reqs.password && !(await this.auth.verifyPassword(user.id, body?.password ?? ''))) {
+      await this.throttle.recordFailure(req.ip, throttleId);
       throw new UnauthorizedException('Your account password is incorrect.');
     }
     if (reqs.totp && !(await this.totp.verifyCode(user.id, body?.totp ?? ''))) {
+      await this.throttle.recordFailure(req.ip, throttleId);
       throw new UnauthorizedException('That authenticator code is incorrect.');
     }
     if (reqs.oidc && !reqs.reauthFresh) {
       throw new UnauthorizedException('Re-authenticate with your identity provider before revealing this value.');
     }
+    await this.throttle.recordSuccess(throttleId);
 
     const value = await this.secrets.revealForActor(key, { actorId: user.id, actorEmail: user.email });
     if (value === null) throw new NotFoundException('Secret not found.');

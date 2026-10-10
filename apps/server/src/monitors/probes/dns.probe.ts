@@ -1,9 +1,26 @@
 import { Resolver } from 'dns/promises';
+import { isIPv4 } from 'net';
 import type { Probe, ProbeConfig, ProbeResult } from './probe';
 import { errMessage, str } from './probe';
+import { hostBlockedReason } from './ssrf-guard';
 
 const RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'] as const;
 type RecordType = (typeof RECORD_TYPES)[number];
+
+/**
+ * Extract the bare IP from a resolver server string for the SSRF check.
+ * `Resolver.setServers` accepts `IPv4`, `IPv4:port`, `IPv6`, and `[IPv6]:port`
+ * (it rejects hostnames), so the server is always a literal IP once the optional
+ * port is stripped — which is exactly what {@link hostBlockedReason} checks.
+ */
+function resolverHost(server: string): string {
+  const s = server.trim();
+  const bracketed = /^\[([^\]]+)\]/.exec(s); // [IPv6] or [IPv6]:port
+  if (bracketed) return bracketed[1];
+  const parts = s.split(':');
+  if (parts.length === 2 && isIPv4(parts[0])) return parts[0]; // IPv4:port
+  return s; // bare IPv4 or bare IPv6
+}
 
 /** DNS resolution check with an optional expected answer. */
 export class DnsProbe implements Probe {
@@ -31,6 +48,14 @@ export class DnsProbe implements Probe {
     if (!str(config, 'hostname')) return 'Hostname is required.';
     const t = str(config, 'recordType') || 'A';
     if (!RECORD_TYPES.includes(t as RecordType)) return 'Unsupported record type.';
+    // SSRF: a custom resolver server causes an outbound UDP/TCP:53 connection to
+    // that exact host — block loopback/link-local/metadata (RFC1918 stays allowed,
+    // consistent with the http/tcp probes). Reject early for operator feedback.
+    const server = str(config, 'resolver');
+    if (server) {
+      const blocked = hostBlockedReason(resolverHost(server));
+      if (blocked) return blocked;
+    }
     return null;
   }
 
@@ -41,6 +66,10 @@ export class DnsProbe implements Probe {
     const expected = str(config, 'expected');
     const resolver = new Resolver({ timeout: timeoutMs, tries: 1 });
     if (server) {
+      // SSRF guard at execution time too (defends a row saved before this check,
+      // or with MONITOR_ALLOW_LOCAL_TARGETS toggled): refuse a blocked resolver.
+      const blocked = hostBlockedReason(resolverHost(server));
+      if (blocked) return { ok: false, message: blocked };
       try {
         resolver.setServers([server]);
       } catch (err) {

@@ -11,6 +11,6 @@ import { LoginThrottleService } from './login-throttle.service';
   imports: [SettingsModule], // OAuthTokenService reads/writes the JWT secret in the vault
   controllers: [AuthController],
   providers: [AuthService, TokenAuthService, OAuthTokenService, TotpService, LoginThrottleService],
-  exports: [AuthService, TokenAuthService, OAuthTokenService, TotpService],
+  exports: [AuthService, TokenAuthService, OAuthTokenService, TotpService, LoginThrottleService],
 })
 export class AuthModule {}
