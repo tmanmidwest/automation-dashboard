@@ -574,6 +574,9 @@ export interface MigratePlanInput {
   /** Resolved `${VAR}` host-port env sets (VAR → new port); filled in by start() from the
    *  portMap and applied to the target `.env`. Not sent by the client. */
   portEnv?: Record<string, number>;
+  /** The compose to migrate when the stack has none Cerebro could read — the reviewed/edited
+   *  reconstruction (from MigratePlan.synthesizedCompose). Used for the capture + redeploy. */
+  composeOverride?: string;
 }
 
 /** One pre-flight readiness check, shown as a checklist before the operator starts. */
@@ -634,6 +637,11 @@ export interface MigratePlan {
   replicator?: MigrateReplicatorLink | null;
   /** Existing ingress routes detected at the source (all of them) — pre-fill the cutover flip. */
   ingressSuggestions?: MigrateIngressSuggestion[];
+  /** True when no compose could be read for the stack (e.g. a Portainer-deployed stack). */
+  composeUnavailable?: boolean;
+  /** When composeUnavailable, a compose reconstructed from the running containers — shown
+   *  for the operator to review/edit and sent back as `composeOverride` on start. */
+  synthesizedCompose?: string;
   conflicts: string[];
   warnings: string[];
 }

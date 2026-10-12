@@ -18,6 +18,7 @@ import type {
 import { BackupTargetService } from './backup-target.service';
 import { SecretCaptureService, detectFileSecrets, redactCompose } from './secret-capture';
 import { bindSlug, inspectStack, manifestOf, type StackInspection } from './stack-inspect';
+import { synthesizeCompose } from './compose-synth';
 import { appendHostFiles, removeHostDir, runHelper, writeHostDir, type HelperMount } from './helper-runner';
 import { friendlyRestic, parseBackupSummary, resticEnv, runResticLocalTolerant } from './restic-cli';
 import { quiesceStack, runHooks, type Resume } from './quiesce';
@@ -461,7 +462,7 @@ export class StackBackupService {
    * Run a policy's backup now. Returns as soon as the run row exists; the work
    * continues in the background and the UI follows the run's status.
    */
-  async startBackup(policyId: string, passphrase: string | undefined, trigger: 'manual' | 'schedule'): Promise<StackBackupRun> {
+  async startBackup(policyId: string, passphrase: string | undefined, trigger: 'manual' | 'schedule', composeOverride?: string): Promise<StackBackupRun> {
     const policy = await this.prisma.stackBackupPolicy.findUnique({ where: { id: policyId } });
     if (!policy) throw new NotFoundException('Stack backup not found.');
     if (this.active.has(policyId)) throw new BadRequestException('A backup for this stack is already running.');
@@ -487,14 +488,14 @@ export class StackBackupService {
       },
     });
     this.active.add(policyId);
-    void this.execute(run.id, policy.id, seal).finally(() => this.active.delete(policyId));
+    void this.execute(run.id, policy.id, seal, composeOverride).finally(() => this.active.delete(policyId));
 
     const hostNames = await this.hostNames();
     return this.runDto(run, hostNames.get(run.connectorInstanceId));
   }
 
   /** The actual capture. Everything that can fail is funnelled into the run row. */
-  private async execute(runId: string, policyId: string, passphrase?: string): Promise<void> {
+  private async execute(runId: string, policyId: string, passphrase?: string, composeOverride?: string): Promise<void> {
     const started = Date.now();
     const log: string[] = [];
     const say = (line: string) => log.push(`${new Date().toISOString()}  ${line}`);
@@ -518,8 +519,11 @@ export class StackBackupService {
       const inspection = await inspectStack(access.api, policy.stackName);
       say(`Found ${inspection.containers.length} container(s), ${inspection.volumes.length} named volume(s), ${inspection.binds.length} bind path(s).`);
 
-      const { compose, envFile, composeSource } = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh, access.target?.stacksDir);
-      say(compose ? `Compose file read from ${composeSource}.` : `No compose file could be read (${composeSource}) — capturing the manifest only.`);
+      const resolved = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh, access.target?.stacksDir);
+      const compose = composeOverride ?? resolved.compose;
+      const envFile = resolved.envFile;
+      if (composeOverride) say('Using the reconstructed compose supplied for this migration.');
+      else say(compose ? `Compose file read from ${resolved.composeSource}.` : `No compose file could be read (${resolved.composeSource}) — capturing the manifest only.`);
 
       const captured = await this.secretCapture.capture({
         instanceId: policy.connectorInstanceId,
@@ -826,6 +830,19 @@ export class StackBackupService {
     if (!inspection) return {};
     const { compose, envFile } = await this.resolveCompose(instanceId, stackName, inspection, ssh, target?.stacksDir);
     return { compose, env: envFile };
+  }
+
+  /**
+   * Reconstruct a compose for a stack Cerebro has no compose for (e.g. Portainer-deployed),
+   * from the running containers — so the migrator can still move it. Best-effort; meant to
+   * be reviewed before use. Returns null when the stack can't be inspected.
+   */
+  async synthesizeComposeFor(instanceId: string, stackName: string): Promise<string | null> {
+    const host = await this.hostOrThrow(instanceId);
+    const ctx = await this.instances.contextFor(host);
+    const { api } = hostAccess(ctx, this.stacks);
+    const inspection = await inspectStack(api, stackName).catch(() => null);
+    return inspection ? synthesizeCompose(inspection) : null;
   }
 
   private async resolveCompose(

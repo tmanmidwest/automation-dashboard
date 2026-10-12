@@ -260,6 +260,22 @@ export class StackMigrateService implements OnModuleInit {
       }
     }
 
+    // Compose availability. When Cerebro can't read a compose for the stack (e.g. one
+    // deployed by Portainer, whose compose lives in Portainer's own storage), reconstruct
+    // one from the running containers for the operator to review/edit before migrating.
+    let composeUnavailable = false;
+    let synthesizedCompose: string | undefined;
+    const peekForPlan = await this.backups.peekCompose(source.id, project).catch(() => ({ compose: undefined as string | undefined }));
+    if (!peekForPlan.compose) {
+      composeUnavailable = true;
+      synthesizedCompose = (await this.backups.synthesizeComposeFor(source.id, project).catch(() => null)) ?? undefined;
+      if (synthesizedCompose) {
+        checks.push({ id: 'compose', label: 'Compose', status: 'warn', detail: 'No compose was found for this stack (e.g. deployed by Portainer) — a compose was reconstructed from the running containers. Review/edit it below before migrating.' });
+      } else {
+        checks.push({ id: 'compose', label: 'Compose', status: 'fail', detail: "No compose found and the stack couldn't be inspected to reconstruct one." });
+      }
+    }
+
     return {
       sourceInstanceId: source.id,
       sourceHostName: source.name,
@@ -280,6 +296,8 @@ export class StackMigrateService implements OnModuleInit {
       estimatedDataBytes,
       replicator,
       ingressSuggestions,
+      composeUnavailable,
+      synthesizedCompose,
       conflicts,
       warnings,
     };
@@ -492,7 +510,13 @@ export class StackMigrateService implements OnModuleInit {
     inspection: { containers?: Array<{ env?: Record<string, string> }> } | null,
     portMap: Record<string, number>,
   ): Promise<{ ops: PortRemapOps; composeRead: boolean }> {
-    const peek = await this.backups.peekCompose(sourceInstanceId, project).catch(() => ({ compose: undefined, env: undefined }));
+    let peek = await this.backups.peekCompose(sourceInstanceId, project).catch(() => ({ compose: undefined as string | undefined, env: undefined as string | undefined }));
+    // No readable compose (e.g. Portainer) → resolve against the reconstructed one, which
+    // uses literal host ports, so a remap still validates consistently with the deploy.
+    if (!peek.compose) {
+      const synth = await this.backups.synthesizeComposeFor(sourceInstanceId, project).catch(() => null);
+      if (synth) peek = { compose: synth, env: undefined };
+    }
     if (!peek.compose) {
       return { ops: { literal: {}, vars: {}, unresolved: Object.keys(portMap).map(Number) }, composeRead: false };
     }
@@ -626,6 +650,9 @@ export class StackMigrateService implements OnModuleInit {
     // source still runs, so the stop-the-world window is just a fast delta capture +
     // delta restore, not a full restore. Only meaningful on top of a warm pre-copy.
     const live = warm && input.preRestore !== false;
+    // For a stack with no compose of its own (e.g. Portainer-deployed), carry the reviewed
+    // reconstruction (or the plan's synthesized one) so the capture has a compose to store.
+    const composeForCapture = input.composeOverride || plan.synthesizedCompose || undefined;
 
     try {
       const source = await this.hostOrThrow(plan.sourceInstanceId);
@@ -668,7 +695,7 @@ export class StackMigrateService implements OnModuleInit {
           ck();
           await this.setStep(runId, 'pre-copying');
           say('Warm pre-copy: backing up the running stack to seed the repo (no downtime)…');
-          const warmSnap = await this.runBackup(policy.policyId, input.passphrase, say, signal);
+          const warmSnap = await this.runBackup(policy.policyId, input.passphrase, say, signal, composeForCapture);
           // 2b) Live-ish: pre-restore that warm snapshot's volumes onto the target now,
           //     while the source keeps serving — the bulk of the restore, out of the
           //     downtime window. The target volumes are created and seeded (stale);
@@ -695,7 +722,7 @@ export class StackMigrateService implements OnModuleInit {
         // 4) Capture — a fast delta when the warm pre-copy seeded the repo, else full.
         ck();
         await this.setStep(runId, 'capturing');
-        const final = await this.runBackup(policy.policyId, input.passphrase, say, signal);
+        const final = await this.runBackup(policy.policyId, input.passphrase, say, signal, composeForCapture);
         const snapshotId = final.snapshotId as string;
         await this.patch(runId, { snapshotId });
         say(`Captured ${warm ? 'delta ' : ''}snapshot ${snapshotId.slice(0, 8)}.`);
@@ -824,8 +851,8 @@ export class StackMigrateService implements OnModuleInit {
   /** Run one backup on the policy and wait for it; returns the finished run (with
    *  its snapshotId). restic dedups, so a second run on the same policy uploads only
    *  the delta. Throws on failure. */
-  private async runBackup(policyId: string, passphrase: string | undefined, say: (l: string) => void, signal?: AbortSignal): Promise<{ snapshotId: string | null; status: string }> {
-    const run = await this.backups.startBackup(policyId, passphrase, 'manual');
+  private async runBackup(policyId: string, passphrase: string | undefined, say: (l: string) => void, signal?: AbortSignal, composeOverride?: string): Promise<{ snapshotId: string | null; status: string }> {
+    const run = await this.backups.startBackup(policyId, passphrase, 'manual', composeOverride);
     const final = await this.poll(() => this.prisma.stackBackupRun.findUnique({ where: { id: run.id } }), CAPTURE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success' || !final.snapshotId) {
       this.surfaceChildLog(final?.log, say, 'capture');

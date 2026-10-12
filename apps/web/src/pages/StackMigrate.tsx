@@ -105,6 +105,7 @@ export function StackMigrate() {
   const [repointReplicator, setRepointReplicator] = useState(true);
   const [overwriteTarget, setOverwriteTarget] = useState(false);
   const [portMap, setPortMap] = useState<Record<number, string>>({}); // old host port → new (input text)
+  const [composeOverride, setComposeOverride] = useState(''); // reviewed/edited synthesized compose
 
   // Automated-cutover ingress (optional, P2) — a stack can front multiple routes.
   const [ingressTargets, setIngressTargets] = useState<IngressTarget[]>([]);
@@ -274,6 +275,10 @@ export function StackMigrate() {
         for (const pp of p.ports) if (pp.suggested != null && next[pp.hostPort] == null) next[pp.hostPort] = String(pp.suggested);
         return next;
       });
+      // Pre-fill the compose editor with the reconstruction when the stack has no compose
+      // (don't clobber an edit the operator already made for this same stack).
+      if (p.composeUnavailable) setComposeOverride((prev) => prev.trim() ? prev : (p.synthesizedCompose ?? ''));
+      else setComposeOverride('');
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Planning failed.');
     } finally {
@@ -308,6 +313,7 @@ export function StackMigrate() {
         repointReplicator: plan.replicator ? repointReplicator : undefined,
         overwriteTarget: overwriteTarget || undefined,
         portMap: cleanedPortMap(),
+        composeOverride: plan.composeUnavailable ? (composeOverride.trim() || undefined) : undefined,
         force,
       });
       setRuns((rs) => [run, ...rs]);
@@ -632,6 +638,23 @@ export function StackMigrate() {
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Reconstructed compose (stack had none Cerebro could read — e.g. Portainer) */}
+            {plan.composeUnavailable && plan.synthesizedCompose && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
+                <div className="text-xs font-medium text-amber-300">No compose was found for this stack — reconstructed from the running containers</div>
+                <p className="text-[0.7rem] text-muted-foreground">
+                  Review and edit before migrating. Built images are carried as images, so <span className="font-mono">image:</span> is correct;
+                  volumes are referenced by their real names. Adjust command/entrypoint, healthchecks or networks if needed. This compose is what the target will be redeployed from (making it Cerebro-managed, not Portainer).
+                </p>
+                <textarea
+                  className="w-full h-64 rounded-md border border-input bg-background/60 p-2 font-mono text-xs"
+                  value={composeOverride}
+                  onChange={(e) => setComposeOverride(e.target.value)}
+                  spellCheck={false}
+                />
               </div>
             )}
 
