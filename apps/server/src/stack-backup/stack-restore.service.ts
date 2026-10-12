@@ -23,7 +23,7 @@ import { appendHostFiles } from './helper-runner';
 import { runHelper, type HelperMount } from './helper-runner';
 import { pushDir, relayRoot } from './relay';
 import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import {
   decodeTags, dumpFile, listFiles, listSnapshots, resticEnv, runResticLocalTolerant,
   type ResticRepoAuth,
@@ -777,30 +777,49 @@ export class StackRestoreService {
       if (res.stderr.trim()) log.push(res.stderr.trim());
       if (res.code !== 0) throw new Error(`restic restore (binds → staging) failed (exit ${res.code})${resticFailReason(res.stderr)}`);
 
-      for (const b of binds) {
-        const staged = `${staging}${bindPath(b.source)}`; // e.g. /var/tmp/.../data/binds/<slug>
-        const script = [
-          'set -e',
-          `s=${sq(staged)}`,
-          `d=${sq(b.dest)}`,
-          'if [ ! -e "$s" ]; then echo missing; exit 3; fi',
-          'if [ -d "$s" ]; then t=dir; else t=file; fi',
-          'note=',
-          // A wrong-type leftover at the destination blocks the copy. The common case:
-          // Docker auto-created an empty DIRECTORY for a single-file bind whose source
-          // did not exist yet on a prior deploy. Remove it so the correct type installs.
-          'if [ "$t" = file ] && [ -d "$d" ]; then rm -rf "$d"; note=" (replaced leftover dir)"; fi',
-          'if [ "$t" = dir ] && [ -e "$d" ] && [ ! -d "$d" ]; then rm -f "$d"; note=" (replaced leftover file)"; fi',
-          'if [ "$t" = dir ]; then mkdir -p "$d"; else mkdir -p "$(dirname "$d")"; fi',
-          'cp -aT "$s" "$d"',
-          'printf "%s%s" "$t" "$note"',
-        ].join('\n');
-        const r = await runSsh(ssh, script);
-        const kind = r.stdout.trim();
-        if (r.code !== 0 || !(kind.startsWith('file') || kind.startsWith('dir'))) {
-          throw new Error(`Could not install bind path ${b.dest}: ${r.stderr.trim() || (kind === 'missing' ? 'not present in the snapshot' : `exit ${r.code}`)}`);
-        }
-        say(`Installed bind ${b.dest} (${kind}, in place${b.remapped ? ', remapped' : ''}).`);
+      // Install each staged bind into place via a ROOT helper (docker run), not plain
+      // SSH: the destinations under the stacks dir can be root-owned (Docker auto-creates
+      // a root dir for a single-file bind whose source was missing on a prior deploy), so
+      // an unprivileged SSH user can't replace them. Mounting each bind's PARENT directory
+      // (not the file) also means the file is a normal entry inside a mounted dir — no
+      // mount-point, no EBUSY. Writes go through the root daemon.
+      const stageMount = '/cerebro-stage';
+      // RW so the root helper can also clear the (root-owned) staged tree afterwards —
+      // an unprivileged SSH user couldn't remove restic's root-owned files.
+      const mounts: HelperMount[] = [{ source: staging, dest: stageMount, kind: 'bind', readOnly: false }];
+      const parents = new Map<string, string>(); // host parent dir → container mountpoint
+      const lines: string[] = ['set -e'];
+      binds.forEach((b) => {
+        const parent = posix.dirname(b.dest);
+        let mp = parents.get(parent);
+        if (!mp) { mp = `/d${parents.size}`; parents.set(parent, mp); mounts.push({ source: parent, dest: mp, kind: 'bind', readOnly: false }); }
+        const s = `${stageMount}${bindPath(b.source)}`;       // staged source inside the helper
+        const d = `${mp}/${posix.basename(b.dest)}`;          // dest inside the mounted parent
+        lines.push(
+          `s=${sq(s)}; d=${sq(d)}; label=${sq(b.dest)}`,
+          'if [ ! -e "$s" ]; then echo "MISSING $label"; exit 3; fi',
+          // Replace a wrong-type leftover (dir where a file belongs, or vice-versa), then copy.
+          'if [ -d "$s" ]; then if [ -e "$d" ] && [ ! -d "$d" ]; then rm -f "$d"; fi; mkdir -p "$d"; cp -a "$s"/. "$d"/; echo "OK dir $label"; else if [ -d "$d" ]; then rm -rf "$d"; fi; cp -a "$s" "$d"; echo "OK file $label"; fi',
+        );
+      });
+      // Clear the root-owned staged tree so the later best-effort SSH rm can drop the dir.
+      lines.push(`rm -rf ${sq(stageMount)}/* || true`);
+      const inst = await runHelper({
+        ssh,
+        image: helperImage,
+        env: {},
+        entrypoint: 'sh',
+        mounts,
+        args: ['-c', lines.join('\n')],
+        timeoutMs: RESTORE_TIMEOUT_MS,
+      });
+      if (inst.stdout.trim()) log.push(inst.stdout.trim());
+      if (inst.stderr.trim()) log.push(inst.stderr.trim());
+      if (inst.code !== 0) throw new Error(`Could not install bind path(s): ${inst.stderr.trim() || inst.stdout.trim() || `exit ${inst.code}`}`);
+      // One clear line per bind from the helper's "OK <kind> <dest>" output.
+      for (const line of inst.stdout.split('\n').map((l) => l.trim())) {
+        const m = /^OK (file|dir) (.+)$/.exec(line);
+        if (m) say(`Installed bind ${m[2]} (${m[1]}, in place).`);
       }
     } finally {
       await runSsh(ssh, `rm -rf ${sq(staging)}`).catch(() => undefined);

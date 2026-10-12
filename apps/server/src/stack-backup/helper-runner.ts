@@ -29,6 +29,9 @@ export interface HelperRunInput {
   mounts: HelperMount[];
   /** Arguments to the image's entrypoint (`restic` for restic/restic). */
   args: string[];
+  /** Override the image entrypoint (e.g. 'sh' to run a plain shell as root for a
+   *  filesystem install step). Must be a bare program name. */
+  entrypoint?: string;
   timeoutMs?: number;
 }
 
@@ -57,6 +60,7 @@ function assertSafe(input: HelperRunInput): void {
     if (v.includes('\n')) throw new Error(`Environment value for ${k} contains a newline, which docker --env-file cannot carry.`);
   }
   if (!/^[\w./:@-]+$/.test(input.image)) throw new Error(`Refusing to run an unexpected helper image reference: ${input.image}`);
+  if (input.entrypoint !== undefined && !/^[\w./-]+$/.test(input.entrypoint)) throw new Error(`Refusing an unexpected helper entrypoint: ${input.entrypoint}`);
 }
 
 /**
@@ -71,11 +75,12 @@ export async function runHelper(input: HelperRunInput): Promise<SshResult> {
   const mountArgs = input.mounts
     .map((m) => `-v ${q(`${m.source}:${m.dest}${m.readOnly ? ':ro' : ''}`)}`)
     .join(' ');
+  const entrypointArg = input.entrypoint ? `--entrypoint ${q(input.entrypoint)} ` : '';
   const cmd = [
     'umask 077',
     'f="$(mktemp /tmp/cerebro-backup.XXXXXX)"',
     'cat > "$f"',
-    `docker run --rm --env-file "$f" ${mountArgs} ${q(input.image)} ${input.args.map(q).join(' ')}`,
+    `docker run --rm --env-file "$f" ${entrypointArg}${mountArgs} ${q(input.image)} ${input.args.map(q).join(' ')}`,
     'rc=$?',
     'rm -f "$f"',
     'exit $rc',
