@@ -123,6 +123,19 @@ export class ToolCatalogService {
       });
 
       read({
+        name: 'list_resource_kinds',
+        description:
+          'List the resource kinds a connector instance exposes (id + label), e.g. Azure "vm" / "storage_account" or Microsoft 365 "service_health" / "user". Use this to discover valid `kind` values for list_resources — especially for read-only connectors, whose kinds carry no actions and so never appear in list_actions.',
+        permission: 'connectors:read',
+        inputSchema: { instanceId: z.string().describe('Connector instance id') },
+        run: async ({ instanceId }) => {
+          const inst = await this.instances.get(instanceId as string);
+          const manifest = this.registry.get(inst.connectorId)?.manifest;
+          return (manifest?.resourceKinds ?? []).map((k) => ({ id: k.id, label: k.label, category: k.category }));
+        },
+      });
+
+      read({
         name: 'list_actions',
         description:
           'Discover the actions and operations available for a connector — resource actions (start/stop/…) with their mutating/destructive/confirm metadata, and parameterized operations with their form fields. Use before run_action / run_operation.',

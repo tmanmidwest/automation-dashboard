@@ -21,6 +21,8 @@ import { JellyfinConnector } from './jellyfin/jellyfin.connector';
 import { NginxProxyManagerConnector } from './nginx-proxy-manager/nginx-proxy-manager.connector';
 import { NpmAuditPollService } from './nginx-proxy-manager/npm-audit-poll.service';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
+import { AzureConnector } from './azure/azure.connector';
+import { O365Connector } from './o365/o365.connector';
 import { BackupRunService } from './backblaze/backup-run.service';
 import { BackupSchedulerService } from './backblaze/backup-scheduler.service';
 import { BackupStateService } from './backblaze/backup-state.service';
@@ -54,6 +56,9 @@ export class ConnectorsModule implements OnModuleInit {
     this.registry.register(new DockerConnector(this.dockerStacks));
     this.registry.register(new JellyfinConnector());
     this.registry.register(new NginxProxyManagerConnector());
+    // Azure + O365 share one Microsoft Entra auth foundation (client-credentials token).
+    this.registry.register(new AzureConnector());
+    this.registry.register(new O365Connector());
     // The Backblaze connector reads restore history, a durable state mirror, and VM names.
     this.registry.register(new BackblazeConnector(this.backupRuns, this.backupState, this.vmNames));
   }
