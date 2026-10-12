@@ -519,7 +519,7 @@ export class StackBackupService {
       say(`Found ${inspection.containers.length} container(s), ${inspection.volumes.length} named volume(s), ${inspection.binds.length} bind path(s).`);
 
       const { compose, envFile, composeSource } = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh, access.target?.stacksDir);
-      say(compose ? `Compose file read from ${composeSource}.` : 'No compose file could be read — capturing the manifest only.');
+      say(compose ? `Compose file read from ${composeSource}.` : `No compose file could be read (${composeSource}) — capturing the manifest only.`);
 
       const captured = await this.secretCapture.capture({
         instanceId: policy.connectorInstanceId,
@@ -831,6 +831,8 @@ export class StackBackupService {
     // deployGit): the compose lives in the cloned repo on the host, so `managed.compose`
     // is empty. Read it (and the repo .env) straight from the known repo path, which is
     // more reliable than the container's compose-path label.
+    const tried: string[] = []; // diagnostics for the "no compose" message
+    tried.push(`managed=${managed ? managed.source : 'none'}`);
     if (managed?.source === 'git' && stacksDir) {
       try {
         const composePath = gitStackComposePath(stacksDir, stackName, managed.gitPath);
@@ -840,10 +842,14 @@ export class StackBackupService {
           const e = await runSsh(ssh, `cat '${envPath}' 2>/dev/null || true`).catch(() => null);
           return { compose: c.stdout, envFile: e?.stdout.trim() ? e.stdout : undefined, composeSource: composePath };
         }
-      } catch { /* bad path chars etc. — fall through to the label-based read below */ }
+        tried.push(`git repo path ${composePath} empty`);
+      } catch (e) { tried.push(`git path error: ${e instanceof Error ? e.message : e}`); }
+    } else if (managed?.source === 'git' && !stacksDir) {
+      tried.push('git stack but stacksDir unknown');
     }
 
     const paths = (inspection.composePath ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+    tried.push(`label config_files=[${paths.join(', ') || 'none'}]`);
     const parts: string[] = [];
     for (const path of paths) {
       if (!path.startsWith('/') || path.includes("'")) continue;
@@ -860,7 +866,7 @@ export class StackBackupService {
     return {
       compose: parts.length ? parts.join('\n') : undefined,
       envFile,
-      composeSource: paths.join(', ') || 'the host',
+      composeSource: parts.length ? paths.join(', ') : `nothing readable — tried: ${tried.join('; ')}`,
     };
   }
 

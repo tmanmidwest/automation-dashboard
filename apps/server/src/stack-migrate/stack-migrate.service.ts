@@ -724,6 +724,15 @@ export class StackMigrateService implements OnModuleInit {
       throw new Error(`Capture failed: ${final?.message ?? 'no snapshot produced'}`);
     }
     if (final.message) say(final.message);
+    // Surface whether the capture found the stack's compose — the restore needs it, and a
+    // "no compose" is the difference between a full migration and data-only. (The detail
+    // lives on the capture run's log, not here.)
+    const composeLine = (final.log ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .reverse()
+      .find((l) => /compose file (was )?read|No compose file/i.test(l));
+    if (composeLine) say(`Capture: ${composeLine.replace(/^\d{4}-\d\d-\d\dT[\d:.Z]+\s+/, '')}`);
     return { snapshotId: final.snapshotId, status: final.status };
   }
 
