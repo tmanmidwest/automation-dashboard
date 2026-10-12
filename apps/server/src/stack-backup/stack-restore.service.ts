@@ -705,6 +705,11 @@ export class StackRestoreService {
         }
         say(`Restoring configuration: compose${env ? ' + .env' : ''} (${compose.length} bytes).`);
         if (!access.target) throw new Error(NO_SSH_REASON);
+        // The data/bind restore runs as root (helper) and can leave the stack directory
+        // root-owned, but the compose/.env write below goes over SSH as the unprivileged
+        // user. Make the project dir owned by that user (and clear any stale top-level
+        // compose/.env) so the write succeeds — on both fresh and previously-touched hosts.
+        await this.prepareStackDir(access, access.target.stacksDir, plan.destStackName, target.helperImage, say, log);
         if (input.deploy) {
           const result = await this.stacks.deploy(access.target, host.id, plan.destStackName, compose, env);
           deployed = result.ok;
@@ -730,6 +735,61 @@ export class StackRestoreService {
       say(`Failed: ${message}`);
       await this.finish(runId, { status: 'error', message, deployed, durationMs: Date.now() - started, log: log.join('\n') });
       void this.logging.error('stack-backup', `Restore ${runId} failed: ${message}`);
+    }
+  }
+
+  /**
+   * Make the target stack directory writable by the (unprivileged) SSH user before the
+   * compose/.env write. The volume + bind restore run as root via `docker run`, which can
+   * leave `<stacksDir>/<project>` root-owned (Docker auto-creates bind-mount parents as
+   * root), so a later SSH `cat > docker-compose.yml` fails with "permission denied". A
+   * short root helper chowns just the project dir to the SSH user's uid/gid and clears any
+   * stale top-level compose/.env so the deploy can recreate them. Best-effort + logged.
+   */
+  private async prepareStackDir(
+    access: ReturnType<typeof hostAccess>,
+    stacksDir: string,
+    name: string,
+    helperImage: string,
+    say: (line: string) => void,
+    log: string[],
+  ): Promise<void> {
+    const ssh = access.ssh;
+    if (!ssh) return;
+    const project = projectName(name);
+    const base = stacksDir.replace(/\/+$/, '');
+    if (!base.startsWith('/') || !project) return;
+    const idr = await runSsh(ssh, 'id -u; id -g').catch(() => null);
+    const [uid, gid] = (idr?.stdout ?? '').trim().split('\n').map((s) => s.trim());
+    if (!/^\d+$/.test(uid ?? '') || !/^\d+$/.test(gid ?? '')) {
+      say('Could not determine the SSH user id to fix stack-dir ownership — continuing (the config write may fail if the dir is root-owned).');
+      return;
+    }
+    const mnt = '/cerebro-stacks';
+    const sq = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+    const p = `${mnt}/${project}`;
+    const script = [
+      'set -e',
+      `mkdir -p ${sq(p)}`,
+      `chown ${sq(uid)}:${sq(gid)} ${sq(p)}`,
+      // Stale root-owned config would still block the user's cat>; drop it so it's recreated.
+      `rm -f ${sq(`${p}/docker-compose.yml`)} ${sq(`${p}/.env`)}`,
+    ].join('\n');
+    const r = await runHelper({
+      ssh,
+      image: helperImage,
+      env: {},
+      entrypoint: 'sh',
+      mounts: [{ source: base, dest: mnt, kind: 'bind', readOnly: false }],
+      args: ['-c', script],
+      timeoutMs: 60_000,
+    });
+    if (r.stdout.trim()) log.push(r.stdout.trim());
+    if (r.stderr.trim()) log.push(r.stderr.trim());
+    if (r.code !== 0) {
+      say(`WARNING: could not prepare ownership of ${base}/${project}: ${r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`}. The config write may fail.`);
+    } else {
+      say(`Prepared target stack dir ${base}/${project} (owned by the deploy user).`);
     }
   }
 
