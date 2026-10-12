@@ -14,7 +14,7 @@ import { StackRestoreService } from '../stack-backup/stack-restore.service';
 import { BackupTargetService } from '../stack-backup/backup-target.service';
 import { hostAccess, NO_SSH_REASON, type DockerHostAccess } from '../stack-backup/docker-host';
 import { inspectStack } from '../stack-backup/stack-inspect';
-import { remapPorts } from '../stack-backup/ports';
+import { resolvePortRemap, type PortRemapOps } from '../stack-backup/ports';
 import { PortAllocatorService } from '../app-replicator/port-allocator.service';
 import { IngressOps } from '../app-replicator/ingress-ops.service';
 import { IngressService } from '../app-replicator/ingress.service';
@@ -245,20 +245,18 @@ export class StackMigrateService implements OnModuleInit {
       inspection, volumes, repoTargetId: input.repoTargetId, sourceId: source.id,
     });
 
-    // Port-remap readiness: dry-run the rewrite against the source's compose/.env BEFORE
-    // any downtime, so an exotic/unresolvable port fails pre-flight instead of mid-restore.
+    // Port-remap readiness: resolve the rewrite against the source's compose + running
+    // container env BEFORE any downtime, so an exotic/unresolvable port fails pre-flight
+    // instead of mid-restore. Uses the same resolver the restore will apply.
     const requestedRemap = this.validatePortMap(input.portMap, { ports } as MigratePlan);
     if (Object.keys(requestedRemap).length) {
-      const peek = await this.backups.peekCompose(source.id, project).catch(() => ({ compose: undefined, env: undefined }));
-      if (!peek.compose) {
+      const { ops, composeRead } = await this.resolveRemapOps(source.id, project, srcAccess, inspection, requestedRemap);
+      if (!composeRead) {
         checks.push({ id: 'port-remap', label: 'Port remap', status: 'warn', detail: "Couldn't read the compose to verify the remap here; it is re-checked at deploy." });
+      } else if (ops.unresolved.length) {
+        checks.push({ id: 'port-remap', label: 'Port remap', status: 'fail', detail: `Can't remap host port(s) ${ops.unresolved.join(', ')} — each must be a simple published port in the compose (not a range, IPv6 host, or absent). Edit the compose or choose a different target.` });
       } else {
-        const r = remapPorts(peek.compose, peek.env ?? '', requestedRemap);
-        if (r.unresolved.length) {
-          checks.push({ id: 'port-remap', label: 'Port remap', status: 'fail', detail: `Can't remap host port(s) ${r.unresolved.join(', ')} — each must be a simple published port in the compose (not a range, IPv6 host, or absent). Edit the compose or choose a different target.` });
-        } else {
-          checks.push({ id: 'port-remap', label: 'Port remap', status: 'pass', detail: `${Object.keys(requestedRemap).length} port(s) will be remapped: ${Object.entries(requestedRemap).map(([o, n]) => `${o}→${n}`).join(', ')}.` });
-        }
+        checks.push({ id: 'port-remap', label: 'Port remap', status: 'pass', detail: `${Object.keys(requestedRemap).length} port(s) will be remapped: ${Object.entries(requestedRemap).map(([o, n]) => `${o}→${n}`).join(', ')}.` });
       }
     }
 
@@ -481,6 +479,34 @@ export class StackMigrateService implements OnModuleInit {
     return out;
   }
 
+  /**
+   * Resolve a port remap into concrete operations (literal compose rewrites + ${VAR} env
+   * sets), using the source's compose + the running containers' resolved env so a `${VAR}`
+   * host port is matched by its CURRENT value. Shared by the pre-flight check and the start
+   * path so both agree, and the restore applies the result verbatim (no re-resolution).
+   */
+  private async resolveRemapOps(
+    sourceInstanceId: string,
+    project: string,
+    srcAccess: DockerHostAccess | null,
+    inspection: { containers?: Array<{ env?: Record<string, string> }> } | null,
+    portMap: Record<string, number>,
+  ): Promise<{ ops: PortRemapOps; composeRead: boolean }> {
+    const peek = await this.backups.peekCompose(sourceInstanceId, project).catch(() => ({ compose: undefined, env: undefined }));
+    if (!peek.compose) {
+      return { ops: { literal: {}, vars: {}, unresolved: Object.keys(portMap).map(Number) }, composeRead: false };
+    }
+    let insp = inspection;
+    if (!insp) {
+      const access = srcAccess ?? await this.accessFor(sourceInstanceId);
+      insp = await inspectStack(access.api, project).catch(() => null);
+    }
+    // .env + every container's resolved env — the ground truth for a ${VAR} port's value.
+    const envLines = [peek.env ?? ''];
+    for (const c of insp?.containers ?? []) for (const [k, v] of Object.entries(c.env ?? {})) envLines.push(`${k}=${v}`);
+    return { ops: resolvePortRemap(peek.compose, envLines.join('\n'), portMap), composeRead: true };
+  }
+
   /** Did this image come from a registry (so the target can pull it)? A locally
    *  built image has no RepoDigests — that is the "built on the host" signal. */
   private async looksPullable(api: DockerApi, ref: string): Promise<boolean> {
@@ -516,6 +542,15 @@ export class StackMigrateService implements OnModuleInit {
       portMap[String(r.port)] != null ? { ...r, port: portMap[String(r.port)] } : r,
     );
 
+    // Resolve the remap to concrete ops (same resolver as the pre-flight) and refuse any
+    // port that can't be cleanly rewritten — before anything is quiesced.
+    const { ops } = Object.keys(portMap).length
+      ? await this.resolveRemapOps(plan.sourceInstanceId, plan.stackName, null, null, portMap)
+      : { ops: { literal: {}, vars: {}, unresolved: [] } as PortRemapOps };
+    if (ops.unresolved.length && !input.force) {
+      throw new BadRequestException(`Can't remap host port(s) ${ops.unresolved.join(', ')} — not a simple published port in the compose (a range, IPv6 host, or absent). Fix the remap or choose a different target.`);
+    }
+
     const run = await this.prisma.stackMigrationRun.create({
       data: {
         sourceInstanceId: plan.sourceInstanceId,
@@ -541,7 +576,12 @@ export class StackMigrateService implements OnModuleInit {
     const ac = new AbortController();
     this.cancels.set(run.id, ac);
     this.active.add(key);
-    void this.execute(run.id, { ...input, portMap }, plan, ac.signal).finally(() => { this.active.delete(key); this.cancels.delete(run.id); });
+    void this.execute(
+      run.id,
+      { ...input, portMap: ops.literal as unknown as Record<string, number>, portEnv: ops.vars },
+      plan,
+      ac.signal,
+    ).finally(() => { this.active.delete(key); this.cancels.delete(run.id); });
     return this.getRun(run.id);
   }
 
@@ -820,6 +860,7 @@ export class StackMigrateService implements OnModuleInit {
       binds,
       bindMap: input.bindMap,
       portMap: input.portMap,
+      portEnv: input.portEnv,
       restoreCredentialFiles: input.restoreCredentialFiles,
     });
     const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);

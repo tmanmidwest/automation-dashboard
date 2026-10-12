@@ -251,9 +251,12 @@ export interface RestorePlanInput {
   destStackName?: string;
   /** Captured bind path → where to write it on the destination. Absent paths restore in place. */
   bindMap?: Record<string, string>;
-  /** Published host-port remap (old host port → new host port) applied to the compose/.env
-   *  before redeploy, so a port already taken on the destination can be moved. */
+  /** Literal published host ports to rewrite in the compose before redeploy (oldHostPort →
+   *  newHostPort), so a port already taken on the destination can be moved. */
   portMap?: Record<string, number>;
+  /** Env vars used as a `${VAR}` published host port, set in the `.env` before redeploy
+   *  (VAR → newHostPort). Resolved by the caller alongside `portMap`. */
+  portEnv?: Record<string, number>;
 }
 
 /** One volume the restore would write, and where it would land. */
@@ -568,6 +571,9 @@ export interface MigratePlanInput {
    * stack — the deployment's stored port on re-point.
    */
   portMap?: Record<string, number>;
+  /** Resolved `${VAR}` host-port env sets (VAR → new port); filled in by start() from the
+   *  portMap and applied to the target `.env`. Not sent by the client. */
+  portEnv?: Record<string, number>;
 }
 
 /** One pre-flight readiness check, shown as a checklist before the operator starts. */

@@ -19,7 +19,7 @@ import { bindSlug } from './stack-inspect';
 import { hostAccess, NO_SSH_REASON } from './docker-host';
 import { PortAllocatorService } from '../app-replicator/port-allocator.service';
 import { assertSandbox, sandboxName, unpublishPorts } from './sandbox';
-import { remapPorts } from './ports';
+import { applyPortRemap } from './ports';
 import { appendHostFiles } from './helper-runner';
 import { runHelper, type HelperMount } from './helper-runner';
 import { pushDir, relayRoot } from './relay';
@@ -689,17 +689,17 @@ export class StackRestoreService {
         if (input.mode === 'verify') {
           compose = unpublishPorts(compose);
           say('Sandbox publishes no host ports — nothing it starts can collide with the real stack.');
-        } else if (input.portMap && Object.keys(input.portMap).length) {
-          // Migrator port remap: move published host ports that collide on the target.
-          const r = remapPorts(compose, outEnv, input.portMap);
-          if (r.unresolved.length) {
-            throw new BadRequestException(
-              `Could not remap host port(s) ${r.unresolved.join(', ')} — each must be a simple published host port in the compose (not a range, IPv6 host, or absent). Remap those by hand, or choose a different target so they don't collide.`,
-            );
-          }
+        } else if ((input.portMap && Object.keys(input.portMap).length) || (input.portEnv && Object.keys(input.portEnv).length)) {
+          // Migrator port remap: apply the operations the caller already resolved — rewrite
+          // literal host ports in the compose, set ${VAR} host ports in the .env.
+          const r = applyPortRemap(compose, outEnv, input.portMap ?? {}, input.portEnv ?? {});
           compose = r.compose;
           outEnv = r.env;
-          say(`Remapped published host port(s): ${Object.entries(input.portMap).map(([o, n]) => `${o}→${n}`).join(', ')}.`);
+          const parts = [
+            ...Object.entries(input.portMap ?? {}).map(([o, n]) => `${o}→${n}`),
+            ...Object.entries(input.portEnv ?? {}).map(([v, n]) => `${v}=${n}`),
+          ];
+          say(`Remapped published host port(s): ${parts.join(', ')}.`);
         }
 
         // Credential files are written back only on request, and only the ones
