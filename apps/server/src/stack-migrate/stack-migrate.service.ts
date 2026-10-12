@@ -670,6 +670,20 @@ export class StackMigrateService implements OnModuleInit {
     };
   }
 
+  /**
+   * Surface the tail of a child run's own log (the restic stdout/stderr lives on the
+   * capture/restore run, not here) into the migrator log, so a failure is diagnosable
+   * on THIS screen instead of a bare "see the log" that points at a different run.
+   */
+  private surfaceChildLog(childLog: string | null | undefined, say: (l: string) => void, label = 'restore'): void {
+    const text = (childLog ?? '').trim();
+    if (!text) return;
+    const tail = text.split('\n').slice(-15);
+    say(`— ${label} log (last ${tail.length} line${tail.length === 1 ? '' : 's'}) —`);
+    for (const l of tail) say(l);
+    say(`— end ${label} log —`);
+  }
+
   /** Run one backup on the policy and wait for it; returns the finished run (with
    *  its snapshotId). restic dedups, so a second run on the same policy uploads only
    *  the delta. Throws on failure. */
@@ -677,6 +691,7 @@ export class StackMigrateService implements OnModuleInit {
     const run = await this.backups.startBackup(policyId, passphrase, 'manual');
     const final = await this.poll(() => this.prisma.stackBackupRun.findUnique({ where: { id: run.id } }), CAPTURE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success' || !final.snapshotId) {
+      this.surfaceChildLog(final?.log, say, 'capture');
       throw new Error(`Capture failed: ${final?.message ?? 'no snapshot produced'}`);
     }
     if (final.message) say(final.message);
@@ -702,6 +717,7 @@ export class StackMigrateService implements OnModuleInit {
     });
     const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success') {
+      this.surfaceChildLog(final?.log, say);
       throw new Error(`Restore to the target failed: ${final?.message ?? 'unknown error'}`);
     }
     say(`Restored and deployed on the target (${final.volumes} volume(s)${final.binds ? `, ${final.binds} bind path(s)` : ''}).`);
@@ -729,6 +745,7 @@ export class StackMigrateService implements OnModuleInit {
       // A pre-restore failure is not fatal — fall back to a full restore in the
       // downtime window. Log and continue rather than aborting the migration.
       say(`WARNING: pre-restore did not complete (${final?.message ?? 'unknown'}). The final restore will copy everything instead.`);
+      this.surfaceChildLog(final?.log, say, 'pre-restore');
       return;
     }
     say(`Pre-restored ${final.volumes} volume(s) to the target (source still live).`);

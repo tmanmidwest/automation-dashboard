@@ -672,7 +672,7 @@ export class StackRestoreService {
           });
           if (res.stdout.trim()) log.push(res.stdout.trim());
           if (res.stderr.trim()) log.push(res.stderr.trim());
-          if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code}). See the log.`);
+          if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code})${resticFailReason(res.stderr)}`);
         }
         say('Data restored.');
       }
@@ -771,7 +771,7 @@ export class StackRestoreService {
       );
       if (res.stdout.trim()) log.push(res.stdout.trim());
       if (res.stderr.trim()) log.push(res.stderr.trim());
-      if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code}). See the log.`);
+      if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code})${resticFailReason(res.stderr)}`);
 
       for (const v of volumes) {
         const dir = join(staging, root.replace(/^\//, ''), 'volumes', v.source);
@@ -986,6 +986,15 @@ function imageForVolume(manifest: Manifest, volume: string): string | undefined 
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Pull a concise reason from restic's stderr for the error MESSAGE (the full output
+ *  still goes to the run log). Prefers a fatal/error line, else the last line. */
+function resticFailReason(stderr: string): string {
+  const lines = stderr.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return '. See the log.';
+  const hit = [...lines].reverse().find((l) => /fatal|error|unable|permission denied|cannot|no such file|not found|exists/i.test(l));
+  return `: ${(hit ?? lines[lines.length - 1]).slice(0, 300)}`;
 }
 
 function escapeRe(v: string): string {
