@@ -644,40 +644,34 @@ export class StackRestoreService {
         // destinations and restic includes both have to match it.
         const root = plan.captureRoot || '/data';
         const volPath = (name: string) => `${root}/volumes/${name}`;
-        const bindPath = (source: string) => `${root}/binds/${bindSlug(source)}`;
 
         if (relayRestore) {
           await this.relayRestore(plan, volumes, binds, root, access, say, log);
         } else {
-          const mounts: HelperMount[] = [
-            ...volumes.map((v) => ({ source: v.dest, dest: volPath(v.source), kind: 'volume' as const, readOnly: false })),
-            ...binds.map((b) => ({ source: b.dest, dest: bindPath(b.source), kind: 'bind' as const, readOnly: false })),
-          ];
-          const includes = [
-            ...volumes.map((v) => volPath(v.source)),
-            ...binds.map((b) => bindPath(b.source)),
-          ];
-          const args = [
-            'restore', plan.snapshot.id, '--target', '/',
-            // Only touch files whose content actually differs. Avoids a needless
-            // remove-then-write of identical files — which fails with "device or
-            // resource busy" when a file is an in-use single-file bind mount on the
-            // target. (restic >= 0.16; the default restic/restic:latest supports it.)
-            '--overwrite', 'if-changed',
-            ...includes.flatMap((i) => ['--include', i]),
-          ];
-          say(`Running ${target.helperImage} to restore ${volumes.length} volume(s) and ${binds.length} bind path(s)…`);
-          const res = await runHelper({
-            ssh: access.ssh!,
-            image: target.helperImage,
-            env: resticEnv(hostAuth),
-            mounts,
-            args,
-            timeoutMs: RESTORE_TIMEOUT_MS,
-          });
-          if (res.stdout.trim()) log.push(res.stdout.trim());
-          if (res.stderr.trim()) log.push(res.stderr.trim());
-          if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code})${resticFailReason(res.stderr)}`);
+          // Volumes: restore straight into the mounted volume directories. restic unlinks
+          // and rewrites files INSIDE a mounted directory fine (the mount is the dir, not
+          // the file), so `--overwrite if-changed` just skips unchanged files.
+          if (volumes.length) {
+            const mounts: HelperMount[] = volumes.map((v) => ({ source: v.dest, dest: volPath(v.source), kind: 'volume' as const, readOnly: false }));
+            const args = [
+              'restore', plan.snapshot.id, '--target', '/', '--overwrite', 'if-changed',
+              ...volumes.flatMap((v) => ['--include', volPath(v.source)]),
+            ];
+            say(`Running ${target.helperImage} to restore ${volumes.length} volume(s)…`);
+            const res = await runHelper({ ssh: access.ssh!, image: target.helperImage, env: resticEnv(hostAuth), mounts, args, timeoutMs: RESTORE_TIMEOUT_MS });
+            if (res.stdout.trim()) log.push(res.stdout.trim());
+            if (res.stderr.trim()) log.push(res.stderr.trim());
+            if (res.code !== 0) throw new Error(`restic restore failed (exit ${res.code})${resticFailReason(res.stderr)}`);
+          }
+          // Binds: NEVER restore directly onto the live path. A single-file bind is a mount
+          // point on the host (docker -v file:dest, and it's held open by the running
+          // container), and restic replaces a file by unlink+create — which fails with
+          // "device or resource busy" on a mount point. Instead restore into an empty
+          // staging dir, then install each into place with an in-place copy. (See
+          // restoreBindsViaStaging.)
+          if (binds.length) {
+            await this.restoreBindsViaStaging(plan, binds, root, access, resticEnv(hostAuth), target.helperImage, say, log);
+          }
         }
         say('Data restored.');
       }
@@ -736,6 +730,73 @@ export class StackRestoreService {
       say(`Failed: ${message}`);
       await this.finish(runId, { status: 'error', message, deployed, durationMs: Date.now() - started, log: log.join('\n') });
       void this.logging.error('stack-backup', `Restore ${runId} failed: ${message}`);
+    }
+  }
+
+  /**
+   * Restore bind paths without letting restic write onto the live host path.
+   *
+   * A single-file bind (`docker -v /host/file:/in/container`) is a MOUNT POINT on the
+   * host, and while the container runs it is held open. restic restores a file by
+   * unlink+create, and you cannot unlink a mount point → "device or resource busy", which
+   * restic treats as fatal and aborts the whole restore. So instead of mounting the live
+   * path and restoring onto it, we restore the binds into an empty staging directory (no
+   * mounts, nothing busy), then install each into place with a copy that writes THROUGH
+   * the mount in place (truncate+write, no unlink) — `cp -aT`, which also preserves mode
+   * (e.g. an entrypoint's +x). Works for file and directory binds alike, and whether or
+   * not a container currently holds the file.
+   */
+  private async restoreBindsViaStaging(
+    plan: RestorePlan,
+    binds: RestoreBindPlan[],
+    root: string,
+    access: ReturnType<typeof hostAccess>,
+    env: Record<string, string>,
+    helperImage: string,
+    say: (line: string) => void,
+    log: string[],
+  ): Promise<void> {
+    const ssh = access.ssh!;
+    const bindPath = (source: string) => `${root}/binds/${bindSlug(source)}`;
+    const sq = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+    const staging = `/var/tmp/cerebro-restore-binds-${Date.now().toString(36)}`;
+
+    say(`Restoring ${binds.length} bind path(s) via a staging dir, then installing in place (so an in-use single-file bind mount is never replaced) …`);
+    await runSsh(ssh, `rm -rf ${sq(staging)} && mkdir -p ${sq(staging)}`);
+    try {
+      const args = ['restore', plan.snapshot.id, '--target', '/restore', ...binds.flatMap((b) => ['--include', bindPath(b.source)])];
+      const res = await runHelper({
+        ssh,
+        image: helperImage,
+        env,
+        mounts: [{ source: staging, dest: '/restore', kind: 'bind', readOnly: false }],
+        args,
+        timeoutMs: RESTORE_TIMEOUT_MS,
+      });
+      if (res.stdout.trim()) log.push(res.stdout.trim());
+      if (res.stderr.trim()) log.push(res.stderr.trim());
+      if (res.code !== 0) throw new Error(`restic restore (binds → staging) failed (exit ${res.code})${resticFailReason(res.stderr)}`);
+
+      for (const b of binds) {
+        const staged = `${staging}${bindPath(b.source)}`; // e.g. /var/tmp/.../data/binds/<slug>
+        const script = [
+          'set -e',
+          `s=${sq(staged)}`,
+          `d=${sq(b.dest)}`,
+          'if [ ! -e "$s" ]; then echo missing; exit 3; fi',
+          'if [ -d "$s" ]; then mkdir -p "$d"; t=dir; else mkdir -p "$(dirname "$d")"; t=file; fi',
+          'cp -aT "$s" "$d"',
+          'printf %s "$t"',
+        ].join('\n');
+        const r = await runSsh(ssh, script);
+        const kind = r.stdout.trim();
+        if (r.code !== 0 || (kind !== 'file' && kind !== 'dir')) {
+          throw new Error(`Could not install bind path ${b.dest}: ${r.stderr.trim() || (kind === 'missing' ? 'not present in the snapshot' : `exit ${r.code}`)}`);
+        }
+        say(`Installed bind ${b.dest} (${kind}, in place${b.remapped ? ', remapped' : ''}).`);
+      }
+    } finally {
+      await runSsh(ssh, `rm -rf ${sq(staging)}`).catch(() => undefined);
     }
   }
 
