@@ -231,6 +231,26 @@ export class StackMigrateService implements OnModuleInit {
   }
 
   /**
+   * On-demand lookup for the UI's "Fetch existing route" button: inspect the source
+   * stack to learn its published ports, then scan ingress connectors for a matching
+   * route. Lets the operator pre-fill the cutover flip without running a full plan.
+   */
+  async detectIngressForStack(sourceInstanceId: string, stackName: string): Promise<MigrateIngressSuggestion | null> {
+    const source = await this.hostOrThrow(sourceInstanceId);
+    const srcAccess = await this.accessFor(source.id);
+    const project = projectName(stackName);
+    const inspection = await inspectStack(srcAccess.api, project).catch(() => null);
+    const wanted = new Set<number>();
+    for (const c of inspection?.containers ?? []) {
+      for (const p of c.ports ?? []) {
+        const n = Number(p.hostPort);
+        if (Number.isFinite(n) && n > 0) wanted.add(n);
+      }
+    }
+    return this.detectIngress(source.id, wanted).catch(() => null);
+  }
+
+  /**
    * Scan the configured Cloudflare/NPM connectors for an existing route whose upstream
    * matches the source host's IP + one of the stack's published ports — so the cutover
    * flip can be pre-filled. NPM: one list call, parse `details.forward` ("http://host:port").

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight, Boxes, CheckCircle2, HardDriveDownload, Loader2, RefreshCw, RotateCcw, ScrollText,
-  Server, TriangleAlert, Undo2, X,
+  Search, Server, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import type {
-  BackupHost, CfTunnelOption, IngressTarget, MigrateIngressSpec, MigratePlan, NpmCertOption, SecretMode,
-  StackBackupCandidate, StackBackupTarget, StackMigrationRun,
+  BackupHost, CfTunnelOption, IngressTarget, MigrateIngressSpec, MigrateIngressSuggestion, MigratePlan,
+  NpmCertOption, SecretMode, StackBackupCandidate, StackBackupTarget, StackMigrationRun,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -100,6 +100,8 @@ export function StackMigrate() {
   const [ingressTunnelId, setIngressTunnelId] = useState('');
   const [certs, setCerts] = useState<NpmCertOption[]>([]);
   const [ingressCertId, setIngressCertId] = useState('0');
+  const [ingressFetching, setIngressFetching] = useState(false);
+  const [ingressFetchMsg, setIngressFetchMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [plan, setPlan] = useState<MigratePlan | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -137,6 +139,34 @@ export function StackMigrate() {
       certificateId: ingressKind === 'npm' ? Number(ingressCertId) || 0 : undefined,
     };
   }, [ingressEnabled, ingressInstanceId, ingressHostname, ingressPort, ingressKind, ingressTunnelId, ingressCertId]);
+
+  // "Fetch existing route": look up the live ingress route pointing at the source stack
+  // and pre-fill the fields, leaving them editable so the operator can tweak before cutover.
+  const fetchIngress = useCallback(async () => {
+    if (!source) return;
+    setIngressFetching(true);
+    setIngressFetchMsg(null);
+    try {
+      const sug = await api.get<MigrateIngressSuggestion | null>(
+        `/api/stack-migrate/ingress/detect?instanceId=${encodeURIComponent(source.connectorInstanceId)}&stackName=${encodeURIComponent(source.stackName)}`,
+      );
+      if (sug) {
+        setIngressInstanceId(sug.instanceId);
+        setIngressHostname(sug.hostname);
+        setIngressPort(String(sug.port));
+        if (sug.tunnelId) setIngressTunnelId(sug.tunnelId);
+        if (typeof sug.certificateId === 'number') setIngressCertId(String(sug.certificateId));
+        setPlan(null);
+        setIngressFetchMsg({ ok: true, text: `Found ${sug.label}. Fields pre-filled — edit them if you need to.` });
+      } else {
+        setIngressFetchMsg({ ok: false, text: 'No existing route found for this stack. Enter the ingress details manually.' });
+      }
+    } catch (e) {
+      setIngressFetchMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Could not look up ingress.' });
+    } finally {
+      setIngressFetching(false);
+    }
+  }, [source]);
 
   const load = useCallback(async () => {
     try {
@@ -274,7 +304,7 @@ export function StackMigrate() {
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <Label className="text-xs">Source stack</Label>
-              <select className={selectCls} value={sourceKey} onChange={(e) => { setSourceKey(e.target.value); setPlan(null); }}>
+              <select className={selectCls} value={sourceKey} onChange={(e) => { setSourceKey(e.target.value); setPlan(null); setIngressFetchMsg(null); }}>
                 <option value="">Choose a stack…</option>
                 {candidates.map((c) => (
                   <option key={`${c.connectorInstanceId}::${c.stackName}`} value={`${c.connectorInstanceId}::${c.stackName}`}>
@@ -353,6 +383,20 @@ export function StackMigrate() {
               {' '}<strong className="text-foreground/80">Unchecked:</strong> the stack is moved but ingress is left alone — after you Complete, you must repoint DNS / your reverse proxy to the target yourself, or traffic keeps hitting the old host.
             </p>
             {ingressEnabled && (
+              <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => void fetchIngress()} disabled={!source || ingressFetching}>
+                  {ingressFetching ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Search className="h-3.5 w-3.5 mr-1" />}
+                  Fetch existing route
+                </Button>
+                {!source && <span className="text-[0.7rem] text-muted-foreground">Choose a source stack first.</span>}
+                {ingressFetchMsg && (
+                  <span className={`text-[0.7rem] inline-flex items-center gap-1 ${ingressFetchMsg.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
+                    {ingressFetchMsg.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <TriangleAlert className="h-3.5 w-3.5" />}
+                    {ingressFetchMsg.text}
+                  </span>
+                )}
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <Label className="text-xs">Ingress connector</Label>
@@ -387,6 +431,7 @@ export function StackMigrate() {
                     </select>
                   </div>
                 )}
+              </div>
               </div>
             )}
             {ingressEnabled && <p className="text-[0.7rem] text-muted-foreground">On “Cut over” the hostname is repointed to the target before the source is stopped; Rollback points it back.</p>}

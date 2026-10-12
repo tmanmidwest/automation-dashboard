@@ -73,6 +73,14 @@ export class StackMigrateController {
     return this.ingress.listCerts(instanceId);
   }
 
+  // On-demand "Fetch existing route" for the cutover form: inspects the source stack's
+  // published ports and scans the CF/NPM connectors for a matching route to pre-fill.
+  @Get('ingress/detect')
+  @RequirePermissions('backup:read')
+  ingressDetect(@Query('instanceId') instanceId: string, @Query('stackName') stackName: string) {
+    return this.migrate.detectIngressForStack(instanceId, stackName);
+  }
+
   @Post('plan')
   @RequirePermissions('backup:read')
   plan(@Body() body: MigratePlanDto) {
