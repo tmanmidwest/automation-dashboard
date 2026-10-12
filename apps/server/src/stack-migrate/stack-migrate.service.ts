@@ -167,20 +167,29 @@ export class StackMigrateService implements OnModuleInit {
       warnings.push(`Could not check for an existing "${destStackName}" on ${dest.name}.`);
     }
 
-    // Optional automated-cutover ingress (P2): validate the chosen CF/NPM connector.
-    if (input.ingress) {
-      const ing = input.ingress;
+    // Optional automated-cutover ingress (P2): validate each chosen CF/NPM route.
+    const ingressRoutes = input.ingressRoutes ?? [];
+    for (let i = 0; i < ingressRoutes.length; i++) {
+      const ing = ingressRoutes[i];
+      const where = ingressRoutes.length > 1 ? ` (route ${i + 1}${ing.hostname ? `, ${ing.hostname}` : ''})` : '';
       try {
         const kind = await this.ingressOps.kindOf(ing.instanceId);
-        if (kind === 'cloudflare' && !ing.tunnelId) conflicts.push('Pick a Cloudflare tunnel for the ingress route.');
+        if (kind === 'cloudflare' && !ing.tunnelId) conflicts.push(`Pick a Cloudflare tunnel for the ingress route${where}.`);
       } catch {
-        conflicts.push('The chosen ingress connector is not a Cloudflare or Nginx Proxy Manager instance.');
+        conflicts.push(`The chosen ingress connector is not a Cloudflare or Nginx Proxy Manager instance${where}.`);
       }
-      if (!ing.hostname?.trim()) conflicts.push('The ingress route needs a hostname.');
+      if (!ing.hostname?.trim()) conflicts.push(`The ingress route needs a hostname${where}.`);
       if (wanted.size && !wanted.has(ing.port)) {
-        warnings.push(`Ingress is set to route to port ${ing.port}, which this stack does not publish — double-check the port.`);
+        warnings.push(`Ingress route${where} is set to port ${ing.port}, which this stack does not publish — double-check the port.`);
       }
     }
+    // Two routes to the same hostname on the same connector would fight each other.
+    const dupe = new Map<string, number>();
+    for (const ing of ingressRoutes) {
+      const k = `${ing.instanceId}|${(ing.hostname ?? '').trim().toLowerCase()}`;
+      dupe.set(k, (dupe.get(k) ?? 0) + 1);
+    }
+    for (const [k, n] of dupe) if (n > 1 && k.split('|')[1]) conflicts.push(`The same hostname "${k.split('|')[1]}" is listed more than once for one connector — remove the duplicate.`);
 
     // Is the source an App Replicator deployment? If so we can re-point it (else it orphans).
     const repl = await this.prisma.replicatorDeployment.findFirst({
@@ -191,12 +200,14 @@ export class StackMigrateService implements OnModuleInit {
       warnings.push(`This stack is an App Replicator deployment ("${repl!.name}"). The migration will re-point it to the target so the replicator keeps managing it — otherwise the replicator would still point at the old host (and a redeploy would recreate it there).`);
     }
 
-    // Detect an existing ingress route pointing at the source stack, to pre-fill the
-    // cutover flip. Skip when it's a replicator deployment — its ingress moves via
-    // the re-point path, so a manual flip would double-handle the same route.
-    const ingressSuggestion = replicator ? null : await this.detectIngress(source.id, wanted).catch(() => null);
-    if (ingressSuggestion) {
-      warnings.push(`Detected an existing route for this stack: ${ingressSuggestion.label}. Enable "automatically flip ingress" to move it to the target on cutover (the fields are pre-filled).`);
+    // Detect existing ingress routes pointing at the source stack (all of them), to
+    // pre-fill the cutover flip. Skip when it's a replicator deployment — its ingress
+    // moves via the re-point path, so a manual flip would double-handle those routes.
+    const ingressSuggestions = replicator ? [] : await this.detectIngress(source.id, wanted).catch(() => []);
+    if (ingressSuggestions.length === 1) {
+      warnings.push(`Detected an existing route for this stack: ${ingressSuggestions[0].label}. Enable "automatically flip ingress" to move it to the target on cutover (the fields pre-fill).`);
+    } else if (ingressSuggestions.length > 1) {
+      warnings.push(`Detected ${ingressSuggestions.length} existing routes for this stack: ${ingressSuggestions.map((s) => s.label).join('; ')}. Enable "automatically flip ingress" to move them all to the target on cutover (the fields pre-fill).`);
     }
 
     // Pre-flight readiness checks (surfaced as a checklist; a `fail` blocks Start).
@@ -220,11 +231,11 @@ export class StackMigrateService implements OnModuleInit {
       images,
       ports,
       needsPassphrase: secretMode === 'embed',
-      ingress: input.ingress ?? null,
+      ingressRoutes,
       checks,
       estimatedDataBytes,
       replicator,
-      ingressSuggestion,
+      ingressSuggestions,
       conflicts,
       warnings,
     };
@@ -235,7 +246,7 @@ export class StackMigrateService implements OnModuleInit {
    * stack to learn its published ports, then scan ingress connectors for a matching
    * route. Lets the operator pre-fill the cutover flip without running a full plan.
    */
-  async detectIngressForStack(sourceInstanceId: string, stackName: string): Promise<MigrateIngressSuggestion | null> {
+  async detectIngressForStack(sourceInstanceId: string, stackName: string): Promise<MigrateIngressSuggestion[]> {
     const source = await this.hostOrThrow(sourceInstanceId);
     const srcAccess = await this.accessFor(source.id);
     const project = projectName(stackName);
@@ -247,7 +258,7 @@ export class StackMigrateService implements OnModuleInit {
         if (Number.isFinite(n) && n > 0) wanted.add(n);
       }
     }
-    return this.detectIngress(source.id, wanted).catch(() => null);
+    return this.detectIngress(source.id, wanted).catch(() => []);
   }
 
   /**
@@ -257,13 +268,21 @@ export class StackMigrateService implements OnModuleInit {
    * Cloudflare: list tunnels, then each tunnel's routes, match `details.service`. The
    * upstream host equals `hostIpFor(source)` (the same value baked into routes at creation).
    */
-  private async detectIngress(sourceInstanceId: string, wantedPorts: Set<number>): Promise<MigrateIngressSuggestion | null> {
-    if (!wantedPorts.size) return null;
+  private async detectIngress(sourceInstanceId: string, wantedPorts: Set<number>): Promise<MigrateIngressSuggestion[]> {
+    if (!wantedPorts.size) return [];
     const sourceIp = await this.hostIpFor(sourceInstanceId);
-    if (!sourceIp) return null;
+    if (!sourceIp) return [];
     const upstream = (svc: string): { host: string; port: number } | null => {
       const m = /^[a-z0-9]+:\/\/\[?([^\]:/]+)\]?:(\d+)/i.exec(svc.trim());
       return m ? { host: m[1], port: Number(m[2]) } : null;
+    };
+    // Collect EVERY route that points at the source stack (a stack can front several
+    // hostnames across one or more CF/NPM connectors), deduped by instance+hostname+port.
+    const found: MigrateIngressSuggestion[] = [];
+    const seen = new Set<string>();
+    const add = (s: MigrateIngressSuggestion) => {
+      const key = `${s.instanceId}|${s.hostname}|${s.port}`;
+      if (!seen.has(key)) { seen.add(key); found.push(s); }
     };
     const targets = await this.ingress.listTargets().catch(() => []);
     for (const t of targets) {
@@ -273,7 +292,7 @@ export class StackMigrateService implements OnModuleInit {
           for (const r of rows) {
             const u = upstream(String(r.details?.forward ?? ''));
             if (u && u.host === sourceIp && wantedPorts.has(u.port)) {
-              return { source: 'npm', label: `${r.name} via ${t.name} (NPM)`, instanceId: t.instanceId, hostname: r.name, port: u.port };
+              add({ source: 'npm', label: `${r.name} via ${t.name} (NPM)`, instanceId: t.instanceId, hostname: r.name, port: u.port });
             }
           }
         } else if (t.kind === 'cloudflare') {
@@ -284,14 +303,14 @@ export class StackMigrateService implements OnModuleInit {
               const u = upstream(String(r.details?.service ?? ''));
               if (u && u.host === sourceIp && wantedPorts.has(u.port)) {
                 const hostname = String(r.details?.hostname ?? r.name);
-                return { source: 'cloudflare', label: `${hostname} via ${t.name} (Cloudflare)`, instanceId: t.instanceId, hostname, port: u.port, tunnelId: tun.id };
+                add({ source: 'cloudflare', label: `${hostname} via ${t.name} (Cloudflare)`, instanceId: t.instanceId, hostname, port: u.port, tunnelId: tun.id });
               }
             }
           }
         }
       } catch { /* a connector that can't be scanned shouldn't block the plan */ }
     }
-    return null;
+    return found;
   }
 
   /** Readiness checks for the plan card: disk, compose plugin, repo, arch, compose
@@ -420,7 +439,7 @@ export class StackMigrateService implements OnModuleInit {
         step: 'planned',
         status: 'running',
         images: plan.images as unknown as object,
-        ingress: (input.ingress ?? undefined) as unknown as object,
+        ingress: (plan.ingressRoutes?.length ? plan.ingressRoutes : undefined) as unknown as object,
         replicatorDeploymentId,
       },
     });
@@ -715,18 +734,23 @@ export class StackMigrateService implements OnModuleInit {
     const log = (row.log ? row.log + '\n' : '');
     const say = (l: string) => void this.patch(id, { log: (log + `${new Date().toISOString()}  ${l}`).slice(-MAX_LOG_CHARS) });
     try {
-      // 1) Repoint ingress at the target BEFORE stopping the source → minimal downtime.
-      const ingress = this.ingressFromRow(row.ingress);
-      if (ingress) {
+      // 1) Repoint every ingress route at the target BEFORE stopping the source → minimal
+      //    downtime. A stack can front several hostnames; flip them all.
+      const routes = this.ingressFromRow(row.ingress);
+      if (routes.length) {
         const targetIp = await this.hostIpFor(row.destInstanceId);
         if (!targetIp) throw new BadRequestException('Could not resolve the target host IP for the ingress flip.');
-        say(`Repointing ${ingress.hostname} → ${targetIp}:${ingress.port} on the ingress connector…`);
-        await this.ingressOps.setRoute({
-          instanceId: ingress.instanceId, hostname: ingress.hostname, upstreamHost: targetIp, port: ingress.port,
-          tunnelId: ingress.tunnelId, certificateId: ingress.certificateId,
-        });
+        let flipped = 0;
+        for (const r of routes) {
+          say(`Repointing ${r.hostname} → ${targetIp}:${r.port} on the ingress connector…`);
+          await this.ingressOps.setRoute({
+            instanceId: r.instanceId, hostname: r.hostname, upstreamHost: targetIp, port: r.port,
+            tunnelId: r.tunnelId, certificateId: r.certificateId,
+          });
+          flipped++;
+        }
         await this.patch(id, { ingressFlipped: true });
-        say('Ingress now serves the target.');
+        say(`Ingress now serves the target (${flipped} route${flipped === 1 ? '' : 's'} repointed).`);
       }
       // 2) Re-point an App Replicator deployment (+ its own ingress routes) to the
       //    target, so the replicator keeps managing the app instead of the dead source.
@@ -745,9 +769,10 @@ export class StackMigrateService implements OnModuleInit {
       const access = await this.accessFor(row.sourceInstanceId);
       const removed = await this.removeProjectContainers(access.api, row.stackName, say);
       say(`Removed ${removed} source container(s). Source volumes are kept — prune them by hand once you're satisfied.`);
-      await this.finish(id, { status: 'success', step: 'done', message: `Cut over to the target${ingress ? ` and repointed ${ingress.hostname}` : ''}. Source "${row.stackName}" torn down.`, durationMs: row.durationMs ?? 0, log: `${row.log ?? ''}` });
+      const flipNote = routes.length ? ` and repointed ${routes.length === 1 ? routes[0].hostname : `${routes.length} routes`}` : '';
+      await this.finish(id, { status: 'success', step: 'done', message: `Cut over to the target${flipNote}. Source "${row.stackName}" torn down.`, durationMs: row.durationMs ?? 0, log: `${row.log ?? ''}` });
       await this.prisma.stackMigrationRun.update({ where: { id }, data: { sourceKept: false } });
-      await this.audit.record({ actorId: actor?.id, actorEmail: actor?.email, action: 'stack.migrate.cutover', target: `${row.stackName} → ${row.destStackName}`, meta: { dest: row.destInstanceId, ingressFlipped: !!ingress, replicatorRepointed: !!row.replicatorDeploymentId } }).catch(() => undefined);
+      await this.audit.record({ actorId: actor?.id, actorEmail: actor?.email, action: 'stack.migrate.cutover', target: `${row.stackName} → ${row.destStackName}`, meta: { dest: row.destInstanceId, ingressRoutesFlipped: routes.length, replicatorRepointed: !!row.replicatorDeploymentId } }).catch(() => undefined);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.patch(id, { step: 'awaiting-cutover', message: `Cutover failed: ${message}` });
@@ -769,16 +794,18 @@ export class StackMigrateService implements OnModuleInit {
       const src = await this.accessFor(row.sourceInstanceId);
       const resumed = await this.startProject(src.api, row.stackName, say);
       say(`Restarted ${resumed} source container(s) — the source is serving again.`);
-      // 2) If ingress was flipped to the target, point it back at the source.
-      const ingress = this.ingressFromRow(row.ingress);
-      if (ingress && row.ingressFlipped) {
+      // 2) If ingress was flipped to the target, point every route back at the source.
+      const routes = this.ingressFromRow(row.ingress);
+      if (routes.length && row.ingressFlipped) {
         const sourceIp = await this.hostIpFor(row.sourceInstanceId);
         if (sourceIp) {
-          say(`Repointing ${ingress.hostname} → ${sourceIp}:${ingress.port} back to the source…`);
-          await this.ingressOps.setRoute({
-            instanceId: ingress.instanceId, hostname: ingress.hostname, upstreamHost: sourceIp, port: ingress.port,
-            tunnelId: ingress.tunnelId, certificateId: ingress.certificateId,
-          }).catch((e) => say(`WARNING: could not flip ingress back: ${msg(e)}. Repoint it by hand.`));
+          for (const r of routes) {
+            say(`Repointing ${r.hostname} → ${sourceIp}:${r.port} back to the source…`);
+            await this.ingressOps.setRoute({
+              instanceId: r.instanceId, hostname: r.hostname, upstreamHost: sourceIp, port: r.port,
+              tunnelId: r.tunnelId, certificateId: r.certificateId,
+            }).catch((e) => say(`WARNING: could not flip ${r.hostname} back: ${msg(e)}. Repoint it by hand.`));
+          }
           await this.patch(id, { ingressFlipped: false });
         }
       }
@@ -838,11 +865,19 @@ export class StackMigrateService implements OnModuleInit {
     return dockerTargetFrom(ctx).hostIp;
   }
 
-  private ingressFromRow(raw: unknown): MigrateIngressSpec | null {
-    if (!raw || typeof raw !== 'object') return null;
-    const o = raw as Partial<MigrateIngressSpec>;
-    if (!o.instanceId || !o.hostname || typeof o.port !== 'number') return null;
-    return { instanceId: o.instanceId, hostname: o.hostname, port: o.port, tunnelId: o.tunnelId, certificateId: o.certificateId };
+  /** Normalize the stored `ingress` column into a route array. Accepts the current
+   *  array shape and legacy single-object rows (object → [object]) for back-compat. */
+  private ingressFromRow(raw: unknown): MigrateIngressSpec[] {
+    if (!raw) return [];
+    const arr = Array.isArray(raw) ? raw : [raw];
+    const out: MigrateIngressSpec[] = [];
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+      const o = item as Partial<MigrateIngressSpec>;
+      if (!o.instanceId || !o.hostname || typeof o.port !== 'number') continue;
+      out.push({ instanceId: o.instanceId, hostname: o.hostname, port: o.port, tunnelId: o.tunnelId, certificateId: o.certificateId });
+    }
+    return out;
   }
 
   // ── Engine-API stack ops (work for foreign/unmanaged stacks too) ──
@@ -1014,7 +1049,7 @@ export class StackMigrateService implements OnModuleInit {
       snapshotId: row.snapshotId,
       images: Array.isArray(row.images) ? (row.images as MigrateImagePlanItem[]) : [],
       sourceKept: row.sourceKept,
-      ingress: this.ingressFromRow(row.ingress),
+      ingressRoutes: this.ingressFromRow(row.ingress),
       ingressFlipped: row.ingressFlipped,
       replicatorDeploymentId: row.replicatorDeploymentId,
       replicatorRepointed: row.replicatorRepointed,

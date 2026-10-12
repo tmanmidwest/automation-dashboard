@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ArrowRight, Boxes, CheckCircle2, HardDriveDownload, Loader2, RefreshCw, RotateCcw, ScrollText,
-  Search, Server, TriangleAlert, Undo2, X,
+  ArrowRight, Boxes, CheckCircle2, HardDriveDownload, Loader2, Plus, RefreshCw, RotateCcw, ScrollText,
+  Search, Server, Trash2, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import type {
   BackupHost, CfTunnelOption, IngressTarget, MigrateIngressSpec, MigrateIngressSuggestion, MigratePlan,
@@ -16,6 +16,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 const selectCls = 'mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm';
+
+/** One editable ingress route row in the cutover form (port/cert kept as strings for inputs). */
+interface RouteRow {
+  instanceId: string;
+  hostname: string;
+  port: string;
+  tunnelId: string;
+  certId: string;
+}
+const emptyRoute = (): RouteRow => ({ instanceId: '', hostname: '', port: '', tunnelId: '', certId: '0' });
 
 const STATUS_COLOR: Record<string, string> = {
   success: 'text-emerald-400',
@@ -90,16 +100,12 @@ export function StackMigrate() {
   const [restoreCredFiles, setRestoreCredFiles] = useState(false);
   const [repointReplicator, setRepointReplicator] = useState(true);
 
-  // Automated-cutover ingress (optional, P2)
+  // Automated-cutover ingress (optional, P2) — a stack can front multiple routes.
   const [ingressTargets, setIngressTargets] = useState<IngressTarget[]>([]);
   const [ingressEnabled, setIngressEnabled] = useState(false);
-  const [ingressInstanceId, setIngressInstanceId] = useState('');
-  const [ingressHostname, setIngressHostname] = useState('');
-  const [ingressPort, setIngressPort] = useState('');
-  const [tunnels, setTunnels] = useState<CfTunnelOption[]>([]);
-  const [ingressTunnelId, setIngressTunnelId] = useState('');
-  const [certs, setCerts] = useState<NpmCertOption[]>([]);
-  const [ingressCertId, setIngressCertId] = useState('0');
+  const [routes, setRoutes] = useState<RouteRow[]>([]);
+  const [tunnelsByInstance, setTunnelsByInstance] = useState<Record<string, CfTunnelOption[]>>({});
+  const [certsByInstance, setCertsByInstance] = useState<Record<string, NpmCertOption[]>>({});
   const [ingressFetching, setIngressFetching] = useState(false);
   const [ingressFetchMsg, setIngressFetchMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -113,53 +119,77 @@ export function StackMigrate() {
     return candidates.find((c) => c.connectorInstanceId === instanceId && c.stackName === stackName) ?? null;
   }, [sourceKey, candidates]);
 
-  const ingressKind = useMemo(
-    () => ingressTargets.find((t) => t.instanceId === ingressInstanceId)?.kind ?? null,
-    [ingressTargets, ingressInstanceId],
+  const kindOf = useCallback(
+    (instanceId: string) => ingressTargets.find((t) => t.instanceId === instanceId)?.kind ?? null,
+    [ingressTargets],
   );
 
-  // Load tunnels (Cloudflare) or certs (NPM) for the chosen ingress connector.
+  // Load tunnels (Cloudflare) / certs (NPM) for every connector referenced by a route,
+  // once each. Each row can point at a different connector.
   useEffect(() => {
-    if (!ingressEnabled || !ingressInstanceId) return;
-    if (ingressKind === 'cloudflare') {
-      void api.get<CfTunnelOption[]>(`/api/stack-migrate/ingress/tunnels?instanceId=${ingressInstanceId}`).then(setTunnels).catch(() => setTunnels([]));
-    } else if (ingressKind === 'npm') {
-      void api.get<NpmCertOption[]>(`/api/stack-migrate/ingress/certs?instanceId=${ingressInstanceId}`).then(setCerts).catch(() => setCerts([]));
+    if (!ingressEnabled) return;
+    const ids = [...new Set(routes.map((r) => r.instanceId).filter(Boolean))];
+    for (const id of ids) {
+      const kind = kindOf(id);
+      if (kind === 'cloudflare' && !tunnelsByInstance[id]) {
+        void api.get<CfTunnelOption[]>(`/api/stack-migrate/ingress/tunnels?instanceId=${id}`)
+          .then((t) => setTunnelsByInstance((m) => ({ ...m, [id]: t })))
+          .catch(() => setTunnelsByInstance((m) => ({ ...m, [id]: [] })));
+      } else if (kind === 'npm' && !certsByInstance[id]) {
+        void api.get<NpmCertOption[]>(`/api/stack-migrate/ingress/certs?instanceId=${id}`)
+          .then((c) => setCertsByInstance((m) => ({ ...m, [id]: c })))
+          .catch(() => setCertsByInstance((m) => ({ ...m, [id]: [] })));
+      }
     }
-  }, [ingressEnabled, ingressInstanceId, ingressKind]);
+  }, [ingressEnabled, routes, kindOf, tunnelsByInstance, certsByInstance]);
 
-  const buildIngress = useCallback((): MigrateIngressSpec | undefined => {
-    const port = Number(ingressPort);
-    if (!ingressEnabled || !ingressInstanceId || !ingressHostname.trim() || !Number.isFinite(port) || port <= 0) return undefined;
-    return {
-      instanceId: ingressInstanceId,
-      hostname: ingressHostname.trim(),
-      port,
-      tunnelId: ingressKind === 'cloudflare' ? ingressTunnelId || undefined : undefined,
-      certificateId: ingressKind === 'npm' ? Number(ingressCertId) || 0 : undefined,
-    };
-  }, [ingressEnabled, ingressInstanceId, ingressHostname, ingressPort, ingressKind, ingressTunnelId, ingressCertId]);
+  const updateRoute = (i: number, patch: Partial<RouteRow>) => {
+    setRoutes((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+    setPlan(null);
+  };
+  const addRoute = () => { setRoutes((rs) => [...rs, emptyRoute()]); setPlan(null); };
+  const removeRoute = (i: number) => { setRoutes((rs) => rs.filter((_, idx) => idx !== i)); setPlan(null); };
 
-  // "Fetch existing route": look up the live ingress route pointing at the source stack
-  // and pre-fill the fields, leaving them editable so the operator can tweak before cutover.
+  const buildIngressRoutes = useCallback((): MigrateIngressSpec[] => {
+    if (!ingressEnabled) return [];
+    const out: MigrateIngressSpec[] = [];
+    for (const r of routes) {
+      const port = Number(r.port);
+      if (!r.instanceId || !r.hostname.trim() || !Number.isFinite(port) || port <= 0) continue;
+      const kind = kindOf(r.instanceId);
+      out.push({
+        instanceId: r.instanceId,
+        hostname: r.hostname.trim(),
+        port,
+        tunnelId: kind === 'cloudflare' ? r.tunnelId || undefined : undefined,
+        certificateId: kind === 'npm' ? Number(r.certId) || 0 : undefined,
+      });
+    }
+    return out;
+  }, [ingressEnabled, routes, kindOf]);
+
+  // "Fetch existing route(s)": look up every live route pointing at the source stack and
+  // load them into the editable list (replacing what's there), so nothing must be retyped.
   const fetchIngress = useCallback(async () => {
     if (!source) return;
     setIngressFetching(true);
     setIngressFetchMsg(null);
     try {
-      const sug = await api.get<MigrateIngressSuggestion | null>(
+      const sugs = await api.get<MigrateIngressSuggestion[]>(
         `/api/stack-migrate/ingress/detect?instanceId=${encodeURIComponent(source.connectorInstanceId)}&stackName=${encodeURIComponent(source.stackName)}`,
       );
-      if (sug) {
-        setIngressInstanceId(sug.instanceId);
-        setIngressHostname(sug.hostname);
-        setIngressPort(String(sug.port));
-        if (sug.tunnelId) setIngressTunnelId(sug.tunnelId);
-        if (typeof sug.certificateId === 'number') setIngressCertId(String(sug.certificateId));
+      if (sugs.length) {
+        setRoutes(sugs.map((s) => ({
+          instanceId: s.instanceId,
+          hostname: s.hostname,
+          port: String(s.port),
+          tunnelId: s.tunnelId ?? '',
+          certId: typeof s.certificateId === 'number' ? String(s.certificateId) : '0',
+        })));
         setPlan(null);
-        setIngressFetchMsg({ ok: true, text: `Found ${sug.label}. Fields pre-filled — edit them if you need to.` });
+        setIngressFetchMsg({ ok: true, text: `Found ${sugs.length} route${sugs.length === 1 ? '' : 's'}: ${sugs.map((s) => s.hostname).join(', ')}. Loaded below — edit or remove any before cutover.` });
       } else {
-        setIngressFetchMsg({ ok: false, text: 'No existing route found for this stack. Enter the ingress details manually.' });
+        setIngressFetchMsg({ ok: false, text: 'No existing routes found for this stack. Add one manually below.' });
       }
     } catch (e) {
       setIngressFetchMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Could not look up ingress.' });
@@ -210,7 +240,7 @@ export function StackMigrate() {
         destStackName: destStackName.trim() || undefined,
         repoTargetId,
         secretMode,
-        ingress: buildIngress(),
+        ingressRoutes: buildIngressRoutes(),
       });
       setPlan(p);
       if (p.secretMode) setSecretMode(p.secretMode);
@@ -241,7 +271,7 @@ export function StackMigrate() {
         warmPrecopy,
         preRestore,
         passphrase: passphrase.trim() || undefined,
-        ingress: plan.ingress ?? undefined,
+        ingressRoutes: plan.ingressRoutes ?? undefined,
         includeBinds,
         bindMap: bindMap && Object.keys(bindMap).length ? bindMap : undefined,
         restoreCredentialFiles: restoreCredFiles || undefined,
@@ -350,10 +380,10 @@ export function StackMigrate() {
           </div>
 
           <div className="rounded-md border border-border/60 p-3 space-y-3">
-            {plan?.ingressSuggestion && !ingressEnabled && (
+            {plan?.ingressSuggestions && plan.ingressSuggestions.length > 0 && !ingressEnabled && (
               <div className="flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-200">
                 <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                <span>Heads up — we found an existing route for this stack: <strong>{plan.ingressSuggestion.label}</strong>. Check the box below to move it to the target on cutover; the fields will pre-fill.</span>
+                <span>Heads up — we found {plan.ingressSuggestions.length} existing route{plan.ingressSuggestions.length === 1 ? '' : 's'} for this stack: <strong>{plan.ingressSuggestions.map((s) => s.label).join('; ')}</strong>. Check the box below to move {plan.ingressSuggestions.length === 1 ? 'it' : 'them all'} to the target on cutover; the rows pre-fill.</span>
               </div>
             )}
             <label className="flex items-center gap-2 text-xs font-medium">
@@ -363,13 +393,16 @@ export function StackMigrate() {
                 onChange={(e) => {
                   const on = e.target.checked;
                   setIngressEnabled(on);
-                  // Auto-populate from a detected route when turning it on and nothing's set yet.
-                  const sug = plan?.ingressSuggestion;
-                  if (on && sug && !ingressInstanceId) {
-                    setIngressInstanceId(sug.instanceId);
-                    setIngressHostname(sug.hostname);
-                    setIngressPort(String(sug.port));
-                    if (sug.tunnelId) setIngressTunnelId(sug.tunnelId);
+                  // Auto-populate ALL detected routes when turning it on and the list is empty.
+                  const sugs = plan?.ingressSuggestions ?? [];
+                  if (on && sugs.length && routes.length === 0) {
+                    setRoutes(sugs.map((s) => ({
+                      instanceId: s.instanceId,
+                      hostname: s.hostname,
+                      port: String(s.port),
+                      tunnelId: s.tunnelId ?? '',
+                      certId: typeof s.certificateId === 'number' ? String(s.certificateId) : '0',
+                    })));
                   }
                   setPlan(null);
                 }}
@@ -379,62 +412,83 @@ export function StackMigrate() {
               {ingressTargets.length === 0 && <span className="text-muted-foreground font-normal">(no Cloudflare / NPM connector configured)</span>}
             </label>
             <p className="text-[0.7rem] text-muted-foreground">
-              <strong className="text-foreground/80">Checked:</strong> at cutover Cerebro repoints this public hostname (Cloudflare tunnel route or NPM proxy host) from the source host to the target automatically — no manual DNS/proxy edit — and Rollback points it back.
+              <strong className="text-foreground/80">Checked:</strong> at cutover Cerebro repoints every public hostname below (Cloudflare tunnel route or NPM proxy host) from the source host to the target automatically — no manual DNS/proxy edit — and Rollback points them all back.
               {' '}<strong className="text-foreground/80">Unchecked:</strong> the stack is moved but ingress is left alone — after you Complete, you must repoint DNS / your reverse proxy to the target yourself, or traffic keeps hitting the old host.
             </p>
             {ingressEnabled && (
               <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => void fetchIngress()} disabled={!source || ingressFetching}>
-                  {ingressFetching ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Search className="h-3.5 w-3.5 mr-1" />}
-                  Fetch existing route
-                </Button>
-                {!source && <span className="text-[0.7rem] text-muted-foreground">Choose a source stack first.</span>}
-                {ingressFetchMsg && (
-                  <span className={`text-[0.7rem] inline-flex items-center gap-1 ${ingressFetchMsg.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
-                    {ingressFetchMsg.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <TriangleAlert className="h-3.5 w-3.5" />}
-                    {ingressFetchMsg.text}
-                  </span>
-                )}
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <Label className="text-xs">Ingress connector</Label>
-                  <select className={selectCls} value={ingressInstanceId} onChange={(e) => { setIngressInstanceId(e.target.value); setPlan(null); }}>
-                    <option value="">Choose…</option>
-                    {ingressTargets.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name} ({t.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'})</option>)}
-                  </select>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => void fetchIngress()} disabled={!source || ingressFetching}>
+                    {ingressFetching ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Search className="h-3.5 w-3.5 mr-1" />}
+                    Fetch existing route(s)
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={addRoute}>
+                    <Plus className="h-3.5 w-3.5 mr-1" /> Add route
+                  </Button>
+                  {!source && <span className="text-[0.7rem] text-muted-foreground">Choose a source stack first.</span>}
+                  {ingressFetchMsg && (
+                    <span className={`text-[0.7rem] inline-flex items-center gap-1 ${ingressFetchMsg.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
+                      {ingressFetchMsg.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <TriangleAlert className="h-3.5 w-3.5" />}
+                      {ingressFetchMsg.text}
+                    </span>
+                  )}
                 </div>
-                <div>
-                  <Label className="text-xs">Public hostname</Label>
-                  <Input value={ingressHostname} onChange={(e) => { setIngressHostname(e.target.value); setPlan(null); }} placeholder="app.example.com" />
-                </div>
-                <div>
-                  <Label className="text-xs">Route to target port</Label>
-                  <Input type="number" value={ingressPort} onChange={(e) => { setIngressPort(e.target.value); setPlan(null); }} placeholder="8080" />
-                </div>
-                {ingressKind === 'cloudflare' && (
-                  <div>
-                    <Label className="text-xs">Cloudflare tunnel</Label>
-                    <select className={selectCls} value={ingressTunnelId} onChange={(e) => setIngressTunnelId(e.target.value)}>
-                      <option value="">Choose a tunnel…</option>
-                      {tunnels.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                    </select>
-                  </div>
+
+                {routes.length === 0 && (
+                  <p className="text-[0.7rem] text-muted-foreground">No routes yet — Fetch to auto-detect what's mapped to this stack, or Add route to enter one by hand.</p>
                 )}
-                {ingressKind === 'npm' && (
-                  <div>
-                    <Label className="text-xs">TLS certificate (optional)</Label>
-                    <select className={selectCls} value={ingressCertId} onChange={(e) => setIngressCertId(e.target.value)}>
-                      {certs.length === 0 && <option value="0">None (HTTP)</option>}
-                      {certs.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
-                    </select>
-                  </div>
-                )}
-              </div>
+
+                {routes.map((r, i) => {
+                  const kind = kindOf(r.instanceId);
+                  return (
+                    <div key={i} className="rounded-md border border-border/50 bg-background/40 p-3 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[0.7rem] font-medium text-muted-foreground">Route {i + 1}{kind ? ` · ${kind === 'cloudflare' ? 'Cloudflare' : 'NPM'}` : ''}</span>
+                        <Button type="button" variant="ghost" size="sm" onClick={() => removeRoute(i)} title="Remove this route">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <Label className="text-xs">Ingress connector</Label>
+                          <select className={selectCls} value={r.instanceId} onChange={(e) => updateRoute(i, { instanceId: e.target.value })}>
+                            <option value="">Choose…</option>
+                            {ingressTargets.map((t) => <option key={t.instanceId} value={t.instanceId}>{t.name} ({t.kind === 'cloudflare' ? 'Cloudflare' : 'NPM'})</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <Label className="text-xs">Public hostname</Label>
+                          <Input value={r.hostname} onChange={(e) => updateRoute(i, { hostname: e.target.value })} placeholder="app.example.com" />
+                        </div>
+                        <div>
+                          <Label className="text-xs">Route to target port</Label>
+                          <Input type="number" value={r.port} onChange={(e) => updateRoute(i, { port: e.target.value })} placeholder="8080" />
+                        </div>
+                        {kind === 'cloudflare' && (
+                          <div>
+                            <Label className="text-xs">Cloudflare tunnel</Label>
+                            <select className={selectCls} value={r.tunnelId} onChange={(e) => updateRoute(i, { tunnelId: e.target.value })}>
+                              <option value="">Choose a tunnel…</option>
+                              {(tunnelsByInstance[r.instanceId] ?? []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                            </select>
+                          </div>
+                        )}
+                        {kind === 'npm' && (
+                          <div>
+                            <Label className="text-xs">TLS certificate (optional)</Label>
+                            <select className={selectCls} value={r.certId} onChange={(e) => updateRoute(i, { certId: e.target.value })}>
+                              {(certsByInstance[r.instanceId] ?? []).length === 0 && <option value="0">None (HTTP)</option>}
+                              {(certsByInstance[r.instanceId] ?? []).map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="text-[0.7rem] text-muted-foreground">On “Cut over” every hostname above is repointed to the target before the source is stopped; Rollback points them all back.</p>
               </div>
             )}
-            {ingressEnabled && <p className="text-[0.7rem] text-muted-foreground">On “Cut over” the hostname is repointed to the target before the source is stopped; Rollback points it back.</p>}
           </div>
 
           <div className="flex items-center gap-2">
@@ -611,9 +665,9 @@ export function StackMigrate() {
                 <span className={`text-xs shrink-0 ${STATUS_COLOR[r.status] ?? ''}`}>{STEP_LABEL[r.step] ?? r.step}</span>
               </div>
               {r.message && <div className="text-xs text-muted-foreground mt-1">{r.message}</div>}
-              {r.ingress && (
+              {r.ingressRoutes && r.ingressRoutes.length > 0 && (
                 <div className="text-[0.7rem] text-muted-foreground mt-1">
-                  Ingress: {r.ingress.hostname} → port {r.ingress.port}{r.ingressFlipped ? ' · flipped to target' : ''}
+                  Ingress: {r.ingressRoutes.map((ing) => `${ing.hostname} → ${ing.port}`).join(', ')}{r.ingressFlipped ? ' · flipped to target' : ''}
                 </div>
               )}
               {r.replicatorDeploymentId && (
@@ -635,7 +689,7 @@ export function StackMigrate() {
                 )}
                 {canMigrate && r.step === 'awaiting-cutover' && (
                   <Button size="sm" onClick={() => act(r.id, 'complete')}>
-                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> {r.ingress ? 'Cut over (flip ingress + tear down source)' : 'Complete (tear down source)'}
+                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> {r.ingressRoutes && r.ingressRoutes.length > 0 ? 'Cut over (flip ingress + tear down source)' : 'Complete (tear down source)'}
                   </Button>
                 )}
                 {canMigrate && (r.step === 'awaiting-cutover' || r.step === 'failed') && (

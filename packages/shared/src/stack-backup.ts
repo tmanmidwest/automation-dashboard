@@ -525,8 +525,12 @@ export interface MigratePlanInput {
   secretMode?: SecretMode;
   transfer?: TransferMode;
   includeBinds?: string[];
-  /** Optional automated-cutover ingress to flip at completion (P2). */
-  ingress?: MigrateIngressSpec;
+  /**
+   * Optional automated-cutover ingress routes to flip at completion (P2). A stack
+   * can front multiple public hostnames (across Cloudflare and/or NPM), so this is
+   * a list — every route is repointed source→target on cutover and back on rollback.
+   */
+  ingressRoutes?: MigrateIngressSpec[];
 }
 
 /** One pre-flight readiness check, shown as a checklist before the operator starts. */
@@ -576,16 +580,16 @@ export interface MigratePlan {
   ports: { hostPort: number; inUse: boolean }[];
   /** Sealed-secret snapshots need a passphrase to rebuild the target .env. */
   needsPassphrase: boolean;
-  /** The automated-cutover ingress, echoed back when one was supplied. */
-  ingress?: MigrateIngressSpec | null;
+  /** The automated-cutover ingress routes, echoed back when supplied. */
+  ingressRoutes?: MigrateIngressSpec[];
   /** Pre-flight readiness checks (disk, compose, repo, arch, …). A `fail` blocks Start. */
   checks: PreflightCheck[];
   /** Estimated total volume data to copy, in bytes (best-effort, from the source daemon). */
   estimatedDataBytes?: number;
   /** Set when the source stack is an App Replicator deployment — offer to re-point it. */
   replicator?: MigrateReplicatorLink | null;
-  /** An existing ingress route detected at the source — pre-fills the cutover flip. */
-  ingressSuggestion?: MigrateIngressSuggestion | null;
+  /** Existing ingress routes detected at the source (all of them) — pre-fill the cutover flip. */
+  ingressSuggestions?: MigrateIngressSuggestion[];
   conflicts: string[];
   warnings: string[];
 }
@@ -653,9 +657,9 @@ export interface StackMigrationRun {
   images?: MigrateImagePlanItem[];
   /** Whether the source stack is still present (false after a confirmed teardown). */
   sourceKept: boolean;
-  /** The automated-cutover ingress attached to this migration, if any. */
-  ingress?: MigrateIngressSpec | null;
-  /** True once the hostname has been repointed to the target at cutover. */
+  /** The automated-cutover ingress routes attached to this migration, if any. */
+  ingressRoutes?: MigrateIngressSpec[];
+  /** True once the hostname(s) have been repointed to the target at cutover. */
   ingressFlipped: boolean;
   /** The App Replicator deployment this stack belongs to, if re-pointing was requested. */
   replicatorDeploymentId?: string | null;

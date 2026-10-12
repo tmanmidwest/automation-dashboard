@@ -27,7 +27,7 @@ class MigratePlanDto {
   @IsOptional() @IsString() @MaxLength(16) secretMode?: string;
   @IsOptional() @IsString() @MaxLength(16) transfer?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) includeBinds?: string[];
-  @IsOptional() @ValidateNested() @Type(() => MigrateIngressDto) ingress?: MigrateIngressDto;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => MigrateIngressDto) ingressRoutes?: MigrateIngressDto[];
 }
 
 class StartMigrateDto extends MigratePlanDto {
