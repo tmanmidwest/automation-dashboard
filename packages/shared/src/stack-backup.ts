@@ -544,6 +544,13 @@ export interface MigratePlanInput {
    * a list — every route is repointed source→target on cutover and back on rollback.
    */
   ingressRoutes?: MigrateIngressSpec[];
+  /**
+   * Replace a same-named stack already on the target: its containers are removed
+   * (named volumes kept and restored into) before the restore, and the source's data
+   * is restored over them. Without this, a running same-named target stack is a plan
+   * conflict that blocks Start. Intended for repeated migrations onto the same target.
+   */
+  overwriteTarget?: boolean;
 }
 
 /** One pre-flight readiness check, shown as a checklist before the operator starts. */

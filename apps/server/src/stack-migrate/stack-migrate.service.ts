@@ -162,7 +162,13 @@ export class StackMigrateService implements OnModuleInit {
     try {
       const containers = await dstAccess.api.listContainers(true);
       const running = containers.filter((c) => (c.Labels ?? {})['com.docker.compose.project'] === destStackName && RUNNING.has(c.State ?? ''));
-      if (running.length) conflicts.push(`"${destStackName}" is already running on ${dest.name} — choose another target name or remove it first.`);
+      if (running.length) {
+        if (input.overwriteTarget) {
+          warnings.push(`"${destStackName}" is already running on ${dest.name} and will be OVERWRITTEN — its containers are removed (named volumes kept) and the source's data restored over them.`);
+        } else {
+          conflicts.push(`"${destStackName}" is already running on ${dest.name}. Choose another target name, or tick "Overwrite existing target stack" to remove its containers (keeping named volumes) and restore the source's data over them.`);
+        }
+      }
     } catch {
       warnings.push(`Could not check for an existing "${destStackName}" on ${dest.name}.`);
     }
@@ -533,6 +539,17 @@ export class StackMigrateService implements OnModuleInit {
           signal,
         );
         await this.patch(runId, { images: outcomes.map((o) => ({ ref: o.ref, method: o.method === 'loaded' ? 'transfer' : o.method === 'pulled' ? 'pull' : 'present' })) as unknown as object });
+
+        // 1b) Clear any pre-existing same-named stack on the TARGET before writing to its
+        //     volumes — only when the operator opted into overwriting it ("Overwrite
+        //     existing target stack", or the legacy Start-anyway force). Removing its
+        //     containers (force; named volumes kept) frees in-use single-file bind mounts
+        //     AND stops us restoring data underneath a live database.
+        if (input.overwriteTarget || input.force) {
+          ck();
+          const cleared = await this.removeProjectContainers(dstAccess.api, plan.destStackName, say);
+          if (cleared) say(`Overwriting the target: removed ${cleared} existing "${plan.destStackName}" container(s) before restoring (named volumes kept, restored into).`);
+        }
 
         // 2) Warm pre-copy (source running): seed the repo so the quiesced delta is
         //    small. restic dedups, so the final capture only uploads what changed.

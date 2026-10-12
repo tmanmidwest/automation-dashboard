@@ -103,6 +103,7 @@ export function StackMigrate() {
   const [bindTargets, setBindTargets] = useState<Record<string, string>>({});
   const [restoreCredFiles, setRestoreCredFiles] = useState(false);
   const [repointReplicator, setRepointReplicator] = useState(true);
+  const [overwriteTarget, setOverwriteTarget] = useState(false);
 
   // Automated-cutover ingress (optional, P2) — a stack can front multiple routes.
   const [ingressTargets, setIngressTargets] = useState<IngressTarget[]>([]);
@@ -249,6 +250,7 @@ export function StackMigrate() {
         destStackName: destStackName.trim() || undefined,
         repoTargetId,
         secretMode,
+        overwriteTarget,
         ingressRoutes: buildIngressRoutes(),
       });
       setPlan(p);
@@ -285,6 +287,7 @@ export function StackMigrate() {
         bindMap: bindMap && Object.keys(bindMap).length ? bindMap : undefined,
         restoreCredentialFiles: restoreCredFiles || undefined,
         repointReplicator: plan.replicator ? repointReplicator : undefined,
+        overwriteTarget: overwriteTarget || undefined,
         force,
       });
       setRuns((rs) => [run, ...rs]);
@@ -424,6 +427,16 @@ export function StackMigrate() {
               </select>
               <p className={`text-[0.7rem] mt-1 ${secretMode === 'reference' ? 'text-amber-300' : 'text-muted-foreground'}`}>{SECRET_HELP[secretMode]}</p>
             </div>
+          </div>
+
+          <div className="rounded-md border border-border/60 p-3 space-y-1">
+            <label className="flex items-center gap-2 text-xs font-medium">
+              <input type="checkbox" checked={overwriteTarget} onChange={(e) => { setOverwriteTarget(e.target.checked); setPlan(null); }} />
+              Overwrite existing target stack
+            </label>
+            <p className={`text-[0.7rem] ${overwriteTarget ? 'text-amber-300' : 'text-muted-foreground'}`}>
+              If a stack with the target name already exists on the target host, remove its containers first (named volumes are kept and restored into), then restore the source's data over them. Needed when re-migrating onto a host that already runs this stack — otherwise a running same-named target is a pre-flight conflict that blocks Start. Leave off for a fresh target.
+            </p>
           </div>
 
           <div className="rounded-md border border-border/60 p-3 space-y-3">

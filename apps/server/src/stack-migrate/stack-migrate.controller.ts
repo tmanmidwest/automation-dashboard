@@ -28,6 +28,7 @@ class MigratePlanDto {
   @IsOptional() @IsString() @MaxLength(16) transfer?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) includeBinds?: string[];
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => MigrateIngressDto) ingressRoutes?: MigrateIngressDto[];
+  @IsOptional() @IsBoolean() overwriteTarget?: boolean;
 }
 
 class StartMigrateDto extends MigratePlanDto {
