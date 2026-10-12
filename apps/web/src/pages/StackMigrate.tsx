@@ -269,7 +269,7 @@ export function StackMigrate() {
                 <option value="">Choose a stack…</option>
                 {candidates.map((c) => (
                   <option key={`${c.connectorInstanceId}::${c.stackName}`} value={`${c.connectorInstanceId}::${c.stackName}`}>
-                    {c.hostName} · {c.stackName} ({c.containers} container{c.containers === 1 ? '' : 's'})
+                    {c.hostName} · {c.stackName}{c.requiresRelay ? ' (no SSH — relay)' : ''}
                   </option>
                 ))}
               </select>
@@ -278,11 +278,14 @@ export function StackMigrate() {
               <Label className="text-xs">Target host</Label>
               <select className={selectCls} value={destInstanceId} onChange={(e) => { setDestInstanceId(e.target.value); setPlan(null); }}>
                 <option value="">Choose a host…</option>
-                {hosts.filter((h) => h.backupable).map((h) => (
-                  <option key={h.id} value={h.id} disabled={!!source && h.id === source.connectorInstanceId}>
-                    {h.name}{!!source && h.id === source.connectorInstanceId ? ' (source)' : ''}
-                  </option>
-                ))}
+                {hosts.map((h) => {
+                  const isSource = !!source && h.id === source.connectorInstanceId;
+                  return (
+                    <option key={h.id} value={h.id} disabled={isSource || !h.backupable}>
+                      {h.name}{isSource ? ' (source)' : !h.backupable ? ' (needs SSH)' : ''}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div>
