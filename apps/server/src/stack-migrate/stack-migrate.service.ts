@@ -28,7 +28,7 @@ const MAX_LOG_CHARS = 64 * 1024;
 const POLL_MS = 3000;
 const CAPTURE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const RESTORE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-const VERIFY_TIMEOUT_MS = 3 * 60_000;
+const VERIFY_TIMEOUT_MS = 5 * 60_000;
 const RUNNING = new Set(['running', 'restarting']);
 
 /** Who initiated a migration action, for the audit trail (from the session user). */
@@ -507,6 +507,7 @@ export class StackMigrateService implements OnModuleInit {
     const ck = () => { if (signal.aborted) throw new CancelledError(); };
     const quiesce = input.quiesceSource !== false;
     let sourceStopped = false;
+    let healthDegraded = false;
 
     // Warm pre-copy only helps when we're going to quiesce: seed the repo + move
     // images while the source still runs, so the downtime window is just the
@@ -601,12 +602,21 @@ export class StackMigrateService implements OnModuleInit {
         ck();
         await this.setStep(runId, 'verifying');
         const health = await this.waitHealthy(dstAccess.api, plan.destStackName, say, signal);
-        if (!health.ok) throw new Error(`The migrated stack did not come up healthy — ${health.detail}`);
+        if (!health.ok) {
+          // Only a hard failure if the stack didn't actually come up. If every container
+          // is running and just not health-green yet (slow starters like clamav load their
+          // DB for minutes), land at awaiting-cutover with a warning — the operator decides.
+          if (!health.degraded) throw new Error(`The migrated stack did not come up — ${health.detail}`);
+          healthDegraded = true;
+          say(`Heads up: the target is up but not every container reports healthy yet (${health.detail}). This is common for slow starters (e.g. clamav loads its virus DB for several minutes). The migration is parked at "awaiting cutover" — give the slow container(s) time and verify, then Complete to cut over, or Rollback.`);
+        }
       } finally {
         await policy.cleanup();
       }
 
-      const message = `Migrated "${plan.stackName}" to "${plan.destStackName}" on ${dest.name} and it came up healthy. The source is stopped — repoint ingress, then Complete to tear it down (or Rollback to restore it).`;
+      const message = healthDegraded
+        ? `Migrated "${plan.stackName}" to "${plan.destStackName}" on ${dest.name} — it is up, but not every container reports healthy yet (see the log; slow starters like clamav can take several minutes). The source is stopped — verify the target, then Complete to cut over (or Rollback).`
+        : `Migrated "${plan.stackName}" to "${plan.destStackName}" on ${dest.name} and it came up healthy. The source is stopped — repoint ingress, then Complete to tear it down (or Rollback to restore it).`;
       say(message);
       await this.finish(runId, { status: 'success', step: 'awaiting-cutover', message, durationMs: Date.now() - started, log: log.join('\n') });
       void this.logging.info('stack-migrate', message);
@@ -987,34 +997,43 @@ export class StackMigrateService implements OnModuleInit {
 
   /** Every container of the project running (and healthy, if it declares a check),
    *  twice in a row — the same bar the restore verify uses. */
-  private async waitHealthy(api: DockerApi, project: string, say: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; detail: string }> {
+  private async waitHealthy(api: DockerApi, project: string, say: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; degraded?: boolean; detail: string }> {
     const deadline = Date.now() + VERIFY_TIMEOUT_MS;
     let consecutive = 0;
     let last = 'no containers yet';
+    let allUp = false; // every container at least running (or a clean one-shot) on the last check
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new CancelledError();
       await sleep(5000);
       let cs;
-      try { cs = await this.projectContainers(api, project); } catch (e) { last = `inspect failed: ${msg(e)}`; continue; }
-      if (!cs.length) { last = 'no containers were created'; continue; }
+      try { cs = await this.projectContainers(api, project); } catch (e) { last = `inspect failed: ${msg(e)}`; allUp = false; continue; }
+      if (!cs.length) { last = 'no containers were created'; allUp = false; continue; }
       const states: string[] = [];
-      let allGood = true;
+      let allHealthy = true;
+      let up = true;
       for (const c of cs) {
         const name = (c.Names ?? [])[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12);
         const inspect = await api.inspectContainer(c.Id).catch(() => null);
         const health = inspect?.State?.Health?.Status;
         const running = inspect?.State?.Running ?? c.State === 'running';
         const finishedCleanly = !running && inspect?.State?.Status === 'exited' && c.Status?.includes('(0)');
-        const good = health ? health === 'healthy' : running || !!finishedCleanly;
+        // "healthy" needs a green healthcheck (or none + running); "up" just needs it running.
+        const healthy = health ? health === 'healthy' : running || !!finishedCleanly;
+        const upThis = running || !!finishedCleanly;
         states.push(`${name}=${health ?? (running ? 'running' : c.State ?? 'unknown')}`);
-        if (!good) allGood = false;
+        if (!healthy) allHealthy = false;
+        if (!upThis) up = false;
       }
       last = states.join(', ');
-      if (allGood) { if (++consecutive >= 2) return { ok: true, detail: last }; }
+      allUp = up;
+      if (allHealthy) { if (++consecutive >= 2) return { ok: true, detail: last }; }
       else consecutive = 0;
       say(`Waiting for the target stack: ${last}`);
     }
-    return { ok: false, detail: `timed out after ${Math.round(VERIFY_TIMEOUT_MS / 1000)}s — ${last}` };
+    // Timed out. If everything is at least running (nothing crashed / exited non-zero),
+    // report `degraded` so a slow-but-starting container doesn't force a rollback — the
+    // caller parks at awaiting-cutover with a warning. Otherwise it's a genuine failure.
+    return { ok: false, degraded: allUp, detail: `not all healthy after ${Math.round(VERIFY_TIMEOUT_MS / 1000)}s — ${last}` };
   }
 
   // ── History ───────────────────────────────────────────────────────
