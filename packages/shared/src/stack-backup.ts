@@ -251,6 +251,9 @@ export interface RestorePlanInput {
   destStackName?: string;
   /** Captured bind path → where to write it on the destination. Absent paths restore in place. */
   bindMap?: Record<string, string>;
+  /** Published host-port remap (old host port → new host port) applied to the compose/.env
+   *  before redeploy, so a port already taken on the destination can be moved. */
+  portMap?: Record<string, number>;
 }
 
 /** One volume the restore would write, and where it would land. */
@@ -282,6 +285,13 @@ export interface RestorePortPlan {
   hostPort: number;
   containerPort?: string;
   inUse: boolean;
+  /** The compose service that publishes this host port. */
+  service?: string;
+  /** The port is "in use" only because the same-named stack we're about to overwrite
+   *  still holds it — it frees before deploy, so it isn't a real conflict. */
+  heldBySameStack?: boolean;
+  /** A free host port to offer when this one is a real conflict. */
+  suggested?: number;
 }
 
 /** The reviewable plan. Nothing is written until it is executed. */
@@ -551,6 +561,13 @@ export interface MigratePlanInput {
    * conflict that blocks Start. Intended for repeated migrations onto the same target.
    */
   overwriteTarget?: boolean;
+  /**
+   * Published host-port remap (old host port → new host port) for ports already taken
+   * on the target. Rewrites the compose (and `.env` for ${VAR} ports) before redeploy,
+   * updates any ingress route that pointed at a remapped port, and — for a replicator
+   * stack — the deployment's stored port on re-point.
+   */
+  portMap?: Record<string, number>;
 }
 
 /** One pre-flight readiness check, shown as a checklist before the operator starts. */
@@ -596,8 +613,9 @@ export interface MigratePlan {
   binds: string[];
   /** Per-image placement strategy on the target. */
   images: MigrateImagePlanItem[];
-  /** Host ports the stack publishes, flagged if already taken on the target. */
-  ports: { hostPort: number; inUse: boolean }[];
+  /** Host ports the stack publishes, flagged if already taken on the target, with the
+   *  publishing service and a suggested free port for real conflicts (for remapping). */
+  ports: { hostPort: number; containerPort?: string; service?: string; inUse: boolean; heldBySameStack?: boolean; suggested?: number }[];
   /** Sealed-secret snapshots need a passphrase to rebuild the target .env. */
   needsPassphrase: boolean;
   /** The automated-cutover ingress routes, echoed back when supplied. */

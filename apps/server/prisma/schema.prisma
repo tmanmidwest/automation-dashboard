@@ -938,6 +938,9 @@ model StackMigrationRun {
   /// Set when a terminal run is dismissed (soft-archived) — hidden from the default
   /// list but kept for history. Null = visible.
   archivedAt DateTime?
+  /// Published host-port remap applied on the target ({ "oldHostPort": newHostPort }),
+  /// used at cutover to sync a re-pointed App Replicator deployment's stored ports.
+  portMap    Json?
 
   @@index([destInstanceId, startedAt])
   @@index([sourceInstanceId, stackName, startedAt])

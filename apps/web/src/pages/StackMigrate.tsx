@@ -104,6 +104,7 @@ export function StackMigrate() {
   const [restoreCredFiles, setRestoreCredFiles] = useState(false);
   const [repointReplicator, setRepointReplicator] = useState(true);
   const [overwriteTarget, setOverwriteTarget] = useState(false);
+  const [portMap, setPortMap] = useState<Record<number, string>>({}); // old host port → new (input text)
 
   // Automated-cutover ingress (optional, P2) — a stack can front multiple routes.
   const [ingressTargets, setIngressTargets] = useState<IngressTarget[]>([]);
@@ -239,6 +240,16 @@ export function StackMigrate() {
     return () => clearInterval(t);
   }, [runs]);
 
+  /** The remap as the API wants it: {oldPort: newPort}, dropping blanks/no-ops. */
+  const cleanedPortMap = (): Record<string, number> | undefined => {
+    const m: Record<string, number> = {};
+    for (const [k, v] of Object.entries(portMap)) {
+      const nw = Number(v);
+      if (Number.isFinite(nw) && nw > 0 && nw !== Number(k)) m[k] = nw;
+    }
+    return Object.keys(m).length ? m : undefined;
+  };
+
   const doPlan = async () => {
     if (!source || !destInstanceId || !repoTargetId) return;
     setPlanning(true); setErr(null); setPlan(null);
@@ -251,10 +262,18 @@ export function StackMigrate() {
         repoTargetId,
         secretMode,
         overwriteTarget,
+        portMap: cleanedPortMap(),
         ingressRoutes: buildIngressRoutes(),
       });
       setPlan(p);
       if (p.secretMode) setSecretMode(p.secretMode);
+      // Pre-fill the remap with the suggested free port for each real conflict, WITHOUT
+      // clobbering anything the operator already typed (so re-planning keeps their edits).
+      setPortMap((prev) => {
+        const next = { ...prev };
+        for (const pp of p.ports) if (pp.suggested != null && next[pp.hostPort] == null) next[pp.hostPort] = String(pp.suggested);
+        return next;
+      });
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Planning failed.');
     } finally {
@@ -288,6 +307,7 @@ export function StackMigrate() {
         restoreCredentialFiles: restoreCredFiles || undefined,
         repointReplicator: plan.replicator ? repointReplicator : undefined,
         overwriteTarget: overwriteTarget || undefined,
+        portMap: cleanedPortMap(),
         force,
       });
       setRuns((rs) => [run, ...rs]);
@@ -653,7 +673,34 @@ export function StackMigrate() {
                 {plan.ports.length > 0 && (
                   <>
                     <div className="text-xs font-medium text-muted-foreground mt-2 mb-1">Published ports</div>
-                    <div className="text-xs">{plan.ports.map((p) => <span key={p.hostPort} className={p.inUse ? 'text-destructive mr-2' : 'mr-2'}>{p.hostPort}{p.inUse ? ' (in use)' : ''}</span>)}</div>
+                    <div className="space-y-1">
+                      {plan.ports.map((p) => {
+                        const realConflict = p.inUse && !(p.heldBySameStack && overwriteTarget);
+                        return (
+                          <div key={p.hostPort} className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-mono">{p.hostPort}{p.containerPort ? `→${p.containerPort}` : ''}</span>
+                            {p.service && <span className="text-muted-foreground">({p.service})</span>}
+                            {!p.inUse && <span className="text-emerald-400">free</span>}
+                            {p.inUse && p.heldBySameStack && overwriteTarget && <span className="text-muted-foreground">in use by this stack · frees on overwrite</span>}
+                            {realConflict && (
+                              <span className="inline-flex items-center gap-1 text-destructive">
+                                in use — remap to
+                                <Input
+                                  type="number"
+                                  className="h-6 w-24"
+                                  value={portMap[p.hostPort] ?? ''}
+                                  placeholder={p.suggested ? String(p.suggested) : 'new port'}
+                                  onChange={(e) => setPortMap((m) => ({ ...m, [p.hostPort]: e.target.value }))}
+                                />
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {plan.ports.some((p) => p.inUse && !(p.heldBySameStack && overwriteTarget)) && (
+                      <p className="text-[0.7rem] text-muted-foreground mt-1">Conflicting ports are remapped on the target (compose/.env rewritten); any ingress route to a remapped port follows the new port, and a re-pointed App Replicator deployment is updated too.</p>
+                    )}
                   </>
                 )}
               </div>

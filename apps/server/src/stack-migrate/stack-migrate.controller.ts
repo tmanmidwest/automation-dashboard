@@ -38,6 +38,7 @@ class StartMigrateDto extends MigratePlanDto {
   @IsOptional() @IsBoolean() warmPrecopy?: boolean;
   @IsOptional() @IsBoolean() preRestore?: boolean;
   @IsOptional() @IsObject() bindMap?: Record<string, string>;
+  @IsOptional() @IsObject() portMap?: Record<string, number>;
   @IsOptional() @IsBoolean() restoreCredentialFiles?: boolean;
   @IsOptional() @IsBoolean() repointReplicator?: boolean;
 }

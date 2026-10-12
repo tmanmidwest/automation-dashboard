@@ -589,6 +589,42 @@ export class DeploymentService {
     }).catch(() => undefined);
   }
 
+  /**
+   * Update a deployment's stored published ports after a stack migration remapped them
+   * on the new host, so the replicator's record matches reality and a later redeploy
+   * keeps the new ports instead of reverting. `portMap` is old host port → new host port.
+   * Returns the number of ports changed.
+   */
+  async applyPortRemap(deploymentId: string, portMap: Record<string, number>): Promise<number> {
+    const map = new Map<number, number>();
+    for (const [k, v] of Object.entries(portMap)) {
+      const o = Number(k);
+      const n = Number(v);
+      if (Number.isFinite(o) && Number.isFinite(n)) map.set(o, n);
+    }
+    if (!map.size) return 0;
+    const row = await this.prisma.replicatorDeployment.findUnique({ where: { id: deploymentId } });
+    if (!row) return 0;
+    const ports = ((row.ports as unknown as ReplicatorPort[]) ?? []).map((p) => ({ ...p }));
+    const values = { ...((row.values as Record<string, string>) ?? {}) };
+    let changed = 0;
+    for (const p of ports) {
+      if (map.has(p.hostPort)) {
+        const next = map.get(p.hostPort)!;
+        p.hostPort = next;
+        if (p.variable) values[p.variable] = String(next);
+        changed++;
+      }
+    }
+    if (changed) {
+      await this.prisma.replicatorDeployment.update({
+        where: { id: deploymentId },
+        data: { ports: ports as unknown as object, values: values as unknown as object },
+      }).catch(() => undefined);
+    }
+    return changed;
+  }
+
   // ── Listing ────────────────────────────────────────────────────────
 
   async listForApp(appId: string): Promise<ReplicatorDeployment[]> {

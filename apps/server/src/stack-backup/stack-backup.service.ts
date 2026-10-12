@@ -812,6 +812,22 @@ export class StackBackupService {
    * stack; otherwise they are read off the host at the paths compose itself
    * recorded in the container labels — which is what makes foreign stacks work.
    */
+  /**
+   * Resolve a stack's compose + `.env` WITHOUT capturing — so the migrator can pre-flight
+   * a published-port remap (dry-run the rewrite) before any downtime. Empty when the
+   * compose can't be read (no SSH, or an unmanaged stack whose file isn't host-readable).
+   */
+  async peekCompose(instanceId: string, stackName: string): Promise<{ compose?: string; env?: string }> {
+    const host = await this.hostOrThrow(instanceId);
+    const ctx = await this.instances.contextFor(host);
+    const { api, ssh, target } = hostAccess(ctx, this.stacks);
+    if (!ssh) return {};
+    const inspection = await inspectStack(api, stackName).catch(() => null);
+    if (!inspection) return {};
+    const { compose, envFile } = await this.resolveCompose(instanceId, stackName, inspection, ssh, target?.stacksDir);
+    return { compose, env: envFile };
+  }
+
   private async resolveCompose(
     instanceId: string,
     stackName: string,

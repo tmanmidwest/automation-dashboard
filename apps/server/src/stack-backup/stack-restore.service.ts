@@ -19,6 +19,7 @@ import { bindSlug } from './stack-inspect';
 import { hostAccess, NO_SSH_REASON } from './docker-host';
 import { PortAllocatorService } from '../app-replicator/port-allocator.service';
 import { assertSandbox, sandboxName, unpublishPorts } from './sandbox';
+import { remapPorts } from './ports';
 import { appendHostFiles } from './helper-runner';
 import { runHelper, type HelperMount } from './helper-runner';
 import { pushDir, relayRoot } from './relay';
@@ -684,9 +685,21 @@ export class StackRestoreService {
         const { env, composeSecrets, files } = await this.resolveSnapshotSecrets(auth, plan, input.passphrase);
         // Literals lifted out of the compose at capture time go back in verbatim.
         let compose = restoreCompose(stored, composeSecrets);
+        let outEnv = env;
         if (input.mode === 'verify') {
           compose = unpublishPorts(compose);
           say('Sandbox publishes no host ports — nothing it starts can collide with the real stack.');
+        } else if (input.portMap && Object.keys(input.portMap).length) {
+          // Migrator port remap: move published host ports that collide on the target.
+          const r = remapPorts(compose, outEnv, input.portMap);
+          if (r.unresolved.length) {
+            throw new BadRequestException(
+              `Could not remap host port(s) ${r.unresolved.join(', ')} — each must be a simple published host port in the compose (not a range, IPv6 host, or absent). Remap those by hand, or choose a different target so they don't collide.`,
+            );
+          }
+          compose = r.compose;
+          outEnv = r.env;
+          say(`Remapped published host port(s): ${Object.entries(input.portMap).map(([o, n]) => `${o}→${n}`).join(', ')}.`);
         }
 
         // Credential files are written back only on request, and only the ones
@@ -711,14 +724,14 @@ export class StackRestoreService {
         // compose/.env) so the write succeeds — on both fresh and previously-touched hosts.
         await this.prepareStackDir(access, access.target.stacksDir, plan.destStackName, target.helperImage, say, log);
         if (input.deploy) {
-          const result = await this.stacks.deploy(access.target, host.id, plan.destStackName, compose, env);
+          const result = await this.stacks.deploy(access.target, host.id, plan.destStackName, compose, outEnv);
           deployed = result.ok;
           say(result.message);
           if (!result.ok) throw new Error(result.message);
         } else {
           // Adopt the configuration without starting anything, so a recovered stack
           // can be reviewed before it comes up and starts talking to the network.
-          await this.stacks.store(host.id, plan.destStackName, compose, env);
+          await this.stacks.store(host.id, plan.destStackName, compose, outEnv);
           say(`Stored as a Cerebro-managed stack — deploy it from the Docker screen when ready.`);
         }
       }

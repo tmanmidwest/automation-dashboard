@@ -14,6 +14,7 @@ import { StackRestoreService } from '../stack-backup/stack-restore.service';
 import { BackupTargetService } from '../stack-backup/backup-target.service';
 import { hostAccess, NO_SSH_REASON, type DockerHostAccess } from '../stack-backup/docker-host';
 import { inspectStack } from '../stack-backup/stack-inspect';
+import { remapPorts } from '../stack-backup/ports';
 import { PortAllocatorService } from '../app-replicator/port-allocator.service';
 import { IngressOps } from '../app-replicator/ingress-ops.service';
 import { IngressService } from '../app-replicator/ingress.service';
@@ -139,38 +140,57 @@ export class StackMigrateService implements OnModuleInit {
     // secrets sitting in the restic repo unless the operator explicitly chooses raw.
     const secretMode = (existingPolicy?.secretMode ?? input.secretMode ?? 'embed') as SecretMode;
 
-    // Ports the stack publishes, flagged against what's taken on the target.
-    const wanted = new Set<number>();
+    // Ports the stack publishes, with the publishing service + container port.
+    const wanted = new Map<number, { containerPort?: string; service?: string }>();
     for (const c of inspection?.containers ?? []) {
+      const service = c.labels?.['com.docker.compose.service'];
       for (const p of c.ports ?? []) {
         const n = Number(p.hostPort);
-        if (Number.isFinite(n) && n > 0) wanted.add(n);
+        if (Number.isFinite(n) && n > 0 && !wanted.has(n)) wanted.set(n, { containerPort: p.containerPort, service });
       }
     }
-    const ports: { hostPort: number; inUse: boolean }[] = [];
+
+    // Inspect the target once: used ports, ports held by a same-named stack we'd
+    // overwrite (not a real conflict then), and whether that stack is running.
+    const sameStackPorts = new Set<number>();
+    let targetRunningSameStack = 0;
+    try {
+      const containers = await dstAccess.api.listContainers(true);
+      const sameStack = containers.filter((c) => (c.Labels ?? {})['com.docker.compose.project'] === destStackName);
+      for (const c of sameStack) for (const p of c.Ports ?? []) if (p.PublicPort) sameStackPorts.add(p.PublicPort);
+      targetRunningSameStack = sameStack.filter((c) => RUNNING.has(c.State ?? '')).length;
+    } catch {
+      warnings.push(`Could not check for an existing "${destStackName}" on ${dest.name}.`);
+    }
+
+    const ports: { hostPort: number; containerPort?: string; service?: string; inUse: boolean; heldBySameStack?: boolean; suggested?: number }[] = [];
     if (wanted.size && dstAccess.ssh) {
       const used = new Set(await this.ports.usedPorts(dstAccess.ssh).catch(() => []));
-      for (const hostPort of [...wanted].sort((a, b) => a - b)) {
+      const taken = new Set<number>([...wanted.keys()]); // don't suggest a port the stack itself uses
+      const realClashes: number[] = [];
+      for (const hostPort of [...wanted.keys()].sort((a, b) => a - b)) {
+        const meta = wanted.get(hostPort)!;
         const inUse = used.has(hostPort);
-        ports.push({ hostPort, inUse });
+        const heldBySameStack = sameStackPorts.has(hostPort);
+        // A real conflict is a port taken by something OTHER than the stack we're about to
+        // overwrite (that one frees before deploy).
+        const realConflict = inUse && !(heldBySameStack && input.overwriteTarget);
+        const suggested = realConflict ? this.ports.suggest(Number(meta.containerPort) || hostPort, used, taken) : undefined;
+        if (realConflict) realClashes.push(hostPort);
+        ports.push({ hostPort, containerPort: meta.containerPort, service: meta.service, inUse, heldBySameStack, suggested });
       }
-      const clashes = ports.filter((p) => p.inUse).map((p) => p.hostPort);
-      if (clashes.length) warnings.push(`Host port(s) already in use on ${dest.name}: ${clashes.join(', ')}. The migrated stack will fail to start until they are free.`);
+      if (realClashes.length) {
+        warnings.push(`Host port(s) already in use on ${dest.name}: ${realClashes.join(', ')}. Remap them below (a free port is suggested) or the migrated stack will fail to start.`);
+      }
     }
 
     // Already something under the destination name?
-    try {
-      const containers = await dstAccess.api.listContainers(true);
-      const running = containers.filter((c) => (c.Labels ?? {})['com.docker.compose.project'] === destStackName && RUNNING.has(c.State ?? ''));
-      if (running.length) {
-        if (input.overwriteTarget) {
-          warnings.push(`"${destStackName}" is already running on ${dest.name} and will be OVERWRITTEN — its containers are removed (named volumes kept) and the source's data restored over them.`);
-        } else {
-          conflicts.push(`"${destStackName}" is already running on ${dest.name}. Choose another target name, or tick "Overwrite existing target stack" to remove its containers (keeping named volumes) and restore the source's data over them.`);
-        }
+    if (targetRunningSameStack > 0) {
+      if (input.overwriteTarget) {
+        warnings.push(`"${destStackName}" is already running on ${dest.name} and will be OVERWRITTEN — its containers are removed (named volumes kept) and the source's data restored over them.`);
+      } else {
+        conflicts.push(`"${destStackName}" is already running on ${dest.name}. Choose another target name, or tick "Overwrite existing target stack" to remove its containers (keeping named volumes) and restore the source's data over them.`);
       }
-    } catch {
-      warnings.push(`Could not check for an existing "${destStackName}" on ${dest.name}.`);
     }
 
     // Optional automated-cutover ingress (P2): validate each chosen CF/NPM route.
@@ -212,7 +232,7 @@ export class StackMigrateService implements OnModuleInit {
     // Detect existing ingress routes pointing at the source stack (all of them), to
     // pre-fill the cutover flip. Skip when it's a replicator deployment — its ingress
     // moves via the re-point path, so a manual flip would double-handle those routes.
-    const ingressSuggestions = replicator ? [] : await this.detectIngress(source.id, wanted).catch(() => []);
+    const ingressSuggestions = replicator ? [] : await this.detectIngress(source.id, new Set(wanted.keys())).catch(() => []);
     if (ingressSuggestions.length === 1) {
       warnings.push(`Detected an existing route for this stack: ${ingressSuggestions[0].label}. Enable "automatically flip ingress" to move it to the target on cutover (the fields pre-fill).`);
     } else if (ingressSuggestions.length > 1) {
@@ -224,6 +244,23 @@ export class StackMigrateService implements OnModuleInit {
       sourceName: source.name, destName: dest.name, project, srcAccess, dstAccess,
       inspection, volumes, repoTargetId: input.repoTargetId, sourceId: source.id,
     });
+
+    // Port-remap readiness: dry-run the rewrite against the source's compose/.env BEFORE
+    // any downtime, so an exotic/unresolvable port fails pre-flight instead of mid-restore.
+    const requestedRemap = this.validatePortMap(input.portMap, { ports } as MigratePlan);
+    if (Object.keys(requestedRemap).length) {
+      const peek = await this.backups.peekCompose(source.id, project).catch(() => ({ compose: undefined, env: undefined }));
+      if (!peek.compose) {
+        checks.push({ id: 'port-remap', label: 'Port remap', status: 'warn', detail: "Couldn't read the compose to verify the remap here; it is re-checked at deploy." });
+      } else {
+        const r = remapPorts(peek.compose, peek.env ?? '', requestedRemap);
+        if (r.unresolved.length) {
+          checks.push({ id: 'port-remap', label: 'Port remap', status: 'fail', detail: `Can't remap host port(s) ${r.unresolved.join(', ')} — each must be a simple published port in the compose (not a range, IPv6 host, or absent). Edit the compose or choose a different target.` });
+        } else {
+          checks.push({ id: 'port-remap', label: 'Port remap', status: 'pass', detail: `${Object.keys(requestedRemap).length} port(s) will be remapped: ${Object.entries(requestedRemap).map(([o, n]) => `${o}→${n}`).join(', ')}.` });
+        }
+      }
+    }
 
     return {
       sourceInstanceId: source.id,
@@ -421,6 +458,29 @@ export class StackMigrateService implements OnModuleInit {
     return { checks, estimatedDataBytes };
   }
 
+  /** Validate + normalize the operator's published-port remap against the plan: every key
+   *  must be a port the stack publishes, every new port valid (1–65535), distinct, and not
+   *  colliding with a port the stack keeps. Throws a clear error; returns a clean map. */
+  private validatePortMap(raw: Record<string, number> | undefined, plan: MigratePlan): Record<string, number> {
+    const out: Record<string, number> = {};
+    if (!raw) return out;
+    const published = new Set(plan.ports.map((p) => p.hostPort));
+    const remapKeys = new Set(Object.keys(raw).map((k) => Number(k)));
+    const kept = new Set([...published].filter((p) => !remapKeys.has(p))); // ports not being remapped
+    const newSeen = new Set<number>();
+    for (const [k, v] of Object.entries(raw)) {
+      const old = Number(k);
+      const nw = Number(v);
+      if (!published.has(old)) throw new BadRequestException(`Port ${k} is not published by this stack, so it can't be remapped.`);
+      if (!Number.isInteger(nw) || nw < 1 || nw > 65535) throw new BadRequestException(`"${v}" is not a valid host port for ${old}.`);
+      if (nw === old) continue; // no-op remap
+      if (kept.has(nw) || newSeen.has(nw)) throw new BadRequestException(`New port ${nw} collides with another port this stack publishes — pick a different one.`);
+      newSeen.add(nw);
+      out[String(old)] = nw;
+    }
+    return out;
+  }
+
   /** Did this image come from a registry (so the target can pull it)? A locally
    *  built image has no RepoDigests — that is the "built on the host" signal. */
   private async looksPullable(api: DockerApi, ref: string): Promise<boolean> {
@@ -436,7 +496,7 @@ export class StackMigrateService implements OnModuleInit {
 
   async start(input: StartMigrateInput, actor?: MigrateActor): Promise<StackMigrationRun> {
     const plan = await this.plan(input);
-    const failed = plan.checks.filter((c) => c.status === 'fail').map((c) => c.label);
+    const failed = plan.checks.filter((c) => c.status === 'fail').map((c) => (c.detail ? `${c.label}: ${c.detail}` : c.label));
     if ((plan.conflicts.length || failed.length) && !input.force) {
       throw new BadRequestException(`Migration blocked: ${[...plan.conflicts, ...failed].join(' · ')}`);
     }
@@ -449,6 +509,13 @@ export class StackMigrateService implements OnModuleInit {
     // Re-point the replicator deployment on cutover unless the operator opted out.
     const replicatorDeploymentId = plan.replicator && input.repointReplicator !== false ? plan.replicator.deploymentId : null;
 
+    // Validate the published-port remap against the plan, then fold it into the ingress
+    // routes so the cutover flip points at the new port.
+    const portMap = this.validatePortMap(input.portMap, plan);
+    const ingressRoutes = (plan.ingressRoutes ?? []).map((r) =>
+      portMap[String(r.port)] != null ? { ...r, port: portMap[String(r.port)] } : r,
+    );
+
     const run = await this.prisma.stackMigrationRun.create({
       data: {
         sourceInstanceId: plan.sourceInstanceId,
@@ -459,7 +526,8 @@ export class StackMigrateService implements OnModuleInit {
         step: 'planned',
         status: 'running',
         images: plan.images as unknown as object,
-        ingress: (plan.ingressRoutes?.length ? plan.ingressRoutes : undefined) as unknown as object,
+        ingress: (ingressRoutes.length ? ingressRoutes : undefined) as unknown as object,
+        portMap: (Object.keys(portMap).length ? portMap : undefined) as unknown as object,
         replicatorDeploymentId,
       },
     });
@@ -473,7 +541,7 @@ export class StackMigrateService implements OnModuleInit {
     const ac = new AbortController();
     this.cancels.set(run.id, ac);
     this.active.add(key);
-    void this.execute(run.id, input, plan, ac.signal).finally(() => { this.active.delete(key); this.cancels.delete(run.id); });
+    void this.execute(run.id, { ...input, portMap }, plan, ac.signal).finally(() => { this.active.delete(key); this.cancels.delete(run.id); });
     return this.getRun(run.id);
   }
 
@@ -751,6 +819,7 @@ export class StackMigrateService implements OnModuleInit {
       passphrase: input.passphrase,
       binds,
       bindMap: input.bindMap,
+      portMap: input.portMap,
       restoreCredentialFiles: input.restoreCredentialFiles,
     });
     const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);
@@ -834,6 +903,13 @@ export class StackMigrateService implements OnModuleInit {
           probs.forEach((p) => say(`Ingress re-point warning: ${p}`));
         }
         await this.deployments.repoint(row.replicatorDeploymentId, row.destInstanceId, row.destStackName);
+        // Keep the replicator's stored ports in sync with any migration remap, so a later
+        // replicator redeploy doesn't revert to the old (taken) host port.
+        const portMap = (row.portMap as Record<string, number> | null) ?? null;
+        if (portMap && Object.keys(portMap).length) {
+          const changed = await this.deployments.applyPortRemap(row.replicatorDeploymentId, portMap).catch(() => 0);
+          if (changed) say(`Updated ${changed} replicator port(s) to the remapped value(s).`);
+        }
         await this.patch(id, { replicatorRepointed: true });
         say('Replicator now points at the migrated stack on the target.');
       }
