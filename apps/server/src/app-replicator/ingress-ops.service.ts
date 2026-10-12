@@ -34,18 +34,19 @@ export class IngressOps {
 
   // ── Cloudflare tunnel routes (keyed by hostname on a tunnel) ──────────
 
-  async cfAddRoute(instanceId: string, tunnelId: string, hostname: string, upstreamHost: string, port: number, createDns = true): Promise<void> {
+  async cfAddRoute(instanceId: string, tunnelId: string, hostname: string, upstreamHost: string, port: number, createDns = true, path?: string): Promise<void> {
     const res = await this.instances.runResourceOperationAwait(instanceId, 'tunnel-add-route', tunnelId, {
-      hostname, service: `http://${upstreamHost}:${port}`, createDns,
+      hostname, service: `http://${upstreamHost}:${port}`, createDns, ...(path ? { path } : {}),
     });
     if (!res.ok) throw new BadGatewayException(res.message || 'Cloudflare rejected the route.');
   }
 
-  /** In-place repoint of an existing hostname route on the SAME tunnel. Returns false
+  /** In-place repoint of an existing hostname route on the SAME tunnel. `path` targets the
+   *  exact rule when a hostname has several path-based rules (order preserved). Returns false
    *  when there is no such route to edit (caller can then add). */
-  async cfEditRoute(instanceId: string, tunnelId: string, hostname: string, upstreamHost: string, port: number): Promise<boolean> {
+  async cfEditRoute(instanceId: string, tunnelId: string, hostname: string, upstreamHost: string, port: number, path?: string): Promise<boolean> {
     const res = await this.instances.runResourceOperationAwait(instanceId, 'tunnel-edit-route', tunnelId, {
-      hostname, service: `http://${upstreamHost}:${port}`,
+      hostname, service: `http://${upstreamHost}:${port}`, ...(path ? { path } : {}),
     });
     return res.ok;
   }
@@ -111,6 +112,8 @@ export class IngressOps {
     port: number;
     /** Cloudflare: the tunnel the hostname is (or will be) routed on. */
     tunnelId?: string;
+    /** Cloudflare: path matcher for a path-based rule (targets the exact rule to edit). */
+    path?: string;
     /** NPM: certificate to attach when CREATING a new proxy host (ignored on edit). */
     certificateId?: number;
     sslForced?: boolean;
@@ -122,8 +125,8 @@ export class IngressOps {
 
     if (kind === 'cloudflare') {
       if (!spec.tunnelId) throw new BadRequestException('Pick a Cloudflare tunnel for the route.');
-      const edited = await this.cfEditRoute(spec.instanceId, spec.tunnelId, hostname, spec.upstreamHost, spec.port);
-      if (!edited) await this.cfAddRoute(spec.instanceId, spec.tunnelId, hostname, spec.upstreamHost, spec.port, true);
+      const edited = await this.cfEditRoute(spec.instanceId, spec.tunnelId, hostname, spec.upstreamHost, spec.port, spec.path);
+      if (!edited) await this.cfAddRoute(spec.instanceId, spec.tunnelId, hostname, spec.upstreamHost, spec.port, true, spec.path);
       return { kind, ref: spec.tunnelId };
     }
 

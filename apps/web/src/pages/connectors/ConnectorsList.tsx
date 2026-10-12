@@ -37,7 +37,9 @@ export function ConnectorsList() {
           <CardContent className="pt-6">
             <p className="text-sm font-medium mb-3">Choose a connector to add</p>
             <div className="grid gap-3 sm:grid-cols-2">
-              {available.map((m) => (
+              {[...available]
+                .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+                .map((m) => (
                 <Link key={m.id} to={`/connectors/new/${m.id}`} onClick={() => setAdding(false)}>
                   <div className="flex items-start gap-3 rounded-lg border border-border p-3 hover:border-primary/50 hover:bg-muted/40 transition-colors">
                     <div className="h-9 w-9 rounded-md bg-primary/15 text-primary grid place-items-center shrink-0">

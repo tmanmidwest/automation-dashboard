@@ -510,6 +510,19 @@ export interface MigrateIngressSpec {
   tunnelId?: string;
   /** NPM only: certificate to attach when a new proxy host is created. */
   certificateId?: number;
+  /**
+   * Cloudflare only: the ingress rule's path matcher, when it's a path-based route
+   * (same hostname, multiple rules). Carried so the flip repoints the exact rule and
+   * doesn't collapse path variants.
+   */
+  path?: string;
+  /**
+   * Relative priority within its connector/tunnel (lower = evaluated first). Cloudflare
+   * tunnel ingress is first-match-wins, so order matters. Informational on cutover — the
+   * flip edits each rule IN PLACE, so the live rule order (and trailing catch-all) is
+   * preserved; surfaced so the operator can see/trust the priority.
+   */
+  order?: number;
 }
 
 /** Ask Cerebro to work out what moving this stack would involve (read-only). */

@@ -24,8 +24,12 @@ interface RouteRow {
   port: string;
   tunnelId: string;
   certId: string;
+  /** Cloudflare path-based rule matcher (blank = host-level route). */
+  path: string;
+  /** Real priority within the tunnel (first-match-wins); informational, preserved on flip. */
+  order?: number;
 }
-const emptyRoute = (): RouteRow => ({ instanceId: '', hostname: '', port: '', tunnelId: '', certId: '0' });
+const emptyRoute = (): RouteRow => ({ instanceId: '', hostname: '', port: '', tunnelId: '', certId: '0', path: '' });
 
 const STATUS_COLOR: Record<string, string> = {
   success: 'text-emerald-400',
@@ -163,6 +167,8 @@ export function StackMigrate() {
         port,
         tunnelId: kind === 'cloudflare' ? r.tunnelId || undefined : undefined,
         certificateId: kind === 'npm' ? Number(r.certId) || 0 : undefined,
+        path: kind === 'cloudflare' && r.path.trim() ? r.path.trim() : undefined,
+        order: r.order,
       });
     }
     return out;
@@ -185,9 +191,11 @@ export function StackMigrate() {
           port: String(s.port),
           tunnelId: s.tunnelId ?? '',
           certId: typeof s.certificateId === 'number' ? String(s.certificateId) : '0',
+          path: s.path ?? '',
+          order: s.order,
         })));
         setPlan(null);
-        setIngressFetchMsg({ ok: true, text: `Found ${sugs.length} route${sugs.length === 1 ? '' : 's'}: ${sugs.map((s) => s.hostname).join(', ')}. Loaded below — edit or remove any before cutover.` });
+        setIngressFetchMsg({ ok: true, text: `Found ${sugs.length} route${sugs.length === 1 ? '' : 's'} (in priority order): ${sugs.map((s) => `${s.hostname}${s.path ?? ''}`).join(', ')}. Loaded below — their order is preserved on cutover.` });
       } else {
         setIngressFetchMsg({ ok: false, text: 'No existing routes found for this stack. Add one manually below.' });
       }
@@ -402,6 +410,8 @@ export function StackMigrate() {
                       port: String(s.port),
                       tunnelId: s.tunnelId ?? '',
                       certId: typeof s.certificateId === 'number' ? String(s.certificateId) : '0',
+                      path: s.path ?? '',
+                      order: s.order,
                     })));
                   }
                   setPlan(null);
@@ -443,7 +453,12 @@ export function StackMigrate() {
                   return (
                     <div key={i} className="rounded-md border border-border/50 bg-background/40 p-3 space-y-3">
                       <div className="flex items-center justify-between">
-                        <span className="text-[0.7rem] font-medium text-muted-foreground">Route {i + 1}{kind ? ` · ${kind === 'cloudflare' ? 'Cloudflare' : 'NPM'}` : ''}</span>
+                        <span className="text-[0.7rem] font-medium text-muted-foreground inline-flex items-center gap-2">
+                          {typeof r.order === 'number' && (
+                            <span className="rounded bg-primary/15 text-primary px-1.5 py-0.5 text-[0.65rem]" title="Priority within the tunnel (first-match-wins). Preserved on cutover.">Priority {r.order + 1}</span>
+                          )}
+                          Route {i + 1}{kind ? ` · ${kind === 'cloudflare' ? 'Cloudflare' : 'NPM'}` : ''}
+                        </span>
                         <Button type="button" variant="ghost" size="sm" onClick={() => removeRoute(i)} title="Remove this route">
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -473,6 +488,12 @@ export function StackMigrate() {
                             </select>
                           </div>
                         )}
+                        {kind === 'cloudflare' && (
+                          <div>
+                            <Label className="text-xs">Path (optional)</Label>
+                            <Input value={r.path} onChange={(e) => updateRoute(i, { path: e.target.value })} placeholder="e.g. /api — blank = whole host" />
+                          </div>
+                        )}
                         {kind === 'npm' && (
                           <div>
                             <Label className="text-xs">TLS certificate (optional)</Label>
@@ -486,7 +507,7 @@ export function StackMigrate() {
                     </div>
                   );
                 })}
-                <p className="text-[0.7rem] text-muted-foreground">On “Cut over” every hostname above is repointed to the target before the source is stopped; Rollback points them all back.</p>
+                <p className="text-[0.7rem] text-muted-foreground">On “Cut over” every route above is repointed to the target before the source is stopped; Rollback points them all back. Each is edited <strong className="text-foreground/80">in place</strong>, so a Cloudflare tunnel's rule order (priority, and its trailing catch-all) is preserved — path-based rules stay distinct.</p>
               </div>
             )}
           </div>

@@ -186,10 +186,13 @@ export class StackMigrateService implements OnModuleInit {
     // Two routes to the same hostname on the same connector would fight each other.
     const dupe = new Map<string, number>();
     for (const ing of ingressRoutes) {
-      const k = `${ing.instanceId}|${(ing.hostname ?? '').trim().toLowerCase()}`;
+      const k = `${ing.instanceId}|${(ing.hostname ?? '').trim().toLowerCase()}|${ing.path ?? ''}`;
       dupe.set(k, (dupe.get(k) ?? 0) + 1);
     }
-    for (const [k, n] of dupe) if (n > 1 && k.split('|')[1]) conflicts.push(`The same hostname "${k.split('|')[1]}" is listed more than once for one connector — remove the duplicate.`);
+    for (const [k, n] of dupe) {
+      const [, host, path] = k.split('|');
+      if (n > 1 && host) conflicts.push(`The same route "${host}${path}" is listed more than once for one connector — remove the duplicate.`);
+    }
 
     // Is the source an App Replicator deployment? If so we can re-point it (else it orphans).
     const repl = await this.prisma.replicatorDeployment.findFirst({
@@ -277,11 +280,12 @@ export class StackMigrateService implements OnModuleInit {
       return m ? { host: m[1], port: Number(m[2]) } : null;
     };
     // Collect EVERY route that points at the source stack (a stack can front several
-    // hostnames across one or more CF/NPM connectors), deduped by instance+hostname+port.
+    // hostnames — and several path-based rules per hostname — across one or more CF/NPM
+    // connectors), deduped by instance+hostname+port+path.
     const found: MigrateIngressSuggestion[] = [];
     const seen = new Set<string>();
     const add = (s: MigrateIngressSuggestion) => {
-      const key = `${s.instanceId}|${s.hostname}|${s.port}`;
+      const key = `${s.instanceId}|${s.hostname}|${s.port}|${s.path ?? ''}`;
       if (!seen.has(key)) { seen.add(key); found.push(s); }
     };
     const targets = await this.ingress.listTargets().catch(() => []);
@@ -303,13 +307,23 @@ export class StackMigrateService implements OnModuleInit {
               const u = upstream(String(r.details?.service ?? ''));
               if (u && u.host === sourceIp && wantedPorts.has(u.port)) {
                 const hostname = String(r.details?.hostname ?? r.name);
-                add({ source: 'cloudflare', label: `${hostname} via ${t.name} (Cloudflare)`, instanceId: t.instanceId, hostname, port: u.port, tunnelId: tun.id });
+                const path = r.details?.path != null ? String(r.details.path) : undefined;
+                const order = typeof r.details?.order === 'number' ? r.details.order : undefined;
+                add({ source: 'cloudflare', label: `${hostname}${path ?? ''} via ${t.name} (Cloudflare)`, instanceId: t.instanceId, hostname, port: u.port, tunnelId: tun.id, path, order });
               }
             }
           }
         }
       } catch { /* a connector that can't be scanned shouldn't block the plan */ }
     }
+    // Present in priority order: group by connector, then by the tunnel's real ingress
+    // order (first-match-wins), NPM rows (no inherent order) trailing by hostname.
+    const BIG = Number.MAX_SAFE_INTEGER;
+    found.sort((a, b) =>
+      a.instanceId.localeCompare(b.instanceId) ||
+      (a.order ?? BIG) - (b.order ?? BIG) ||
+      a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }),
+    );
     return found;
   }
 
@@ -742,10 +756,10 @@ export class StackMigrateService implements OnModuleInit {
         if (!targetIp) throw new BadRequestException('Could not resolve the target host IP for the ingress flip.');
         let flipped = 0;
         for (const r of routes) {
-          say(`Repointing ${r.hostname} → ${targetIp}:${r.port} on the ingress connector…`);
+          say(`Repointing ${r.hostname}${r.path ?? ''} → ${targetIp}:${r.port} on the ingress connector…`);
           await this.ingressOps.setRoute({
             instanceId: r.instanceId, hostname: r.hostname, upstreamHost: targetIp, port: r.port,
-            tunnelId: r.tunnelId, certificateId: r.certificateId,
+            tunnelId: r.tunnelId, certificateId: r.certificateId, path: r.path,
           });
           flipped++;
         }
@@ -800,11 +814,11 @@ export class StackMigrateService implements OnModuleInit {
         const sourceIp = await this.hostIpFor(row.sourceInstanceId);
         if (sourceIp) {
           for (const r of routes) {
-            say(`Repointing ${r.hostname} → ${sourceIp}:${r.port} back to the source…`);
+            say(`Repointing ${r.hostname}${r.path ?? ''} → ${sourceIp}:${r.port} back to the source…`);
             await this.ingressOps.setRoute({
               instanceId: r.instanceId, hostname: r.hostname, upstreamHost: sourceIp, port: r.port,
-              tunnelId: r.tunnelId, certificateId: r.certificateId,
-            }).catch((e) => say(`WARNING: could not flip ${r.hostname} back: ${msg(e)}. Repoint it by hand.`));
+              tunnelId: r.tunnelId, certificateId: r.certificateId, path: r.path,
+            }).catch((e) => say(`WARNING: could not flip ${r.hostname}${r.path ?? ''} back: ${msg(e)}. Repoint it by hand.`));
           }
           await this.patch(id, { ingressFlipped: false });
         }
@@ -875,7 +889,7 @@ export class StackMigrateService implements OnModuleInit {
       if (!item || typeof item !== 'object') continue;
       const o = item as Partial<MigrateIngressSpec>;
       if (!o.instanceId || !o.hostname || typeof o.port !== 'number') continue;
-      out.push({ instanceId: o.instanceId, hostname: o.hostname, port: o.port, tunnelId: o.tunnelId, certificateId: o.certificateId });
+      out.push({ instanceId: o.instanceId, hostname: o.hostname, port: o.port, tunnelId: o.tunnelId, certificateId: o.certificateId, path: o.path, order: o.order });
     }
     return out;
   }

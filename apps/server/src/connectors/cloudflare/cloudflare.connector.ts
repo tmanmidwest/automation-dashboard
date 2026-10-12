@@ -852,16 +852,19 @@ export class CloudflareConnector implements Connector {
     const ingress = cfg.config?.ingress ?? [];
     return ingress
       .filter((r) => !!r.hostname)
-      .map((r) => ({
+      // `order` is the rule's position among the host rules in the tunnel's ingress
+      // array (first-match-wins). Captured here BEFORE the display sort so consumers
+      // (e.g. the stack migrator) can preserve/show the real priority.
+      .map((r, order) => ({
         id: r.hostname as string,
         kind: 'route',
         name: r.path ? `${r.hostname}${r.path}` : (r.hostname as string),
         // Locally-managed tunnels can't be edited via the API — flag it in the row.
         status: local ? 'local' : 'active',
-        details: { hostname: r.hostname ?? null, service: r.service, path: r.path ?? null },
+        details: { hostname: r.hostname ?? null, service: r.service, path: r.path ?? null, order },
       }))
       // List routes alphabetically by hostname (case-insensitive) rather than in
-      // the tunnel config's ingress order.
+      // the tunnel config's ingress order (the real order rides along in `details.order`).
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   }
 
@@ -1418,9 +1421,14 @@ export class CloudflareConnector implements Connector {
           const hostname = strOrUndef(values.hostname);
           const service = strOrUndef(values.service);
           if (!hostname || !service) return { ok: false, message: 'Hostname and service are required.' };
-          const idx = hostRules.findIndex((r) => r.hostname === hostname);
-          if (idx < 0) return { ok: false, message: `No route for ${hostname} on this tunnel.` };
           const path = strOrUndef(values.path);
+          // When a path is given, target the exact hostname+path rule (a hostname can
+          // have several path-based rules, whose order is significant); otherwise match
+          // the hostname. This keeps the matched rule's position in the ingress array.
+          const idx = path
+            ? hostRules.findIndex((r) => r.hostname === hostname && (r.path ?? '') === path)
+            : hostRules.findIndex((r) => r.hostname === hostname);
+          if (idx < 0) return { ok: false, message: `No route for ${hostname}${path ? ` (path ${path})` : ''} on this tunnel.` };
           hostRules[idx] = { ...hostRules[idx], hostname, service, ...(path ? { path } : {}) };
           if (!path) delete hostRules[idx].path;
           onProgress(`Updating route ${hostname}…`);
