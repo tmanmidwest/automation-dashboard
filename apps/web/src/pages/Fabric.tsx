@@ -16,7 +16,7 @@ import type {
   FabricSshConnectInput, FabricRdpConnectInput, FabricVncConnectInput, FabricSessionTicket,
   FabricVncSessionTicket, FabricSessionDto, FabricSftpListing, FabricSftpOpenResult, FabricSftpEntry,
   FabricApprovalPending, FabricApprovalStatus, FabricApprovalDto,
-  FabricRemoteBrowserTicket, FabricInjectResult,
+  FabricRemoteBrowserTicket, FabricInjectResult, FabricCredentialOption,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -1626,6 +1626,30 @@ function RoutesDialog({
     return () => { live = false; };
   }, [form.kind]);
 
+  // Inline "＋ New credential" for web routes — no connect step to save through, so
+  // create the vault web credential here, then attach it to this route.
+  const [newCred, setNewCred] = useState({ open: false, name: '', username: '', password: '', totp: '' });
+  const [savingCred, setSavingCred] = useState(false);
+  const saveNewCred = async () => {
+    setSavingCred(true); setErr(null);
+    try {
+      const created = await api.post<FabricCredentialOption>('/api/fabric/credentials', {
+        name: newCred.name.trim(),
+        username: newCred.username.trim(),
+        password: newCred.password,
+        totpSecret: newCred.totp.trim() || undefined,
+      });
+      const refreshed = await api.get<{ key: string; label: string }[]>('/api/fabric/credentials?kind=web').catch(() => creds);
+      setCreds(refreshed);
+      setForm((f) => ({ ...f, secretRef: created.key, webAutofill: f.webAutofill === 'off' ? 'manual' : f.webAutofill }));
+      setNewCred({ open: false, name: '', username: '', password: '', totp: '' });
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not save the credential.');
+    } finally {
+      setSavingCred(false);
+    }
+  };
+
   const reset = () => { setForm(blank); setEditingId(null); setErr(null); };
 
   const setKind = (kind: string) =>
@@ -1769,11 +1793,30 @@ function RoutesDialog({
                 <span>Ignore TLS certificate errors for this route (self-signed internal sites, e.g. a Proxmox host). Applies to this route only.</span>
               </label>
               <div className="col-span-2">
-                <Label className="text-xs">Web credential (optional)</Label>
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">Web credential (optional)</Label>
+                  <button type="button" className="text-[0.7rem] text-primary hover:underline" onClick={() => setNewCred((n) => ({ ...n, open: !n.open }))}>
+                    {newCred.open ? 'Cancel' : '+ New credential'}
+                  </button>
+                </div>
                 <select className={selectCls} value={form.secretRef} onChange={(e) => setForm((f) => ({ ...f, secretRef: e.target.value }))}>
                   <option value="">None</option>
                   {creds.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
                 </select>
+                {newCred.open && (
+                  <div className="mt-2 rounded-md border border-border/60 p-3 space-y-2">
+                    <p className="text-[0.7rem] text-muted-foreground">Saved to the vault (as a reusable <span className="font-mono">web</span> credential) and attached to this route. Injected into the page per the Autofill setting.</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input placeholder="Name (e.g. switch-admin)" value={newCred.name} onChange={(e) => setNewCred((n) => ({ ...n, name: e.target.value }))} />
+                      <Input placeholder="Username" value={newCred.username} onChange={(e) => setNewCred((n) => ({ ...n, username: e.target.value }))} />
+                      <Input type="password" placeholder="Password" autoComplete="new-password" value={newCred.password} onChange={(e) => setNewCred((n) => ({ ...n, password: e.target.value }))} />
+                      <Input placeholder="TOTP secret (optional)" value={newCred.totp} onChange={(e) => setNewCred((n) => ({ ...n, totp: e.target.value }))} />
+                    </div>
+                    <Button size="sm" onClick={saveNewCred} disabled={savingCred || !newCred.name.trim() || !newCred.username.trim() || !newCred.password}>
+                      {savingCred ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />} Save &amp; attach
+                    </Button>
+                  </div>
+                )}
               </div>
               <div>
                 <Label className="text-xs">Autofill</Label>

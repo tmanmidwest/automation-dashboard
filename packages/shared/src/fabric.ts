@@ -438,6 +438,16 @@ export interface FabricCredentialOption {
   label: string;
 }
 
+/** Create a reusable web credential for a Remote Browser route (POST /api/fabric/credentials). */
+export interface FabricWebCredentialInput {
+  /** A name for the vault entry (also the picker label). */
+  name: string;
+  username: string;
+  password: string;
+  /** Optional base32 TOTP seed (P3 autofill). */
+  totpSecret?: string;
+}
+
 /** Minting an interactive session returns a one-time ticket; open the WS with it. */
 export interface FabricSessionTicket {
   token: string;

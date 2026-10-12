@@ -56,7 +56,7 @@ interface NewSecret {
   label: string;
   category: SecretCategory;
   value: string;
-  kind: 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc';
+  kind: 'generic' | 'git' | 'ssh' | 'rdp' | 'vnc' | 'web';
   gitHost: string;
   gitUsername: string;
   sshUsername: string;
@@ -66,6 +66,8 @@ interface NewSecret {
   rdpUsername: string;
   rdpDomain: string;
   vncUsername: string;
+  webUsername: string;
+  webTotp: string;
 }
 /** Whether the create form has enough to submit (fields vary by kind). */
 function canCreateSecret(n: NewSecret): boolean {
@@ -75,6 +77,7 @@ function canCreateSecret(n: NewSecret): boolean {
   }
   if (n.kind === 'rdp') return n.rdpUsername.trim() !== '' && n.value !== '';
   if (n.kind === 'vnc') return n.value !== '';
+  if (n.kind === 'web') return n.webUsername.trim() !== '' && n.value !== '';
   return n.value !== '';
 }
 
@@ -93,6 +96,8 @@ const emptyNewSecret = (): NewSecret => ({
   rdpUsername: '',
   rdpDomain: '',
   vncUsername: '',
+  webUsername: '',
+  webTotp: '',
 });
 
 export function Secrets() {
@@ -211,12 +216,18 @@ export function Secrets() {
           username: newSecret.vncUsername.trim() || undefined,
           password: newSecret.value,
         });
+      } else if (newSecret.kind === 'web') {
+        value = JSON.stringify({
+          username: newSecret.webUsername.trim(),
+          password: newSecret.value,
+          totpSecret: newSecret.webTotp.trim() || undefined,
+        });
       } else {
         value = newSecret.value;
       }
-      // SSH/RDP/VNC credentials belong in the Fabric group.
+      // SSH/RDP/VNC/web credentials belong in the Fabric group.
       const category =
-        newSecret.kind === 'ssh' || newSecret.kind === 'rdp' || newSecret.kind === 'vnc' ? 'fabric' : newSecret.category;
+        ['ssh', 'rdp', 'vnc', 'web'].includes(newSecret.kind) ? 'fabric' : newSecret.category;
       await api.put(`/api/secrets/${encodeURIComponent(key)}`, {
         value,
         label: newSecret.label.trim() || key,
@@ -357,7 +368,7 @@ export function Secrets() {
 
   /** Pretty-print a structured (git/ssh/rdp) JSON credential; show others verbatim. */
   function displayValue(s: SecretSummary, value: string): string {
-    if (s.kind === 'git' || s.kind === 'ssh' || s.kind === 'rdp' || s.kind === 'vnc') {
+    if (s.kind === 'git' || s.kind === 'ssh' || s.kind === 'rdp' || s.kind === 'vnc' || s.kind === 'web') {
       try {
         return JSON.stringify(JSON.parse(value), null, 2);
       } catch {
@@ -612,6 +623,7 @@ export function Secrets() {
               <option value="ssh">SSH credential</option>
               <option value="rdp">RDP credential</option>
               <option value="vnc">VNC credential</option>
+              <option value="web">Web credential (Remote Browser)</option>
             </select>
           </div>
           <div>
@@ -699,6 +711,21 @@ export function Secrets() {
               <p className="mt-1 text-xs text-muted-foreground">Required for macOS Screen Sharing (Apple RA2); leave blank for legacy password-only VNC.</p>
             </div>
           )}
+          {newSecret.kind === 'web' && (
+            <>
+              <div>
+                <Label>Username</Label>
+                <Input value={newSecret.webUsername} placeholder="the login the web app expects"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, webUsername: e.target.value }))} />
+              </div>
+              <div>
+                <Label>TOTP secret (optional)</Label>
+                <Input value={newSecret.webTotp} placeholder="base32 2FA seed — leave blank if none"
+                  onChange={(e) => setNewSecret((s) => ({ ...s, webTotp: e.target.value }))} />
+                <p className="mt-1 text-xs text-muted-foreground">Used to auto-enter a 2FA code on login (P3). Leave blank for sites without TOTP.</p>
+              </div>
+            </>
+          )}
           {newSecret.kind === 'generic' && (
             <div>
               <Label>Category</Label>
@@ -719,7 +746,7 @@ export function Secrets() {
               <Label>
                 {newSecret.kind === 'git'
                   ? 'Token / Password'
-                  : newSecret.kind === 'ssh' || newSecret.kind === 'rdp' || newSecret.kind === 'vnc'
+                  : newSecret.kind === 'ssh' || newSecret.kind === 'rdp' || newSecret.kind === 'vnc' || newSecret.kind === 'web'
                     ? 'Password'
                     : 'Value'}
               </Label>

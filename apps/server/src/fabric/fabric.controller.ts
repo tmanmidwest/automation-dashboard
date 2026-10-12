@@ -103,6 +103,26 @@ class EnrollDto {
   token!: string;
 }
 
+/** Create a reusable web credential (Remote Browser autofill). */
+class WebCredentialDto {
+  @IsString()
+  @MaxLength(80)
+  name!: string;
+
+  @IsString()
+  @MaxLength(128)
+  username!: string;
+
+  @IsString()
+  @MaxLength(1024)
+  password!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  totpSecret?: string;
+}
+
 class UpdateAgentDto {
   @IsOptional()
   @IsString()
@@ -525,6 +545,15 @@ export class FabricController {
     return this.fabric.listCredentials(
       kind === 'rdp' ? 'rdp' : kind === 'vnc' ? 'vnc' : kind === 'web' ? 'web' : 'ssh',
     );
+  }
+
+  /** Create a reusable web credential for a Remote Browser route (no live session to
+   *  save through, unlike ssh/rdp/vnc). Returns the new vault key for the route to reference. */
+  @Post('credentials')
+  @SessionOnly()
+  @RequirePermissions('fabric:manage')
+  createCredential(@Body() body: WebCredentialDto, @CurrentUser() user: SessionUser) {
+    return this.fabric.createWebCredential(body, user);
   }
 
   /** Stream a session's recording for playback (Guacamole recording format). */

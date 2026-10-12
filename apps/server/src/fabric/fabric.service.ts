@@ -22,6 +22,7 @@ import type {
   SshCredential,
   VncCredential,
   WebCredential,
+  FabricCredentialOption,
 } from '@cerebro/shared';
 
 /** Create/edit input for a route (kind validated at runtime in normalizeRoute). */
@@ -563,13 +564,14 @@ export class FabricService implements OnModuleInit {
     return JSON.parse(raw) as FabricCredValue;
   }
 
-  /** Save a named, reusable credential (not tied to one machine) in the vault. */
+  /** Save a named, reusable credential (not tied to one machine) in the vault.
+   *  Returns the vault key it was stored under. */
   private async saveNamedCredential(
     kind: FabricCredKind,
     name: string,
     value: FabricCredValue,
     user: SessionUser,
-  ): Promise<void> {
+  ): Promise<string> {
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'cred';
     const key = `fabric/cred/${slug}`;
     await this.secrets.set(
@@ -585,6 +587,30 @@ export class FabricService implements OnModuleInit {
       target: key,
       meta: { kind, name },
     });
+    return key;
+  }
+
+  /**
+   * Create a named, reusable WEB credential in the vault (for a Remote Browser route
+   * to reference) WITHOUT a live session — the web route dialog has no connect step
+   * to piggyback a save on, unlike ssh/rdp/vnc. Needs fabric:manage. Returns the key.
+   */
+  async createWebCredential(
+    input: { name: string; username: string; password: string; totpSecret?: string },
+    user: SessionUser,
+  ): Promise<FabricCredentialOption> {
+    this.requireManage(user);
+    const name = input.name?.trim();
+    if (!name) throw new BadRequestException('A credential name is required.');
+    if (!input.username?.trim()) throw new BadRequestException('A username is required.');
+    if (!input.password) throw new BadRequestException('A password is required.');
+    const value: WebCredential = {
+      username: input.username.trim(),
+      password: input.password,
+      totpSecret: input.totpSecret?.trim() || undefined,
+    };
+    const key = await this.saveNamedCredential('web', name, value, user);
+    return { key, label: name };
   }
 
   /** Store a target credential (SSH or RDP) in the vault and attach it to the target. */
