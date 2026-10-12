@@ -784,13 +784,20 @@ export class StackRestoreService {
           `s=${sq(staged)}`,
           `d=${sq(b.dest)}`,
           'if [ ! -e "$s" ]; then echo missing; exit 3; fi',
-          'if [ -d "$s" ]; then mkdir -p "$d"; t=dir; else mkdir -p "$(dirname "$d")"; t=file; fi',
+          'if [ -d "$s" ]; then t=dir; else t=file; fi',
+          'note=',
+          // A wrong-type leftover at the destination blocks the copy. The common case:
+          // Docker auto-created an empty DIRECTORY for a single-file bind whose source
+          // did not exist yet on a prior deploy. Remove it so the correct type installs.
+          'if [ "$t" = file ] && [ -d "$d" ]; then rm -rf "$d"; note=" (replaced leftover dir)"; fi',
+          'if [ "$t" = dir ] && [ -e "$d" ] && [ ! -d "$d" ]; then rm -f "$d"; note=" (replaced leftover file)"; fi',
+          'if [ "$t" = dir ]; then mkdir -p "$d"; else mkdir -p "$(dirname "$d")"; fi',
           'cp -aT "$s" "$d"',
-          'printf %s "$t"',
+          'printf "%s%s" "$t" "$note"',
         ].join('\n');
         const r = await runSsh(ssh, script);
         const kind = r.stdout.trim();
-        if (r.code !== 0 || (kind !== 'file' && kind !== 'dir')) {
+        if (r.code !== 0 || !(kind.startsWith('file') || kind.startsWith('dir'))) {
           throw new Error(`Could not install bind path ${b.dest}: ${r.stderr.trim() || (kind === 'missing' ? 'not present in the snapshot' : `exit ${r.code}`)}`);
         }
         say(`Installed bind ${b.dest} (${kind}, in place${b.remapped ? ', remapped' : ''}).`);
