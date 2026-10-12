@@ -31,6 +31,8 @@ export async function ensureImagesOnTarget(
   say: (line: string) => void,
   /** Called as each image is resolved, for live "n/total" progress. */
   onProgress?: (done: number, total: number, ref: string) => void,
+  /** Abort between images (and the in-flight pull/transfer) when the migration is cancelled. */
+  signal?: AbortSignal,
 ): Promise<ImageOutcome[]> {
   const unique = [...new Set(refs.filter((r) => r && r.trim()))];
   const total = unique.length;
@@ -44,18 +46,19 @@ export async function ensureImagesOnTarget(
   }
 
   for (let i = 0; i < unique.length; i++) {
+    if (signal?.aborted) throw new Error('cancelled');
     const ref = unique[i];
     const tag = `[${i + 1}/${total}]`;
     let method: ImageMethod;
     if (await target.imageExists(ref)) {
       say(`${tag} ${ref} already present on the target.`);
       method = 'present';
-    } else if (await tryPull(target, ref, say, tag)) {
+    } else if (await tryPull(target, ref, say, tag, signal)) {
       method = 'pulled';
     } else {
       // Not present and not pullable → it was built on the source host. Move the bytes.
       say(`${tag} ${ref} is not in a registry the target can reach — transferring from the source (save → load)…`);
-      await transferImage(source, target, ref);
+      await transferImage(source, target, ref, signal);
       say(`${tag} ${ref} transferred to the target.`);
       method = 'loaded';
     }
@@ -74,12 +77,13 @@ async function archOf(api: DockerApi): Promise<string | null> {
   }
 }
 
-async function tryPull(target: DockerApi, ref: string, say: (line: string) => void, tag = ''): Promise<boolean> {
+async function tryPull(target: DockerApi, ref: string, say: (line: string) => void, tag = '', signal?: AbortSignal): Promise<boolean> {
   try {
-    await target.pullImage(ref, () => { /* progress is noisy; swallow */ });
+    await target.pullImage(ref, () => { /* progress is noisy; swallow */ }, signal);
     say(`${tag ? tag + ' ' : ''}Pulled ${ref} on the target from its registry.`);
     return true;
-  } catch {
+  } catch (e) {
+    if (signal?.aborted) throw e instanceof Error ? e : new Error('cancelled'); // a cancel, not an unpullable image
     return false; // not pullable (private/local-only) — fall through to save/load
   }
 }
@@ -89,8 +93,10 @@ async function tryPull(target: DockerApi, ref: string, say: (line: string) => vo
  * source feeds a PassThrough that `docker load` on the target consumes. Errors on
  * either side abort both.
  */
-async function transferImage(source: DockerApi, target: DockerApi, ref: string): Promise<void> {
+async function transferImage(source: DockerApi, target: DockerApi, ref: string, signal?: AbortSignal): Promise<void> {
   const bridge = new PassThrough();
+  const onAbort = () => bridge.destroy(new Error('cancelled'));
+  signal?.addEventListener('abort', onAbort, { once: true });
   const exportP = source.exportImage(ref, bridge);
   const loadP = target.loadImages(bridge);
   // If load fails, kill the export's pipe (and vice-versa) so neither hangs.
@@ -100,5 +106,7 @@ async function transferImage(source: DockerApi, target: DockerApi, ref: string):
   } catch (err) {
     bridge.destroy();
     throw err;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
 }

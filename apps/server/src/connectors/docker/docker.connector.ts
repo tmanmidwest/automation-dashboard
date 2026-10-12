@@ -28,7 +28,7 @@ import {
   type DockerEvent,
 } from './docker-api';
 import { DockerStackService, projectName, type StackDeployTarget } from './docker-stack.service';
-import { runSsh, type SshConfig } from './docker-ssh';
+import { effectiveSshHost, runSsh, type SshConfig } from './docker-ssh';
 import { remoteDigest } from './docker-registry';
 
 const HOST_KIND = 'docker_host';
@@ -401,7 +401,7 @@ export class DockerConnector implements Connector {
    */
   private hostMetrics(ctx: ConnectorContext): OverviewMetric[] {
     const key = ctx.instanceId ?? '';
-    const hasSsh = !!str(ctx.config.sshHost) && (!!str(ctx.config.sshPrivateKey) || !!str(ctx.config.sshPassword));
+    const hasSsh = !!effectiveSshHost(ctx.config as Record<string, unknown>) && (!!str(ctx.config.sshPrivateKey) || !!str(ctx.config.sshPassword));
     if (!key || !hasSsh) return [];
     const cached = this.hostCache.get(key);
     if (!cached || Date.now() - cached.at > HOST_TTL_MS) void this.refreshHost(key, ctx);
@@ -491,8 +491,8 @@ export class DockerConnector implements Connector {
         label: 'SSH host (for stack deploys)',
         type: 'text',
         required: false,
-        placeholder: 'same host as the Docker endpoint',
-        help: 'To deploy compose stacks, Cerebro runs the host\'s own "docker compose" over SSH. Leave the SSH fields blank to keep this connector monitor/manage-only.',
+        placeholder: 'defaults to the Docker endpoint host',
+        help: 'To deploy compose stacks, Cerebro runs the host\'s own "docker compose" over SSH. If you set an SSH user + password/key but leave this blank, it uses the Docker endpoint\'s host automatically (for a tcp/https endpoint) — set it only for a socket endpoint or a different SSH address. Leave all SSH fields blank to keep this connector monitor/manage-only.',
       },
       { key: 'sshPort', label: 'SSH port', type: 'number', required: false, placeholder: '22' },
       { key: 'sshUser', label: 'SSH user', type: 'text', required: false, placeholder: 'a user in the docker group' },
@@ -572,11 +572,11 @@ export class DockerConnector implements Connector {
 
   /** Build the SSH deploy target from config, or throw a clear message if unset. */
   private sshTargetFrom(ctx: ConnectorContext): StackDeployTarget {
-    const host = str(ctx.config.sshHost);
+    const host = effectiveSshHost(ctx.config as Record<string, unknown>);
     const key = str(ctx.config.sshPrivateKey);
     const password = str(ctx.config.sshPassword);
     if (!host || (!key && !password)) {
-      throw new Error('Stack deploys need SSH configured — set the SSH host, user, and either a password or a private key on this connector.');
+      throw new Error('Stack deploys need SSH configured — set the SSH host (or a networked Docker endpoint), user, and either a password or a private key on this connector.');
     }
     const ssh: SshConfig = {
       host,

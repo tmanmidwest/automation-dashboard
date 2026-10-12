@@ -489,8 +489,10 @@ export type MigrateStep =
   | 'verifying'
   | 'awaiting-cutover' // target up + verified, source stopped — operator flips ingress, then completes
   | 'completing'
+  | 'cancelling'
   | 'done'
   | 'failed'
+  | 'cancelled'
   | 'rolled_back';
 
 /**

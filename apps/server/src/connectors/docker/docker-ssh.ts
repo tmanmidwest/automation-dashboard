@@ -1,6 +1,22 @@
 import { Client } from 'ssh2';
 import { createHash } from 'crypto';
 
+/**
+ * The SSH host for a Docker connector: the explicit `sshHost`, or — when that's
+ * blank but SSH credentials are present — derived from a networked Docker `endpoint`
+ * (`tcp://` / `http(s)://host:port`). A `unix://` socket endpoint has no host to
+ * borrow, so this returns ''. This makes the "SSH host (for stack deploys)" field's
+ * placeholder ("same host as the Docker endpoint") real: filling only SSH
+ * user+password is enough when the box is the Docker endpoint itself.
+ */
+export function effectiveSshHost(config: Record<string, unknown>): string {
+  const explicit = typeof config.sshHost === 'string' ? config.sshHost.trim() : '';
+  if (explicit) return explicit;
+  const ep = typeof config.endpoint === 'string' ? config.endpoint.trim() : '';
+  const m = /^(?:tcp|https?):\/\/\[?([^\]:/]+)/i.exec(ep);
+  return m ? m[1] : '';
+}
+
 export interface SshConfig {
   host: string;
   port: number;

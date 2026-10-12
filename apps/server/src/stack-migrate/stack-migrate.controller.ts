@@ -112,6 +112,13 @@ export class StackMigrateController {
     return this.migrate.rollback(id, { id: user.id, email: user.email });
   }
 
+  @Post('runs/:id/cancel')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  cancel(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.migrate.cancel(id, { id: user.id, email: user.email });
+  }
+
   @Post('runs/:id/force-fail')
   @RequirePermissions('backup:restore')
   @SessionOnly()

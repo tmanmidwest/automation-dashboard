@@ -1,6 +1,6 @@
 import type { ConnectorContext } from '@cerebro/shared';
 import { DockerApi } from '../connectors/docker/docker-api';
-import type { SshConfig } from '../connectors/docker/docker-ssh';
+import { effectiveSshHost, type SshConfig } from '../connectors/docker/docker-ssh';
 import type { DockerStackService } from '../connectors/docker/docker-stack.service';
 import type { StackDeployTarget } from '../connectors/docker/docker-stack.service';
 
@@ -30,7 +30,7 @@ export function hostAccess(ctx: ConnectorContext, stacks: DockerStackService): D
     insecureSkipVerify: ctx.config.insecureSkipVerify === true,
   });
 
-  const host = str(ctx.config.sshHost);
+  const host = effectiveSshHost(ctx.config as Record<string, unknown>);
   const privateKey = str(ctx.config.sshPrivateKey);
   const password = str(ctx.config.sshPassword);
   if (!host || (!privateKey && !password)) return { api, ssh: null, target: null };

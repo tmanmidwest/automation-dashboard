@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight, Boxes, CheckCircle2, HardDriveDownload, Loader2, RefreshCw, RotateCcw, ScrollText,
-  Server, TriangleAlert, Undo2,
+  Server, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import type {
   BackupHost, CfTunnelOption, IngressTarget, MigrateIngressSpec, MigratePlan, NpmCertOption, SecretMode,
@@ -21,6 +21,7 @@ const STATUS_COLOR: Record<string, string> = {
   success: 'text-emerald-400',
   running: 'text-amber-400',
   error: 'text-destructive',
+  cancelled: 'text-muted-foreground',
 };
 
 const STEP_LABEL: Record<string, string> = {
@@ -34,8 +35,10 @@ const STEP_LABEL: Record<string, string> = {
   verifying: 'Verifying health',
   'awaiting-cutover': 'Awaiting cutover',
   completing: 'Tearing down source',
+  cancelling: 'Cancelling',
   done: 'Done',
   failed: 'Failed',
+  cancelled: 'Cancelled',
   rolled_back: 'Rolled back',
 };
 
@@ -49,6 +52,12 @@ function formatBytes(n?: number): string {
 }
 
 const CHECK_CLS: Record<string, string> = { pass: 'text-emerald-400', warn: 'text-amber-400', fail: 'text-destructive' };
+
+const SECRET_HELP: Record<string, string> = {
+  embed: 'Reads the stack’s current environment and carries it, encrypted with a passphrase you set below. Works no matter where the secrets live. Recommended.',
+  raw: 'Reads the stack’s current environment and carries it as-is — simplest, but the values sit unencrypted in the transfer repository.',
+  reference: 'Does NOT carry secret values — it stores only references to Cerebro vault keys and re-reads them from the TARGET’s vault on restore. Use only when those secrets already exist in the vault on the target; the migration fails if a referenced key is missing.',
+};
 
 const IMAGE_BADGE: Record<string, { label: string; cls: string }> = {
   present: { label: 'already on target', cls: 'bg-muted text-muted-foreground' },
@@ -219,7 +228,7 @@ export function StackMigrate() {
     }
   };
 
-  const act = async (id: string, kind: 'complete' | 'rollback' | 'force-fail') => {
+  const act = async (id: string, kind: 'complete' | 'rollback' | 'force-fail' | 'cancel') => {
     setErr(null);
     try {
       const run = await api.post<StackMigrationRun>(`/api/stack-migrate/runs/${id}/${kind}`);
@@ -299,13 +308,14 @@ export function StackMigrate() {
                 {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </div>
-            <div>
+            <div className="col-span-2">
               <Label className="text-xs">Secrets / .env</Label>
               <select className={selectCls} value={secretMode} onChange={(e) => { setSecretMode(e.target.value as SecretMode); setPlan(null); }}>
-                <option value="raw">Copy values (plaintext in the repo)</option>
-                <option value="embed">Seal with a passphrase</option>
-                <option value="reference">Reference vault keys (re-resolved on target)</option>
+                <option value="embed">Sealed — carry the values, encrypted (recommended)</option>
+                <option value="raw">Plaintext — carry the values, unencrypted</option>
+                <option value="reference">Vault reference — re-read from the target’s vault (advanced)</option>
               </select>
+              <p className={`text-[0.7rem] mt-1 ${secretMode === 'reference' ? 'text-amber-300' : 'text-muted-foreground'}`}>{SECRET_HELP[secretMode]}</p>
             </div>
           </div>
 
@@ -315,6 +325,10 @@ export function StackMigrate() {
               Automatically flip ingress on cutover
               {ingressTargets.length === 0 && <span className="text-muted-foreground font-normal">(no Cloudflare / NPM connector configured)</span>}
             </label>
+            <p className="text-[0.7rem] text-muted-foreground">
+              <strong className="text-foreground/80">Checked:</strong> at cutover Cerebro repoints this public hostname (Cloudflare tunnel route or NPM proxy host) from the source host to the target automatically — no manual DNS/proxy edit — and Rollback points it back.
+              {' '}<strong className="text-foreground/80">Unchecked:</strong> the stack is moved but ingress is left alone — after you Complete, you must repoint DNS / your reverse proxy to the target yourself, or traffic keeps hitting the old host.
+            </p>
             {ingressEnabled && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
@@ -521,7 +535,7 @@ export function StackMigrate() {
                 <span className="inline-flex items-center gap-2 min-w-0">
                   {r.status === 'running' ? <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
                     : r.step === 'done' ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                    : r.step === 'rolled_back' ? <Undo2 className="h-4 w-4 text-muted-foreground" />
+                    : r.step === 'rolled_back' || r.step === 'cancelled' ? <Undo2 className="h-4 w-4 text-muted-foreground" />
                     : r.status === 'error' ? <TriangleAlert className="h-4 w-4 text-destructive" />
                     : <HardDriveDownload className="h-4 w-4 text-muted-foreground" />}
                   <span className="truncate">{r.sourceHostName} · {r.stackName} → {r.destHostName} · {r.destStackName}</span>
@@ -542,7 +556,12 @@ export function StackMigrate() {
               <div className="flex items-center gap-2 mt-2">
                 <Button variant="ghost" size="sm" onClick={() => openLog(r.id)}><ScrollText className="h-3.5 w-3.5 mr-1" /> Log</Button>
                 {canMigrate && r.status === 'running' && (
-                  <Button variant="ghost" size="sm" onClick={() => { if (confirm('Force-fail this migration? Its background task may still be finishing — this just lets you roll back a stuck run.')) void act(r.id, 'force-fail'); }} title="Mark a stuck run failed so you can roll it back. The background task may still finish on its own.">
+                  <Button variant="ghost" size="sm" onClick={() => { if (confirm('Cancel this migration? It stops the work, restarts the source if it was stopped, and removes any partial target. A capture/restore already in flight may still finish on its own.')) void act(r.id, 'cancel'); }} title="Stop the migration and clean up — restart the source and remove the partial target.">
+                    <X className="h-3.5 w-3.5 mr-1" /> Cancel
+                  </Button>
+                )}
+                {canMigrate && r.status === 'running' && (
+                  <Button variant="ghost" size="sm" onClick={() => { if (confirm('Force-fail this migration? Use this only if Cancel is stuck — it just marks the run failed so you can roll it back.')) void act(r.id, 'force-fail'); }} title="Escape hatch if Cancel hangs: mark the run failed so you can roll it back.">
                     <TriangleAlert className="h-3.5 w-3.5 mr-1" /> Force-fail
                   </Button>
                 )}

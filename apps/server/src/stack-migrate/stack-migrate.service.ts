@@ -34,6 +34,11 @@ const RUNNING = new Set(['running', 'restarting']);
 /** Who initiated a migration action, for the audit trail (from the session user). */
 type MigrateActor = { id?: string; email?: string };
 
+/** Thrown through the step pipeline when the operator cancels a running migration. */
+class CancelledError extends Error {
+  constructor() { super('cancelled'); this.name = 'CancelledError'; }
+}
+
 /**
  * Move a Compose stack from one Docker host to another (docs/stack-migrator.md).
  *
@@ -47,6 +52,8 @@ type MigrateActor = { id?: string; email?: string };
 @Injectable()
 export class StackMigrateService implements OnModuleInit {
   private readonly active = new Set<string>();
+  /** Abort controllers for in-flight migrations, keyed by run id — drives cancel(). */
+  private readonly cancels = new Map<string, AbortController>();
 
   /**
    * A migration runs in a background promise guarded by an in-memory lock. If the
@@ -351,15 +358,41 @@ export class StackMigrateService implements OnModuleInit {
       target: `${plan.stackName} → ${plan.destStackName}`,
       meta: { source: plan.sourceInstanceId, dest: plan.destInstanceId, repo: plan.repoTargetId, replicator: !!replicatorDeploymentId },
     }).catch(() => undefined);
+    const ac = new AbortController();
+    this.cancels.set(run.id, ac);
     this.active.add(key);
-    void this.execute(run.id, input, plan).finally(() => this.active.delete(key));
+    void this.execute(run.id, input, plan, ac.signal).finally(() => { this.active.delete(key); this.cancels.delete(run.id); });
     return this.getRun(run.id);
   }
 
-  private async execute(runId: string, input: StartMigrateInput, plan: MigratePlan): Promise<void> {
+  /**
+   * Cancel a running migration: abort its background task (poll waits, image
+   * pull/transfer stop promptly; a restic capture/restore already in flight can't be
+   * hard-killed and may still finish into its own run), then clean up — restart the
+   * source if it was stopped, remove any partial target — and return a summary.
+   */
+  async cancel(id: string, actor?: MigrateActor): Promise<StackMigrationRun> {
+    const row = await this.prisma.stackMigrationRun.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException('Migration run not found.');
+    if (row.status !== 'running') throw new BadRequestException('Only a running migration can be cancelled.');
+    const ac = this.cancels.get(id);
+    if (!ac) {
+      // No live task in this process (e.g. after a failover) — settle the row directly.
+      await this.finish(id, { status: 'cancelled', step: 'cancelled', message: 'Cancelled — no active task was found on this server; roll back if a partial target remains.', durationMs: row.durationMs ?? 0, log: `${row.log ?? ''}` });
+    } else {
+      ac.abort();
+      // Wait for execute()'s cancel path to clean up and settle the row.
+      await this.poll(() => this.prisma.stackMigrationRun.findUnique({ where: { id } }), 120_000);
+    }
+    await this.audit.record({ actorId: actor?.id, actorEmail: actor?.email, action: 'stack.migrate.cancelled', target: `${row.stackName} → ${row.destStackName}` }).catch(() => undefined);
+    return this.getRun(id);
+  }
+
+  private async execute(runId: string, input: StartMigrateInput, plan: MigratePlan, signal: AbortSignal): Promise<void> {
     const started = Date.now();
     const log: string[] = [];
     const say = (line: string) => { log.push(`${new Date().toISOString()}  ${line}`); void this.patch(runId, { log: log.join('\n').slice(-MAX_LOG_CHARS) }); };
+    const ck = () => { if (signal.aborted) throw new CancelledError(); };
     const quiesce = input.quiesceSource !== false;
     let sourceStopped = false;
 
@@ -385,32 +418,37 @@ export class StackMigrateService implements OnModuleInit {
       try {
         // 1) Image transfer FIRST, while the source still runs — images are static,
         //    so moving them now keeps them out of the downtime window (every mode).
+        ck();
         await this.setStep(runId, 'transferring-images');
         const refs = plan.images.map((i) => i.ref);
         const outcomes = await ensureImagesOnTarget(
           srcAccess.api, dstAccess.api, refs, say,
           (done, imgTotal) => { void this.patch(runId, { message: `Transferring images (${done}/${imgTotal})…` }); },
+          signal,
         );
         await this.patch(runId, { images: outcomes.map((o) => ({ ref: o.ref, method: o.method === 'loaded' ? 'transfer' : o.method === 'pulled' ? 'pull' : 'present' })) as unknown as object });
 
         // 2) Warm pre-copy (source running): seed the repo so the quiesced delta is
         //    small. restic dedups, so the final capture only uploads what changed.
         if (warm) {
+          ck();
           await this.setStep(runId, 'pre-copying');
           say('Warm pre-copy: backing up the running stack to seed the repo (no downtime)…');
-          const warmSnap = await this.runBackup(policy.policyId, input.passphrase, say);
+          const warmSnap = await this.runBackup(policy.policyId, input.passphrase, say, signal);
           // 2b) Live-ish: pre-restore that warm snapshot's volumes onto the target now,
           //     while the source keeps serving — the bulk of the restore, out of the
           //     downtime window. The target volumes are created and seeded (stale);
           //     the quiesced delta restore below brings them current.
           if (live && warmSnap.snapshotId) {
+            ck();
             await this.setStep(runId, 'pre-restoring');
             say('Pre-restoring the warm snapshot onto the target (data only, source still live)…');
-            await this.restoreDataToTarget(plan, warmSnap.snapshotId, input.passphrase, say);
+            await this.restoreDataToTarget(plan, warmSnap.snapshotId, input.passphrase, say, signal);
           }
         }
 
         // 3) Quiesce the source so the FINAL capture is consistent.
+        ck();
         if (quiesce) {
           await this.setStep(runId, 'quiescing');
           const stopped = await this.stopProject(srcAccess.api, plan.stackName, say);
@@ -421,20 +459,23 @@ export class StackMigrateService implements OnModuleInit {
         }
 
         // 4) Capture — a fast delta when the warm pre-copy seeded the repo, else full.
+        ck();
         await this.setStep(runId, 'capturing');
-        const final = await this.runBackup(policy.policyId, input.passphrase, say);
+        const final = await this.runBackup(policy.policyId, input.passphrase, say, signal);
         const snapshotId = final.snapshotId as string;
         await this.patch(runId, { snapshotId });
         say(`Captured ${warm ? 'delta ' : ''}snapshot ${snapshotId.slice(0, 8)}.`);
 
         // 5) Restore + deploy onto the target. When we pre-restored, restic writes
         //    only the files that changed since the warm copy — a fast delta restore.
+        ck();
         await this.setStep(runId, 'restoring');
-        await this.restoreToTarget(plan, snapshotId, input, say);
+        await this.restoreToTarget(plan, snapshotId, input, say, signal);
 
         // 6) Verify it came up healthy before declaring the target good.
+        ck();
         await this.setStep(runId, 'verifying');
-        const health = await this.waitHealthy(dstAccess.api, plan.destStackName, say);
+        const health = await this.waitHealthy(dstAccess.api, plan.destStackName, say, signal);
         if (!health.ok) throw new Error(`The migrated stack did not come up healthy — ${health.detail}`);
       } finally {
         await policy.cleanup();
@@ -445,6 +486,32 @@ export class StackMigrateService implements OnModuleInit {
       await this.finish(runId, { status: 'success', step: 'awaiting-cutover', message, durationMs: Date.now() - started, log: log.join('\n') });
       void this.logging.info('stack-migrate', message);
     } catch (err) {
+      // Operator cancel: clean up (restart source, remove the partial target) and summarize.
+      if (err instanceof CancelledError || signal.aborted) {
+        await this.setStep(runId, 'cancelling');
+        say('Cancelled — cleaning up…');
+        const summary: string[] = [];
+        if (sourceStopped) {
+          try {
+            const n = await this.startProject((await this.accessFor(plan.sourceInstanceId)).api, plan.stackName, say);
+            summary.push(`source restarted (${n} container(s))`);
+          } catch (e) { summary.push(`source restart FAILED (${msg(e)} — start it by hand)`); }
+        } else {
+          summary.push('source left running');
+        }
+        try {
+          const dst = await this.accessFor(plan.destInstanceId);
+          const c = await this.removeProjectContainers(dst.api, plan.destStackName, say);
+          const v = await this.removeProjectVolumes(dst.api, plan.destStackName, say);
+          if (dst.target) await this.stacks.remove(plan.destInstanceId, plan.destStackName).catch(() => undefined);
+          summary.push(`target cleaned up (${c} container(s), ${v} volume(s))`);
+        } catch (e) { summary.push(`target cleanup had issues (${msg(e)})`); }
+        const cmsg = `Cancelled. ${summary.join('; ')}. A capture/restore already in flight may still finish on its own — the target cleanup above removes whatever it would land.`;
+        say(cmsg);
+        await this.finish(runId, { status: 'cancelled', step: 'cancelled', message: cmsg, durationMs: Date.now() - started, log: log.join('\n') });
+        void this.logging.info('stack-migrate', `Migration ${runId} cancelled.`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       say(`Failed: ${message}`);
       // Don't leave the operator with nothing running: bring the source back up.
@@ -500,9 +567,9 @@ export class StackMigrateService implements OnModuleInit {
   /** Run one backup on the policy and wait for it; returns the finished run (with
    *  its snapshotId). restic dedups, so a second run on the same policy uploads only
    *  the delta. Throws on failure. */
-  private async runBackup(policyId: string, passphrase: string | undefined, say: (l: string) => void): Promise<{ snapshotId: string | null; status: string }> {
+  private async runBackup(policyId: string, passphrase: string | undefined, say: (l: string) => void, signal?: AbortSignal): Promise<{ snapshotId: string | null; status: string }> {
     const run = await this.backups.startBackup(policyId, passphrase, 'manual');
-    const final = await this.poll(() => this.prisma.stackBackupRun.findUnique({ where: { id: run.id } }), CAPTURE_TIMEOUT_MS);
+    const final = await this.poll(() => this.prisma.stackBackupRun.findUnique({ where: { id: run.id } }), CAPTURE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success' || !final.snapshotId) {
       throw new Error(`Capture failed: ${final?.message ?? 'no snapshot produced'}`);
     }
@@ -512,7 +579,7 @@ export class StackMigrateService implements OnModuleInit {
 
   /** Restore+deploy onto the target via the restore pipeline, then wait for the run.
    *  Carries the operator's bind-path selection (+ remap) and credential-file choice. */
-  private async restoreToTarget(plan: MigratePlan, snapshotId: string, input: StartMigrateInput, say: (l: string) => void): Promise<void> {
+  private async restoreToTarget(plan: MigratePlan, snapshotId: string, input: StartMigrateInput, say: (l: string) => void, signal?: AbortSignal): Promise<void> {
     const binds = input.includeBinds?.length ? input.includeBinds : undefined;
     const run = await this.restores.start({
       targetId: plan.repoTargetId,
@@ -527,7 +594,7 @@ export class StackMigrateService implements OnModuleInit {
       bindMap: input.bindMap,
       restoreCredentialFiles: input.restoreCredentialFiles,
     });
-    const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS);
+    const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success') {
       throw new Error(`Restore to the target failed: ${final?.message ?? 'unknown error'}`);
     }
@@ -540,7 +607,7 @@ export class StackMigrateService implements OnModuleInit {
    * volumes so the later quiesced restore only writes the delta. Data-only so nothing
    * starts against the (stale) warm data.
    */
-  private async restoreDataToTarget(plan: MigratePlan, snapshotId: string, passphrase: string | undefined, say: (l: string) => void): Promise<void> {
+  private async restoreDataToTarget(plan: MigratePlan, snapshotId: string, passphrase: string | undefined, say: (l: string) => void, signal?: AbortSignal): Promise<void> {
     const run = await this.restores.start({
       targetId: plan.repoTargetId,
       snapshotId,
@@ -551,7 +618,7 @@ export class StackMigrateService implements OnModuleInit {
       force: true,
       passphrase,
     });
-    const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS);
+    const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success') {
       // A pre-restore failure is not fatal — fall back to a full restore in the
       // downtime window. Log and continue rather than aborting the migration.
@@ -759,11 +826,12 @@ export class StackMigrateService implements OnModuleInit {
 
   /** Every container of the project running (and healthy, if it declares a check),
    *  twice in a row — the same bar the restore verify uses. */
-  private async waitHealthy(api: DockerApi, project: string, say: (l: string) => void): Promise<{ ok: boolean; detail: string }> {
+  private async waitHealthy(api: DockerApi, project: string, say: (l: string) => void, signal?: AbortSignal): Promise<{ ok: boolean; detail: string }> {
     const deadline = Date.now() + VERIFY_TIMEOUT_MS;
     let consecutive = 0;
     let last = 'no containers yet';
     while (Date.now() < deadline) {
+      if (signal?.aborted) throw new CancelledError();
       await sleep(5000);
       let cs;
       try { cs = await this.projectContainers(api, project); } catch (e) { last = `inspect failed: ${msg(e)}`; continue; }
@@ -822,9 +890,10 @@ export class StackMigrateService implements OnModuleInit {
     return new Map(rows.map((r) => [r.id, r.name]));
   }
 
-  private async poll<T extends { status: string }>(get: () => Promise<T | null>, timeoutMs: number): Promise<T | null> {
+  private async poll<T extends { status: string }>(get: () => Promise<T | null>, timeoutMs: number, signal?: AbortSignal): Promise<T | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      if (signal?.aborted) throw new CancelledError();
       const row = await get();
       if (row && row.status !== 'running') return row;
       if (Date.now() > deadline) return row;
