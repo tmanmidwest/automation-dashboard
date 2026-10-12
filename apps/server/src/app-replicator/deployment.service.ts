@@ -574,6 +574,21 @@ export class DeploymentService {
       : { ok: true, message: `Removed "${row.project}" and cleaned up its secrets.` };
   }
 
+  /**
+   * Re-point a deployment's record at a stack that has moved to another host/name
+   * (used by the stack migrator so a migrated replicator app keeps being managed
+   * here instead of pointing at the dead source). Only the record moves — the
+   * migrator has already placed the real stack on the target. Vault secrets are
+   * keyed by deployment id, so they follow automatically; ingress routes are
+   * re-pointed separately (IngressService). No-op-safe if the deployment is gone.
+   */
+  async repoint(deploymentId: string, dockerInstanceId: string, project: string): Promise<void> {
+    await this.prisma.replicatorDeployment.update({
+      where: { id: deploymentId },
+      data: { dockerInstanceId, project, status: 'deployed', phase: null },
+    }).catch(() => undefined);
+  }
+
   // ── Listing ────────────────────────────────────────────────────────
 
   async listForApp(appId: string): Promise<ReplicatorDeployment[]> {

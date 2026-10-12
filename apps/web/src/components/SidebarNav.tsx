@@ -17,6 +17,7 @@ import {
   Cpu,
   Radio,
   Archive,
+  HardDriveUpload,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -38,6 +39,7 @@ const NAV: NavItem[] = [
   { to: '/docker-fleet', label: 'Docker Fleet', icon: Ship, perm: 'connectors:read', code: '02-DKR' },
   { to: '/replicator', label: 'App Replicator', icon: Boxes, perm: 'replicator:read', code: '02-REP' },
   { to: '/backups', label: 'Stack Backups', icon: Archive, perm: 'backup:read', code: '02-BAK' },
+  { to: '/migrate', label: 'Stack Migrate', icon: HardDriveUpload, perm: 'backup:read', code: '02-MIG' },
   { to: '/fabric', label: 'Fabric', icon: Radio, perm: 'fabric:read', code: '02-FAB' },
   { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },

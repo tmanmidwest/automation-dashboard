@@ -899,6 +899,47 @@ model StackRestoreRun {
   @@index([snapshotId])
 }
 
+/// One stack-migration attempt — move a Compose stack from one Docker host to
+/// another (docs/stack-migrator.md). Append-only history: a migration stops the
+/// source and overwrites a target, so where a stack went and how is worth keeping.
+model StackMigrationRun {
+  id               String @id @default(cuid())
+  sourceInstanceId String
+  stackName        String
+  destInstanceId   String
+  destStackName    String
+  /// The restic repo capture→restore was brokered through.
+  repoTargetId String
+  /// planned | quiescing | capturing | transferring-images | restoring | verifying
+  /// | awaiting-cutover | completing | done | failed | rolled_back.
+  step   String @default("planned")
+  /// running | success | error.
+  status String
+  message    String?
+  snapshotId String?
+  /// Per-image placement strategy chosen (MigrateImagePlanItem[] as JSON).
+  images Json @default("[]")
+  /// False once the source stack has been torn down after a confirmed cutover.
+  sourceKept Boolean @default(true)
+  /// Automated-cutover ingress (MigrateIngressSpec as JSON): the CF/NPM connector,
+  /// public hostname and port flipped source→target at completion (P2). Null = none.
+  ingress Json?
+  /// True once the hostname has been repointed to the target at cutover.
+  ingressFlipped Boolean @default(false)
+  /// The App Replicator deployment this stack belongs to (so we can re-point it on
+  /// cutover instead of orphaning it). Null when the source isn't a replicator stack.
+  replicatorDeploymentId String?
+  /// True once that replicator deployment has been re-pointed to the target.
+  replicatorRepointed Boolean @default(false)
+  durationMs Int?
+  log        String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([destInstanceId, startedAt])
+  @@index([sourceInstanceId, stackName, startedAt])
+}
+
 /// Which vault key backs one of a stack's environment variables (Phase 2 of
 /// docs/stack-backup.md). Built from three sources — what the App Replicator put
 /// in the vault, what a value-digest match infers, and what an operator declares

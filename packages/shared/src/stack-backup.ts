@@ -460,3 +460,197 @@ export interface VerifyRestoreInput {
   /** Leave the sandbox running instead of tearing it down (for poking at it). */
   keep?: boolean;
 }
+
+// ── Stack migrator (move a stack between Docker hosts) ───────────────────────
+// See docs/stack-migrator.md. Reuses the backup capture + restore pipeline, adds
+// host→host image transfer and a cold cutover. Session-only (backup:restore).
+
+/** How a service's image will be made present on the target host. */
+export type MigrateImageMethod =
+  | 'present' // already on the target
+  | 'pull' // pullable from a registry the target reaches
+  | 'transfer'; // built on the source / not pullable → docker save|load
+
+/** One image the migration must place on the target, with its planned strategy. */
+export interface MigrateImagePlanItem {
+  ref: string;
+  method: MigrateImageMethod;
+}
+
+/** Where the migration run currently is. */
+export type MigrateStep =
+  | 'planned'
+  | 'transferring-images'
+  | 'pre-copying'
+  | 'pre-restoring'
+  | 'quiescing'
+  | 'capturing'
+  | 'restoring'
+  | 'verifying'
+  | 'awaiting-cutover' // target up + verified, source stopped — operator flips ingress, then completes
+  | 'completing'
+  | 'done'
+  | 'failed'
+  | 'rolled_back';
+
+/**
+ * Automated-cutover ingress: a Cloudflare tunnel route or NPM proxy host for the
+ * stack's public hostname, repointed source→target at cutover (P2). Optional — a
+ * migration without it just leaves the operator to flip ingress by hand.
+ */
+export interface MigrateIngressSpec {
+  /** A Cloudflare or NPM connector instance that fronts the hostname. */
+  instanceId: string;
+  hostname: string;
+  /** The published host port the hostname routes to. */
+  port: number;
+  /** Cloudflare only: the tunnel the route lives on. */
+  tunnelId?: string;
+  /** NPM only: certificate to attach when a new proxy host is created. */
+  certificateId?: number;
+}
+
+/** Ask Cerebro to work out what moving this stack would involve (read-only). */
+export interface MigratePlanInput {
+  sourceInstanceId: string;
+  stackName: string;
+  destInstanceId: string;
+  /** Defaults to the source stack name. */
+  destStackName?: string;
+  /** The restic repo to broker capture→restore through. */
+  repoTargetId: string;
+  /** Capture options used only when the source has no existing backup policy. */
+  secretMode?: SecretMode;
+  transfer?: TransferMode;
+  includeBinds?: string[];
+  /** Optional automated-cutover ingress to flip at completion (P2). */
+  ingress?: MigrateIngressSpec;
+}
+
+/** One pre-flight readiness check, shown as a checklist before the operator starts. */
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  /** pass = green; warn = proceed with caution; fail = blocks Start unless overridden. */
+  status: 'pass' | 'warn' | 'fail';
+  detail?: string;
+}
+
+/** A replicator deployment the source stack belongs to (so we can re-point it). */
+export interface MigrateReplicatorLink {
+  deploymentId: string;
+  /** The deployment's instance name, for display. */
+  name: string;
+}
+
+/** What a migration would do — shown for review before anything runs. */
+export interface MigratePlan {
+  sourceInstanceId: string;
+  sourceHostName?: string;
+  stackName: string;
+  destInstanceId: string;
+  destHostName?: string;
+  destStackName: string;
+  repoTargetId: string;
+  /** True when a saved backup policy for the source stack will be reused as-is. */
+  usingExistingPolicy: boolean;
+  secretMode: SecretMode;
+  /** Named volumes that will be copied. */
+  volumes: string[];
+  /** Bind-mount host paths in the stack (copied only if opted in). */
+  binds: string[];
+  /** Per-image placement strategy on the target. */
+  images: MigrateImagePlanItem[];
+  /** Host ports the stack publishes, flagged if already taken on the target. */
+  ports: { hostPort: number; inUse: boolean }[];
+  /** Sealed-secret snapshots need a passphrase to rebuild the target .env. */
+  needsPassphrase: boolean;
+  /** The automated-cutover ingress, echoed back when one was supplied. */
+  ingress?: MigrateIngressSpec | null;
+  /** Pre-flight readiness checks (disk, compose, repo, arch, …). A `fail` blocks Start. */
+  checks: PreflightCheck[];
+  /** Estimated total volume data to copy, in bytes (best-effort, from the source daemon). */
+  estimatedDataBytes?: number;
+  /** Set when the source stack is an App Replicator deployment — offer to re-point it. */
+  replicator?: MigrateReplicatorLink | null;
+  conflicts: string[];
+  warnings: string[];
+}
+
+/** Start a migration. */
+export interface StartMigrateInput extends MigratePlanInput {
+  /** Needed when the source's secrets are sealed (embed mode). */
+  passphrase?: string;
+  /** Proceed despite plan conflicts (the UI makes the operator opt in). */
+  force?: boolean;
+  /**
+   * Quiesce (stop) the source before the final volume copy for a consistent
+   * capture — the honest default for stateful stacks. Set false for a warm copy
+   * of a stateless stack. Defaults to true.
+   */
+  quiesceSource?: boolean;
+  /**
+   * Warm pre-copy (P3): back up the running stack first to seed the restic repo,
+   * so the quiesced final capture is just a fast delta — shrinks the downtime
+   * window for large volumes. Only applies when quiescing. Defaults to true.
+   */
+  warmPrecopy?: boolean;
+  /**
+   * Live-ish (P4): also pre-restore the warm snapshot onto the target while the
+   * source still runs, so the stop-the-world window is just the delta capture +
+   * a fast delta restore. Only applies on top of a warm pre-copy. Defaults to true.
+   */
+  preRestore?: boolean;
+  /**
+   * Remap included bind-mount host paths to different paths on the target
+   * (source path → target path). Paths not listed are restored to the same path.
+   */
+  bindMap?: Record<string, string>;
+  /**
+   * Write back credential files the capture sealed (compose `secrets: file:` host
+   * paths). Needs embed/raw secrets (reference mode carries no file contents).
+   */
+  restoreCredentialFiles?: boolean;
+  /**
+   * When the source stack is an App Replicator deployment, re-point that deployment
+   * (and its ingress routes) to the migrated stack on completion, so the replicator
+   * keeps managing it instead of pointing at the dead source. Defaults to true when
+   * a replicator deployment is detected.
+   */
+  repointReplicator?: boolean;
+}
+
+/** One migration attempt (append-only history). */
+export interface StackMigrationRun {
+  id: string;
+  sourceInstanceId: string;
+  sourceHostName?: string;
+  stackName: string;
+  destInstanceId: string;
+  destHostName?: string;
+  destStackName: string;
+  repoTargetId: string;
+  step: MigrateStep;
+  /** running | success | error. */
+  status: string;
+  message?: string | null;
+  /** Snapshot the capture produced (once it has). */
+  snapshotId?: string | null;
+  /** Per-image strategy chosen, as JSON on the row. */
+  images?: MigrateImagePlanItem[];
+  /** Whether the source stack is still present (false after a confirmed teardown). */
+  sourceKept: boolean;
+  /** The automated-cutover ingress attached to this migration, if any. */
+  ingress?: MigrateIngressSpec | null;
+  /** True once the hostname has been repointed to the target at cutover. */
+  ingressFlipped: boolean;
+  /** The App Replicator deployment this stack belongs to, if re-pointing was requested. */
+  replicatorDeploymentId?: string | null;
+  /** True once that replicator deployment has been re-pointed to the target. */
+  replicatorRepointed?: boolean;
+  durationMs?: number | null;
+  /** Only returned by the single-run endpoint. */
+  log?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+}

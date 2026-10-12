@@ -2,6 +2,7 @@ import { BadGatewayException, BadRequestException, Injectable, NotFoundException
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
+import { IngressOps } from './ingress-ops.service';
 import { dockerTargetFrom } from './docker-target';
 import type {
   AddIngressInput, IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, ReplicatorPort, ReplicatorIngressKind,
@@ -27,6 +28,7 @@ export class IngressService {
     private readonly prisma: PrismaService,
     private readonly instances: ConnectorInstanceService,
     private readonly audit: AuditService,
+    private readonly ops: IngressOps,
   ) {}
 
   /** Cloudflare + NPM connector instances that can front a deployment. */
@@ -79,31 +81,15 @@ export class IngressService {
     const hostIp = await this.hostIpFor(dep.dockerInstanceId);
     if (!hostIp) throw new BadRequestException('Could not determine the deployment host IP from its Docker connector.');
 
+    // The actual route create is shared with the stack migrator via IngressOps;
+    // IngressService keeps the deployment/row bookkeeping around it.
     let ref: string;
     if (input.kind === 'cloudflare') {
       if (!input.tunnelId) throw new BadRequestException('Pick a Cloudflare tunnel.');
-      const service = `http://${hostIp}:${input.hostPort}`;
-      const res = await this.instances.runResourceOperationAwait(input.instanceId, 'tunnel-add-route', input.tunnelId, {
-        hostname, service, createDns: true,
-      });
-      if (!res.ok) throw new BadGatewayException(res.message || 'Cloudflare rejected the route.');
+      await this.ops.cfAddRoute(input.instanceId, input.tunnelId, hostname, hostIp, input.hostPort, true);
       ref = input.tunnelId; // delete needs the tunnel id + hostname (stored in its column)
     } else if (input.kind === 'npm') {
-      const certId = input.certificateId ?? 0;
-      const res = await this.instances.runResourceOperationAwait(input.instanceId, 'create-proxy-host', undefined, {
-        domain_names: hostname,
-        forward_scheme: 'http',
-        forward_host: hostIp,
-        forward_port: input.hostPort,
-        certificate_id: String(certId),
-        ssl_forced: certId > 0 && !!input.sslForced,
-        block_exploits: true,
-        allow_websocket_upgrade: true,
-        caching_enabled: false,
-      });
-      if (!res.ok) throw new BadGatewayException(res.message || 'NPM rejected the proxy host.');
-      if (!res.createdResourceId) throw new BadGatewayException('NPM did not return the created proxy host id.');
-      ref = res.createdResourceId;
+      ref = await this.ops.npmCreateHost(input.instanceId, hostname, hostIp, input.hostPort, input.certificateId ?? 0, !!input.sslForced);
     } else {
       throw new BadRequestException('Unknown ingress kind.');
     }
@@ -205,6 +191,35 @@ export class IngressService {
     return problems;
   }
 
+  /**
+   * Re-point every (tunnel/NPM) ingress route of a deployment at a new upstream host
+   * — used when the stack migrator moves a replicator deployment to another host, so
+   * the public hostnames follow. In-place upsert via IngressOps (CF edit-route / NPM
+   * edit-proxy-host), keyed by hostname; the stored `ref`/`hostPort` are unchanged.
+   * ECS/ALB ingress is skipped (its routing is ALB-based, not a host IP). Best-effort;
+   * returns problem strings.
+   */
+  async repointForDeployment(deploymentId: string, upstreamHost: string): Promise<string[]> {
+    const rows = await this.prisma.replicatorIngress.findMany({ where: { deploymentId } });
+    const problems: string[] = [];
+    for (const row of rows) {
+      const meta = (row.meta as unknown as { ruleArn?: string } | null) ?? null;
+      if (meta?.ruleArn) continue; // ECS/ALB route — not a host-IP upstream
+      try {
+        await this.ops.setRoute({
+          instanceId: row.instanceId,
+          hostname: row.hostname,
+          upstreamHost,
+          port: row.hostPort,
+          tunnelId: row.kind === 'cloudflare' ? row.ref : undefined, // CF ref is the tunnel id
+        });
+      } catch (e) {
+        problems.push(`${row.hostname}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    return problems;
+  }
+
   /** Best-effort: remove the actual route/proxy host. Returns a problem string or null. */
   private async teardown(row: IngressRow): Promise<string | null> {
     const meta = (row.meta as unknown as { ruleArn?: string; awsInstanceId?: string } | null) ?? null;
@@ -221,10 +236,10 @@ export class IngressService {
         return problems.length ? problems.join('; ') : null;
       }
       if (row.kind === 'cloudflare') {
-        const res = await this.instances.runResourceOperationAwait(row.instanceId, 'tunnel-delete-route', row.ref, { hostname: row.hostname });
+        const res = await this.ops.cfDeleteRoute(row.instanceId, row.ref, row.hostname);
         return res.ok ? null : res.message;
       }
-      const res = await this.instances.deleteResource(row.instanceId, 'proxy_host', row.ref);
+      const res = await this.ops.npmDeleteHost(row.instanceId, row.ref);
       return res.ok ? null : res.message;
     } catch (err) {
       return err instanceof Error ? err.message : 'route teardown failed';

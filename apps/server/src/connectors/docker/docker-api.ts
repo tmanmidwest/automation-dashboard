@@ -653,6 +653,75 @@ export class DockerApi {
     });
   }
 
+  /**
+   * Stream an image out of this host as a tar (`docker save`), into `sink`. Used by
+   * the stack migrator to move an image that exists only in a host's local store
+   * (built on the box, pushed to no registry) to another host — paired with
+   * {@link loadImages} on the destination. No size cap: this is a trusted,
+   * potentially multi-GB export from a known Docker host. See docs/stack-migrator.md.
+   */
+  exportImage(ref: string, sink: NodeJS.WritableStream, timeoutMs = 6 * 60 * 60 * 1000): Promise<void> {
+    const url = `/images/${encodeURIComponent(ref)}/get`;
+    const { mod, options } = this.requestOptions('GET', url, { Accept: 'application/x-tar' }, timeoutMs);
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => { if (chunks.length < 64) chunks.push(c); });
+          res.on('end', () => reject(new DockerApiError(httpErrorMessage(status, 'GET', Buffer.concat(chunks).toString('utf8')), status)));
+          return;
+        }
+        res.on('error', reject);
+        sink.on('error', reject);
+        sink.on('finish', () => resolve());
+        res.pipe(sink);
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('Exporting the image timed out.')));
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      req.end();
+    });
+  }
+
+  /**
+   * Load a tar of images into this host (`docker load`), from `source`. The daemon
+   * streams NDJSON progress; a `{error}` line rejects. Pairs with {@link exportImage}
+   * for host→host image transfer. No size cap (trusted stream). See docs/stack-migrator.md.
+   */
+  loadImages(source: NodeJS.ReadableStream, timeoutMs = 6 * 60 * 60 * 1000): Promise<void> {
+    const { mod, options } = this.requestOptions('POST', '/images/load?quiet=0', { 'Content-Type': 'application/x-tar', Accept: 'application/json' }, timeoutMs);
+    return new Promise<void>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (status < 200 || status >= 300) {
+            return reject(new DockerApiError(httpErrorMessage(status, 'POST', text), status));
+          }
+          for (const line of text.split('\n')) {
+            const s = line.trim();
+            if (!s) continue;
+            try {
+              const o = JSON.parse(s) as { error?: string; errorDetail?: { message?: string } };
+              if (o.error || o.errorDetail?.message) {
+                return reject(new DockerApiError(`Image load failed: ${o.errorDetail?.message || o.error}`, status));
+              }
+            } catch {
+              /* non-JSON progress line */
+            }
+          }
+          resolve();
+        });
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('Loading the image timed out.')));
+      req.on('error', (err) => reject(err instanceof DockerApiError ? err : new DockerApiError(err.message)));
+      source.on('error', (err: Error) => req.destroy(err));
+      source.pipe(req);
+    });
+  }
+
   private request<T>(method: string, path: string, body?: string): Promise<T> {
     // Unversioned path → the daemon uses its own max supported API version.
     const fullPath = path;
