@@ -510,6 +510,13 @@ export function gitStackEnvPath(stacksDir: string, name: string, gitPath?: strin
   return `${composeFile.replace(/\/[^/]*$/, '') || dir}/.env`;
 }
 
+/** The host path to a git stack's compose file in its cloned repo. Exported so backup
+ *  can read the compose of a git-sourced stack (e.g. an App Replicator deployment),
+ *  whose text is not stored in Cerebro's DB. Validates the chars like the deploy path. */
+export function gitStackComposePath(stacksDir: string, name: string, gitPath?: string | null): string {
+  return `${trimSlash(stacksDir)}/${projectName(name)}/repo/${safeComposeRel(gitPath)}`;
+}
+
 function trimSlash(p: string): string {
   const dir = (p || '/opt/cerebro-stacks').replace(/\/+$/, '');
   // stacksDir is admin-set config that gets embedded in remote shell commands

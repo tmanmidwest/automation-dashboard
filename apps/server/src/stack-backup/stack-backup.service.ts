@@ -6,7 +6,7 @@ import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 import { CryptoService } from '../common/crypto.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
-import { DockerStackService } from '../connectors/docker/docker-stack.service';
+import { DockerStackService, gitStackComposePath, gitStackEnvPath } from '../connectors/docker/docker-stack.service';
 import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
 import { hostAccess, NO_SSH_REASON } from './docker-host';
 import type { ConnectorContext } from '@cerebro/shared';
@@ -310,7 +310,7 @@ export class StackBackupService {
   async secretsReport(instanceId: string, stackName: string): Promise<StackSecretsReport> {
     const host = await this.hostOrThrow(instanceId);
     const ctx = await this.instances.contextFor(host);
-    const { api, ssh } = hostAccess(ctx, this.stacks);
+    const { api, ssh, target } = hostAccess(ctx, this.stacks);
     const inspection = await inspectStack(api, stackName);
 
     const vars = await this.secretCapture.discover(instanceId, stackName, inspection);
@@ -339,7 +339,7 @@ export class StackBackupService {
     }
 
     const { compose } = ssh
-      ? await this.resolveCompose(instanceId, stackName, inspection, ssh)
+      ? await this.resolveCompose(instanceId, stackName, inspection, ssh, target?.stacksDir)
       : { compose: undefined };
     const { names: inlineComposeSecrets } = redactCompose(compose);
     const fileSecrets = detectFileSecrets(compose, vars).map((f) => f.label);
@@ -518,7 +518,7 @@ export class StackBackupService {
       const inspection = await inspectStack(access.api, policy.stackName);
       say(`Found ${inspection.containers.length} container(s), ${inspection.volumes.length} named volume(s), ${inspection.binds.length} bind path(s).`);
 
-      const { compose, envFile, composeSource } = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh);
+      const { compose, envFile, composeSource } = await this.resolveCompose(policy.connectorInstanceId, policy.stackName, inspection, ssh, access.target?.stacksDir);
       say(compose ? `Compose file read from ${composeSource}.` : 'No compose file could be read — capturing the manifest only.');
 
       const captured = await this.secretCapture.capture({
@@ -817,6 +817,7 @@ export class StackBackupService {
     stackName: string,
     inspection: StackInspection,
     ssh: SshConfig | null,
+    stacksDir?: string | null,
   ): Promise<{ compose?: string; envFile?: string; composeSource: string }> {
     const managed = await this.stacks.get(instanceId, stackName);
     if (managed?.compose) {
@@ -825,6 +826,22 @@ export class StackBackupService {
     // Reading the host's own copy needs a shell. Without one (a relay host) an
     // unmanaged stack can only contribute its manifest.
     if (!ssh) return { composeSource: 'unavailable without SSH' };
+
+    // Git-sourced managed stack (e.g. an App Replicator deployment deployed via
+    // deployGit): the compose lives in the cloned repo on the host, so `managed.compose`
+    // is empty. Read it (and the repo .env) straight from the known repo path, which is
+    // more reliable than the container's compose-path label.
+    if (managed?.source === 'git' && stacksDir) {
+      try {
+        const composePath = gitStackComposePath(stacksDir, stackName, managed.gitPath);
+        const c = await runSsh(ssh, `cat '${composePath}' 2>/dev/null || true`).catch(() => null);
+        if (c?.code === 0 && c.stdout.trim()) {
+          const envPath = gitStackEnvPath(stacksDir, stackName, managed.gitPath);
+          const e = await runSsh(ssh, `cat '${envPath}' 2>/dev/null || true`).catch(() => null);
+          return { compose: c.stdout, envFile: e?.stdout.trim() ? e.stdout : undefined, composeSource: composePath };
+        }
+      } catch { /* bad path chars etc. — fall through to the label-based read below */ }
+    }
 
     const paths = (inspection.composePath ?? '').split(',').map((p) => p.trim()).filter(Boolean);
     const parts: string[] = [];
