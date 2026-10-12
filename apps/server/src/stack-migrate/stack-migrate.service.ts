@@ -548,7 +548,9 @@ export class StackMigrateService implements OnModuleInit {
         if (input.overwriteTarget || input.force) {
           ck();
           const cleared = await this.removeProjectContainers(dstAccess.api, plan.destStackName, say);
-          if (cleared) say(`Overwriting the target: removed ${cleared} existing "${plan.destStackName}" container(s) before restoring (named volumes kept, restored into).`);
+          say(cleared
+            ? `Overwriting the target: removed ${cleared} existing "${plan.destStackName}" container(s) before restoring (named volumes kept, restored into).`
+            : `Overwrite requested: no existing "${plan.destStackName}" containers found on the target to remove.`);
         }
 
         // 2) Warm pre-copy (source running): seed the repo so the quiesced delta is
