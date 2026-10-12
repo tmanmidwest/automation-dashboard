@@ -935,6 +935,9 @@ model StackMigrationRun {
   log        String?
   startedAt  DateTime  @default(now())
   finishedAt DateTime?
+  /// Set when a terminal run is dismissed (soft-archived) — hidden from the default
+  /// list but kept for history. Null = visible.
+  archivedAt DateTime?
 
   @@index([destInstanceId, startedAt])
   @@index([sourceInstanceId, stackName, startedAt])

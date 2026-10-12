@@ -683,4 +683,7 @@ export interface StackMigrationRun {
   log?: string | null;
   startedAt: string;
   finishedAt?: string | null;
+  /** Dismissed (soft-archived) terminal runs are hidden from the default list but kept
+   *  for history; the list can opt back in with includeArchived. */
+  archived?: boolean;
 }

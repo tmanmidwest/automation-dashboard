@@ -117,6 +117,7 @@ export function StackMigrate() {
   const [planning, setPlanning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [logFor, setLogFor] = useState<StackMigrationRun | null>(null);
+  const [showDismissed, setShowDismissed] = useState(false);
 
   const source = useMemo(() => {
     const [instanceId, stackName] = sourceKey.split('::');
@@ -212,7 +213,7 @@ export function StackMigrate() {
         api.get<StackBackupCandidate[]>('/api/stack-backup/candidates'),
         api.get<BackupHost[]>('/api/stack-backup/hosts'),
         api.get<StackBackupTarget[]>('/api/stack-backup/targets'),
-        api.get<StackMigrationRun[]>('/api/stack-migrate/runs?limit=25'),
+        api.get<StackMigrationRun[]>('/api/stack-migrate/runs?limit=25&includeArchived=1'),
         api.get<IngressTarget[]>('/api/stack-migrate/ingress/targets').catch(() => []),
       ]);
       setCandidates(cands);
@@ -232,7 +233,7 @@ export function StackMigrate() {
   useEffect(() => {
     if (!runs.some((r) => r.status === 'running')) return;
     const t = setInterval(() => {
-      void api.get<StackMigrationRun[]>('/api/stack-migrate/runs?limit=25').then(setRuns).catch(() => undefined);
+      void api.get<StackMigrationRun[]>('/api/stack-migrate/runs?limit=25&includeArchived=1').then(setRuns).catch(() => undefined);
     }, 3000);
     return () => clearInterval(t);
   }, [runs]);
@@ -296,13 +297,51 @@ export function StackMigrate() {
     }
   };
 
-  const act = async (id: string, kind: 'complete' | 'rollback' | 'force-fail' | 'cancel') => {
+  const act = async (id: string, kind: 'complete' | 'rollback' | 'force-fail' | 'cancel' | 'dismiss' | 'restore') => {
     setErr(null);
     try {
       const run = await api.post<StackMigrationRun>(`/api/stack-migrate/runs/${id}/${kind}`);
       setRuns((rs) => rs.map((r) => (r.id === id ? run : r)));
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : `Could not ${kind}.`);
+    }
+  };
+
+  // Retry a terminal run: pre-fill the Plan form from it (the source still exists for a
+  // failed/cancelled/rolled-back run), so the operator can re-plan — adjusting options
+  // (e.g. turn off copy-binds) — rather than hand-retyping everything.
+  const retry = (r: StackMigrationRun) => {
+    setSourceKey(`${r.sourceInstanceId}::${r.stackName}`);
+    setDestInstanceId(r.destInstanceId);
+    setDestStackName(r.destStackName === r.stackName ? '' : r.destStackName);
+    setRepoTargetId(r.repoTargetId);
+    const rts = r.ingressRoutes ?? [];
+    setIngressEnabled(rts.length > 0);
+    setRoutes(rts.map((s) => ({
+      instanceId: s.instanceId,
+      hostname: s.hostname,
+      port: String(s.port),
+      tunnelId: s.tunnelId ?? '',
+      certId: typeof s.certificateId === 'number' ? String(s.certificateId) : '0',
+      path: s.path ?? '',
+      order: s.order,
+    })));
+    setPlan(null);
+    setErr(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const dismissAllFinished = async () => {
+    const finished = runs.filter((r) => !r.archived && r.status !== 'running' && r.step !== 'awaiting-cutover');
+    if (!finished.length) return;
+    if (!confirm(`Dismiss ${finished.length} finished migration${finished.length === 1 ? '' : 's'}? They’re hidden from the list (kept in history — use “Show dismissed” to see them). Any failed run that left a partial target is hidden too, so roll those back first if you still need to.`)) return;
+    setErr(null);
+    try {
+      await api.post('/api/stack-migrate/runs/dismiss-finished');
+      const rs = await api.get<StackMigrationRun[]>('/api/stack-migrate/runs?limit=25&includeArchived=1');
+      setRuns(rs);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not dismiss finished migrations.');
     }
   };
 
@@ -669,11 +708,43 @@ export function StackMigrate() {
       )}
 
       <Card>
-        <CardHeader><CardTitle className="text-sm">Migrations</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-sm">Migrations</CardTitle>
+            <div className="flex items-center gap-3">
+              {canMigrate && runs.some((r) => !r.archived && r.status !== 'running' && r.step !== 'awaiting-cutover') && (
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => void dismissAllFinished()}
+                  title="Hide every finished run from the list at once (running and awaiting-cutover runs are left alone)."
+                >
+                  Dismiss all finished
+                </button>
+              )}
+              {runs.some((r) => r.archived) && (
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowDismissed((s) => !s)}
+                >
+                  {showDismissed ? 'Hide' : 'Show'} dismissed ({runs.filter((r) => r.archived).length})
+                </button>
+              )}
+            </div>
+          </div>
+        </CardHeader>
         <CardContent className="space-y-2">
-          {runs.length === 0 && <div className="text-xs text-muted-foreground">No migrations yet.</div>}
-          {runs.map((r) => (
-            <div key={r.id} className="rounded-md border border-border/60 px-3 py-2">
+          {(() => {
+            const visible = runs.filter((r) => showDismissed || !r.archived);
+            if (visible.length === 0) {
+              return <div className="text-xs text-muted-foreground">{runs.length ? 'No active migrations — all are dismissed.' : 'No migrations yet.'}</div>;
+            }
+            return visible.map((r) => {
+              const retriable = r.step === 'failed' || r.step === 'cancelled' || r.step === 'rolled_back';
+              const terminal = r.status !== 'running' && r.step !== 'awaiting-cutover';
+              return (
+            <div key={r.id} className={`rounded-md border border-border/60 px-3 py-2 ${r.archived ? 'opacity-60' : ''}`}>
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className="inline-flex items-center gap-2 min-w-0">
                   {r.status === 'running' ? <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
@@ -682,6 +753,7 @@ export function StackMigrate() {
                     : r.status === 'error' ? <TriangleAlert className="h-4 w-4 text-destructive" />
                     : <HardDriveDownload className="h-4 w-4 text-muted-foreground" />}
                   <span className="truncate">{r.sourceHostName} · {r.stackName} → {r.destHostName} · {r.destStackName}</span>
+                  {r.archived && <span className="shrink-0 rounded bg-muted text-muted-foreground px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider">Dismissed</span>}
                 </span>
                 <span className={`text-xs shrink-0 ${STATUS_COLOR[r.status] ?? ''}`}>{STEP_LABEL[r.step] ?? r.step}</span>
               </div>
@@ -696,7 +768,7 @@ export function StackMigrate() {
                   App Replicator deployment{r.replicatorRepointed ? ' · re-pointed to target' : ' · re-points on cutover'}
                 </div>
               )}
-              <div className="flex items-center gap-2 mt-2">
+              <div className="flex flex-wrap items-center gap-2 mt-2">
                 <Button variant="ghost" size="sm" onClick={() => openLog(r.id)}><ScrollText className="h-3.5 w-3.5 mr-1" /> Log</Button>
                 {canMigrate && r.status === 'running' && (
                   <Button variant="ghost" size="sm" onClick={() => { if (confirm('Cancel this migration? It stops the work, restarts the source if it was stopped, and removes any partial target. A capture/restore already in flight may still finish on its own.')) void act(r.id, 'cancel'); }} title="Stop the migration and clean up — restart the source and remove the partial target.">
@@ -718,9 +790,31 @@ export function StackMigrate() {
                     <RotateCcw className="h-3.5 w-3.5 mr-1" /> Rollback
                   </Button>
                 )}
+                {canMigrate && retriable && (
+                  <Button variant="ghost" size="sm" onClick={() => retry(r)} title="Pre-fill the plan form from this run so you can re-run it (adjust options first).">
+                    <RefreshCw className="h-3.5 w-3.5 mr-1" /> Retry
+                  </Button>
+                )}
+                {canMigrate && terminal && !r.archived && (
+                  <Button variant="ghost" size="sm" onClick={() => {
+                    const warn = r.step === 'failed'
+                      ? 'Dismiss this failed run? It may have left a partial stack on the target — consider Rollback first to clean it up. Dismissing only hides it from the list.'
+                      : null;
+                    if (!warn || confirm(warn)) void act(r.id, 'dismiss');
+                  }} title="Hide this finished run from the list (kept in history; show it again with “Show dismissed”).">
+                    <X className="h-3.5 w-3.5 mr-1" /> Dismiss
+                  </Button>
+                )}
+                {canMigrate && r.archived && (
+                  <Button variant="ghost" size="sm" onClick={() => act(r.id, 'restore')} title="Bring this run back into the active list.">
+                    <Undo2 className="h-3.5 w-3.5 mr-1" /> Restore
+                  </Button>
+                )}
               </div>
             </div>
-          ))}
+              );
+            });
+          })()}
         </CardContent>
       </Card>
 

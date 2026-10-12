@@ -659,6 +659,11 @@ export class StackRestoreService {
           ];
           const args = [
             'restore', plan.snapshot.id, '--target', '/',
+            // Only touch files whose content actually differs. Avoids a needless
+            // remove-then-write of identical files — which fails with "device or
+            // resource busy" when a file is an in-use single-file bind mount on the
+            // target. (restic >= 0.16; the default restic/restic:latest supports it.)
+            '--overwrite', 'if-changed',
             ...includes.flatMap((i) => ['--include', i]),
           ];
           say(`Running ${target.helperImage} to restore ${volumes.length} volume(s) and ${binds.length} bind path(s)…`);
@@ -766,7 +771,7 @@ export class StackRestoreService {
       say(`Restoring ${volumes.length} volume(s) into staging on Cerebro…`);
       const res = await runResticLocalTolerant(
         auth,
-        ['restore', plan.snapshot.id, '--target', staging, ...includes.flatMap((i) => ['--include', i])],
+        ['restore', plan.snapshot.id, '--target', staging, '--overwrite', 'if-changed', ...includes.flatMap((i) => ['--include', i])],
         RESTORE_TIMEOUT_MS,
       );
       if (res.stdout.trim()) log.push(res.stdout.trim());

@@ -96,8 +96,8 @@ export class StackMigrateController {
 
   @Get('runs')
   @RequirePermissions('backup:read')
-  listRuns(@Query('limit') limit?: string) {
-    return this.migrate.listRuns(limit ? Number(limit) : undefined);
+  listRuns(@Query('limit') limit?: string, @Query('includeArchived') includeArchived?: string) {
+    return this.migrate.listRuns(limit ? Number(limit) : undefined, includeArchived === '1' || includeArchived === 'true');
   }
 
   @Get('runs/:id')
@@ -132,5 +132,28 @@ export class StackMigrateController {
   @SessionOnly()
   forceFail(@Param('id') id: string, @CurrentUser() user: SessionUser) {
     return this.migrate.forceFail(id, { id: user.id, email: user.email });
+  }
+
+  // Declutter: dismiss all finished runs at once (leaves active ones alone).
+  @Post('runs/dismiss-finished')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  dismissFinished(@CurrentUser() user: SessionUser) {
+    return this.migrate.dismissFinished({ id: user.id, email: user.email });
+  }
+
+  // Declutter: dismiss (soft-archive) a terminal run, or bring one back.
+  @Post('runs/:id/dismiss')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  dismiss(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.migrate.dismiss(id, { id: user.id, email: user.email });
+  }
+
+  @Post('runs/:id/restore')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  restoreToList(@Param('id') id: string) {
+    return this.migrate.restoreToList(id);
   }
 }

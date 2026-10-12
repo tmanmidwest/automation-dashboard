@@ -718,6 +718,9 @@ export class StackMigrateService implements OnModuleInit {
     const final = await this.poll(() => this.prisma.stackRestoreRun.findUnique({ where: { id: run.id } }), RESTORE_TIMEOUT_MS, signal);
     if (!final || final.status !== 'success') {
       this.surfaceChildLog(final?.log, say);
+      if (/device or resource busy|resource busy/i.test(`${final?.message ?? ''}\n${final?.log ?? ''}`)) {
+        say('Hint: a bind-mounted file on the target is in use — usually a same-named stack already running there (or a leftover from a prior attempt), which holds its single-file bind mounts open. Remove/stop that target stack (or migrate to a new target stack name), or turn off “Copy bind-mount host paths” for files the deploy recreates from the repo, then retry.');
+      }
       throw new Error(`Restore to the target failed: ${final?.message ?? 'unknown error'}`);
     }
     say(`Restored and deployed on the target (${final.volumes} volume(s)${final.binds ? `, ${final.binds} bind path(s)` : ''}).`);
@@ -997,10 +1000,49 @@ export class StackMigrateService implements OnModuleInit {
 
   // ── History ───────────────────────────────────────────────────────
 
-  async listRuns(limit = 25): Promise<StackMigrationRun[]> {
-    const rows = await this.prisma.stackMigrationRun.findMany({ orderBy: { startedAt: 'desc' }, take: Math.min(Math.max(limit, 1), 200) });
+  async listRuns(limit = 25, includeArchived = false): Promise<StackMigrationRun[]> {
+    const rows = await this.prisma.stackMigrationRun.findMany({
+      where: includeArchived ? {} : { archivedAt: null },
+      orderBy: { startedAt: 'desc' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
     const names = await this.hostNames();
     return rows.map((r) => this.runDto(r, names));
+  }
+
+  /** Dismiss (soft-archive) a terminal run so it drops out of the default list. Kept for
+   *  history; un-dismiss with `restore`. Refused while the run is still in flight or
+   *  awaiting cutover (those have their own Cancel / Complete / Rollback actions). */
+  async dismiss(id: string, actor?: MigrateActor): Promise<StackMigrationRun> {
+    const row = await this.prisma.stackMigrationRun.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException('Migration run not found.');
+    if (row.status === 'running' || row.step === 'awaiting-cutover') {
+      throw new BadRequestException('This migration is still active — cancel, complete or roll it back before dismissing it.');
+    }
+    await this.prisma.stackMigrationRun.update({ where: { id }, data: { archivedAt: new Date() } });
+    await this.audit.record({ actorId: actor?.id, actorEmail: actor?.email, action: 'stack.migrate.dismiss', target: `${row.stackName} → ${row.destStackName}`, meta: { step: row.step } }).catch(() => undefined);
+    return this.getRun(id);
+  }
+
+  /** Dismiss every finished (terminal, not-yet-archived) run in one go — the test-churn
+   *  declutter. Leaves running and awaiting-cutover runs alone. Returns how many it hid. */
+  async dismissFinished(actor?: MigrateActor): Promise<{ dismissed: number }> {
+    const res = await this.prisma.stackMigrationRun.updateMany({
+      where: { archivedAt: null, status: { not: 'running' }, step: { not: 'awaiting-cutover' } },
+      data: { archivedAt: new Date() },
+    });
+    if (res.count) {
+      await this.audit.record({ actorId: actor?.id, actorEmail: actor?.email, action: 'stack.migrate.dismiss-all', target: 'finished migrations', meta: { count: res.count } }).catch(() => undefined);
+    }
+    return { dismissed: res.count };
+  }
+
+  /** Un-dismiss a previously archived run (bring it back to the default list). */
+  async restoreToList(id: string): Promise<StackMigrationRun> {
+    const row = await this.prisma.stackMigrationRun.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException('Migration run not found.');
+    await this.prisma.stackMigrationRun.update({ where: { id }, data: { archivedAt: null } });
+    return this.getRun(id);
   }
 
   async getRun(id: string): Promise<StackMigrationRun> {
@@ -1061,7 +1103,7 @@ export class StackMigrateService implements OnModuleInit {
       repoTargetId: string; step: string; status: string; message: string | null; snapshotId: string | null;
       images: unknown; ingress: unknown; ingressFlipped: boolean; replicatorDeploymentId: string | null;
       replicatorRepointed: boolean; sourceKept: boolean; durationMs: number | null;
-      startedAt: Date; finishedAt: Date | null;
+      startedAt: Date; finishedAt: Date | null; archivedAt?: Date | null;
     },
     names: Map<string, string>,
   ): StackMigrationRun {
@@ -1087,6 +1129,7 @@ export class StackMigrateService implements OnModuleInit {
       durationMs: row.durationMs,
       startedAt: row.startedAt.toISOString(),
       finishedAt: row.finishedAt?.toISOString() ?? null,
+      archived: !!row.archivedAt,
     };
   }
 }
