@@ -70,38 +70,57 @@ export function ConnectorsList() {
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-3">
-          {[...instances]
-            .sort((a, b) =>
-              a.connectorName.localeCompare(b.connectorName, undefined, { sensitivity: 'base' }) ||
-              a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
-            )
-            .map((inst) => (
-            <Link key={inst.id} to={`/connectors/${inst.id}`}>
-              <Card className="transition-all hover:border-primary/50">
-                <CardContent className="pt-4 pb-4 flex items-center gap-4">
-                  <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary grid place-items-center shrink-0">
-                    <ConnectorIcon icon={inst.icon} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium truncate">{inst.name}</p>
-                      {inst.enabled
-                        ? <span className="text-xs rounded-full bg-emerald-500/15 text-emerald-400 px-2 py-0.5">Enabled</span>
-                        : <span className="text-xs rounded-full bg-muted text-muted-foreground px-2 py-0.5">Disabled</span>}
-                    </div>
-                    <p className="text-xs text-muted-foreground">{inst.connectorName}</p>
-                  </div>
-                  <div className="text-right shrink-0 hidden sm:block">
-                    <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70">Last sync</p>
-                    <p className="text-xs text-muted-foreground" title={inst.lastSyncedAt ?? 'Never synced'}>
-                      {timeAgo(inst.lastSyncedAt)}
-                    </p>
-                  </div>
-                  <ChevronRight className="h-5 w-5 text-muted-foreground shrink-0" />
-                </CardContent>
-              </Card>
-            </Link>
+        <div className="space-y-6">
+          {Object.entries(
+            [...instances]
+              .sort((a, b) =>
+                a.connectorName.localeCompare(b.connectorName, undefined, { sensitivity: 'base' }) ||
+                a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+              )
+              .reduce<Record<string, ConnectorInstanceSummary[]>>((groups, inst) => {
+                (groups[inst.connectorName] ??= []).push(inst);
+                return groups;
+              }, {}),
+          ).map(([connectorName, group]) => (
+            <section key={connectorName}>
+              <div className="flex items-center gap-2 mb-2 px-1">
+                <div className="h-6 w-6 rounded-md bg-primary/15 text-primary grid place-items-center shrink-0">
+                  <ConnectorIcon icon={group[0].icon} className="h-3.5 w-3.5" />
+                </div>
+                <h3 className="text-xs font-mono uppercase tracking-wider text-muted-foreground">{connectorName}</h3>
+                <span className="text-xs text-muted-foreground/60">({group.length})</span>
+                <div className="h-px flex-1 bg-border/60" />
+              </div>
+              <div className="space-y-2">
+                {group.map((inst) => (
+                  <Link key={inst.id} to={`/connectors/${inst.id}`}>
+                    <Card className="transition-all hover:border-primary/50">
+                      <CardContent className="pt-4 pb-4 flex items-center gap-4">
+                        <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary grid place-items-center shrink-0">
+                          <ConnectorIcon icon={inst.icon} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-medium truncate">{inst.name}</p>
+                            {inst.enabled
+                              ? <span className="text-xs rounded-full bg-emerald-500/15 text-emerald-400 px-2 py-0.5">Enabled</span>
+                              : <span className="text-xs rounded-full bg-muted text-muted-foreground px-2 py-0.5">Disabled</span>}
+                          </div>
+                          <p className="text-xs text-muted-foreground">{inst.connectorName}</p>
+                        </div>
+                        <div className="text-right shrink-0 hidden sm:block">
+                          <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70">Last sync</p>
+                          <p className="text-xs text-muted-foreground" title={inst.lastSyncedAt ?? 'Never synced'}>
+                            {timeAgo(inst.lastSyncedAt)}
+                          </p>
+                        </div>
+                        <ChevronRight className="h-5 w-5 text-muted-foreground shrink-0" />
+                      </CardContent>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       )}
