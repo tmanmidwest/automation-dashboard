@@ -71,7 +71,12 @@ export function ConnectorsList() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {instances.map((inst) => (
+          {[...instances]
+            .sort((a, b) =>
+              a.connectorName.localeCompare(b.connectorName, undefined, { sensitivity: 'base' }) ||
+              a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+            )
+            .map((inst) => (
             <Link key={inst.id} to={`/connectors/${inst.id}`}>
               <Card className="transition-all hover:border-primary/50">
                 <CardContent className="pt-4 pb-4 flex items-center gap-4">
