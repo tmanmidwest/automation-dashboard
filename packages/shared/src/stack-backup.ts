@@ -545,6 +545,15 @@ export interface MigrateReplicatorLink {
   name: string;
 }
 
+/** An existing ingress route detected pointing at the source stack — offered to
+ *  pre-fill the automatic-cutover ingress flip. Extends the spec with display info. */
+export interface MigrateIngressSuggestion extends MigrateIngressSpec {
+  /** Where it was found — 'cloudflare' | 'npm'. */
+  source: string;
+  /** Human label, e.g. "app.example.com via Main Cloudflare (Cloudflare)". */
+  label: string;
+}
+
 /** What a migration would do — shown for review before anything runs. */
 export interface MigratePlan {
   sourceInstanceId: string;
@@ -575,6 +584,8 @@ export interface MigratePlan {
   estimatedDataBytes?: number;
   /** Set when the source stack is an App Replicator deployment — offer to re-point it. */
   replicator?: MigrateReplicatorLink | null;
+  /** An existing ingress route detected at the source — pre-fills the cutover flip. */
+  ingressSuggestion?: MigrateIngressSuggestion | null;
   conflicts: string[];
   warnings: string[];
 }

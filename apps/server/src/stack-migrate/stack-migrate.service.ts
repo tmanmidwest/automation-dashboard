@@ -20,7 +20,7 @@ import { IngressService } from '../app-replicator/ingress.service';
 import { DeploymentService } from '../app-replicator/deployment.service';
 import { dockerTargetFrom } from '../app-replicator/docker-target';
 import { runSsh } from '../connectors/docker/docker-ssh';
-import type { PreflightCheck } from '@cerebro/shared';
+import type { PreflightCheck, MigrateIngressSuggestion } from '@cerebro/shared';
 import { ensureImagesOnTarget } from './image-transfer';
 
 const DOCKER = 'docker';
@@ -191,6 +191,14 @@ export class StackMigrateService implements OnModuleInit {
       warnings.push(`This stack is an App Replicator deployment ("${repl!.name}"). The migration will re-point it to the target so the replicator keeps managing it — otherwise the replicator would still point at the old host (and a redeploy would recreate it there).`);
     }
 
+    // Detect an existing ingress route pointing at the source stack, to pre-fill the
+    // cutover flip. Skip when it's a replicator deployment — its ingress moves via
+    // the re-point path, so a manual flip would double-handle the same route.
+    const ingressSuggestion = replicator ? null : await this.detectIngress(source.id, wanted).catch(() => null);
+    if (ingressSuggestion) {
+      warnings.push(`Detected an existing route for this stack: ${ingressSuggestion.label}. Enable "automatically flip ingress" to move it to the target on cutover (the fields are pre-filled).`);
+    }
+
     // Pre-flight readiness checks (surfaced as a checklist; a `fail` blocks Start).
     const { checks, estimatedDataBytes } = await this.runPreflight({
       sourceName: source.name, destName: dest.name, project, srcAccess, dstAccess,
@@ -216,9 +224,54 @@ export class StackMigrateService implements OnModuleInit {
       checks,
       estimatedDataBytes,
       replicator,
+      ingressSuggestion,
       conflicts,
       warnings,
     };
+  }
+
+  /**
+   * Scan the configured Cloudflare/NPM connectors for an existing route whose upstream
+   * matches the source host's IP + one of the stack's published ports — so the cutover
+   * flip can be pre-filled. NPM: one list call, parse `details.forward` ("http://host:port").
+   * Cloudflare: list tunnels, then each tunnel's routes, match `details.service`. The
+   * upstream host equals `hostIpFor(source)` (the same value baked into routes at creation).
+   */
+  private async detectIngress(sourceInstanceId: string, wantedPorts: Set<number>): Promise<MigrateIngressSuggestion | null> {
+    if (!wantedPorts.size) return null;
+    const sourceIp = await this.hostIpFor(sourceInstanceId);
+    if (!sourceIp) return null;
+    const upstream = (svc: string): { host: string; port: number } | null => {
+      const m = /^[a-z0-9]+:\/\/\[?([^\]:/]+)\]?:(\d+)/i.exec(svc.trim());
+      return m ? { host: m[1], port: Number(m[2]) } : null;
+    };
+    const targets = await this.ingress.listTargets().catch(() => []);
+    for (const t of targets) {
+      try {
+        if (t.kind === 'npm') {
+          const rows = await this.instances.listResources(t.instanceId, 'proxy_host');
+          for (const r of rows) {
+            const u = upstream(String(r.details?.forward ?? ''));
+            if (u && u.host === sourceIp && wantedPorts.has(u.port)) {
+              return { source: 'npm', label: `${r.name} via ${t.name} (NPM)`, instanceId: t.instanceId, hostname: r.name, port: u.port };
+            }
+          }
+        } else if (t.kind === 'cloudflare') {
+          const tunnels = await this.instances.listResources(t.instanceId, 'tunnel');
+          for (const tun of tunnels) {
+            const routes = await this.instances.listSubResources(t.instanceId, 'tunnel', tun.id, 'route').catch(() => []);
+            for (const r of routes) {
+              const u = upstream(String(r.details?.service ?? ''));
+              if (u && u.host === sourceIp && wantedPorts.has(u.port)) {
+                const hostname = String(r.details?.hostname ?? r.name);
+                return { source: 'cloudflare', label: `${hostname} via ${t.name} (Cloudflare)`, instanceId: t.instanceId, hostname, port: u.port, tunnelId: tun.id };
+              }
+            }
+          }
+        }
+      } catch { /* a connector that can't be scanned shouldn't block the plan */ }
+    }
+    return null;
   }
 
   /** Readiness checks for the plan card: disk, compose plugin, repo, arch, compose

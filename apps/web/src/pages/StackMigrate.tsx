@@ -320,8 +320,31 @@ export function StackMigrate() {
           </div>
 
           <div className="rounded-md border border-border/60 p-3 space-y-3">
+            {plan?.ingressSuggestion && !ingressEnabled && (
+              <div className="flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-200">
+                <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>Heads up — we found an existing route for this stack: <strong>{plan.ingressSuggestion.label}</strong>. Check the box below to move it to the target on cutover; the fields will pre-fill.</span>
+              </div>
+            )}
             <label className="flex items-center gap-2 text-xs font-medium">
-              <input type="checkbox" checked={ingressEnabled} onChange={(e) => { setIngressEnabled(e.target.checked); setPlan(null); }} disabled={ingressTargets.length === 0} />
+              <input
+                type="checkbox"
+                checked={ingressEnabled}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setIngressEnabled(on);
+                  // Auto-populate from a detected route when turning it on and nothing's set yet.
+                  const sug = plan?.ingressSuggestion;
+                  if (on && sug && !ingressInstanceId) {
+                    setIngressInstanceId(sug.instanceId);
+                    setIngressHostname(sug.hostname);
+                    setIngressPort(String(sug.port));
+                    if (sug.tunnelId) setIngressTunnelId(sug.tunnelId);
+                  }
+                  setPlan(null);
+                }}
+                disabled={ingressTargets.length === 0}
+              />
               Automatically flip ingress on cutover
               {ingressTargets.length === 0 && <span className="text-muted-foreground font-normal">(no Cloudflare / NPM connector configured)</span>}
             </label>
