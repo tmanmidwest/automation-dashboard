@@ -118,33 +118,44 @@ function forEachHostToken(compose: string, fn: (hostToken: string) => void): voi
   }
 }
 
-/** Extract the host-port token from a short-form spec `[[host_ip:]host:]container[/proto]`. */
+/** Split on `sep`, but never on a separator INSIDE a `${...}` group — so a defaulted
+ *  port var like `${HRSOT_HOST_PORT:-8000}` isn't shredded by the host/container colon. */
+function splitTop(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of s) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth = Math.max(0, depth - 1);
+    if (ch === sep && depth === 0) { parts.push(cur); cur = ''; } else cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+/** Parse a short-form spec `[[host_ip:]host:]container[/proto]`, treating `${...}` as
+ *  opaque. Returns null for container-only (no host port) or anything ambiguous (IPv6). */
+function parseSpec(spec: string): { hostIp: string; host: string; container: string; proto: string } | null {
+  const bySlash = splitTop(spec, '/');
+  const proto = bySlash.length > 1 ? `/${bySlash.slice(1).join('/')}` : '';
+  const parts = splitTop(bySlash[0], ':');
+  if (parts.length === 2) return { hostIp: '', host: parts[0].trim(), container: parts[1], proto };
+  if (parts.length === 3) return { hostIp: parts[0], host: parts[1].trim(), container: parts[2], proto };
+  return null; // container-only, IPv6 host_ip, or otherwise not a plain host:container
+}
+
+/** Extract the host-port token from a short-form spec. */
 function hostTokenOf(spec: string): string | null {
-  const slash = spec.lastIndexOf('/');
-  const body = slash > -1 ? spec.slice(0, slash) : spec;
-  const lastColon = body.lastIndexOf(':');
-  if (lastColon < 0) return null; // container-only
-  const hostPart = body.slice(0, lastColon);
-  const hc = hostPart.split(':');
-  if (hc.length > 2) return null; // IPv6 host_ip — skip
-  return (hc.length === 2 ? hc[1] : hc[0]).trim();
+  return parseSpec(spec)?.host ?? null;
 }
 
 /** Rewrite a short-form spec's literal host port if it's in `lit`; else null (unchanged). */
 function rewriteSpec(spec: string, lit: Map<number, number>): string | null {
-  const slash = spec.lastIndexOf('/');
-  const proto = slash > -1 ? spec.slice(slash) : '';
-  const body = slash > -1 ? spec.slice(0, slash) : spec;
-  const lastColon = body.lastIndexOf(':');
-  if (lastColon < 0) return null;
-  const hostPart = body.slice(0, lastColon);
-  const container = body.slice(lastColon + 1);
-  const hc = hostPart.split(':');
-  if (hc.length > 2) return null;
-  const hostIp = hc.length === 2 ? hc[0] : '';
-  const nt = rewriteLiteral(hc.length === 2 ? hc[1] : hc[0], lit);
+  const p = parseSpec(spec);
+  if (!p) return null;
+  const nt = rewriteLiteral(p.host, lit);
   if (nt === null) return null;
-  return `${hostIp ? `${hostIp}:` : ''}${nt}:${container}${proto}`;
+  return `${p.hostIp ? `${p.hostIp}:` : ''}${nt}:${p.container}${p.proto}`;
 }
 
 function rewriteLiteral(token: string, lit: Map<number, number>): string | null {
