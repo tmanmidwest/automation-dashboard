@@ -763,6 +763,9 @@ export function StackMigrate() {
             ) : (
               <div className="text-xs text-muted-foreground">You need the <span className="font-mono">backup:restore</span> permission to run a migration.</div>
             )}
+            {err && (
+              <div className="text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2 whitespace-pre-wrap">{err}</div>
+            )}
           </CardContent>
         </Card>
       )}

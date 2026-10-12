@@ -13,6 +13,9 @@ class MigrateIngressDto {
   @IsInt() @Min(1) port!: number;
   @IsOptional() @IsString() @MaxLength(128) tunnelId?: string;
   @IsOptional() @IsInt() certificateId?: number;
+  // Carried through so the whitelist pipe doesn't strip a route's path/priority.
+  @IsOptional() @IsString() @MaxLength(512) path?: string;
+  @IsOptional() @IsInt() order?: number;
 }
 
 /** Plan/start a stack migration. Mirrors the shapes in @cerebro/shared;
