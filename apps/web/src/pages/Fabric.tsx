@@ -305,14 +305,22 @@ export function Fabric() {
   };
 
   // One-click Remote Desktop: the agent enables the box's desktop remotely (no CLI on the
-  // box) and we open an RDP session to it, reusing the same viewer/approval path.
+  // box) and we open a session to it, reusing the same viewer/approval path. The agent may
+  // resolve to RDP (real logged-in desktop) or VNC (a bundled virtual desktop on a headless
+  // box); the ticket's `proto` tells us which viewer to open.
   const openDesktop = async (agent: FabricAgentDto) => {
     setDesktopBusy((s) => ({ ...s, [agent.id]: true }));
     const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
     try {
-      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/desktop-session`);
+      const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/desktop-session`);
       const ticket = await awaitSession(resp);
-      launchViewer('rdp', ticket, `${agent.name} · Desktop`, win, { dynamicResize: true });
+      if (ticket.proto === 'vnc') {
+        launchViewer('vnc', ticket, `${agent.name} · Desktop`, win, {
+          vncCreds: ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
+        });
+      } else {
+        launchViewer('rdp', ticket, `${agent.name} · Desktop`, win, { dynamicResize: true });
+      }
     } catch (e) {
       win?.close();
       setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Desktop.');

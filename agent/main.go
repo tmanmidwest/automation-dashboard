@@ -466,6 +466,9 @@ type session struct {
 	quitOnce sync.Once
 	mu       sync.Mutex
 	streams  map[uint32]net.Conn
+	// streamPorts records the loopback port each open stream dials, so the remote-desktop
+	// idle watchdog can tell whether anyone is still connected to a desktop server's port.
+	streamPorts map[uint32]int
 	// hbReset carries a new heartbeat cadence from a hello-ack to the run loop.
 	hbReset chan time.Duration
 }
@@ -476,10 +479,11 @@ func newSession(conn *websocket.Conn, allow map[string]bool, cfg config, cred st
 		allow:   allow,
 		cfg:     cfg,
 		cred:    cred,
-		out:     make(chan outMsg, 128),
-		quit:    make(chan struct{}),
-		streams: map[uint32]net.Conn{},
-		hbReset: make(chan time.Duration, 1),
+		out:         make(chan outMsg, 128),
+		quit:        make(chan struct{}),
+		streams:     map[uint32]net.Conn{},
+		streamPorts: map[uint32]int{},
+		hbReset:     make(chan time.Duration, 1),
 	}
 }
 
@@ -545,6 +549,72 @@ func (s *session) allowed(host string, port int) bool {
 	return false
 }
 
+// allowDesktopPort adds a loopback port to the tunnel allow-list at runtime — used when the
+// agent itself has just started a remote-desktop server there (so the broker, which only
+// dials what it is told, may reach it). Scoped to 127.0.0.1; nothing else is widened.
+func (s *session) allowDesktopPort(port int) {
+	key := fmt.Sprintf("127.0.0.1:%d", port)
+	s.mu.Lock()
+	if s.allow == nil {
+		s.allow = map[string]bool{}
+	}
+	s.allow[key] = true
+	s.mu.Unlock()
+}
+
+// anyStreamOnPort reports whether any currently-open stream is dialed to the given loopback
+// port — i.e. whether an operator is still connected to a desktop server there.
+func (s *session) anyStreamOnPort(port int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.streamPorts {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+// desktop idle/teardown timings: how long an operator has to connect after we enable a
+// desktop, and how long it may sit with nobody connected before we tear it down. The
+// watchdog is what actually reverts a grd enable / kills a virtual desktop on disconnect —
+// the security lifecycle the design doc promises. A `desktop-stop` from the broker forces it.
+//
+// The connect grace is deliberately longer than the broker's four-eyes approval TTL (~5 min):
+// the agent enables the desktop before the approval gate runs, so no stream opens until an
+// approver says yes — we must not tear it down out from under a still-pending approval.
+const (
+	desktopConnectGrace = 6 * time.Minute
+	desktopIdleTimeout  = 3 * time.Minute
+)
+
+// watchDesktopIdle tears a remote desktop (session id) down once nobody is connected: after a
+// grace period with no initial connection, after an idle period following a disconnect, or
+// immediately when the agent's control session drops (the operator's stream is gone with it).
+func (s *session) watchDesktopIdle(id string, res desktopResult) {
+	deadline := time.Now().Add(desktopConnectGrace)
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.quit:
+			// Control session gone — the brokered stream went with it; don't leak the desktop.
+			stopDesktop(id)
+			return
+		case <-t.C:
+			if s.anyStreamOnPort(res.port) {
+				deadline = time.Now().Add(desktopIdleTimeout)
+				continue
+			}
+			if time.Now().After(deadline) {
+				log.Printf("remote desktop %s idle on 127.0.0.1:%d — tearing down", id, res.port)
+				stopDesktop(id)
+				return
+			}
+		}
+	}
+}
+
 // enqueue blocks the caller until the frame is buffered or the session stops —
 // providing per-stream backpressure rather than dropping bytes.
 func (s *session) enqueue(m outMsg) {
@@ -584,11 +654,24 @@ type ctrlFrame struct {
 	EgressCidrs        []string     `json:"egressCidrs"`
 	UninstallSig       string       `json:"uninstallSig"`
 	UninstallIssuedAt  int64        `json:"uninstallIssuedAt"`
-	// Remote Desktop (P1)
+	// Remote Desktop (P1 + P3)
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Proto    string `json:"proto"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
+// desktopResult is what an OS-specific startDesktop reports back: the protocol + loopback
+// port the broker should broker to, an optional agent-minted credential to connect with
+// (used by the bundled virtual desktop, whose VNC password the agent generates itself), and
+// which path was taken ("real" logged-in desktop vs a "virtual" bundled one).
+type desktopResult struct {
+	proto string
+	port  int
+	cred  string
+	mode  string
 }
 
 func (s *session) onControl(msg []byte) {
@@ -649,20 +732,34 @@ func (s *session) onControl(msg []byte) {
 		}
 	case "desktop-start":
 		// One-click Remote Desktop: enable the box's real logged-in desktop remotely with
-		// the broker's one-time credential, then report the loopback port to broker to.
-		go func(id, user, pass, proto string) {
-			p, port, err := startDesktop(user, pass, proto)
+		// the broker's one-time credential; if there's no usable real desktop (headless),
+		// fall back to a bundled virtual desktop. Report the loopback port to broker to.
+		go func(id, user, pass, proto string, width, height int) {
+			res, err := startDesktop(id, user, pass, proto, width, height)
 			if err != nil {
 				log.Printf("desktop-start failed: %v", err)
 				s.writeJSON(map[string]any{"t": "desktop-started", "id": id, "ok": false, "message": err.Error()})
 				return
 			}
-			log.Printf("desktop-start ok: %s on 127.0.0.1:%d", p, port)
-			s.writeJSON(map[string]any{"t": "desktop-started", "id": id, "ok": true, "proto": p, "port": port})
-		}(c.ID, c.Username, c.Password, c.Proto)
+			log.Printf("desktop-start ok: %s (%s) on 127.0.0.1:%d", res.proto, res.mode, res.port)
+			// Authorize the exact loopback port we just opened so the broker can dial it. The
+			// seeded allow-list only covers 22/3389/5900; a bundled virtual desktop lands on a
+			// free 5900+N, which would otherwise be refused by openStream.
+			s.allowDesktopPort(res.port)
+			// Tear the desktop down once the operator disconnects or never connects.
+			go s.watchDesktopIdle(id, res)
+			frame := map[string]any{"t": "desktop-started", "id": id, "ok": true, "proto": res.proto, "port": res.port}
+			if res.cred != "" {
+				frame["credential"] = res.cred
+			}
+			if res.mode != "" {
+				frame["mode"] = res.mode
+			}
+			s.writeJSON(frame)
+		}(c.ID, c.Username, c.Password, c.Proto, c.Width, c.Height)
 	case "desktop-stop":
 		go func(id string) {
-			if err := stopDesktop(); err != nil {
+			if err := stopDesktop(id); err != nil {
 				log.Printf("desktop-stop: %v", err)
 			}
 			s.writeJSON(map[string]any{"t": "desktop-stopped", "id": id, "ok": true})
@@ -701,6 +798,7 @@ func (s *session) openStream(id uint32, host string, port int) {
 	}
 	s.mu.Lock()
 	s.streams[id] = local
+	s.streamPorts[id] = port
 	s.mu.Unlock()
 	s.writeJSON(map[string]any{"t": "stream-opened", "streamId": id})
 	go s.pumpLocalToWS(id, local)
@@ -729,6 +827,7 @@ func (s *session) closeStream(id uint32, notifyPeer bool) {
 	s.mu.Lock()
 	local := s.streams[id]
 	delete(s.streams, id)
+	delete(s.streamPorts, id)
 	s.mu.Unlock()
 	if local == nil {
 		return
@@ -745,6 +844,7 @@ func (s *session) closeAll() {
 	for id, c := range s.streams {
 		_ = c.Close()
 		delete(s.streams, id)
+		delete(s.streamPorts, id)
 	}
 	s.mu.Unlock()
 }

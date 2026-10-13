@@ -444,7 +444,10 @@ export class AgentRegistryService {
    * does the OS-specific enabling (e.g. gnome-remote-desktop); the broker then brokers an
    * RDP/VNC session to the returned loopback port. Rejects if the agent is offline or slow.
    */
-  startDesktop(agentId: string, req: { username: string; password: string; proto?: 'rdp' | 'vnc' }): Promise<FabricDesktopStartedFrame> {
+  startDesktop(
+    agentId: string,
+    req: { username: string; password: string; proto?: 'rdp' | 'vnc'; width?: number; height?: number },
+  ): Promise<FabricDesktopStartedFrame> {
     if (!this.isOnline(agentId)) return Promise.reject(new Error('The agent is offline.'));
     const id = randomUUID();
     return new Promise<FabricDesktopStartedFrame>((resolve, reject) => {
@@ -453,7 +456,15 @@ export class AgentRegistryService {
         reject(new Error('The agent did not respond to the remote-desktop request in time.'));
       }, 60_000);
       this.pendingDesktop.set(id, { resolve, timer });
-      this.send(agentId, { t: 'desktop-start', id, username: req.username, password: req.password, proto: req.proto });
+      this.send(agentId, {
+        t: 'desktop-start',
+        id,
+        username: req.username,
+        password: req.password,
+        proto: req.proto,
+        width: req.width,
+        height: req.height,
+      });
     });
   }
 

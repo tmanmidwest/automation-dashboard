@@ -190,7 +190,7 @@ export class FabricService implements OnModuleInit {
       privateKey: creds.privateKey,
       passphrase: creds.passphrase,
     });
-    return { token, wsPath: SESSION_WS_PATH };
+    return { token, wsPath: SESSION_WS_PATH, proto: 'ssh' };
   }
 
   /**
@@ -244,7 +244,7 @@ export class FabricService implements OnModuleInit {
       }
     }
 
-    return this.guac.issue({
+    const ticket = await this.guac.issue({
       agentId,
       targetId: target.id,
       userId: user.id,
@@ -262,6 +262,7 @@ export class FabricService implements OnModuleInit {
       enableEffects: input.enableEffects,
       disableAudio: input.disableAudio,
     });
+    return { ...ticket, proto: 'rdp' };
   }
 
   /**
@@ -305,13 +306,16 @@ export class FabricService implements OnModuleInit {
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
     const username = 'cerebro-rd';
     const password = randomBytes(18).toString('base64url');
-    const started = await this.registry.startDesktop(agentId, { username, password, proto: 'rdp' });
+    const started = await this.registry.startDesktop(agentId, { username, password, proto: 'rdp', width: 1600, height: 900 });
     if (!started.ok) {
       throw new BadRequestException(started.message || "The agent couldn't start a remote desktop on this host. It may be headless (no desktop yet) — a bundled virtual desktop lands in a later phase.");
     }
     if (started.proto === 'vnc') {
       const port = started.port ?? 5900;
-      return this.openAdhocVncSession(agentId, { host: '127.0.0.1', port }, { password }, user);
+      // The bundled virtual desktop (P2) mints its own VNC password (VNC auth truncates to 8
+      // chars), returned as `credential` — connect with that, not the broker's longer secret.
+      const vncPassword = started.credential ?? password;
+      return this.openAdhocVncSession(agentId, { host: '127.0.0.1', port }, { password: vncPassword }, user);
     }
     const port = started.port ?? 3389;
     return this.openAdhocRdpSession(agentId, { host: '127.0.0.1', port }, { username, password, security: 'any' }, user);
@@ -362,7 +366,7 @@ export class FabricService implements OnModuleInit {
       port: target.port,
       kind: 'vnc',
     });
-    return { token, wsPath: SESSION_WS_PATH, username: creds?.username, password: creds?.password };
+    return { token, wsPath: SESSION_WS_PATH, username: creds?.username, password: creds?.password, proto: 'vnc' };
   }
 
   /**

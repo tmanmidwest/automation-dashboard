@@ -395,6 +395,10 @@ export interface FabricDesktopStartFrame {
   password: string;
   /** Preferred protocol; the agent may return a different one it could actually enable. */
   proto?: 'rdp' | 'vnc';
+  /** Requested desktop resolution for a bundled virtual desktop (the real RDP path resizes
+   *  dynamically and ignores these). The agent clamps to a sane range and defaults if absent. */
+  width?: number;
+  height?: number;
 }
 
 /** agent → broker: outcome of `desktop-start`. On ok, `proto`+`port` say what to broker. */
@@ -405,6 +409,15 @@ export interface FabricDesktopStartedFrame {
   proto?: 'rdp' | 'vnc';
   /** Loopback port on the agent the desktop server listens on (e.g. 3389). */
   port?: number;
+  /**
+   * Agent-generated one-time credential the operator must connect with, when it differs from
+   * the one the broker sent. The bundled virtual desktop (P2) uses this: VNC auth truncates to
+   * 8 chars, so the agent mints its own VNC password rather than reusing the broker's longer
+   * secret. Absent for the real-session RDP path, where the broker's credential was applied.
+   */
+  credential?: string;
+  /** Which path the agent took: the box's real logged-in desktop, or a bundled virtual one. */
+  mode?: 'real' | 'virtual';
   /** Human-readable detail — surfaced to the operator, especially on failure. */
   message?: string;
 }
@@ -500,6 +513,13 @@ export interface FabricSessionTicket {
   token: string;
   /** WebSocket path to open, e.g. `/api/fabric/session/ws`. */
   wsPath: string;
+  /**
+   * Which viewer this ticket is for. Self-describing so a caller that doesn't fix the protocol
+   * up front (one-click Remote Desktop, which may resolve to RDP on a real desktop or VNC on a
+   * bundled virtual one) can pick the right viewer — and so the choice survives the four-eyes
+   * approval round-trip, where only the stored ticket comes back.
+   */
+  proto?: 'ssh' | 'rdp' | 'vnc';
 }
 
 /** Credentials + display options for an RDP session. */
