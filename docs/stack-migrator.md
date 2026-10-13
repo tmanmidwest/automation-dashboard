@@ -113,10 +113,24 @@ picks a strategy:
 - Deploy: `DockerStackService.deploy(..., { pull: true })` (`--pull always`), pinned by digest where
   known so a moving tag can't swap the image mid-migration.
 
-**B. Git-backed build context** → rebuild on the target.
-- Detection: the compose service has a `build:` context **and** the stack is Git-backed (a
-  `DockerStack.gitSource`, used by [[app-replicator]] via `deployGit`).
-- Deploy: `deployGit(..., { build: true })` / `forceRebuild` clones on the target and builds there.
+**B. Git-backed build context** → rebuild on the target. ✅ BUILT (opt-in "Rebuild on target").
+- Detection (`plan.buildServices`): the compose service has a `build:` context **and** Cerebro knows
+  a Git source for the stack — a replicator app's repo (`ReplicatorApp.gitUrl`), or a git-deployed
+  `DockerStack` (`source='git'`). `rebuildAvailable` flags the option in the UI.
+- Mechanism: `DockerStackService.buildGitImages(target, gitSource, builds)` — a **build-only** step
+  (NOT `deployGit`, which would `up` prematurely over the not-yet-restored volumes). It shallow-clones
+  the repo into a scratch dir on the target and `docker build -t <ref> -f <dockerfile> <context>` for
+  each build service, tagging exactly the refs the restored compose references, so the restore's own
+  `docker compose up` finds them locally. Runs in step 1 (source still up — the clone is from Git, not
+  the source host, so it adds no downtime); the build-service images are then skipped by
+  `ensureImagesOnTarget` (already present) instead of being save/load-copied.
+- **This is the cross-arch fix.** A save/load (path C) moves the source's architecture-locked binary;
+  rebuilding from source on the target produces a native image. Gated behind the operator's
+  `rebuildImages` toggle (defaulted off; the UI recommends it when the arch pre-flight warns). The
+  target host must be able to reach the Git repo.
+- Requires the compose/build context to come from Git — the migrator's snapshot carries the compose
+  text + volumes + secrets, **not** the build context, so a non-Git `build:` stack can't be rebuilt
+  (it still falls to path C with the arch warning).
 
 **C. Locally built, not pullable, not Git-backed** → **save/load transfer (net-new, required).**
 - Detection: image is present in the *source* host's local image store, resolves to no registry, and

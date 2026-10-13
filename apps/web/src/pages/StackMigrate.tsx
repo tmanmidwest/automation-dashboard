@@ -77,6 +77,7 @@ const IMAGE_BADGE: Record<string, { label: string; cls: string }> = {
   present: { label: 'already on target', cls: 'bg-muted text-muted-foreground' },
   pull: { label: 'pull from registry', cls: 'bg-sky-500/15 text-sky-300' },
   transfer: { label: 'save → load (built on host)', cls: 'bg-amber-500/15 text-amber-300' },
+  rebuild: { label: 'rebuild on target', cls: 'bg-emerald-500/15 text-emerald-300' },
 };
 
 export function StackMigrate() {
@@ -103,6 +104,7 @@ export function StackMigrate() {
   const [bindTargets, setBindTargets] = useState<Record<string, string>>({});
   const [restoreCredFiles, setRestoreCredFiles] = useState(false);
   const [repointReplicator, setRepointReplicator] = useState(true);
+  const [rebuildImages, setRebuildImages] = useState(false);
   const [overwriteTarget, setOverwriteTarget] = useState(false);
   const [portMap, setPortMap] = useState<Record<number, string>>({}); // old host port → new (input text)
   const [composeOverride, setComposeOverride] = useState(''); // reviewed/edited synthesized compose
@@ -117,6 +119,10 @@ export function StackMigrate() {
   const [ingressFetchMsg, setIngressFetchMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [plan, setPlan] = useState<MigratePlan | null>(null);
+  // Build-from-source image refs + whether a cross-arch warning is present — used
+  // to label images as "rebuild on target" and to recommend the rebuild option.
+  const buildRefs = new Set((plan?.buildServices ?? []).map((b) => b.image));
+  const archWarn = (plan?.checks ?? []).some((c) => c.id === 'arch' && c.status === 'warn');
   const [planning, setPlanning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [logFor, setLogFor] = useState<StackMigrationRun | null>(null);
@@ -311,6 +317,7 @@ export function StackMigrate() {
         bindMap: bindMap && Object.keys(bindMap).length ? bindMap : undefined,
         restoreCredentialFiles: restoreCredFiles || undefined,
         repointReplicator: plan.replicator ? repointReplicator : undefined,
+        rebuildImages: plan.rebuildAvailable ? rebuildImages : undefined,
         overwriteTarget: overwriteTarget || undefined,
         portMap: cleanedPortMap(),
         composeOverride: plan.composeUnavailable ? (composeOverride.trim() || undefined) : undefined,
@@ -671,16 +678,32 @@ export function StackMigrate() {
               </div>
             )}
 
+            {/* Rebuild build-from-source images natively on the target (cross-arch fix) */}
+            {plan.rebuildAvailable && (
+              <div className={`rounded-md border p-3 space-y-1 ${archWarn ? 'border-amber-500/40 bg-amber-500/5' : 'border-border/60'}`}>
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" checked={rebuildImages} onChange={(e) => setRebuildImages(e.target.checked)} />
+                  Rebuild images on the target (build from source natively){archWarn ? ' — recommended for the architecture change above' : ''}
+                </label>
+                <p className="text-[0.7rem] text-muted-foreground">
+                  {plan.buildServices?.length} image(s) are built from source ({plan.buildServices?.map((b) => b.service).join(', ')}). With this on, Cerebro clones the stack’s Git repo on the target and <code>docker build</code>s them there, so they match the target’s architecture — instead of copying the source host’s binaries (which won’t run across architectures). The target host must be able to reach the Git repo. Slower, but the correct choice for a cross-arch move.
+                </p>
+              </div>
+            )}
+
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <div className="text-xs font-medium text-muted-foreground mb-1">Images ({plan.images.length})</div>
                 <div className="space-y-1">
-                  {plan.images.map((im) => (
+                  {plan.images.map((im) => {
+                    const method = rebuildImages && buildRefs.has(im.ref) ? 'rebuild' : im.method;
+                    return (
                     <div key={im.ref} className="flex items-center justify-between gap-2">
                       <span className="font-mono text-xs truncate">{im.ref}</span>
-                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[0.65rem] ${IMAGE_BADGE[im.method]?.cls ?? ''}`}>{IMAGE_BADGE[im.method]?.label ?? im.method}</span>
+                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[0.65rem] ${IMAGE_BADGE[method]?.cls ?? ''}`}>{IMAGE_BADGE[method]?.label ?? method}</span>
                     </div>
-                  ))}
+                    );
+                  })}
                   {!plan.images.length && <div className="text-xs text-muted-foreground">None detected.</div>}
                 </div>
               </div>

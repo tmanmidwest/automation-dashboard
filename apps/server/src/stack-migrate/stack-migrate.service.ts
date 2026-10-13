@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException, type OnModuleInit } from '@nestjs/common';
 import type {
   MigrateImagePlanItem, MigrateIngressSpec, MigratePlan, MigratePlanInput, MigrateStep, SecretMode,
-  StackMigrationRun, StartMigrateInput,
+  StackMigrationRun, StartMigrateInput, MigrateBuildService,
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoggingService } from '../logging/logging.service';
@@ -276,6 +276,24 @@ export class StackMigrateService implements OnModuleInit {
       }
     }
 
+    // Build-from-source services we could rebuild natively on the target — the fix
+    // for a cross-arch migration. Needs a Git source Cerebro can clone (replicator
+    // app, or a git-deployed managed stack) and a `build:` in the compose.
+    const serviceImage = new Map<string, string>();
+    for (const c of inspection?.containers ?? []) {
+      const svc = c.labels?.['com.docker.compose.service'];
+      if (svc && c.image && !serviceImage.has(svc)) serviceImage.set(svc, c.image);
+    }
+    const gitSource = await this.gitSourceFor(source.id, project);
+    const buildServices: MigrateBuildService[] = [];
+    if (gitSource) {
+      const composeForBuild = peekForPlan.compose ?? synthesizedCompose ?? '';
+      for (const [svc, cfg] of parseBuildServices(composeForBuild)) {
+        const image = serviceImage.get(svc);
+        if (image) buildServices.push({ service: svc, image, context: cfg.context, dockerfile: cfg.dockerfile });
+      }
+    }
+
     return {
       sourceInstanceId: source.id,
       sourceHostName: source.name,
@@ -295,6 +313,8 @@ export class StackMigrateService implements OnModuleInit {
       checks,
       estimatedDataBytes,
       replicator,
+      buildServices,
+      rebuildAvailable: buildServices.length > 0,
       ingressSuggestions,
       composeUnavailable,
       synthesizedCompose,
@@ -531,6 +551,27 @@ export class StackMigrateService implements OnModuleInit {
     return { ops: resolvePortRemap(peek.compose, envLines.join('\n'), portMap), composeRead: true };
   }
 
+  /**
+   * The Git source Cerebro can rebuild this stack from, if any: a replicator
+   * deployment's app repo, or a managed stack deployed from Git. Null when the
+   * stack wasn't deployed from a repo Cerebro knows (so there's no build context
+   * to rebuild from). Used by the "rebuild on target" migration option.
+   */
+  private async gitSourceFor(sourceInstanceId: string, project: string): Promise<{ gitUrl: string; gitRef?: string | null; gitPath?: string | null; credKey?: string | null } | null> {
+    const repl = await this.prisma.replicatorDeployment.findFirst({ where: { dockerInstanceId: sourceInstanceId, project } }).catch(() => null);
+    if (repl) {
+      const app = await this.prisma.replicatorApp.findUnique({ where: { id: repl.appId } }).catch(() => null);
+      if (app?.gitUrl) return { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, credKey: app.gitCredKey };
+    }
+    const stack = await this.prisma.dockerStack
+      .findUnique({ where: { connectorInstanceId_name: { connectorInstanceId: sourceInstanceId, name: project } } })
+      .catch(() => null);
+    if (stack && stack.source === 'git' && stack.gitUrl) {
+      return { gitUrl: stack.gitUrl, gitRef: stack.gitRef, gitPath: stack.gitPath, credKey: stack.gitCredKey };
+    }
+    return null;
+  }
+
   /** Did this image come from a registry (so the target can pull it)? A locally
    *  built image has no RepoDigests — that is the "built on the host" signal. */
   private async looksPullable(api: DockerApi, ref: string): Promise<boolean> {
@@ -664,8 +705,37 @@ export class StackMigrateService implements OnModuleInit {
       // One capture policy, reused for the warm pre-copy and the quiesced delta.
       const policy = await this.ensureCapturePolicy(source.id, plan, input.includeBinds ?? [], say);
       try {
-        // 1) Image transfer FIRST, while the source still runs — images are static,
-        //    so moving them now keeps them out of the downtime window (every mode).
+        // 1) Images onto the target FIRST, while the source still runs — they're
+        //    static, so this stays out of the downtime window (every mode).
+        //
+        // 1a) Rebuild build-from-source images natively on the target when asked —
+        //     the fix for a cross-arch move (copying the source's binary would land
+        //     a wrong-arch image). The built tags match what the restored compose
+        //     references, so the restore's `up` finds them; ensureImagesOnTarget
+        //     then reports them already present (no save/load).
+        const rebuiltRefs = new Set<string>();
+        if (input.rebuildImages && plan.buildServices?.length) {
+          ck();
+          const gitSource = await this.gitSourceFor(plan.sourceInstanceId, plan.stackName);
+          if (!gitSource) {
+            say('WARNING: "rebuild on target" was requested, but no Git source is known for this stack — copying the images instead.');
+          } else if (!dstAccess.target) {
+            throw new Error('Rebuild on target needs SSH access to the target host (none is configured).');
+          } else {
+            await this.setStep(runId, 'transferring-images');
+            say(`Rebuilding ${plan.buildServices.length} image(s) natively on the target from ${gitSource.gitUrl} (the target host must be able to reach that repo)…`);
+            await this.stacks.buildGitImages(
+              dstAccess.target,
+              gitSource,
+              plan.buildServices.map((b) => ({ image: b.image, context: b.context, dockerfile: b.dockerfile })),
+              say,
+              signal,
+            );
+            for (const b of plan.buildServices) rebuiltRefs.add(b.image);
+            say(`Rebuilt ${rebuiltRefs.size} image(s) on the target.`);
+          }
+        }
+
         ck();
         await this.setStep(runId, 'transferring-images');
         const refs = plan.images.map((i) => i.ref);
@@ -674,7 +744,7 @@ export class StackMigrateService implements OnModuleInit {
           (done, imgTotal) => { void this.patch(runId, { message: `Transferring images (${done}/${imgTotal})…` }); },
           signal,
         );
-        await this.patch(runId, { images: outcomes.map((o) => ({ ref: o.ref, method: o.method === 'loaded' ? 'transfer' : o.method === 'pulled' ? 'pull' : 'present' })) as unknown as object });
+        await this.patch(runId, { images: outcomes.map((o) => ({ ref: o.ref, method: rebuiltRefs.has(o.ref) ? 'rebuild' : o.method === 'loaded' ? 'transfer' : o.method === 'pulled' ? 'pull' : 'present' })) as unknown as object });
 
         // 1b) Clear any pre-existing same-named stack on the TARGET before writing to its
         //     volumes — only when the operator opted into overwriting it ("Overwrite
@@ -1345,4 +1415,44 @@ function fmtBytes(n: number): string {
 /** Compose's project-name rules: lowercase, alphanumerics, dash and underscore. */
 function projectName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Services that build their image from source, parsed out of a compose file —
+ * both the short `build: .` and the long `build: { context, dockerfile }` forms.
+ * Indent/line based like the rest of Cerebro's compose reading (no YAML dep);
+ * returns each service's context (relative to the compose file) and dockerfile.
+ */
+function parseBuildServices(compose: string): Map<string, { context: string; dockerfile: string }> {
+  const out = new Map<string, { context: string; dockerfile: string }>();
+  if (!compose) return out;
+  const lines = compose.replace(/\r\n/g, '\n').split('\n');
+  const indentOf = (l: string) => { let n = 0; for (const c of l) { if (c === ' ') n++; else if (c === '\t') n += 2; else break; } return n; };
+  const unquote = (v: string) => v.trim().replace(/^["']|["']$/g, '');
+  const stack: { indent: number; key: string }[] = [];
+  let inBuild: { service: string; indent: number; context: string; dockerfile: string } | null = null;
+  const flush = () => {
+    if (inBuild) { out.set(inBuild.service, { context: inBuild.context || '.', dockerfile: inBuild.dockerfile || 'Dockerfile' }); inBuild = null; }
+  };
+  for (const raw of lines) {
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+    const indent = indentOf(raw);
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    if (inBuild && indent <= inBuild.indent) flush();
+    const parentKey = stack.length ? stack[stack.length - 1].key : undefined;
+    const path = stack.map((f) => f.key);
+    const service = path[0] === 'services' ? (path[1] ?? null) : null;
+    const km = raw.match(/^\s*([A-Za-z0-9_.-]+):\s*(.*)$/);
+    if (km && service && km[1] === 'build') {
+      const val = unquote(km[2]);
+      if (val) out.set(service, { context: val, dockerfile: 'Dockerfile' });
+      else inBuild = { service, indent, context: '', dockerfile: '' };
+    } else if (inBuild && km && (km[1] === 'context' || km[1] === 'dockerfile')) {
+      if (km[1] === 'context') inBuild.context = unquote(km[2]);
+      else inBuild.dockerfile = unquote(km[2]);
+    }
+    if (km && km[2].trim() === '') stack.push({ indent, key: km[1] });
+  }
+  flush();
+  return out;
 }

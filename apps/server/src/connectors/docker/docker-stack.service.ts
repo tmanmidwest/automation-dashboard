@@ -326,6 +326,90 @@ export class DockerStackService {
   }
 
   /**
+   * Clone a Git source onto a host and `docker build` the given images there —
+   * build only, no deploy. Used by the Stack Migrator's "rebuild on target"
+   * option: an image built on the source host is architecture-locked, so copying
+   * its bytes to a different-arch target produces something that won't run;
+   * rebuilding from source on the target yields a native image. The produced tags
+   * are exactly the refs the restored compose will reference, so the restore's
+   * `docker compose up` finds them locally. Reuses the same shallow-clone +
+   * credential plumbing as deployGit. See docs/stack-migrator.md.
+   */
+  async buildGitImages(
+    target: StackDeployTarget,
+    src: { gitUrl: string; gitRef?: string | null; gitPath?: string | null; credKey?: string | null },
+    builds: { image: string; context: string; dockerfile: string }[],
+    onProgress?: (line: string) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    target = this.withHostPin(target);
+    let ref: string | undefined;
+    try { assertSafeGitUrl(src.gitUrl); ref = assertSafeGitRef(src.gitRef) || undefined; }
+    catch (e) { throw new Error(e instanceof Error ? e.message : 'Invalid git repository URL.'); }
+    if (!builds.length) return;
+
+    // A dedicated scratch dir under the stacks root, so a failed build never touches
+    // a real stack's checkout. `mktemp -d` keeps concurrent builds from colliding.
+    const base = `${trimSlash(target.stacksDir)}/.cerebro-build`;
+    const mk = await runSsh(target.ssh, `mkdir -p '${base}' && mktemp -d '${base}/XXXXXXXX'`);
+    if (mk.code !== 0 || !mk.stdout.trim()) throw new Error('Could not create a build directory on the target.');
+    const workdir = mk.stdout.trim();
+    const repoDir = `${workdir}/repo`;
+    const credFile = `${workdir}/.gitcred`;
+
+    let cred: GitCredential | null = null;
+    if (src.credKey) {
+      const raw = await this.secrets.reveal(src.credKey).catch(() => null);
+      if (raw) { try { cred = JSON.parse(raw) as GitCredential; } catch { cred = { secret: raw }; } }
+    }
+    const helper = cred ? `-c credential.helper='store --file=${credFile}'` : '';
+
+    try {
+      if (cred?.secret) {
+        const host = cred.host?.trim() || hostFromUrl(src.gitUrl);
+        const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
+        const w = await runSsh(target.ssh, `cat > '${credFile}' && chmod 600 '${credFile}'`, line);
+        if (w.code !== 0) throw new Error('Failed to write git credentials on the target.');
+      }
+
+      onProgress?.('Cloning the repository on the target…');
+      const clone = await runSsh(
+        target.ssh,
+        `${GIT_SAFE_SH_PREFIX} git ${helper} clone --depth 1 ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(src.gitUrl)}' '${repoDir}'`,
+        undefined, GIT_TIMEOUT_MS,
+      );
+      if (clone.code !== 0) {
+        // A SHA ref can't be --branch'd — fall back to a full clone + checkout.
+        if (!ref) throw new Error(`Git clone failed: ${redact(tail(clone.stderr || clone.stdout, 2000), cred)}`);
+        const full = await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${repoDir}' && git ${helper} clone -- '${sq(src.gitUrl)}' '${repoDir}' && git -C '${repoDir}' checkout '${sq(ref)}'`, undefined, GIT_TIMEOUT_MS);
+        if (full.code !== 0) throw new Error(`Git clone failed: ${redact(tail(full.stderr || full.stdout, 2000), cred)}`);
+      }
+
+      // The compose file's directory within the repo — build contexts are relative to it.
+      const composeDir = relDir(safeRelPath(src.gitPath));
+      for (let i = 0; i < builds.length; i++) {
+        if (signal?.aborted) throw new Error('cancelled');
+        const b = builds[i];
+        const image = safeImageRef(b.image);
+        const ctxRel = safeRelPath(joinRel(composeDir, b.context || '.'));
+        const dockerfileRel = safeRelPath(b.dockerfile || 'Dockerfile');
+        const ctxDir = ctxRel ? `${repoDir}/${ctxRel}` : repoDir;
+        const dfPath = `${ctxDir}/${dockerfileRel}`;
+        onProgress?.(`Building ${image} on the target (${i + 1}/${builds.length})…`);
+        const build = await runSsh(
+          target.ssh,
+          `docker build --pull -t '${sq(image)}' -f '${sq(dfPath)}' '${sq(ctxDir)}'`,
+          undefined, BUILD_TIMEOUT_MS,
+        );
+        if (build.code !== 0) throw new Error(`Build of ${image} failed: ${tail(build.stderr || build.stdout, 3000)}`);
+        onProgress?.(`Built ${image} natively on the target.`);
+      }
+    } finally {
+      await runSsh(target.ssh, `rm -rf '${workdir}'`).catch(() => { /* best-effort */ });
+    }
+  }
+
+  /**
    * Compare a managed stack against reality: does the compose file on the host
    * still match what Cerebro stored, and are all expected services present and
    * running? Returns a human-readable report. Read-only — runs nothing that
@@ -554,6 +638,34 @@ function composeUpFlags(opts: StackDeployOpts): string {
 /** Escape a string for safe embedding inside single quotes in a shell command. */
 function sq(s: string): string {
   return (s || '').replace(/'/g, `'\\''`);
+}
+
+/** A repo-relative path that's safe to embed in a single-quoted remote command. */
+function safeRelPath(p?: string | null): string {
+  const rel = (p ?? '').trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!rel) return '';
+  if (!/^[A-Za-z0-9 _.\/-]+$/.test(rel) || rel.split('/').includes('..')) {
+    throw new Error('Unsafe path in the build configuration.');
+  }
+  return rel;
+}
+
+/** Directory part of a repo-relative file path ("deploy/compose.yml" → "deploy"). */
+function relDir(rel: string): string {
+  const i = rel.lastIndexOf('/');
+  return i >= 0 ? rel.slice(0, i) : '';
+}
+
+/** Join two repo-relative paths, dropping "." and empty segments. */
+function joinRel(a: string, b: string): string {
+  return [...a.split('/'), ...b.split('/')].filter((x) => x && x !== '.').join('/');
+}
+
+/** Validate a docker image reference before embedding it in a remote command. */
+function safeImageRef(ref: string): string {
+  const r = (ref || '').trim();
+  if (!r || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/.test(r)) throw new Error(`Unsafe image reference: ${ref}`);
+  return r;
 }
 
 /** Hostname from a git URL, for the credential-store line. */

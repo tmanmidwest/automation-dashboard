@@ -482,12 +482,29 @@ export interface VerifyRestoreInput {
 export type MigrateImageMethod =
   | 'present' // already on the target
   | 'pull' // pullable from a registry the target reaches
-  | 'transfer'; // built on the source / not pullable → docker save|load
+  | 'transfer' // built on the source / not pullable → docker save|load
+  | 'rebuild'; // built from source natively ON the target (cross-arch safe)
 
 /** One image the migration must place on the target, with its planned strategy. */
 export interface MigrateImagePlanItem {
   ref: string;
   method: MigrateImageMethod;
+}
+
+/**
+ * A service whose image is built from source (`build:` in the compose) and whose
+ * build context Cerebro can reach from Git — so the migrator can rebuild it
+ * natively on the target instead of copying the source host's (possibly
+ * wrong-architecture) binary. See docs/stack-migrator.md.
+ */
+export interface MigrateBuildService {
+  service: string;
+  /** The image tag the rebuilt image is given (what the compose references). */
+  image: string;
+  /** Build context within the repo (relative to the compose file's directory). */
+  context: string;
+  /** Dockerfile relative to the context (default "Dockerfile"). */
+  dockerfile: string;
 }
 
 /** Where the migration run currently is. */
@@ -635,6 +652,14 @@ export interface MigratePlan {
   estimatedDataBytes?: number;
   /** Set when the source stack is an App Replicator deployment — offer to re-point it. */
   replicator?: MigrateReplicatorLink | null;
+  /**
+   * Build-from-source services whose images Cerebro could rebuild natively on the
+   * target (the compose declares `build:` and a Git source is known). Empty when
+   * nothing can be rebuilt. See `rebuildImages` on the start input.
+   */
+  buildServices?: MigrateBuildService[];
+  /** True when `buildServices` is non-empty — the "Rebuild on target" option applies. */
+  rebuildAvailable?: boolean;
   /** Existing ingress routes detected at the source (all of them) — pre-fill the cutover flip. */
   ingressSuggestions?: MigrateIngressSuggestion[];
   /** True when no compose could be read for the stack (e.g. a Portainer-deployed stack). */
@@ -687,6 +712,14 @@ export interface StartMigrateInput extends MigratePlanInput {
    * a replicator deployment is detected.
    */
   repointReplicator?: boolean;
+  /**
+   * Rebuild build-from-source images natively on the target instead of copying the
+   * source host's binaries — the fix for a cross-architecture migration (e.g.
+   * aarch64 → x86_64). Only meaningful when `rebuildAvailable` on the plan; the
+   * migrator clones the stack's Git source on the target and `docker build`s each
+   * `buildServices` image there. Defaults to false (copy/pull, as before).
+   */
+  rebuildImages?: boolean;
 }
 
 /** One migration attempt (append-only history). */
