@@ -588,8 +588,18 @@ export class StackMigrateService implements OnModuleInit {
   async start(input: StartMigrateInput, actor?: MigrateActor): Promise<StackMigrationRun> {
     const plan = await this.plan(input);
     const failed = plan.checks.filter((c) => c.status === 'fail').map((c) => (c.detail ? `${c.label}: ${c.detail}` : c.label));
-    if ((plan.conflicts.length || failed.length) && !input.force) {
-      throw new BadRequestException(`Migration blocked: ${[...plan.conflicts, ...failed].join(' · ')}`);
+    // Cross-architecture + build-from-source + rebuild not selected = a guaranteed
+    // failure (the copied images are the wrong arch and won't start). Block it with
+    // an actionable message rather than let it run and fail at the health check.
+    const crossArch = plan.checks.some((c) => c.id === 'arch' && c.status === 'warn');
+    const extraConflicts: string[] = [];
+    if (crossArch && plan.rebuildAvailable && !input.rebuildImages) {
+      extraConflicts.push(
+        `This is a cross-architecture migration (source ≠ target CPU) and the images are built from source — enable "Rebuild images on the target" so they're built natively, or they won't start on the target. (Override with force only if the target can emulate the source architecture.)`,
+      );
+    }
+    if ((plan.conflicts.length || failed.length || extraConflicts.length) && !input.force) {
+      throw new BadRequestException(`Migration blocked: ${[...plan.conflicts, ...extraConflicts, ...failed].join(' · ')}`);
     }
     if (plan.needsPassphrase && !input.passphrase) {
       throw new BadRequestException("This stack's backup seals its secrets — supply the passphrase so the target .env can be rebuilt.");

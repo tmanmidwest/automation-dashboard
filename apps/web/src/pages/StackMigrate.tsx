@@ -274,6 +274,12 @@ export function StackMigrate() {
       });
       setPlan(p);
       if (p.secretMode) setSecretMode(p.secretMode);
+      // Default "rebuild on target" ON for a cross-arch migration that can rebuild —
+      // copying the source's (wrong-arch) images would just fail at start.
+      if (p.rebuildAvailable) {
+        const crossArch = (p.checks ?? []).some((c) => c.id === 'arch' && c.status === 'warn');
+        setRebuildImages(crossArch);
+      }
       // Pre-fill the remap with the suggested free port for each real conflict, WITHOUT
       // clobbering anything the operator already typed (so re-planning keeps their edits).
       setPortMap((prev) => {
