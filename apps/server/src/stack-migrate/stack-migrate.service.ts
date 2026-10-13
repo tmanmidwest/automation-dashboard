@@ -1025,15 +1025,20 @@ export class StackMigrateService implements OnModuleInit {
     try {
       // 1) Repoint every ingress route at the target BEFORE stopping the source → minimal
       //    downtime. A stack can front several hostnames; flip them all.
+      // Remap (old host port → new) so a route whose port moved in the migration
+      // follows the new port, not just the new host.
+      const portMap = (row.portMap as Record<string, number> | null) ?? null;
+      const remap = (port: number) => (portMap?.[port] ?? port);
       const routes = this.ingressFromRow(row.ingress);
       if (routes.length) {
         const targetIp = await this.hostIpFor(row.destInstanceId);
         if (!targetIp) throw new BadRequestException('Could not resolve the target host IP for the ingress flip.');
         let flipped = 0;
         for (const r of routes) {
-          say(`Repointing ${r.hostname}${r.path ?? ''} → ${targetIp}:${r.port} on the ingress connector…`);
+          const port = remap(r.port);
+          say(`Repointing ${r.hostname}${r.path ?? ''} → ${targetIp}:${port} on the ingress connector…`);
           await this.ingressOps.setRoute({
-            instanceId: r.instanceId, hostname: r.hostname, upstreamHost: targetIp, port: r.port,
+            instanceId: r.instanceId, hostname: r.hostname, upstreamHost: targetIp, port,
             tunnelId: r.tunnelId, certificateId: r.certificateId, path: r.path,
           });
           flipped++;
@@ -1047,13 +1052,12 @@ export class StackMigrateService implements OnModuleInit {
         const targetIp = await this.hostIpFor(row.destInstanceId);
         say(`Re-pointing the App Replicator deployment to the target…`);
         if (targetIp) {
-          const probs = await this.ingress.repointForDeployment(row.replicatorDeploymentId, targetIp);
+          const probs = await this.ingress.repointForDeployment(row.replicatorDeploymentId, targetIp, numericMap(portMap));
           probs.forEach((p) => say(`Ingress re-point warning: ${p}`));
         }
         await this.deployments.repoint(row.replicatorDeploymentId, row.destInstanceId, row.destStackName);
         // Keep the replicator's stored ports in sync with any migration remap, so a later
         // replicator redeploy doesn't revert to the old (taken) host port.
-        const portMap = (row.portMap as Record<string, number> | null) ?? null;
         if (portMap && Object.keys(portMap).length) {
           const changed = await this.deployments.applyPortRemap(row.replicatorDeploymentId, portMap).catch(() => 0);
           if (changed) say(`Updated ${changed} replicator port(s) to the remapped value(s).`);
@@ -1106,13 +1110,19 @@ export class StackMigrateService implements OnModuleInit {
         }
       }
       // 2b) If the replicator deployment was re-pointed, point it back at the source.
+      //     Reverse the migration remap (new host port → old) so the source's original
+      //     ports are restored on the routes and the deployment record.
       if (row.replicatorDeploymentId && row.replicatorRepointed) {
+        const inverse = invertMap((row.portMap as Record<string, number> | null) ?? null);
         const sourceIp = await this.hostIpFor(row.sourceInstanceId);
         if (sourceIp) {
-          const probs = await this.ingress.repointForDeployment(row.replicatorDeploymentId, sourceIp).catch(() => [] as string[]);
+          const probs = await this.ingress.repointForDeployment(row.replicatorDeploymentId, sourceIp, inverse).catch(() => [] as string[]);
           probs.forEach((p) => say(`Ingress re-point warning: ${p}`));
         }
         await this.deployments.repoint(row.replicatorDeploymentId, row.sourceInstanceId, row.stackName);
+        if (inverse && Object.keys(inverse).length) {
+          await this.deployments.applyPortRemap(row.replicatorDeploymentId, mapToStringKeys(inverse)).catch(() => 0);
+        }
         await this.patch(id, { replicatorRepointed: false });
         say('Reverted the App Replicator deployment back to the source.');
       }
@@ -1464,5 +1474,28 @@ function parseBuildServices(compose: string): Map<string, { context: string; doc
     if (km && km[2].trim() === '') stack.push({ indent, key: km[1] });
   }
   flush();
+  return out;
+}
+
+/** A migration's port remap as numeric key→value (old host port → new), or undefined. */
+function numericMap(m: Record<string, number> | null): Record<number, number> | undefined {
+  if (!m) return undefined;
+  const out: Record<number, number> = {};
+  for (const [k, v] of Object.entries(m)) { const o = Number(k), n = Number(v); if (Number.isFinite(o) && Number.isFinite(n)) out[o] = n; }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** The inverse remap (new host port → old) — used to reverse a cutover on rollback. */
+function invertMap(m: Record<string, number> | null): Record<number, number> | undefined {
+  if (!m) return undefined;
+  const out: Record<number, number> = {};
+  for (const [k, v] of Object.entries(m)) { const o = Number(k), n = Number(v); if (Number.isFinite(o) && Number.isFinite(n)) out[n] = o; }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Numeric-keyed remap → string-keyed, for `applyPortRemap`. */
+function mapToStringKeys(m: Record<number, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(m)) out[k] = v;
   return out;
 }

@@ -47,6 +47,10 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'npmCertsExpiring', metricKey: 'certsExpiring', alertKey: 'npm.certs_expiring', label: 'Certificates expiring' },
   { id: 'npmHostsErrored', metricKey: 'erroredHosts', alertKey: 'npm.hosts_errored', label: 'Hosts offline' },
   { id: 'npmHostsDisabled', metricKey: 'disabledHosts', alertKey: 'npm.hosts_disabled', label: 'Disabled hosts' },
+  // Technitium DNS health (counts from the connector's dashboard-stats overview).
+  { id: 'technitiumZonesExpired', metricKey: 'zonesExpired', alertKey: 'technitium.zones_expired', label: 'Zones expired' },
+  { id: 'technitiumServerFailures', metricKey: 'serverFailures1h', alertKey: 'technitium.server_failures', label: 'Server failures (1h)' },
+  { id: 'technitiumBlockRate', metricKey: 'blockedPct', alertKey: 'technitium.block_rate', label: 'Block rate (%)' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {

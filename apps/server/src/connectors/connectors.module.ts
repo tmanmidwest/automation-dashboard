@@ -19,6 +19,7 @@ import { DockerConnector } from './docker/docker.connector';
 import { DockerStackService } from './docker/docker-stack.service';
 import { JellyfinConnector } from './jellyfin/jellyfin.connector';
 import { NginxProxyManagerConnector } from './nginx-proxy-manager/nginx-proxy-manager.connector';
+import { TechnitiumConnector } from './technitium/technitium.connector';
 import { NpmAuditPollService } from './nginx-proxy-manager/npm-audit-poll.service';
 import { BackblazeConnector } from './backblaze/backblaze.connector';
 import { AzureConnector } from './azure/azure.connector';
@@ -56,6 +57,7 @@ export class ConnectorsModule implements OnModuleInit {
     this.registry.register(new DockerConnector(this.dockerStacks));
     this.registry.register(new JellyfinConnector());
     this.registry.register(new NginxProxyManagerConnector());
+    this.registry.register(new TechnitiumConnector());
     // Azure + O365 share one Microsoft Entra auth foundation (client-credentials token).
     this.registry.register(new AzureConnector());
     this.registry.register(new O365Connector());

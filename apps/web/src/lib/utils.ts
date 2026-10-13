@@ -20,12 +20,14 @@ const STATUS_GOOD = new Set([
   'home', 'playing', 'locked', 'heat', 'cool', 'heat_cool', 'auto', 'loaded',
   'healthy', 'proxied', // Cloudflare tunnel healthy / proxied DNS record
   'deployed', 'success', // Cloudflare Workers deployed / Pages deploy succeeded
+  'allowed', // Technitium manually-allowed domain
 ]);
 const STATUS_IDLE = new Set([
   'stopped', 'disabled', 'off', 'idle', 'standby', 'paused', 'closed',
   'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
   'inactive', 'dns_only', 'deleted', // Cloudflare inactive tunnel / unproxied DNS record / revoked device
   'canceled', // Cloudflare Pages deploy canceled
+  'blocked', 'dynamic', 'reserved', // Technitium blocked domain / DHCP lease types (informational, not alarming)
 ]);
 
 /** Tailwind classes for a resource status badge, by status string. */

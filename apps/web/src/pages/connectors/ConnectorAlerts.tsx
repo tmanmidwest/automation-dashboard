@@ -49,6 +49,9 @@ const THRESHOLD_DEFS = [
   { id: 'npmCertsExpiring', metricKey: 'certsExpiring', alertKey: 'npm.certs_expiring', label: 'Certificates expiring' },
   { id: 'npmHostsErrored', metricKey: 'erroredHosts', alertKey: 'npm.hosts_errored', label: 'Hosts offline' },
   { id: 'npmHostsDisabled', metricKey: 'disabledHosts', alertKey: 'npm.hosts_disabled', label: 'Disabled hosts' },
+  { id: 'technitiumZonesExpired', metricKey: 'zonesExpired', alertKey: 'technitium.zones_expired', label: 'Zones expired' },
+  { id: 'technitiumServerFailures', metricKey: 'serverFailures1h', alertKey: 'technitium.server_failures', label: 'Server failures (1h)' },
+  { id: 'technitiumBlockRate', metricKey: 'blockedPct', alertKey: 'technitium.block_rate', label: 'Block rate (%)' },
 ];
 const THRESHOLD_ALERT_KEYS = new Set(THRESHOLD_DEFS.map((d) => d.alertKey));
 

@@ -199,20 +199,31 @@ export class IngressService {
    * ECS/ALB ingress is skipped (its routing is ALB-based, not a host IP). Best-effort;
    * returns problem strings.
    */
-  async repointForDeployment(deploymentId: string, upstreamHost: string): Promise<string[]> {
+  /**
+   * Point every route of a deployment at a new upstream host — used on a stack
+   * migration's cutover/rollback. `portMap` (old host port → new) remaps a route
+   * whose published port changed in the migration, so the route follows the port as
+   * well as the host; the stored `ReplicatorIngress.hostPort` is updated to match so
+   * a later re-point (and the record itself) stays correct.
+   */
+  async repointForDeployment(deploymentId: string, upstreamHost: string, portMap?: Record<number, number>): Promise<string[]> {
     const rows = await this.prisma.replicatorIngress.findMany({ where: { deploymentId } });
     const problems: string[] = [];
     for (const row of rows) {
       const meta = (row.meta as unknown as { ruleArn?: string } | null) ?? null;
       if (meta?.ruleArn) continue; // ECS/ALB route — not a host-IP upstream
+      const newPort = portMap?.[row.hostPort] ?? row.hostPort;
       try {
         await this.ops.setRoute({
           instanceId: row.instanceId,
           hostname: row.hostname,
           upstreamHost,
-          port: row.hostPort,
+          port: newPort,
           tunnelId: row.kind === 'cloudflare' ? row.ref : undefined, // CF ref is the tunnel id
         });
+        if (newPort !== row.hostPort) {
+          await this.prisma.replicatorIngress.update({ where: { id: row.id }, data: { hostPort: newPort } }).catch(() => undefined);
+        }
       } catch (e) {
         problems.push(`${row.hostname}: ${e instanceof Error ? e.message : e}`);
       }

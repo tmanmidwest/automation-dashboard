@@ -237,6 +237,37 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  // ── Technitium DNS ───────────────────────────────────────
+  {
+    key: 'technitium.zones_expired',
+    label: 'Zones expired over threshold',
+    description: 'The number of Technitium DNS zones that have expired (e.g. a secondary zone that failed to transfer) crossed the limit set on its page.',
+    category: 'Technitium DNS',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'technitium.server_failures',
+    label: 'Server failures over threshold',
+    description: 'The number of SERVFAIL responses Technitium returned in the last hour crossed the limit set on its page — often an upstream/forwarder or DNSSEC problem.',
+    category: 'Technitium DNS',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'technitium.block_rate',
+    label: 'Block rate over threshold',
+    description: 'The share of DNS queries Technitium blocked in the last hour crossed the percentage set on its page — a sudden spike can mean a device flooding blocked (ad/tracker/malware) domains.',
+    category: 'Technitium DNS',
+    defaultSeverity: 'info',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
   // ── Monitors ─────────────────────────────────────────────
   {
     key: 'monitor.down',

@@ -1,4 +1,4 @@
-import { Server, Cloud, Cloudy, Building2, House, Puzzle, Container, LayoutGrid, Route, Flame } from 'lucide-react';
+import { Server, Cloud, Cloudy, Building2, House, Puzzle, Container, LayoutGrid, Route, Flame, Network } from 'lucide-react';
 
 /**
  * Custom connector glyphs, authored in the lucide line style (24×24, fill none,
@@ -60,6 +60,8 @@ export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; 
       return <JellyfinGlyph className={className} />;
     case 'nginx-proxy-manager':
       return <Route className={className} />;
+    case 'technitium':
+      return <Network className={className} />;
     default:
       return <Puzzle className={className} />;
   }
