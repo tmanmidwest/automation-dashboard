@@ -379,6 +379,49 @@ export interface FabricCloseStreamFrame {
   streamId: number;
 }
 
+// --- Remote Desktop (Fabric Remote Desktop P1). docs/fabric-remote-desktop.md ---
+
+/**
+ * broker → agent: set up a one-click remote-desktop session on the box, using the
+ * broker-chosen one-time credential. The agent enables the real logged-in desktop's
+ * remote access (e.g. gnome-remote-desktop RDP on Wayland) and replies with the
+ * loopback port the broker should then broker an RDP/VNC session to.
+ */
+export interface FabricDesktopStartFrame {
+  t: 'desktop-start';
+  /** Correlates the reply. */
+  id: string;
+  username: string;
+  password: string;
+  /** Preferred protocol; the agent may return a different one it could actually enable. */
+  proto?: 'rdp' | 'vnc';
+}
+
+/** agent → broker: outcome of `desktop-start`. On ok, `proto`+`port` say what to broker. */
+export interface FabricDesktopStartedFrame {
+  t: 'desktop-started';
+  id: string;
+  ok: boolean;
+  proto?: 'rdp' | 'vnc';
+  /** Loopback port on the agent the desktop server listens on (e.g. 3389). */
+  port?: number;
+  /** Human-readable detail — surfaced to the operator, especially on failure. */
+  message?: string;
+}
+
+/** broker → agent: tear down the remote-desktop session started under `id`. */
+export interface FabricDesktopStopFrame {
+  t: 'desktop-stop';
+  id: string;
+}
+
+/** agent → broker: the desktop session was torn down. */
+export interface FabricDesktopStoppedFrame {
+  t: 'desktop-stopped';
+  id: string;
+  ok: boolean;
+}
+
 export type FabricAgentToBroker =
   | FabricHelloFrame
   | FabricHeartbeatFrame
@@ -388,7 +431,9 @@ export type FabricAgentToBroker =
   | FabricHostKeyFrame
   | FabricStreamOpenedFrame
   | FabricStreamErrorFrame
-  | FabricCloseStreamFrame;
+  | FabricCloseStreamFrame
+  | FabricDesktopStartedFrame
+  | FabricDesktopStoppedFrame;
 export type FabricBrokerToAgent =
   | FabricHelloAckFrame
   | FabricPingFrame
@@ -397,7 +442,9 @@ export type FabricBrokerToAgent =
   | FabricUninstallFrame
   | FabricInstallCaFrame
   | FabricHostCertFrame
-  | FabricSetAllowFrame;
+  | FabricSetAllowFrame
+  | FabricDesktopStartFrame
+  | FabricDesktopStopFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */

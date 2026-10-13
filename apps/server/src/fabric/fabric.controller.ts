@@ -643,6 +643,23 @@ export class FabricController {
     return this.fabric.openAdhocVncSession(id, { host, port }, input, user);
   }
 
+  /** One-click Remote Desktop: the agent enables the box's real desktop remotely, then we
+   *  broker an RDP/VNC session to it — no command line on the box. */
+  @Post('agents/:id/desktop-session')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  openDesktop(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.fabric.openDesktopSession(id, user);
+  }
+
+  @Post('agents/:id/desktop-session/stop')
+  @SessionOnly()
+  @RequirePermissions('fabric:connect')
+  stopDesktop(@Param('id') id: string) {
+    this.fabric.stopDesktopSession(id);
+    return { ok: true };
+  }
+
   /** Launch a Remote Browser (remote browser) for a `web` route. */
   @Post('agents/:id/targets/:targetId/remote-browser-session')
   @SessionOnly()

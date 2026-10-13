@@ -584,6 +584,11 @@ type ctrlFrame struct {
 	EgressCidrs        []string     `json:"egressCidrs"`
 	UninstallSig       string       `json:"uninstallSig"`
 	UninstallIssuedAt  int64        `json:"uninstallIssuedAt"`
+	// Remote Desktop (P1)
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Proto    string `json:"proto"`
 }
 
 func (s *session) onControl(msg []byte) {
@@ -642,6 +647,26 @@ func (s *session) onControl(msg []byte) {
 			default:
 			}
 		}
+	case "desktop-start":
+		// One-click Remote Desktop: enable the box's real logged-in desktop remotely with
+		// the broker's one-time credential, then report the loopback port to broker to.
+		go func(id, user, pass, proto string) {
+			p, port, err := startDesktop(user, pass, proto)
+			if err != nil {
+				log.Printf("desktop-start failed: %v", err)
+				s.writeJSON(map[string]any{"t": "desktop-started", "id": id, "ok": false, "message": err.Error()})
+				return
+			}
+			log.Printf("desktop-start ok: %s on 127.0.0.1:%d", p, port)
+			s.writeJSON(map[string]any{"t": "desktop-started", "id": id, "ok": true, "proto": p, "port": port})
+		}(c.ID, c.Username, c.Password, c.Proto)
+	case "desktop-stop":
+		go func(id string) {
+			if err := stopDesktop(); err != nil {
+				log.Printf("desktop-stop: %v", err)
+			}
+			s.writeJSON(map[string]any{"t": "desktop-stopped", "id": id, "ok": true})
+		}(c.ID)
 	case "ping":
 		// no action
 	}

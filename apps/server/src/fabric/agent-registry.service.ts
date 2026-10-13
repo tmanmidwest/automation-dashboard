@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import type { WebSocket } from 'ws';
+import { randomUUID } from 'crypto';
 import {
   FABRIC_AGENT_VERSION,
   type FabricAgentStatus,
   type FabricControlFrame,
+  type FabricDesktopStartedFrame,
   type FabricHelloFrame,
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -40,6 +42,8 @@ export class AgentRegistryService {
    * WebSocket) is swallowed without a status flicker or a false "offline" alert.
    */
   private readonly pendingOffline = new Map<string, NodeJS.Timeout>();
+  /** In-flight desktop-start requests, keyed by request id, awaiting the agent's reply. */
+  private readonly pendingDesktop = new Map<string, { resolve: (f: FabricDesktopStartedFrame) => void; timer: NodeJS.Timeout }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -238,6 +242,13 @@ export class AgentRegistryService {
       case 'uninstall-ack':
         await this.purgeUninstalledAgent(agentId);
         break;
+      case 'desktop-started': {
+        const p = this.pendingDesktop.get(frame.id);
+        if (p) { clearTimeout(p.timer); this.pendingDesktop.delete(frame.id); p.resolve(frame); }
+        break;
+      }
+      case 'desktop-stopped':
+        break; // fire-and-forget teardown ack
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':
@@ -427,6 +438,30 @@ export class AgentRegistryService {
    * flushes. Best-effort: only reaches an online agent. Returns whether the
    * agent was online to receive it.
    */
+  /**
+   * Ask an online agent to set up a one-click remote desktop with the given one-time
+   * credential, and wait for its reply (port + protocol, or a failure message). The agent
+   * does the OS-specific enabling (e.g. gnome-remote-desktop); the broker then brokers an
+   * RDP/VNC session to the returned loopback port. Rejects if the agent is offline or slow.
+   */
+  startDesktop(agentId: string, req: { username: string; password: string; proto?: 'rdp' | 'vnc' }): Promise<FabricDesktopStartedFrame> {
+    if (!this.isOnline(agentId)) return Promise.reject(new Error('The agent is offline.'));
+    const id = randomUUID();
+    return new Promise<FabricDesktopStartedFrame>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingDesktop.delete(id);
+        reject(new Error('The agent did not respond to the remote-desktop request in time.'));
+      }, 60_000);
+      this.pendingDesktop.set(id, { resolve, timer });
+      this.send(agentId, { t: 'desktop-start', id, username: req.username, password: req.password, proto: req.proto });
+    });
+  }
+
+  /** Tell the agent to tear down the remote desktop started under `id`. Fire-and-forget. */
+  stopDesktop(agentId: string, id: string): void {
+    this.send(agentId, { t: 'desktop-stop', id });
+  }
+
   async requestUninstall(agentId: string): Promise<boolean> {
     const entry = this.live.get(agentId);
     if (!entry) return false;

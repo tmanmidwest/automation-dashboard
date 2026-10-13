@@ -210,6 +210,7 @@ export function Fabric() {
   const [enrollment, setEnrollment] = useState<FabricEnrollmentDto | null>(null);
   const [probe, setProbe] = useState<Record<string, { loading?: boolean; result?: FabricProbeResult }>>({});
   const [webBusy, setWebBusy] = useState<Record<string, boolean>>({});
+  const [desktopBusy, setDesktopBusy] = useState<Record<string, boolean>>({});
   const [showApprovals, setShowApprovals] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const [pendingMsg, setPendingMsg] = useState<string | null>(null);
@@ -300,6 +301,23 @@ export function Fabric() {
       setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Browser.');
     } finally {
       setWebBusy((s) => ({ ...s, [t.id]: false }));
+    }
+  };
+
+  // One-click Remote Desktop: the agent enables the box's desktop remotely (no CLI on the
+  // box) and we open an RDP session to it, reusing the same viewer/approval path.
+  const openDesktop = async (agent: FabricAgentDto) => {
+    setDesktopBusy((s) => ({ ...s, [agent.id]: true }));
+    const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
+    try {
+      const resp = await api.post<FabricSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/desktop-session`);
+      const ticket = await awaitSession(resp);
+      launchViewer('rdp', ticket, `${agent.name} · Desktop`, win, { dynamicResize: true });
+    } catch (e) {
+      win?.close();
+      setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Desktop.');
+    } finally {
+      setDesktopBusy((s) => ({ ...s, [agent.id]: false }));
     }
   };
 
@@ -522,6 +540,16 @@ export function Fabric() {
             </span>
           );
         })}
+        {canConnect && !isWaypoint && (
+          <button
+            type="button" disabled={!online || desktopBusy[a.id]}
+            onClick={online ? () => openDesktop(a) : undefined}
+            title={online ? 'Open the desktop — set up automatically, no command line on the box' : 'Agent offline'}
+            className={`inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-[0.7rem] ${online ? 'hover:bg-primary/20 hover:text-primary cursor-pointer' : 'opacity-40 cursor-default'}`}
+          >
+            {desktopBusy[a.id] ? <Loader2 className="h-3 w-3 animate-spin" /> : <MonitorSmartphone className="h-3 w-3" />} Remote Desktop
+          </button>
+        )}
         {canConnect && ssh && (
           <button
             type="button" disabled={!online}

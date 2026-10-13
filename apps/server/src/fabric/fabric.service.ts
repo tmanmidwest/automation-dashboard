@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, type OnModuleInit } from '@nestjs/common';
 import { existsSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { BlockList, isIP } from 'net';
 import { join } from 'path';
 import type { Agent, AgentTarget } from '@prisma/client';
@@ -291,6 +292,34 @@ export class FabricService implements OnModuleInit {
     return this.gate(agentId, { kind: 'vnc', host: target.host, port: target.port }, user, () =>
       this.issueVncSession(agentId, target, input, user),
     );
+  }
+
+  /**
+   * One-click Remote Desktop (Fabric Remote Desktop P1, docs/fabric-remote-desktop.md):
+   * ask the agent to enable the box's real logged-in desktop remotely with a one-time
+   * credential, then broker an RDP (or VNC) session to the loopback port it returns —
+   * reusing the ad-hoc session path (so the four-eyes gate + recording apply as usual).
+   * No command line on the box.
+   */
+  async openDesktopSession(agentId: string, user: SessionUser): Promise<FabricSessionTicket | FabricVncSessionTicket | FabricApprovalPending> {
+    if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
+    const username = 'cerebro-rd';
+    const password = randomBytes(18).toString('base64url');
+    const started = await this.registry.startDesktop(agentId, { username, password, proto: 'rdp' });
+    if (!started.ok) {
+      throw new BadRequestException(started.message || "The agent couldn't start a remote desktop on this host. It may be headless (no desktop yet) — a bundled virtual desktop lands in a later phase.");
+    }
+    if (started.proto === 'vnc') {
+      const port = started.port ?? 5900;
+      return this.openAdhocVncSession(agentId, { host: '127.0.0.1', port }, { password }, user);
+    }
+    const port = started.port ?? 3389;
+    return this.openAdhocRdpSession(agentId, { host: '127.0.0.1', port }, { username, password, security: 'any' }, user);
+  }
+
+  /** Tear down a remote desktop the agent set up (best-effort; the agent also idle-stops). */
+  stopDesktopSession(agentId: string): void {
+    this.registry.stopDesktop(agentId, '*');
   }
 
   private async issueVncSession(
