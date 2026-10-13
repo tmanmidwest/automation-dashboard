@@ -326,8 +326,11 @@ export class FabricService implements OnModuleInit {
     }
     const port = started.port ?? 3389;
     const target = this.loopbackDesktopTarget(agentId, 'rdp', port);
+    // gnome-remote-desktop serves RDP only over TLS (hence the TLS cert the agent sets). FreeRDP
+    // with security "any" negotiates NLA/CredSSP first, which grd refuses outright ("Server
+    // refused connection (wrong security type?)"). Pin TLS for the real-session path.
     return this.gate(agentId, { kind: 'rdp', host: target.host, port: target.port }, user, () =>
-      this.issueRdpSession(agentId, target, { username, password, security: 'any' }, user),
+      this.issueRdpSession(agentId, target, { username, password, security: 'tls' }, user),
     );
   }
 
