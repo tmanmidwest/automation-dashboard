@@ -90,9 +90,21 @@ export function fileEnvOf(
   return out;
 }
 
+/**
+ * Escape one value for a Compose `.env` line. Compose v2 interpolates `.env`
+ * values, so a literal `$` must be doubled (`$$`) — otherwise a value like
+ * `x$funN0t` is read as `x` + the (unset) variable `${funN0t}`, and the secret is
+ * silently blanked. Every value the replicator writes is a resolved literal (a
+ * secret, a port, an image tag…), never a variable reference, so escaping all `$`
+ * is always correct here. Newlines are flattened (a `.env` line can't span lines).
+ */
+export function escapeEnvValue(v: string): string {
+  return String(v).replace(/[\r\n]+/g, ' ').replace(/\$/g, '$$$$');
+}
+
 /** Serialize an env map to a single-line-per-entry compose `.env` string. */
 export function toDotenv(env: Map<string, string>): string {
-  return [...env.entries()].map(([k, v]) => `${k}=${String(v).replace(/[\r\n]+/g, ' ')}`).join('\n') + '\n';
+  return [...env.entries()].map(([k, v]) => `${k}=${escapeEnvValue(v)}`).join('\n') + '\n';
 }
 
 /** Everything a target needs to materialize one deployment. */

@@ -12,7 +12,7 @@ import { IngressService } from './ingress.service';
 import { DockerDeployTarget } from './docker-deploy-target';
 import { EcsDeployTarget } from './ecs-deploy-target';
 import { ecsProfileFrom } from './ecs-target';
-import { buildEnvMap } from './deploy-target';
+import { buildEnvMap, escapeEnvValue } from './deploy-target';
 import { parseDotenv } from './compose-introspect';
 import { runSsh } from '../connectors/docker/docker-ssh';
 import type { DeployTarget, DestroyContext } from './deploy-target';
@@ -512,7 +512,11 @@ export class DeploymentService {
 
     const onlyOnHost = [...onHost.keys()].filter((k) => !expected.has(k)).sort();
     const missingOnHost = [...expected.keys()].filter((k) => !onHost.has(k)).sort();
-    const differing = [...expected.entries()].filter(([k, v]) => onHost.has(k) && onHost.get(k) !== v).map(([k]) => k).sort();
+    // A host value matches whether the `.env` was written raw (pre-`$`-escaping) or
+    // with `$` doubled (current writer), so the escaping change isn't flagged as drift.
+    const differing = [...expected.entries()]
+      .filter(([k, v]) => onHost.has(k) && onHost.get(k) !== v && onHost.get(k) !== escapeEnvValue(v))
+      .map(([k]) => k).sort();
     const drifted = onlyOnHost.length + missingOnHost.length + differing.length;
 
     return {
