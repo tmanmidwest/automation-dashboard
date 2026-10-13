@@ -555,6 +555,15 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   const formVars = app.variables.filter((v) =>
     v.role !== 'image_tag' && v.role !== 'container_name' && (!isEcs || (v.role !== 'host_port' && v.role !== 'host_ip')));
 
+  // Host-network ports bind the host directly and can't be remapped, so the
+  // "ports already in use" preflight copy doesn't apply to them — they get their
+  // own line. Their effective port follows the chosen value of their env var.
+  const hostNetPorts = app.fixedPorts.filter((pp) => pp.mode === 'host_network');
+  const hostNetLabel = hostNetPorts
+    .map((pp) => ':' + (pp.variable && values[pp.variable] ? values[pp.variable] : pp.hostPort))
+    .join(', ');
+  const hasPublished = formVars.some((v) => v.role === 'host_port') || app.fixedPorts.some((pp) => pp.mode === 'published');
+
   const ready = isEcs ? configured : !!plan;
   const cost = isEcs ? estimateEcsMonthlyUsd(taskCpu, taskMemory) : null;
 
@@ -644,9 +653,15 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                   </p>
                 )}
               </>
+            ) : hostNetPorts.length > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                Host {plan!.hostIp} · binds the host network directly on {hostNetLabel} — Cerebro can’t remap{' '}
+                {hostNetPorts.length === 1 ? 'it' : 'these'}, so make sure {hostNetPorts.length === 1 ? "it's" : "they're"} free on the host.
+                {hasPublished ? ` ${plan!.usedPorts.length} other port${plan!.usedPorts.length === 1 ? '' : 's'} already in use.` : ''}
+              </p>
             ) : (
               <p className="text-xs text-muted-foreground">
-                Host {plan!.hostIp} · {plan!.usedPorts.length} ports already in use. Reachable at {plan!.hostIp}:&lt;host port&gt;.
+                Host {plan!.hostIp} · {plan!.usedPorts.length} port{plan!.usedPorts.length === 1 ? '' : 's'} already in use. Reachable at {plan!.hostIp}:&lt;host port&gt;.
               </p>
             )}
             <div className="space-y-2">
