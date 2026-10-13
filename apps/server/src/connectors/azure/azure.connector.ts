@@ -19,7 +19,7 @@ import type {
   TestConnectionResult,
 } from '@cerebro/shared';
 import { AzureApi, AzSite, AzStorageAccount, AzVm } from './azure-api';
-import { EntraCloud, EntraCreds, EntraError } from '../entra/entra-auth';
+import { EntraCloud, EntraCreds, EntraError, clearEntraTokens } from '../entra/entra-auth';
 
 const SUB_KIND = 'subscription';
 const RG_KIND = 'resource_group';
@@ -139,6 +139,12 @@ export class AzureConnector implements Connector {
 
   private apiFrom(ctx: ConnectorContext): AzureApi {
     return new AzureApi(this.credsFrom(ctx), str(ctx.config.subscriptionId));
+  }
+
+  /** Drop this instance's cached Entra token so the next call re-authenticates — e.g.
+   *  after assigning an RBAC role or rotating the secret (triggered by the Refresh button). */
+  invalidateCache(ctx: ConnectorContext): void {
+    clearEntraTokens(this.credsFrom(ctx));
   }
 
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {

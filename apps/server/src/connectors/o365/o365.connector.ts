@@ -21,7 +21,7 @@ import type {
   TestConnectionResult,
 } from '@cerebro/shared';
 import { GraphApi, GraphSku } from './graph-api';
-import { EntraCloud, EntraCreds, EntraError } from '../entra/entra-auth';
+import { EntraCloud, EntraCreds, EntraError, clearEntraTokens } from '../entra/entra-auth';
 
 const HEALTH_KIND = 'service_health';
 const ISSUE_KIND = 'service_issue';
@@ -141,6 +141,12 @@ export class O365Connector implements Connector {
     return new GraphApi(this.credsFrom(ctx));
   }
 
+  /** Drop this instance's cached Entra token so the next call re-authenticates — e.g.
+   *  after granting admin consent or rotating the secret (triggered by the Refresh button). */
+  invalidateCache(ctx: ConnectorContext): void {
+    clearEntraTokens(this.credsFrom(ctx));
+  }
+
   async testConnection(ctx: ConnectorContext): Promise<TestConnectionResult> {
     try {
       const api = this.apiFrom(ctx);
@@ -151,7 +157,12 @@ export class O365Connector implements Connector {
         return { ok: true, message: `Connected to ${probe.name ?? 'the Microsoft 365 tenant'}.`, details: probe.name ? { tenant: probe.name } : undefined };
       }
       if (probe.status === 403) {
-        return { ok: true, message: 'Authenticated, but Graph returned 403 — grant tenant admin consent and add the read permissions (see the setup help).' };
+        // The access token caches the app's granted roles at issue time. If consent was
+        // granted after this token was minted, it stays 403 until the token expires — so
+        // drop it now, letting the next test (manual or the every-minute monitor) fetch a
+        // fresh token that carries the newly-consented roles. The token endpoint is free.
+        clearEntraTokens(this.credsFrom(ctx));
+        return { ok: true, message: 'Authenticated, but Graph returned 403 — grant tenant admin consent and add the read permissions (see the setup help). If you just granted consent, this clears on the next check.' };
       }
       return { ok: false, message: `Microsoft Graph returned HTTP ${probe.status}.` };
     } catch (e) {
