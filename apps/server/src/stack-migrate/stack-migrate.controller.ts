@@ -45,6 +45,7 @@ class StartMigrateDto extends MigratePlanDto {
   @IsOptional() @IsString() @MaxLength(131072) composeOverride?: string;
   @IsOptional() @IsBoolean() restoreCredentialFiles?: boolean;
   @IsOptional() @IsBoolean() repointReplicator?: boolean;
+  @IsOptional() @IsBoolean() rebuildImages?: boolean;
 }
 
 /**
