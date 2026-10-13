@@ -548,7 +548,7 @@ export function Fabric() {
             </span>
           );
         })}
-        {canConnect && !isWaypoint && (
+        {canConnect && !isWaypoint && a.os === 'linux' && (
           <button
             type="button" disabled={!online || desktopBusy[a.id]}
             onClick={online ? () => openDesktop(a) : undefined}

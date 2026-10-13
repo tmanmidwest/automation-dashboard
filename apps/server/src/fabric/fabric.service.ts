@@ -296,11 +296,15 @@ export class FabricService implements OnModuleInit {
   }
 
   /**
-   * One-click Remote Desktop (Fabric Remote Desktop P1, docs/fabric-remote-desktop.md):
-   * ask the agent to enable the box's real logged-in desktop remotely with a one-time
-   * credential, then broker an RDP (or VNC) session to the loopback port it returns —
-   * reusing the ad-hoc session path (so the four-eyes gate + recording apply as usual).
-   * No command line on the box.
+   * One-click Remote Desktop (Fabric Remote Desktop, docs/fabric-remote-desktop.md):
+   * ask the agent to enable its own desktop remotely with a one-time credential, then broker
+   * an RDP (or VNC) session to the LOOPBACK port it returns.
+   *
+   * The desktop lives on the agent's own 127.0.0.1 — this is NOT an ad-hoc/egress connection
+   * to another host, so it must not go through resolveAdhocTarget (which is Waypoint-only and
+   * would reject every endpoint agent with "Ad-hoc connections require a Waypoint"). We build
+   * a transient loopback target directly and gate+issue it, so the four-eyes gate + recording
+   * still apply but no Waypoint is involved. The agent authorizes this exact loopback port.
    */
   async openDesktopSession(agentId: string, user: SessionUser): Promise<FabricSessionTicket | FabricVncSessionTicket | FabricApprovalPending> {
     if (!this.registry.isOnline(agentId)) throw new BadRequestException('Agent is offline.');
@@ -308,17 +312,44 @@ export class FabricService implements OnModuleInit {
     const password = randomBytes(18).toString('base64url');
     const started = await this.registry.startDesktop(agentId, { username, password, proto: 'rdp', width: 1600, height: 900 });
     if (!started.ok) {
-      throw new BadRequestException(started.message || "The agent couldn't start a remote desktop on this host. It may be headless (no desktop yet) — a bundled virtual desktop lands in a later phase.");
+      throw new BadRequestException(started.message || "The agent couldn't start a remote desktop on this host.");
     }
     if (started.proto === 'vnc') {
       const port = started.port ?? 5900;
       // The bundled virtual desktop (P2) mints its own VNC password (VNC auth truncates to 8
       // chars), returned as `credential` — connect with that, not the broker's longer secret.
       const vncPassword = started.credential ?? password;
-      return this.openAdhocVncSession(agentId, { host: '127.0.0.1', port }, { password: vncPassword }, user);
+      const target = this.loopbackDesktopTarget(agentId, 'vnc', port);
+      return this.gate(agentId, { kind: 'vnc', host: target.host, port: target.port }, user, () =>
+        this.issueVncSession(agentId, target, { password: vncPassword }, user),
+      );
     }
     const port = started.port ?? 3389;
-    return this.openAdhocRdpSession(agentId, { host: '127.0.0.1', port }, { username, password, security: 'any' }, user);
+    const target = this.loopbackDesktopTarget(agentId, 'rdp', port);
+    return this.gate(agentId, { kind: 'rdp', host: target.host, port: target.port }, user, () =>
+      this.issueRdpSession(agentId, target, { username, password, security: 'any' }, user),
+    );
+  }
+
+  /**
+   * A transient target on the agent's OWN loopback for a one-click Remote Desktop. Deliberately
+   * NOT the ad-hoc path: no Waypoint, no egress CIDR check — the agent only ever dials its own
+   * 127.0.0.1 here, and it has already authorized this exact port (allowDesktopPort).
+   */
+  private loopbackDesktopTarget(agentId: string, kind: FabricCredKind, port: number): AgentTarget {
+    return {
+      id: '',
+      agentId,
+      kind,
+      host: '127.0.0.1',
+      port,
+      label: null,
+      secretRef: null,
+      hostKey: null,
+      source: 'desktop',
+      group: null,
+      webUrl: null,
+    } as AgentTarget;
   }
 
   /** Tear down a remote desktop the agent set up (best-effort; the agent also idle-stops). */
