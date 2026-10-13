@@ -117,20 +117,25 @@ exactly `PORT`, or a single `*_PORT` with a numeric default (bambuddy's `PORT=${
 that var is adjustable the reachable port tracks the operator's chosen value. If it's ambiguous,
 Cerebro infers nothing and warns, rather than guessing the wrong port.
 
-**Fixed ports still preflight** against the host (so a literal-port collision is caught before
-deploy) — except host-network ports, which Cerebro can't remap and so doesn't block on. All of them
-land in the deployment's stored `ports`, so the host-port preflight and the ingress picker see every
-reachable port however the repo declared it.
+**Every reachable port is preflighted** against the host's bound ports before a deploy, so a
+collision is caught up front with an actionable message rather than a container that fails to bind:
+a parameterized port says *pick a different host port*; a host-network port backed by an env var says
+*change `<VAR>`* (its own field in the form); a hardcoded literal says *free it on the host or edit
+the compose*. The deploy form also runs this check **live** for host-network ports, flagging a clash
+(and clearing to a ✓) as you edit the backing variable. All reachable ports land in the deployment's
+stored `ports`, so the preflight and the ingress picker see every one however the repo declared it.
+A redeploy excludes the deployment's own currently-bound ports, so it never conflicts with itself.
 
 **The escape hatch.** No heuristic covers every repo, so the register and refresh dialogs carry an
 **Add a reachable port** control (host port, container port, published vs host-network). A
 hand-added port is `source: 'manual'` and, like a hand-added variable, survives a schema refresh.
 This is what keeps a repo that binds its port in some unreadable way from being a dead end.
 
-**The remaining limitation:** a *hardcoded* host port can't be moved (Cerebro doesn't rewrite the
-compose), so you can't run two instances of such an app on one host — the preflight will correctly
-refuse the second. A `docker-compose.override.yml` that remaps it is a possible follow-up; it's
-purely additive on top of this.
+**The remaining limitation:** a *hardcoded* literal host port can't be moved (Cerebro doesn't rewrite
+the compose), so you can't run two instances of such an app on one host — the preflight will correctly
+refuse the second. A host-network port backed by an env var is **not** subject to this — change the
+var. A `docker-compose.override.yml` that remaps a hardcoded port is a possible follow-up; it's purely
+additive on top of this.
 
 ### Env files (`env_file:` / `.env.example`)
 

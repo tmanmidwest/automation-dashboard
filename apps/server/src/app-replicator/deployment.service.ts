@@ -726,14 +726,23 @@ export class DeploymentService {
     const seen = new Set<number>();
     const conflicts: string[] = [];
     for (const p of portList) {
-      // Host-network ports aren't a published mapping — the app binds the port
-      // itself and we can't remap it, so a conflict there isn't ours to flag here.
-      if (p.mode === 'host_network') continue;
-      if (seen.has(p.hostPort)) conflicts.push(`${p.hostPort} (assigned twice in this deployment)`);
-      else if (used.has(p.hostPort)) conflicts.push(`${p.hostPort} (already in use on the host)`);
+      if (seen.has(p.hostPort)) { conflicts.push(`${p.hostPort} (assigned twice in this deployment)`); continue; }
       seen.add(p.hostPort);
+      if (!used.has(p.hostPort)) continue;
+      // In use on the host — the remedy depends on whether Cerebro can move it.
+      // A host-network or hardcoded port can't be auto-assigned, but one backed by
+      // an env var can still be changed by the operator, so the message says how.
+      if (p.mode === 'host_network') {
+        conflicts.push(p.variable
+          ? `${p.hostPort} (in use on the host — this app binds it directly via host networking; change ${p.variable} to a free port and deploy again)`
+          : `${p.hostPort} (in use on the host — this app binds it directly via host networking and hardcodes the port, so free it on the host or edit the app's compose)`);
+      } else if (p.adjustable === false) {
+        conflicts.push(`${p.hostPort} (in use on the host — hardcoded in the app's compose, so free it on the host or edit the compose)`);
+      } else {
+        conflicts.push(`${p.hostPort} (already in use on the host — pick a different host port)`);
+      }
     }
-    if (conflicts.length) throw new BadRequestException(`Port conflict: ${conflicts.join(', ')}. Pick different host ports.`);
+    if (conflicts.length) throw new BadRequestException(`Port conflict: ${conflicts.join('; ')}.`);
   }
 
   private map(row: DeploymentRow, appName?: string, instanceName?: string, ingress?: ReplicatorIngress[]): ReplicatorDeployment {

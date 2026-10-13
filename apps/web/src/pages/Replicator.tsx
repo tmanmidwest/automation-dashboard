@@ -563,6 +563,12 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
     .map((pp) => ':' + (pp.variable && values[pp.variable] ? values[pp.variable] : pp.hostPort))
     .join(', ');
   const hasPublished = formVars.some((v) => v.role === 'host_port') || app.fixedPorts.some((pp) => pp.mode === 'published');
+  // Live availability check for host-network ports against the host's used-port
+  // scan — the effective port follows the current value of its env var.
+  const hostNetConflicts = (plan ? hostNetPorts : [])
+    .map((pp) => ({ port: pp.variable && values[pp.variable] ? Number(values[pp.variable]) : pp.hostPort, variable: pp.variable }))
+    .filter((e) => Number.isFinite(e.port) && plan!.usedPorts.includes(e.port));
+  const anyHardcoded = app.fixedPorts.some((pp) => !pp.adjustable);
 
   const ready = isEcs ? configured : !!plan;
   const cost = isEcs ? estimateEcsMonthlyUsd(taskCpu, taskMemory) : null;
@@ -654,11 +660,22 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                 )}
               </>
             ) : hostNetPorts.length > 0 ? (
-              <p className="text-xs text-muted-foreground">
-                Host {plan!.hostIp} · binds the host network directly on {hostNetLabel} — Cerebro can’t remap{' '}
-                {hostNetPorts.length === 1 ? 'it' : 'these'}, so make sure {hostNetPorts.length === 1 ? "it's" : "they're"} free on the host.
-                {hasPublished ? ` ${plan!.usedPorts.length} other port${plan!.usedPorts.length === 1 ? '' : 's'} already in use.` : ''}
-              </p>
+              <div className="text-xs space-y-0.5">
+                <p className="text-muted-foreground">
+                  Host {plan!.hostIp} · binds the host network directly on {hostNetLabel}.
+                  {hasPublished ? ` ${plan!.usedPorts.length} other port${plan!.usedPorts.length === 1 ? '' : 's'} already in use.` : ''}
+                </p>
+                {hostNetConflicts.length > 0 ? (
+                  <p className="text-destructive">
+                    ⚠ {hostNetConflicts.map((e) => ':' + e.port).join(', ')} already in use on {plan!.hostIp}.{' '}
+                    {hostNetConflicts.every((e) => e.variable)
+                      ? `Change ${[...new Set(hostNetConflicts.map((e) => e.variable))].join(' / ')} to a free port before deploying.`
+                      : 'Free it on the host, or edit the app’s compose, before deploying.'}
+                  </p>
+                ) : (
+                  <p className="text-emerald-400">✓ {hostNetLabel} free on {plan!.hostIp}.</p>
+                )}
+              </div>
             ) : (
               <p className="text-xs text-muted-foreground">
                 Host {plan!.hostIp} · {plan!.usedPorts.length} port{plan!.usedPorts.length === 1 ? '' : 's'} already in use. Reachable at {plan!.hostIp}:&lt;host port&gt;.
@@ -683,7 +700,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                   {app.fixedPorts.map((pp) => fixedPortLabel(pp)).join(' · ')}
                 </p>
                 <p className="text-[0.65rem] text-muted-foreground/70 mt-0.5">
-                  Set by the compose file — ingress can target these after deploy. Hardcoded ports can't be remapped per instance.
+                  Set by the compose file — ingress can target these after deploy.{anyHardcoded ? ' Hardcoded ports can’t be remapped per instance.' : ''}
                 </p>
               </div>
             )}
