@@ -27,6 +27,8 @@ const DHCP_SCOPE_KIND = 'dhcp_scope';
 const DHCP_LEASE_KIND = 'dhcp_lease';
 const ALLOWED_KIND = 'allowed_zone';
 const BLOCKED_KIND = 'blocked_zone';
+const CACHE_KIND = 'cached_zone';
+const BLOCKLIST_KIND = 'block_list';
 const RECORD_SUB = 'record';
 
 /** The record types this connector can add/edit/delete. Each maps to a value field below. */
@@ -66,9 +68,20 @@ const KINDS: ConnectorResourceKind[] = [
     ],
   },
   { id: DHCP_SCOPE_KIND, label: 'DHCP Scopes', deletable: false, actions: [] },
-  { id: DHCP_LEASE_KIND, label: 'DHCP Leases', deletable: false, actions: [] },
+  {
+    id: DHCP_LEASE_KIND,
+    label: 'DHCP Leases',
+    deletable: false,
+    actions: [
+      { id: 'reserve', label: 'Reserve', mutating: true, showWhenStatus: ['dynamic'], confirm: 'Pin this client to its current IP address (convert to a reserved lease)?' },
+      { id: 'unreserve', label: 'Unreserve', mutating: true, showWhenStatus: ['reserved'], confirm: 'Release this reservation back to a dynamic lease?' },
+      { id: 'remove', label: 'Remove lease', mutating: true, confirm: 'Remove this lease? The IP can be reassigned — use carefully to avoid conflicts.', intent: 'destructive' },
+    ],
+  },
   { id: ALLOWED_KIND, label: 'Allowed Domains', deletable: true, actions: [] },
   { id: BLOCKED_KIND, label: 'Blocked Domains', deletable: true, actions: [] },
+  { id: CACHE_KIND, label: 'Cache', deletable: true, actions: [] },
+  { id: BLOCKLIST_KIND, label: 'Block Lists', deletable: true, actions: [] },
 ];
 
 /** The main value field, shown for every record type with type-appropriate help. */
@@ -144,6 +157,53 @@ const OPERATIONS: ConnectorOperation[] = [
       { key: 'domain', label: 'Domain', type: 'text', required: true, placeholder: 'ads.example.com', help: 'The domain to block. Its subdomains are blocked too.' },
     ],
   },
+  // ── Cache (create-scope → buttons on the Cache tab) ──
+  {
+    id: 'flush-cache',
+    label: 'Flush entire cache',
+    description: 'Clear the whole resolver cache. The next lookups will be resolved fresh.',
+    scope: 'create',
+    kind: CACHE_KIND,
+    icon: 'trash-2',
+    submitLabel: 'Flush cache',
+    intent: 'destructive',
+    fields: [],
+  },
+  // ── Block lists (create-scope → buttons on the Block Lists tab) ──
+  {
+    id: 'add-blocklist',
+    label: 'Add block list URL',
+    description: 'Subscribe to a block list (hosts/domains file). Technitium downloads and merges it automatically.',
+    scope: 'create',
+    kind: BLOCKLIST_KIND,
+    icon: 'plus',
+    submitLabel: 'Add block list',
+    fields: [
+      { key: 'url', label: 'Block list URL', type: 'text', required: true, placeholder: 'https://big.oisd.nl/', help: 'A URL to a hosts or domain block list.' },
+    ],
+  },
+  {
+    id: 'update-blocklists',
+    label: 'Update block lists now',
+    description: 'Force Technitium to re-download all configured block lists immediately.',
+    scope: 'create',
+    kind: BLOCKLIST_KIND,
+    icon: 'refresh-cw',
+    submitLabel: 'Update now',
+    fields: [],
+  },
+  {
+    id: 'pause-blocking',
+    label: 'Pause blocking',
+    description: 'Temporarily disable all ad/content blocking for a set number of minutes.',
+    scope: 'create',
+    kind: BLOCKLIST_KIND,
+    icon: 'pause',
+    submitLabel: 'Pause',
+    fields: [
+      { key: 'minutes', label: 'Minutes', type: 'number', required: true, default: 5, help: 'How long to disable blocking. It resumes automatically afterwards.' },
+    ],
+  },
 ];
 
 function strOrUndef(v: unknown): string | undefined {
@@ -159,6 +219,11 @@ function numOrUndef(v: unknown): string | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? String(n) : undefined;
+}
+
+/** A DHCP lease's stable resource id — prefer the IP, then MAC, then host name. */
+function leaseId(l: TechDhcpLease): string {
+  return l.address || l.hardwareAddress || l.hostName || 'lease';
 }
 
 /**
@@ -295,8 +360,8 @@ export class TechnitiumConnector implements Connector {
     id: 'technitium',
     name: 'Technitium DNS',
     description:
-      'Monitor and manage a Technitium DNS Server — DNS zones and their records (add/edit/delete), DHCP scopes and leases, and the manually allowed/blocked domains (add/remove), with a dashboard summary of query volume, block rate, active clients, and cache. Enable, disable, or delete zones.',
-    version: '0.3.0',
+      'Monitor and manage a Technitium DNS Server — DNS zones and their records (add/edit/delete), DHCP scopes and leases (reserve/remove), the manually allowed/blocked domains, the resolver cache (browse/flush), and ad-blocking block lists (add/remove URLs, update now, pause blocking). Includes a dashboard summary and threshold alerts for expired zones, server failures, and block-rate spikes.',
+    version: '0.4.0',
     icon: 'technitium',
     configFields: [
       {
@@ -340,13 +405,16 @@ export class TechnitiumConnector implements Connector {
         'Minimum to view: Dashboard: View, Zones: View, DHCP: View.',
         'To manage records/zones: Zone: Modify (add/edit records, enable/disable) and Zone: Delete (delete records/zones).',
         'To manage allow/block lists: Allowed Zones and Blocked Zones: Modify.',
+        'To flush/delete cache: Cache: Delete.',
+        'To manage block-list URLs, force updates, or pause blocking: Settings: Modify.',
+        'To reserve/remove DHCP leases: DhcpServer: Modify (and Delete to remove a lease).',
       ],
       referenceLinks: [
         { label: 'Technitium DNS Server', url: 'https://technitium.com/dns/' },
         { label: 'HTTP API documentation', url: 'https://github.com/TechnitiumSoftware/DnsServer/blob/master/APIDOCS.md' },
       ],
       notes:
-        'The API token is sent as a Bearer token (required since Technitium v15). If your server uses HTTPS with a self-signed certificate, enable the "Accept self-signed certificate" option. Editing features need the matching Zone: Modify/Delete permissions on the token\'s user; without them those actions fail with a clear message while read-only views keep working. Record editing covers A, AAAA, CNAME, TXT, MX, NS, PTR, and SRV — other record types are shown read-only.',
+        'The API token is sent as a Bearer token (required since Technitium v15). If your server uses HTTPS with a self-signed certificate, enable the "Accept self-signed certificate" option. Editing features need the matching permissions on the token\'s user; without them those actions fail with a clear message while read-only views keep working. Record editing covers A, AAAA, CNAME, TXT, MX, NS, PTR, and SRV — other record types are shown read-only. The Cache tab lets you flush the resolver cache; the Block Lists tab manages your ad-blocking subscription URLs, forces an update, or pauses blocking for a set time.',
     },
   };
 
@@ -417,6 +485,20 @@ export class TechnitiumConnector implements Connector {
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
+    if (kind === CACHE_KIND) {
+      const tree = await api.listCache();
+      return (tree.zones ?? [])
+        .map((name) => ({ id: name, kind: CACHE_KIND, name, status: 'cached' }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    if (kind === BLOCKLIST_KIND) {
+      const settings = await api.getSettings();
+      return (settings.blockListUrls ?? [])
+        .map((url) => ({ id: url, kind: BLOCKLIST_KIND, name: url, status: 'active' }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     return [];
   }
 
@@ -481,7 +563,7 @@ export class TechnitiumConnector implements Connector {
 
     if (kind === DHCP_LEASE_KIND) {
       const leases = await api.listDhcpLeases();
-      const l = leases.find((ll) => (ll.address || ll.hardwareAddress) === resourceId);
+      const l = leases.find((ll) => leaseId(ll) === resourceId);
       if (!l) throw new Error(`DHCP lease "${resourceId}" not found.`);
       const r = this.leaseToResource(l);
       return {
@@ -507,14 +589,20 @@ export class TechnitiumConnector implements Connector {
       };
     }
 
-    // Allowed / blocked domains carry only their name.
-    const label = kind === ALLOWED_KIND ? 'Allowed Domain' : 'Blocked Domain';
+    // The remaining kinds carry only their name/URL.
+    const NAME_ONLY: Record<string, { title: string; field: string; status: string }> = {
+      [ALLOWED_KIND]: { title: 'Allowed Domain', field: 'Domain', status: 'allowed' },
+      [BLOCKED_KIND]: { title: 'Blocked Domain', field: 'Domain', status: 'blocked' },
+      [CACHE_KIND]: { title: 'Cached Entry', field: 'Domain', status: 'cached' },
+      [BLOCKLIST_KIND]: { title: 'Block List', field: 'URL', status: 'active' },
+    };
+    const meta = NAME_ONLY[kind] ?? { title: 'Resource', field: 'Name', status: '' };
     return {
       id: resourceId,
       kind,
       name: resourceId,
-      status: kind === ALLOWED_KIND ? 'allowed' : 'blocked',
-      groups: [{ title: label, items: detailItems([['Domain', resourceId]]) }],
+      status: meta.status,
+      groups: [{ title: meta.title, items: detailItems([[meta.field, resourceId]]) }],
     };
   }
 
@@ -571,6 +659,26 @@ export class TechnitiumConnector implements Connector {
       await api.disableZone(resourceId);
       return { ok: true, message: `Zone "${resourceId}" disabled.` };
     }
+    if (kind === DHCP_LEASE_KIND && (actionId === 'reserve' || actionId === 'unreserve' || actionId === 'remove')) {
+      const lease = (await api.listDhcpLeases()).find((l) => leaseId(l) === resourceId);
+      if (!lease) return { ok: false, message: `DHCP lease "${resourceId}" not found.` };
+      if (!lease.scope) return { ok: false, message: 'This lease has no scope, so it cannot be modified.' };
+      // The convert/remove endpoints identify a lease by scope name + MAC (or client id).
+      const params: Record<string, string> = { name: lease.scope };
+      if (lease.hardwareAddress) params.hardwareAddress = lease.hardwareAddress;
+      else if (lease.clientIdentifier) params.clientIdentifier = lease.clientIdentifier;
+      else return { ok: false, message: 'This lease has no MAC or client identifier, so it cannot be modified.' };
+      if (actionId === 'reserve') {
+        await api.dhcpConvertToReserved(params);
+        return { ok: true, message: `Reserved ${lease.address ?? resourceId} for ${lease.hostName || lease.hardwareAddress}.` };
+      }
+      if (actionId === 'unreserve') {
+        await api.dhcpConvertToDynamic(params);
+        return { ok: true, message: `Released the reservation for ${lease.address ?? resourceId}.` };
+      }
+      await api.dhcpRemoveLease(params);
+      return { ok: true, message: `Removed the lease for ${lease.address ?? resourceId}.` };
+    }
     return { ok: false, message: `Unsupported action "${actionId}" for ${kind}.` };
   }
 
@@ -587,6 +695,17 @@ export class TechnitiumConnector implements Connector {
     if (kind === BLOCKED_KIND) {
       await api.deleteBlocked(resourceId);
       return { ok: true, message: `"${resourceId}" removed from the blocked list.` };
+    }
+    if (kind === CACHE_KIND) {
+      await api.deleteCache(resourceId);
+      return { ok: true, message: `"${resourceId}" dropped from the cache.` };
+    }
+    if (kind === BLOCKLIST_KIND) {
+      const current = (await api.getSettings()).blockListUrls ?? [];
+      const next = current.filter((u) => u !== resourceId);
+      if (next.length === current.length) return { ok: false, message: 'That block list URL is not configured.' };
+      await api.setBlockListUrls(next);
+      return { ok: true, message: `Removed block list "${resourceId}".` };
     }
     return { ok: false, message: `Deleting ${kind} is not supported.` };
   }
@@ -640,6 +759,31 @@ export class TechnitiumConnector implements Connector {
       if (!domain) return { ok: false, message: 'A domain is required.' };
       await api.addBlocked(domain);
       return { ok: true, message: `Blocked "${domain}".`, createdResourceId: domain };
+    }
+
+    if (operationId === 'flush-cache') {
+      await api.flushCache();
+      return { ok: true, message: 'Resolver cache flushed.' };
+    }
+    if (operationId === 'update-blocklists') {
+      await api.forceUpdateBlockLists();
+      return { ok: true, message: 'Block lists are updating now.' };
+    }
+    if (operationId === 'pause-blocking') {
+      const minutes = Number(values.minutes);
+      if (!Number.isFinite(minutes) || minutes <= 0) return { ok: false, message: 'Enter a positive number of minutes.' };
+      await api.temporaryDisableBlocking(minutes);
+      return { ok: true, message: `Blocking paused for ${minutes} minute${minutes === 1 ? '' : 's'}.` };
+    }
+    if (operationId === 'add-blocklist') {
+      const url = strOrUndef(values.url);
+      if (!url) return { ok: false, message: 'A block list URL is required.' };
+      const current = (await api.getSettings()).blockListUrls ?? [];
+      if (current.some((u) => u.toLowerCase() === url.toLowerCase())) {
+        return { ok: false, message: 'That block list URL is already configured.' };
+      }
+      await api.setBlockListUrls([...current, url]);
+      return { ok: true, message: `Added block list "${url}".`, createdResourceId: url };
     }
 
     // The remaining ops act on records within a zone (resourceId = the zone name).
@@ -829,8 +973,7 @@ export class TechnitiumConnector implements Connector {
     if (l.scope) tags.scope = l.scope;
     if (l.type) tags.type = l.type;
     return {
-      // Prefer IP as the stable id; fall back to MAC.
-      id: l.address || l.hardwareAddress || l.hostName || 'lease',
+      id: leaseId(l),
       kind: DHCP_LEASE_KIND,
       name: strOrUndef(l.hostName) || l.address || l.hardwareAddress || 'lease',
       status: (l.type || 'dynamic').toLowerCase(),

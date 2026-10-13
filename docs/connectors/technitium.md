@@ -4,9 +4,10 @@ Monitor a self-hosted [Technitium DNS Server](https://technitium.com/dns/) — a
 combined authoritative/recursive DNS server **and** a Pi-hole-style ad-blocker,
 with a built-in DHCP server.
 
-**Status:** Phase 1 (read-only) + Phase 2 (writes) + Phase 3 (alerts) **BUILT &
-VERIFIED** (logic harnesses + green builds), **not git-committed** and not live-tested
-against a real server. Connector `v0.3.0`.
+**Status:** Phases 1–4 **BUILT & VERIFIED** (logic harnesses + green builds),
+**not git-committed** and not live-tested against a real server. Connector `v0.4.0`
+— **feature-complete** (P1 read, P2 record/zone writes, P3 alerts, P4 cache +
+block-list management + DHCP reservations).
 
 ## Files
 
@@ -103,7 +104,30 @@ alerts. The connector just emits the metrics; the alerts are wired in three plac
 never sinks the overview). `blockedPct` was already emitted in P1. The monitor only
 fires once the user sets a threshold on the connector's Alerts page.
 
-## Future phases (not built)
+## Phase 4 — cache, block lists, DHCP reservations (`v0.4.0`)
 
-- **P4:** flush DNS cache, logs browsing, block-list-URL management, DHCP
-  reservation create/convert, Prometheus metrics for observability.
+Two new kinds plus actions on DHCP leases:
+
+- **`cached_zone` ("Cache"):** browse top-level cached labels
+  (`/api/cache/list`), delete a cached subtree (`/api/cache/delete?domain=`), and
+  a **Flush entire cache** create-op (`/api/cache/flush`).
+- **`block_list` ("Block Lists"):** the configured ad-block subscription URLs,
+  read from `/api/settings/get` (`blockListUrls`). Add / remove a URL by
+  read-modify-write of the whole set via `/api/settings/set?blockListUrls=` (set to
+  `false` when the set becomes empty); dedupe on add. Create-ops: **Add block list
+  URL**, **Update block lists now** (`/api/settings/forceUpdateBlockLists`), and
+  **Pause blocking** for N minutes (`/api/settings/temporaryDisableBlocking?minutes=`).
+- **DHCP lease actions:** **Reserve** (`convertToReserved`, when dynamic),
+  **Unreserve** (`convertToDynamic`, when reserved), **Remove lease**
+  (`/api/dhcp/leases/remove`, destructive). `performAction` re-lists leases, finds
+  the one whose id matches, and identifies it to the API by scope `name` + MAC
+  (`hardwareAddress`) or `clientIdentifier`.
+
+Server-level actions (flush/update/pause) are modelled as `scope: 'create'`
+operations so they render as buttons on their tab — the only way the generic UI
+exposes a non-row action.
+
+## Future ideas (not built)
+
+- Query-log browsing (needs the Query Logs app installed), DNS-app management, and
+  a Prometheus metrics feed for the observability roadmap.

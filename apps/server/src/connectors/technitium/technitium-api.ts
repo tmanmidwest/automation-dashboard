@@ -112,6 +112,11 @@ export interface TechDhcpLease {
   leaseExpires?: string;
 }
 
+/** The subset of GET /api/settings/get we use. */
+export interface TechSettings {
+  blockListUrls?: string[];
+}
+
 /** A DNS record from GET /api/zones/records/get. `rData` is type-specific. */
 export interface TechRecord {
   name: string;
@@ -253,6 +258,59 @@ export class TechnitiumApi {
   /** POST /api/blocked/delete — remove a manually blocked domain. */
   deleteBlocked(domain: string): Promise<void> {
     return this.mutate(`/api/blocked/delete?domain=${encodeURIComponent(domain)}`);
+  }
+
+  // ── Phase 4: cache, block lists, DHCP reservations ────────────────
+
+  /** GET /api/cache/list — the cached child labels under a domain (root by default). */
+  listCache(domain = ''): Promise<TechZoneTree> {
+    return this.request<TechZoneTree>('GET', `/api/cache/list?domain=${encodeURIComponent(domain)}&direction=down`);
+  }
+
+  /** POST /api/cache/flush — clear the entire resolver cache. */
+  flushCache(): Promise<void> {
+    return this.mutate('/api/cache/flush');
+  }
+
+  /** POST /api/cache/delete — drop a domain (and its subtree) from the cache. */
+  deleteCache(domain: string): Promise<void> {
+    return this.mutate(`/api/cache/delete?domain=${encodeURIComponent(domain)}`);
+  }
+
+  /** GET /api/settings/get — reads the full settings (we only use `blockListUrls`). */
+  getSettings(): Promise<TechSettings> {
+    return this.request<TechSettings>('GET', '/api/settings/get');
+  }
+
+  /** POST /api/settings/set?blockListUrls=... — replace the block-list URL set (empty → `false` clears it). */
+  setBlockListUrls(urls: string[]): Promise<void> {
+    const value = urls.length ? encodeURIComponent(urls.join(',')) : 'false';
+    return this.mutate(`/api/settings/set?blockListUrls=${value}`);
+  }
+
+  /** POST /api/settings/forceUpdateBlockLists — re-download the block lists now. */
+  forceUpdateBlockLists(): Promise<void> {
+    return this.mutate('/api/settings/forceUpdateBlockLists');
+  }
+
+  /** POST /api/settings/temporaryDisableBlocking?minutes=N — pause ad-blocking for a while. */
+  temporaryDisableBlocking(minutes: number): Promise<void> {
+    return this.mutate(`/api/settings/temporaryDisableBlocking?minutes=${encodeURIComponent(String(minutes))}`);
+  }
+
+  /** POST /api/dhcp/leases/convertToReserved — pin a dynamic lease to its current IP. */
+  dhcpConvertToReserved(params: Record<string, string>): Promise<void> {
+    return this.mutate(`/api/dhcp/leases/convertToReserved?${qs(params)}`);
+  }
+
+  /** POST /api/dhcp/leases/convertToDynamic — release a reserved lease back to the pool. */
+  dhcpConvertToDynamic(params: Record<string, string>): Promise<void> {
+    return this.mutate(`/api/dhcp/leases/convertToDynamic?${qs(params)}`);
+  }
+
+  /** POST /api/dhcp/leases/remove — delete a lease (use carefully; can cause IP conflicts). */
+  dhcpRemoveLease(params: Record<string, string>): Promise<void> {
+    return this.mutate(`/api/dhcp/leases/remove?${qs(params)}`);
   }
 
   /** A write call: POST with the params already in the query string; ignores the (empty) body. */

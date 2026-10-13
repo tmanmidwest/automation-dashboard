@@ -27,7 +27,7 @@ const STATUS_IDLE = new Set([
   'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
   'inactive', 'dns_only', 'deleted', // Cloudflare inactive tunnel / unproxied DNS record / revoked device
   'canceled', // Cloudflare Pages deploy canceled
-  'blocked', 'dynamic', 'reserved', // Technitium blocked domain / DHCP lease types (informational, not alarming)
+  'blocked', 'dynamic', 'reserved', 'cached', // Technitium blocked domain / DHCP lease types / cached entry (informational, not alarming)
 ]);
 
 /** Tailwind classes for a resource status badge, by status string. */
