@@ -4,7 +4,7 @@ import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
-  DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin,
+  DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin, ReplicatorFixedPort,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -359,13 +359,14 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
   const [gitCredKey, setGitCredKey] = useState('');
   const [result, setResult] = useState<IntrospectResult | null>(null);
   const [vars, setVars] = useState<ReplicatorVariable[]>([]);
+  const [fixedPorts, setFixedPorts] = useState<ReplicatorFixedPort[]>([]);
   const [busy, setBusy] = useState(false);
 
   async function introspect() {
     setBusy(true); setErr(null);
     try {
       const r = await api.post<IntrospectResult>('/api/replicator/introspect', { gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined });
-      setResult(r); setVars(r.variables);
+      setResult(r); setVars(r.variables); setFixedPorts(r.fixedPorts ?? []);
       if (!name && gitUrl) setName(gitUrl.replace(/\.git$/, '').split('/').pop() || '');
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Introspection failed.'); }
     finally { setBusy(false); }
@@ -376,7 +377,7 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     try {
       await api.post('/api/replicator/apps', {
         name, gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined,
-        variables: vars, usesGeneratedCompose: result?.usesGeneratedCompose,
+        variables: vars, fixedPorts, usesGeneratedCompose: result?.usesGeneratedCompose,
       });
       onRegistered();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Register failed.'); setBusy(false); }
@@ -418,6 +419,7 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
               Image tag &amp; container name are set per deployment automatically.
             </p>
             <VariableSchemaEditor vars={vars} onChange={setVars} />
+            <FixedPortEditor ports={fixedPorts} onChange={setFixedPorts} />
           </div>
         )}
       </div>
@@ -432,6 +434,7 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
 }) {
   const [result, setResult] = useState<RefreshSchemaResult | null>(null);
   const [vars, setVars] = useState<ReplicatorVariable[]>([]);
+  const [fixedPorts, setFixedPorts] = useState<ReplicatorFixedPort[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -442,7 +445,7 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
       try {
         const r = await api.post<RefreshSchemaResult>(`/api/replicator/apps/${app.id}/refresh-schema`, {});
         if (!alive) return;
-        setResult(r); setVars(r.variables);
+        setResult(r); setVars(r.variables); setFixedPorts(r.fixedPorts ?? []);
       } catch (e) {
         if (alive) setErr(e instanceof ApiError ? e.message : 'Could not re-read the repo.');
       } finally {
@@ -456,7 +459,7 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
     setBusy(true); setErr(null);
     try {
       await api.patch(`/api/replicator/apps/${app.id}`, {
-        variables: vars, usesGeneratedCompose: result?.usesGeneratedCompose,
+        variables: vars, fixedPorts, usesGeneratedCompose: result?.usesGeneratedCompose,
       });
       onApplied();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not save the schema.'); setBusy(false); }
@@ -506,6 +509,7 @@ function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
           )}
 
           <VariableSchemaEditor vars={vars} onChange={setVars} added={diff!.added} />
+          <FixedPortEditor ports={fixedPorts} onChange={setFixedPorts} />
         </div>
       ) : (
         <p className="text-sm text-destructive py-6">Could not read the repository.</p>
@@ -657,6 +661,17 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                   }} />
               ))}
             </div>
+            {app.fixedPorts.length > 0 && (
+              <div className="rounded-lg border border-border/60 px-3 py-2">
+                <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Reachable ports (fixed)</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {app.fixedPorts.map((pp) => fixedPortLabel(pp)).join(' · ')}
+                </p>
+                <p className="text-[0.65rem] text-muted-foreground/70 mt-0.5">
+                  Set by the compose file — ingress can target these after deploy. Hardcoded ports can't be remapped per instance.
+                </p>
+              </div>
+            )}
             <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} />
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
@@ -1019,6 +1034,105 @@ function roleLabel(v: ReplicatorVariable): string {
  * app reads a key the repo never documents. All three are written into the
  * deployment's `.env` the same way.
  */
+/** A human label for one reachable fixed port. */
+function fixedPortLabel(p: ReplicatorFixedPort): string {
+  const range = p.hostPortEnd && p.hostPortEnd !== p.hostPort ? `${p.hostPort}-${p.hostPortEnd}` : String(p.hostPort);
+  const proto = p.protocol === 'udp' ? '/udp' : '';
+  if (p.mode === 'host_network') return `host:${range}${proto}${p.variable ? ` (via ${p.variable})` : ''}`;
+  return `${range}${proto} → ${p.containerPort}`;
+}
+
+/**
+ * The reachable ports Cerebro found that aren't driven by an adjustable `${VAR}`:
+ * literal `ports:` mappings, ranges, and host-network bindings. They're shown so
+ * the operator can see what ingress will be able to target — and add one by hand
+ * when a repo binds its port in a way Cerebro couldn't read (the escape hatch that
+ * keeps any repo from being a dead end).
+ */
+function FixedPortEditor({ ports, onChange }: {
+  ports: ReplicatorFixedPort[]; onChange: (next: ReplicatorFixedPort[]) => void;
+}) {
+  const [host, setHost] = useState('');
+  const [container, setContainer] = useState('');
+  const [mode, setMode] = useState<'published' | 'host_network'>('published');
+
+  const hostN = Number(host);
+  const contN = Number(container);
+  const hostOk = Number.isInteger(hostN) && hostN >= 1 && hostN <= 65535;
+  const contOk = Number.isInteger(contN) && contN >= 1 && contN <= 65535;
+  const dupe = hostOk && ports.some((p) => p.hostPort === hostN && (p.mode === mode));
+
+  function add() {
+    if (!hostOk || !contOk || dupe) return;
+    onChange([...ports, {
+      service: null,
+      containerPort: contN,
+      hostPort: hostN,
+      hostPortEnd: null,
+      mode,
+      protocol: 'tcp',
+      variable: null,
+      adjustable: false,
+      source: 'manual',
+    }]);
+    setHost(''); setContainer('');
+  }
+  const remove = (idx: number) => onChange(ports.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-2">
+      <Label className="text-xs text-muted-foreground">Reachable ports</Label>
+      <div className="rounded-lg border border-border/60 divide-y divide-border/60">
+        {ports.length === 0 && (
+          <p className="px-3 py-2 text-xs text-muted-foreground">
+            No fixed ports detected. Parameterized ports (if any) are in the variables above; add a port here if this app binds one Cerebro didn't pick up.
+          </p>
+        )}
+        {ports.map((p, i) => (
+          <div key={`${p.hostPort}-${p.mode}-${i}`} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+            <div className="min-w-0">
+              <span className="font-mono text-xs">{fixedPortLabel(p)}</span>
+              <span className="ml-2 text-xs text-muted-foreground">
+                {p.mode === 'host_network' ? 'host network' : 'published'}
+                {p.adjustable ? ' · adjustable' : ' · fixed'}
+                {p.source === 'manual' ? ' · added by hand' : ''}
+              </span>
+            </div>
+            {p.source === 'manual' && (
+              <Button type="button" variant="ghost" size="icon" className="h-6 w-6" title="Remove this port"
+                aria-label="Remove port" onClick={() => remove(i)}><X className="h-3.5 w-3.5" /></Button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="flex items-end gap-2">
+        <div className="w-28">
+          <Label className="text-xs">Host port</Label>
+          <Input className="mt-1" value={host} placeholder="8080" inputMode="numeric"
+            onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} />
+        </div>
+        <div className="w-28">
+          <Label className="text-xs">Container port</Label>
+          <Input className="mt-1" value={container} placeholder="80" inputMode="numeric"
+            onChange={(e) => setContainer(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} />
+        </div>
+        <div className="flex-1">
+          <Label className="text-xs">Mode</Label>
+          <select className={selectCls} value={mode} onChange={(e) => setMode(e.target.value as 'published' | 'host_network')}>
+            <option value="published">published</option>
+            <option value="host_network">host network</option>
+          </select>
+        </div>
+        <Button type="button" variant="outline" size="sm" className="h-9" onClick={add} disabled={!hostOk || !contOk || dupe}>
+          <Plus className="h-4 w-4" /> Add port
+        </Button>
+      </div>
+      {(host || container) && (!hostOk || !contOk) && <p className="text-xs text-destructive">Enter valid port numbers (1–65535).</p>}
+      {dupe && <p className="text-xs text-destructive">A {mode} port {host} is already listed.</p>}
+    </div>
+  );
+}
+
 function VariableSchemaEditor({ vars, onChange, added }: {
   vars: ReplicatorVariable[]; onChange: (next: ReplicatorVariable[]) => void; added?: string[];
 }) {

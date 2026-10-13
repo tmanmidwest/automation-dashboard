@@ -58,6 +58,8 @@ export interface ReplicatorApp {
   /** Vault secret key (kind='git') to authenticate a private repo; null = public. */
   gitCredKey?: string | null;
   variables: ReplicatorVariable[];
+  /** Reachable ports not backed by an adjustable `${VAR}` (literals, ranges, host-network, manual). */
+  fixedPorts: ReplicatorFixedPort[];
   /** True when the repo had only a Dockerfile and Cerebro generated a compose wrapper. */
   usesGeneratedCompose: boolean;
   createdAt: string;
@@ -66,12 +68,61 @@ export interface ReplicatorApp {
   deploymentCount?: number;
 }
 
-/** A published port mapping for a deployment. */
+/**
+ * How a deployment's containers are reachable on the host:
+ * - 'published' — a `ports:` mapping binds a host port to a container port.
+ * - 'host_network' — the service runs with `network_mode: host`, so it binds the
+ *   host port directly (no mapping); the reachable port is whatever the app
+ *   listens on (often a `PORT`-style env var).
+ */
+export type ReplicatorPortMode = 'published' | 'host_network';
+
+/** A reachable port of a deployment (what ingress can target). */
 export interface ReplicatorPort {
   service: string;
-  variable: string;
+  /**
+   * The env var that sets this host port, or null when the compose hardcodes it
+   * (a literal `ports:` mapping) — a fixed port can't be remapped per instance.
+   */
+  variable: string | null;
   hostPort: number;
   containerPort: number;
+  /** Absent/'published' for a `ports:` mapping; 'host_network' for host networking. */
+  mode?: ReplicatorPortMode;
+  /** False when the host port is hardcoded in the repo and can't be changed. */
+  adjustable?: boolean;
+  /** End of a published range (`3000-3002:3000-3002`); the start is `hostPort`. */
+  hostPortEnd?: number | null;
+  /** 'udp' for a `/udp` mapping; otherwise tcp. */
+  protocol?: 'tcp' | 'udp';
+}
+
+/**
+ * A reachable port detected in the compose file that is NOT backed by an
+ * adjustable `${VAR}` — a literal mapping, a port range, a host-network binding,
+ * or one the operator added by hand. Stored on the app alongside its variable
+ * schema, since the deploy flow reads the stored schema rather than re-reading the
+ * repo. Parameterized ports (`${APP_PORT:-8080}:80`) stay modeled as `host_port`
+ * variables instead; these are everything else. See docs/app-replicator.md.
+ */
+export interface ReplicatorFixedPort {
+  service: string | null;
+  containerPort: number;
+  /** The host port it binds (range start when hostPortEnd is set). */
+  hostPort: number;
+  hostPortEnd?: number | null;
+  mode: ReplicatorPortMode;
+  protocol?: 'tcp' | 'udp';
+  /**
+   * For a host-network port whose listen port comes from an env var (e.g.
+   * `PORT`): the var name, so the effective host port tracks the chosen value.
+   * Null for a hardcoded literal.
+   */
+  variable?: string | null;
+  /** True when the host port follows an env var and can therefore be changed. */
+  adjustable: boolean;
+  /** How Cerebro knows about it — 'compose' from the repo, 'manual' operator-added. */
+  source?: 'compose' | 'manual';
 }
 
 /**
@@ -214,6 +265,8 @@ export interface IntrospectRepoInput {
 
 export interface IntrospectResult {
   variables: ReplicatorVariable[];
+  /** Reachable ports not backed by an adjustable `${VAR}` (literals, ranges, host-network). */
+  fixedPorts: ReplicatorFixedPort[];
   services: string[];
   /** Path to the compose file used within the repo (or the generated wrapper name). */
   composePath: string;
@@ -244,6 +297,8 @@ export interface ReplicatorSchemaDiff {
 export interface RefreshSchemaResult {
   /** The proposed merged variable schema. */
   variables: ReplicatorVariable[];
+  /** The proposed merged fixed-port list (operator-added ports preserved). */
+  fixedPorts: ReplicatorFixedPort[];
   diff: ReplicatorSchemaDiff;
   composePath: string;
   usesGeneratedCompose: boolean;
@@ -261,6 +316,8 @@ export interface RegisterAppInput {
   gitCredKey?: string | null;
   /** The reviewed/adjusted variable schema (secret flags may have been toggled). */
   variables: ReplicatorVariable[];
+  /** The reviewed fixed-port list (operator may have added or removed ports). */
+  fixedPorts?: ReplicatorFixedPort[];
   usesGeneratedCompose?: boolean;
 }
 

@@ -331,6 +331,9 @@ model ReplicatorApp {
   gitCredKey           String?
   /// Detected + reviewed variable schema (ReplicatorVariable[]) as JSON.
   variables            Json                   @default("[]")
+  /// Reachable ports not backed by an adjustable ${VAR} — literal mappings, port
+  /// ranges, host-network bindings, and operator-added ports (ReplicatorFixedPort[]).
+  fixedPorts           Json                   @default("[]")
   /// True when the repo had only a Dockerfile and Cerebro generated a compose wrapper.
   usesGeneratedCompose Boolean                @default(false)
   createdAt            DateTime               @default(now())

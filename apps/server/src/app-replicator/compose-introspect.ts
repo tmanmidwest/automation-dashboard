@@ -1,4 +1,4 @@
-import type { ReplicatorVariable, ReplicatorVarRole } from '@cerebro/shared';
+import type { ReplicatorVariable, ReplicatorVarRole, ReplicatorFixedPort } from '@cerebro/shared';
 
 /**
  * Derive an app's variable/port schema from its Docker Compose file. The compose
@@ -37,6 +37,8 @@ export function looksSecret(name: string): boolean {
 
 export interface ParsedCompose {
   variables: ReplicatorVariable[];
+  /** Reachable ports not backed by an adjustable `${VAR}` (literals, ranges, host-network). */
+  fixedPorts: ReplicatorFixedPort[];
   services: string[];
   /** Paths named by `env_file:`, relative to the compose file's own directory. */
   envFiles: string[];
@@ -113,24 +115,97 @@ function portOfSegment(seg: string): number | null {
   return Number.isFinite(literal) && literal > 0 ? literal : null;
 }
 
+/** Protocol suffix of a ports item (`"8080:80/udp"` → "udp"); defaults to tcp. */
+function protoOf(item: string): 'tcp' | 'udp' {
+  return /\/udp\s*$/i.test(item.trim().replace(/^["']|["']$/g, '')) ? 'udp' : 'tcp';
+}
+
+/** A literal port segment resolved to [start, end] (end set only for a range). */
+function literalRange(seg: string): { start: number; end: number | null } | null {
+  const s = seg.trim();
+  const m = s.match(/^(\d+)(?:-(\d+))?$/);
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] != null ? Number(m[2]) : null;
+  if (!Number.isFinite(start) || start < 1) return null;
+  return { start, end: end && Number.isFinite(end) ? end : null };
+}
+
 /**
- * Assign roles to the `${VAR}` tokens on a `ports:` list item by segment: in a
- * 3-segment `HOST_IP:HOST_PORT:CONTAINER` mapping the leading token is a bind
- * address (host_ip, free text), the middle is the published host port; the
- * trailing container-port token (rare) is fixed config, treated as plain.
+ * Parse one `ports:` SHORT-form item (`[IP:][HOST:]CONTAINER[/proto]`). A host
+ * segment that interpolates a `${VAR}` stays modeled as a `host_port` variable
+ * (adjustable per deployment, as before); a literal host segment becomes a fixed
+ * port. A bare `CONTAINER` with no host segment publishes to an ephemeral host
+ * port Docker chooses — not targetable by ingress — so it's skipped.
  */
-function addPortsTokens(map: Map<string, ReplicatorVariable>, item: string, service: string | null): void {
+function addShortPort(
+  map: Map<string, ReplicatorVariable>,
+  fixed: ReplicatorFixedPort[],
+  item: string,
+  service: string | null,
+): void {
+  const proto = protoOf(item);
   const segs = portSegments(item);
+  if (segs.length < 2) return; // container-only → ephemeral host port, can't target
   const last = segs.length - 1;
-  const containerPort = portOfSegment(segs[last]);
-  segs.forEach((seg, idx) => {
-    const toks = tokensIn(seg);
-    if (!toks.length) return;
-    let role: ReplicatorVarRole;
-    if (idx === last) role = 'plain'; // the container-port slot — fixed, not a host binding
-    else if (segs.length >= 3 && idx === 0) role = 'host_ip';
-    else role = 'host_port';
-    for (const t of toks) addVar(map, t, role, service, role === 'host_port' ? containerPort : null);
+  const hostSeg = segs[last - 1];
+  const containerPort = portOfSegment(segs[last]) ?? literalRange(segs[last])?.start ?? portOfSegment(hostSeg) ?? literalRange(hostSeg)?.start ?? null;
+
+  // Bind IP (3-segment form): a `${VAR}` there is free-text host_ip config.
+  if (segs.length >= 3) for (const t of tokensIn(segs[0])) addVar(map, t, 'host_ip', service, null);
+
+  const hostToks = tokensIn(hostSeg);
+  if (hostToks.length) {
+    // Parameterized host port — unchanged behavior, adjustable via the var.
+    for (const t of hostToks) addVar(map, t, 'host_port', service, containerPort);
+    return;
+  }
+  const range = literalRange(hostSeg);
+  if (!range || containerPort == null) return;
+  fixed.push({
+    service,
+    containerPort,
+    hostPort: range.start,
+    hostPortEnd: range.end,
+    mode: 'published',
+    protocol: proto,
+    variable: null,
+    adjustable: false,
+    source: 'compose',
+  });
+}
+
+/**
+ * Parse one `ports:` LONG-form item (`{ target, published, protocol, host_ip }`).
+ * Same split as short form: a `${VAR}` in `published` is an adjustable host_port
+ * variable; a literal is a fixed port.
+ */
+function addLongPort(
+  map: Map<string, ReplicatorVariable>,
+  fixed: ReplicatorFixedPort[],
+  item: { service: string | null; target?: string; published?: string; protocol?: string },
+): void {
+  const containerPort = item.target != null ? (portOfSegment(item.target) ?? literalRange(item.target)?.start ?? null) : null;
+  const published = (item.published ?? '').trim().replace(/^["']|["']$/g, '');
+  if (!published) return; // no host side → ephemeral, skip
+  const proto = item.protocol?.trim().toLowerCase() === 'udp' ? 'udp' : 'tcp';
+  const toks = tokensIn(published);
+  if (toks.length) {
+    for (const t of toks) addVar(map, t, 'host_port', item.service, containerPort);
+    return;
+  }
+  const range = literalRange(published);
+  if (!range || containerPort == null) return;
+  fixed.push({
+    service: item.service,
+    containerPort,
+    hostPort: range.start,
+    hostPortEnd: range.end,
+    mode: 'published',
+    protocol: proto,
+    variable: null,
+    adjustable: false,
+    source: 'compose',
   });
 }
 
@@ -169,11 +244,17 @@ export function introspectCompose(text: string): ParsedCompose {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const services = new Set<string>();
   const vars = new Map<string, ReplicatorVariable>();
+  const fixedPorts: ReplicatorFixedPort[] = [];
+  const netHostServices = new Set<string>();
   const envFiles = new Set<string>();
   const warnings: string[] = [];
 
   // Stack of open mapping keys (indent + key), so we know the path to each line.
   const stack: { indent: number; key: string }[] = [];
+  // A long-form ports item is spread across several indented lines; accumulate it
+  // and flush when the next item starts or the `ports:` block closes.
+  let longPort: { service: string | null; target?: string; published?: string; protocol?: string } | null = null;
+  const flushLong = () => { if (longPort) { addLongPort(vars, fixedPorts, longPort); longPort = null; } };
 
   for (const raw of lines) {
     if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
@@ -186,22 +267,36 @@ export function introspectCompose(text: string): ParsedCompose {
     const path = stack.map((f) => f.key);
     const service = path[0] === 'services' ? (path[1] ?? null) : null;
 
+    // Left the ports block → finalize any half-built long-form item.
+    if (longPort && parentKey !== 'ports') flushLong();
+
     // A key whose immediate parent is `services:` is a service name.
     if (keyM && parentKey === 'services') services.add(keyM[1]);
 
     const fieldKey = keyM ? keyM[1] : undefined;
+
+    // `network_mode: host` → the service binds host ports directly (no mapping).
+    if (fieldKey === 'network_mode' && /\bhost\b/.test(keyM![2]) && service) netHostServices.add(service);
 
     // `env_file:` targets, in either compose form: the scalar `env_file: .env`,
     // or a list whose items are bare paths or the long `- path: ./x.env`.
     if (fieldKey === 'env_file' && keyM![2].trim()) addEnvFile(envFiles, keyM![2]);
     else if (parentKey === 'env_file' && listM) addEnvFile(envFiles, listM[1].replace(/^path:\s*/, ''));
 
-    const toks = tokensIn(raw);
-    if (toks.length) {
-      if (parentKey === 'ports' && listM) {
-        // A ports mapping needs per-segment roles (bind IP vs host port vs container port).
-        addPortsTokens(vars, listM[1], service);
-      } else {
+    if (parentKey === 'ports') {
+      // Ports are parsed structurally — whether or not they carry a `${VAR}` —
+      // so literal mappings and ranges are detected, not just parameterized ones.
+      if (listM) {
+        const content = listM[1].trim();
+        const lm = content.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+        if (lm) { flushLong(); longPort = { service }; applyLongField(longPort, lm[1], lm[2]); }
+        else addShortPort(vars, fixedPorts, content, service);
+      } else if (keyM && longPort) {
+        applyLongField(longPort, keyM[1], keyM[2]);
+      }
+    } else {
+      const toks = tokensIn(raw);
+      if (toks.length) {
         let role: ReplicatorVarRole = 'plain';
         if (fieldKey === 'image') role = 'image_tag';
         else if (fieldKey === 'container_name') role = 'container_name';
@@ -212,6 +307,7 @@ export function introspectCompose(text: string): ParsedCompose {
     // Opening a nested block (a key with no inline value) pushes context.
     if (keyM && keyM[2].trim() === '') stack.push({ indent, key: keyM[1] });
   }
+  flushLong();
 
   // Finalize secret flags: a secret-looking name that isn't a managed/port var.
   for (const v of vars.values()) {
@@ -219,20 +315,69 @@ export function introspectCompose(text: string): ParsedCompose {
     else v.secret = v.role === 'secret';
   }
 
-  const hostPorts = [...vars.values()].filter((v) => v.role === 'host_port');
-  if (hostPorts.some((v) => v.containerPort == null)) {
+  // Host-network services publish nothing, so infer the reachable port from a
+  // PORT-style env var when there is an unambiguous one.
+  for (const svc of netHostServices) {
+    const pv = pickPortVar([...vars.values()], svc);
+    if (pv) {
+      const def = Number(pv.default);
+      fixedPorts.push({ service: svc, containerPort: def, hostPort: def, mode: 'host_network', protocol: 'tcp', variable: pv.name, adjustable: true, source: 'compose' });
+    } else {
+      warnings.push(`Service "${svc}" uses host networking; Cerebro could not infer which port it listens on — add a reachable port by hand if you want to set up ingress.`);
+    }
+  }
+
+  const paramHostPorts = [...vars.values()].filter((v) => v.role === 'host_port');
+  if (paramHostPorts.some((v) => v.containerPort == null)) {
     warnings.push('A published-port variable had no detectable container port; defaulting it to the host port at deploy.');
   }
-  if (!hostPorts.length) {
-    warnings.push('No published-port variable detected — this app may not expose a reachable port.');
+  if (!paramHostPorts.length && !fixedPorts.length) {
+    warnings.push('No reachable port detected — this app may not expose a reachable port, or it binds one in a way Cerebro could not read. Add a reachable port by hand to set up ingress.');
   }
 
   return {
     variables: [...vars.values()].sort(sortVars),
+    fixedPorts: dedupeFixed(fixedPorts),
     services: [...services],
     envFiles: [...envFiles],
     warnings,
   };
+}
+
+/** Apply one long-form `ports:` field (`target`/`published`/`protocol`). */
+function applyLongField(item: { target?: string; published?: string; protocol?: string }, key: string, val: string): void {
+  const v = val.trim();
+  if (key === 'target') item.target = v;
+  else if (key === 'published') item.published = v;
+  else if (key === 'protocol') item.protocol = v;
+}
+
+/**
+ * Pick the env var a host-network service listens on: an exact `PORT`, else a
+ * single `*_PORT`/`*PORT` with a numeric default. Deliberately conservative — a
+ * wrong guess would expose the wrong port, so ambiguity yields nothing (and a
+ * warning telling the operator to add it by hand).
+ */
+function pickPortVar(vars: ReplicatorVariable[], service: string): ReplicatorVariable | null {
+  const numeric = (v: ReplicatorVariable) => v.default != null && /^\d+$/.test(String(v.default)) && Number(v.default) > 0;
+  const inSvc = vars.filter((v) => v.role === 'plain' && (v.service === service || v.service == null) && numeric(v));
+  const exact = inSvc.find((v) => v.name === 'PORT');
+  if (exact) return exact;
+  const portish = inSvc.filter((v) => /_?PORT$/i.test(v.name));
+  return portish.length === 1 ? portish[0] : null;
+}
+
+/** Drop duplicate fixed ports (same host port + protocol), keeping the first. */
+function dedupeFixed(ports: ReplicatorFixedPort[]): ReplicatorFixedPort[] {
+  const seen = new Set<string>();
+  const out: ReplicatorFixedPort[] = [];
+  for (const p of ports) {
+    const k = `${p.hostPort}-${p.hostPortEnd ?? ''}-${p.protocol ?? 'tcp'}-${p.mode}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out;
 }
 
 /** Record one `env_file:` path, skipping empties and unresolvable interpolations. */

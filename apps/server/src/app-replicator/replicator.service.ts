@@ -6,7 +6,7 @@ import { dockerTargetFrom } from './docker-target';
 import { ecsProfileFrom, regionOf } from './ecs-target';
 import type {
   IntrospectRepoInput, IntrospectResult, RegisterAppInput, ReplicatorApp, ReplicatorVariable, ReplicatorTarget,
-  ReplicatorSchemaDiff, RefreshSchemaResult,
+  ReplicatorSchemaDiff, RefreshSchemaResult, ReplicatorFixedPort,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow } from '@prisma/client';
 
@@ -47,6 +47,7 @@ export class ReplicatorService {
     if (!input.name?.trim()) throw new BadRequestException('A name is required.');
     if (!input.gitUrl?.trim()) throw new BadRequestException('A git repository URL is required.');
     const variables = sanitizeVariables(input.variables);
+    const fixedPorts = sanitizeFixedPorts(input.fixedPorts);
     const app = await this.prisma.replicatorApp.create({
       data: {
         name: input.name.trim(),
@@ -55,6 +56,7 @@ export class ReplicatorService {
         gitPath: input.gitPath?.trim() || null,
         gitCredKey: input.gitCredKey || null,
         variables: variables as unknown as object,
+        fixedPorts: fixedPorts as unknown as object,
         usesGeneratedCompose: !!input.usesGeneratedCompose,
       },
     });
@@ -71,6 +73,7 @@ export class ReplicatorService {
     if (patch.gitPath !== undefined) data.gitPath = patch.gitPath?.trim() || null;
     if (patch.gitCredKey !== undefined) data.gitCredKey = patch.gitCredKey || null;
     if (patch.variables !== undefined) data.variables = sanitizeVariables(patch.variables) as unknown as object;
+    if (patch.fixedPorts !== undefined) data.fixedPorts = sanitizeFixedPorts(patch.fixedPorts) as unknown as object;
     if (patch.usesGeneratedCompose !== undefined) data.usesGeneratedCompose = !!patch.usesGeneratedCompose;
     const app = await this.prisma.replicatorApp.update({ where: { id }, data });
     const count = await this.prisma.replicatorDeployment.count({ where: { appId: id } });
@@ -96,8 +99,11 @@ export class ReplicatorService {
     });
     const existing = (app.variables as unknown as ReplicatorVariable[]) ?? [];
     const { variables, diff } = mergeSchema(existing, introspected.variables);
+    const existingPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];
+    const fixedPorts = mergeFixedPorts(existingPorts, introspected.fixedPorts);
     return {
       variables,
+      fixedPorts,
       diff,
       composePath: introspected.composePath,
       usesGeneratedCompose: introspected.usesGeneratedCompose,
@@ -150,6 +156,7 @@ export class ReplicatorService {
       gitPath: row.gitPath,
       gitCredKey: row.gitCredKey,
       variables: (row.variables as unknown as ReplicatorVariable[]) ?? [],
+      fixedPorts: (row.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [],
       usesGeneratedCompose: row.usesGeneratedCompose,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -223,4 +230,51 @@ function sanitizeVariables(vars?: ReplicatorVariable[]): ReplicatorVariable[] {
     }))
     // A plain var toggled secret becomes role 'secret'; a secret toggled off becomes 'plain'.
     .map((v) => ({ ...v, role: v.secret && v.role === 'plain' ? 'secret' : !v.secret && v.role === 'secret' ? 'plain' : v.role }));
+}
+
+/** A valid TCP/UDP port number. */
+function validPort(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
+/**
+ * Keep only well-formed fixed ports. Operator-added ports arrive here too (from
+ * the register/refresh form), so this is the edge that validates them: a sane
+ * port number, a sane range, and a known mode.
+ */
+function sanitizeFixedPorts(ports?: ReplicatorFixedPort[]): ReplicatorFixedPort[] {
+  if (!Array.isArray(ports)) return [];
+  const out: ReplicatorFixedPort[] = [];
+  for (const p of ports) {
+    if (!p || !validPort(p.containerPort) || !validPort(p.hostPort)) continue;
+    const mode = p.mode === 'host_network' ? 'host_network' : 'published';
+    const end = validPort(p.hostPortEnd) && p.hostPortEnd! >= p.hostPort ? p.hostPortEnd! : null;
+    const variable = typeof p.variable === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(p.variable) ? p.variable : null;
+    out.push({
+      service: typeof p.service === 'string' ? p.service : null,
+      containerPort: p.containerPort,
+      hostPort: p.hostPort,
+      hostPortEnd: end,
+      mode,
+      protocol: p.protocol === 'udp' ? 'udp' : 'tcp',
+      // A host port that follows an env var is adjustable; a hardcoded one isn't.
+      variable,
+      adjustable: mode === 'host_network' ? !!variable : !!p.adjustable && !!variable,
+      source: p.source === 'manual' ? 'manual' : 'compose',
+    });
+  }
+  return out;
+}
+
+/**
+ * Merge a freshly-introspected fixed-port list onto the stored one. The repo is
+ * authoritative for its own ports, but ports the operator added by hand
+ * (`source: 'manual'`) have no counterpart in the repo, so — like manual
+ * variables — they're carried through a refresh rather than dropped.
+ */
+function mergeFixedPorts(existing: ReplicatorFixedPort[], fresh: ReplicatorFixedPort[]): ReplicatorFixedPort[] {
+  const key = (p: ReplicatorFixedPort) => `${p.hostPort}-${p.hostPortEnd ?? ''}-${p.protocol ?? 'tcp'}-${p.mode}`;
+  const freshKeys = new Set(fresh.map(key));
+  const manual = (existing ?? []).filter((p) => p.source === 'manual' && !freshKeys.has(key(p)));
+  return sanitizeFixedPorts([...fresh, ...manual]);
 }

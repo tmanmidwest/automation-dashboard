@@ -19,7 +19,7 @@ import type { DeployTarget, DestroyContext } from './deploy-target';
 import type {
   DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
   ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs, ExtraEnvEntry,
-  DeploymentEnvView, DeploymentEnvEntry, DeploymentEnvOrigin, DeploymentEnvDrift,
+  DeploymentEnvView, DeploymentEnvEntry, DeploymentEnvOrigin, DeploymentEnvDrift, ReplicatorFixedPort,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
 
@@ -163,7 +163,8 @@ export class DeploymentService {
     if (clash) throw new BadRequestException(`A deployment named "${project}" already exists on that target.`);
 
     // Resolve ports; Docker preflights them against the host (ECS has no host ports).
-    const portList = this.resolvePorts(variables, input.ports);
+    const fixedPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];
+    const portList = this.resolvePorts(variables, fixedPorts, input.ports, input.values);
     if (targetKind === 'docker') {
       const target = await this.targetFor(input.dockerInstanceId);
       await this.preflightPorts(target, portList);
@@ -265,13 +266,9 @@ export class DeploymentService {
     if (opts.edit) {
       // Ports: keep each stored port unless the operator supplied a new one. Preflight
       // against the host, treating this deployment's OWN current ports as free.
-      const chosenPorts: Record<string, number> = {};
-      for (const p of portList) chosenPorts[p.variable] = p.hostPort;
-      for (const [name, val] of Object.entries(opts.ports ?? {})) if (val != null) chosenPorts[name] = Number(val);
-      const newPortList = this.resolvePorts(variables, chosenPorts);
-      if (target) await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
-
-      // Non-secret values: merge provided plain/host_ip values over the stored ones.
+      //
+      // Values first — a host-network port's effective host port follows its env
+      // var (e.g. PORT), so the merged values must be known before resolving ports.
       const mergedValues: Record<string, string> = { ...nonSecretValues };
       for (const v of variables) {
         if (v.role !== 'plain' && v.role !== 'host_ip') continue;
@@ -280,6 +277,15 @@ export class DeploymentService {
         if (provided === '') delete mergedValues[v.name]; // cleared → fall back to repo default
         else mergedValues[v.name] = String(provided);
       }
+
+      const chosenPorts: Record<string, number> = {};
+      // Only adjustable, variable-backed published ports carry a chosen host port;
+      // host-network ports track their env var and fixed literals can't move.
+      for (const p of portList) if (p.variable && p.mode !== 'host_network' && p.adjustable !== false) chosenPorts[p.variable] = p.hostPort;
+      for (const [name, val] of Object.entries(opts.ports ?? {})) if (val != null) chosenPorts[name] = Number(val);
+      const fixedPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];
+      const newPortList = this.resolvePorts(variables, fixedPorts, chosenPorts, mergedValues);
+      if (target) await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
 
       // Required-value validation, accounting for an already-stored secret.
       const missing = variables
@@ -670,17 +676,47 @@ export class DeploymentService {
     return new Map(list.map((i) => [i.id, i.name]));
   }
 
-  private resolvePorts(variables: ReplicatorVariable[], chosen: Record<string, number>): ReplicatorPort[] {
-    return variables
-      .filter((v) => v.role === 'host_port')
-      .map((v) => {
-        const cport = v.containerPort ?? Number(v.default) ?? 8080;
-        const hostPort = Number(chosen[v.name] ?? v.default ?? cport);
-        if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535) {
-          throw new BadRequestException(`Invalid host port for ${v.name}.`);
-        }
-        return { service: v.service ?? 'app', variable: v.name, hostPort, containerPort: cport };
+  /**
+   * Resolve the deployment's reachable ports from the app schema. Parameterized
+   * `host_port` variables take the operator's chosen host port (as before); fixed
+   * ports pass through, except a host-network port whose host port follows an env
+   * var, which tracks that var's chosen value. All of them land in the stored
+   * `ports` list so the host-port preflight and ingress can see every port,
+   * however the repo declared it.
+   */
+  private resolvePorts(
+    variables: ReplicatorVariable[],
+    fixedPorts: ReplicatorFixedPort[],
+    chosen: Record<string, number>,
+    values: Record<string, string>,
+  ): ReplicatorPort[] {
+    const out: ReplicatorPort[] = [];
+    for (const v of variables.filter((x) => x.role === 'host_port')) {
+      const cport = v.containerPort ?? Number(v.default) ?? 8080;
+      const hostPort = Number(chosen[v.name] ?? v.default ?? cport);
+      if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535) {
+        throw new BadRequestException(`Invalid host port for ${v.name}.`);
+      }
+      out.push({ service: v.service ?? 'app', variable: v.name, hostPort, containerPort: cport, mode: 'published', adjustable: true });
+    }
+    for (const p of fixedPorts ?? []) {
+      let hostPort = p.hostPort;
+      if (p.mode === 'host_network' && p.variable) {
+        const chosenVal = Number(values[p.variable] ?? p.hostPort);
+        if (Number.isInteger(chosenVal) && chosenVal >= 1 && chosenVal <= 65535) hostPort = chosenVal;
+      }
+      out.push({
+        service: p.service ?? 'app',
+        variable: p.variable ?? null,
+        hostPort,
+        containerPort: p.containerPort,
+        mode: p.mode,
+        adjustable: p.adjustable,
+        hostPortEnd: p.hostPortEnd ?? null,
+        protocol: p.protocol,
       });
+    }
+    return out;
   }
 
   private async preflightPorts(target: DockerTarget, portList: ReplicatorPort[], exclude?: Set<number>): Promise<void> {
@@ -690,6 +726,9 @@ export class DeploymentService {
     const seen = new Set<number>();
     const conflicts: string[] = [];
     for (const p of portList) {
+      // Host-network ports aren't a published mapping — the app binds the port
+      // itself and we can't remap it, so a conflict there isn't ours to flag here.
+      if (p.mode === 'host_network') continue;
       if (seen.has(p.hostPort)) conflicts.push(`${p.hostPort} (assigned twice in this deployment)`);
       else if (used.has(p.hostPort)) conflicts.push(`${p.hostPort} (already in use on the host)`);
       seen.add(p.hostPort);

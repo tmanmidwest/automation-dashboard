@@ -89,6 +89,7 @@ export class RepoIntrospectService {
         const env = await this.readEnvFiles(repoDir, composePath, parsed.envFiles);
         return {
           variables: mergeEnvFileVars(parsed.variables, env.variables),
+          fixedPorts: parsed.fixedPorts,
           services: parsed.services,
           composePath,
           usesGeneratedCompose: false,

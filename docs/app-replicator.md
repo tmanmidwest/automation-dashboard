@@ -75,7 +75,8 @@ interface VariableSpec {
 ```
 
 Role detection:
-- **host_port** — the variable appears on the left side of a `ports:` `"${X}:NNNN"` mapping.
+- **host_port** — the variable appears on the host side of a `ports:` `"${X}:NNNN"` mapping. Ports
+  that don't interpolate a variable are handled separately — see *Reachable ports* below.
 - **image_tag** / **container_name** — appears in `image:` / `container_name:`. These are
   **auto-managed** per deployment (Cerebro sets them so instances never collide); hidden from the
   user form.
@@ -89,6 +90,47 @@ Role detection:
 
 A multi-service app (the demo publishes **two** ports — `hr-sot:8000` and `hr-mcp:8100`) yields
 **two** `host_port` specs. Ingress is therefore modeled **per published port**, not per app.
+
+### Reachable ports (not just `${VAR}` mappings)
+
+`host_port` above only covers a port whose **host** side interpolates a `${VAR}` — the shape an app
+written *for* Cerebro uses. Real-world repos bind ports every other way, and those were silently
+missed (a repo with a hardcoded `8123:8123`, or `network_mode: host`, registered with nothing to
+expose, so ingress couldn't be set up). The introspector now parses `ports:` **structurally**,
+whether or not a `${VAR}` is present, and anything not backed by an adjustable variable becomes a
+**`ReplicatorFixedPort`** (stored on the app alongside its variable schema, since deploy reads the
+stored schema rather than re-reading the repo):
+
+| Compose shape | Becomes |
+| --- | --- |
+| `"${APP_PORT:-8080}:80"` | a `host_port` **variable** (adjustable per deployment) — unchanged |
+| `"8123:8123"` (literal) | a fixed port, `adjustable: false` — can't be remapped per instance |
+| `"3000-3002:3000-3002"` | a fixed port range |
+| `"51820:51820/udp"` | a fixed port, `protocol: 'udp'` |
+| `target:/published:` long form | parsed the same way (literal → fixed, `${VAR}` → variable) |
+| `network_mode: host` | a **host-network** fixed port, its number inferred from a `PORT`-style env var |
+| `"8080"` (container-only) | **skipped** — Docker assigns an ephemeral host port, nothing to target |
+
+**Host-network inference is deliberately conservative.** A service with `network_mode: host` binds
+the host directly, so there's no mapping to read; Cerebro takes the port from an env var named
+exactly `PORT`, or a single `*_PORT` with a numeric default (bambuddy's `PORT=${PORT:-8000}`). When
+that var is adjustable the reachable port tracks the operator's chosen value. If it's ambiguous,
+Cerebro infers nothing and warns, rather than guessing the wrong port.
+
+**Fixed ports still preflight** against the host (so a literal-port collision is caught before
+deploy) — except host-network ports, which Cerebro can't remap and so doesn't block on. All of them
+land in the deployment's stored `ports`, so the host-port preflight and the ingress picker see every
+reachable port however the repo declared it.
+
+**The escape hatch.** No heuristic covers every repo, so the register and refresh dialogs carry an
+**Add a reachable port** control (host port, container port, published vs host-network). A
+hand-added port is `source: 'manual'` and, like a hand-added variable, survives a schema refresh.
+This is what keeps a repo that binds its port in some unreadable way from being a dead end.
+
+**The remaining limitation:** a *hardcoded* host port can't be moved (Cerebro doesn't rewrite the
+compose), so you can't run two instances of such an app on one host — the preflight will correctly
+refuse the second. A `docker-compose.override.yml` that remaps it is a possible follow-up; it's
+purely additive on top of this.
 
 ### Env files (`env_file:` / `.env.example`)
 
