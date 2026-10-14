@@ -40,6 +40,10 @@ services:
       GUACD_HOST: ${GUACD_HOST:-guacd}
       GUACD_PORT: ${GUACD_PORT:-4822}
       FABRIC_GUACD_CALLBACK_HOST: ${FABRIC_GUACD_CALLBACK_HOST:-}
+      # Security mode for one-click Remote Desktop (the real-session gnome-remote-desktop path).
+      # grd authenticates with NLA/CredSSP, so "nla" is the default; override to tls|any|rdp if a
+      # particular GNOME build negotiates differently. Does not affect normal RDP routes.
+      FABRIC_DESKTOP_RDP_SECURITY: ${FABRIC_DESKTOP_RDP_SECURITY:-nla}
       # Fabric scaling knobs. Raise the heartbeat interval to cut per-agent liveness
       # DB writes when many agents are enrolled (agents adopt it on their next hello);
       # FABRIC_POLL_MS slows how often the /fabric screen refreshes the agent list.

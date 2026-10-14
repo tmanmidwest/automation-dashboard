@@ -411,9 +411,15 @@ export class AgentRegistryService {
     // targets are operator-curated only.
     const agent = await this.prisma.agent.findUnique({
       where: { id: agentId },
-      select: { mode: true },
+      select: { mode: true, os: true },
     });
     if (agent?.mode === 'waypoint') return;
+    // On a Linux box the one-click Remote Desktop owns the GUI: it enables gnome-remote-desktop
+    // on loopback 3389 itself. The port-probe would then auto-advertise a raw `RDP :3389` route,
+    // but that route's generic Connect defaults to a security mode grd rejects (grd needs NLA) —
+    // so it's a dead-looking duplicate of the Remote Desktop button. Suppress it on Linux
+    // endpoints (users reach the Linux desktop via Remote Desktop). See docs/fabric-remote-desktop.md.
+    const suppressLinuxRdp = agent?.os === 'linux';
     for (const t of targets) {
       if (t.kind !== 'ssh' && t.kind !== 'rdp' && t.kind !== 'vnc') continue;
       // An endpoint agent only ever proxies its own loopback services (its allow-list
@@ -422,12 +428,20 @@ export class AgentRegistryService {
       const host = '127.0.0.1';
       const port = Number(t.port);
       if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
+      if (suppressLinuxRdp && t.kind === 'rdp' && port === 3389) continue;
       await this.prisma.agentTarget
         .upsert({
           where: { agentId_kind_host_port: { agentId, kind: t.kind, host, port } },
           update: { label: t.label ?? undefined },
           create: { agentId, kind: t.kind, host, port, label: t.label ?? null },
         })
+        .catch(() => undefined);
+    }
+    // Reap any phantom `RDP :3389` row created on a Linux endpoint before this rule existed
+    // (syncTargets only upserts, so stale discovered rows never prune themselves).
+    if (suppressLinuxRdp) {
+      await this.prisma.agentTarget
+        .deleteMany({ where: { agentId, kind: 'rdp', host: '127.0.0.1', port: 3389 } })
         .catch(() => undefined);
     }
   }
