@@ -206,6 +206,29 @@ export interface ExtraEnvEntry {
   secret: boolean;
 }
 
+/**
+ * One operator-added volume mount on a deployment. The compose file is the shared
+ * app manifest, so it can't know host-specific paths — a NAS share, a local data
+ * directory — and those differ per instance anyway, so a mount lives on the
+ * deployment rather than the app (same reasoning as an extra env entry). Cerebro
+ * writes these into a generated `docker-compose.override.yml` merged at
+ * `docker compose up` time, leaving the repo's own compose untouched so a schema
+ * refresh or an upstream change never clobbers them. Docker target only — ECS /
+ * Fargate has no host filesystem to bind.
+ */
+export interface ReplicatorMount {
+  /** The compose service the mount attaches to (a real service name in the repo's compose). */
+  service: string;
+  /** 'bind' = an existing absolute host path; 'volume' = a Docker named volume (declared top-level). */
+  type: 'bind' | 'volume';
+  /** For 'bind': an absolute host path that must already exist. For 'volume': the volume name. */
+  source: string;
+  /** Absolute path inside the container. */
+  target: string;
+  /** Mount read-only (`:ro`) — recommended for shares the app shouldn't write to. */
+  readOnly: boolean;
+}
+
 export type ReplicatorDeploymentStatus = 'pending' | 'deployed' | 'error' | 'updating' | 'stopped';
 
 /** One running instance of an app on a target host. */
@@ -237,6 +260,8 @@ export interface ReplicatorDeployment {
   extraEnv: Record<string, string>;
   /** Names of operator-added entries whose values live in the vault. */
   extraSecretVars: string[];
+  /** Operator-added volume mounts (bind/named) layered on via a compose override. Docker only. */
+  extraMounts: ReplicatorMount[];
   ports: ReplicatorPort[];
   status: ReplicatorDeploymentStatus;
   /** Live sub-step while a deploy/redeploy runs (e.g. "Building images…"); null when settled. */
@@ -339,6 +364,8 @@ export interface DeployInput {
   ports: Record<string, number>;
   /** Env entries beyond the app's schema, added by the operator for this instance. */
   extraEnv?: ExtraEnvEntry[];
+  /** Volume mounts to layer on for this instance (bind/named). Docker target only. */
+  mounts?: ReplicatorMount[];
   /** `docker compose build --no-cache` — for repos that build their own image. */
   forceRebuild?: boolean;
   /** ECS only: Fargate task CPU units (e.g. '256'); default 256. */
@@ -371,6 +398,13 @@ export interface RedeployInput {
    * fall back to, so removal has to be expressible.
    */
   extraEnv?: ExtraEnvEntry[];
+  /**
+   * The complete set of volume mounts after the edit — it **replaces** the stored
+   * ones (an omitted mount is removed), for the same reason as `extraEnv`: a mount
+   * has no repo manifest to fall back to, so removal has to be expressible.
+   * Omit the field entirely to leave the stored mounts untouched.
+   */
+  mounts?: ReplicatorMount[];
 }
 
 /** A suggested free host port for one host_port variable. */

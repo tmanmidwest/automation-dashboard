@@ -39,6 +39,13 @@ export interface StackGitSource {
   /** Vault secret key (kind='git') to authenticate a private repo; null = public. */
   credKey?: string | null;
   env?: string;
+  /**
+   * An extra compose file merged over the repo's own at `up` time (a generated
+   * `docker-compose.override.yml`). Used by the App Replicator to layer on
+   * operator-added volume mounts without editing the repo. Absent/empty removes
+   * any override previously written for this stack.
+   */
+  overrideCompose?: string;
 }
 
 /**
@@ -245,6 +252,9 @@ export class DockerStackService {
     const composeFile = `${dir}/${relCompose}`;
     const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
     const credFile = `${base}/.gitcred`;
+    // Cerebro's generated compose override lives beside the repo (not inside it, so
+    // a `git reset --hard` can't touch it) and is passed as an extra `-f`.
+    const overrideFile = `${base}/cerebro.override.yml`;
 
     // Resolve the vault Git credential (kind='git' JSON), if any.
     let cred: GitCredential | null = null;
@@ -283,9 +293,22 @@ export class DockerStackService {
         if (we.code !== 0) throw new Error('Failed to write the .env file on the host.');
       }
 
+      // Write (or clear) the Cerebro-generated compose override, and build the
+      // `-f` list — the base repo compose first (sets the project directory), then
+      // the override merged over it.
+      let composeArgs = `-f '${composeFile}'`;
+      if (src.overrideCompose != null && src.overrideCompose.trim() !== '') {
+        const wo = await runSsh(target.ssh, `mkdir -p '${base}' && cat > '${overrideFile}'`, src.overrideCompose);
+        if (wo.code !== 0) throw new Error('Failed to write the compose override file on the host.');
+        composeArgs += ` -f '${overrideFile}'`;
+      } else {
+        // No override now — remove any stale one so a removed mount actually goes away.
+        await runSsh(target.ssh, `rm -f '${overrideFile}'`).catch(() => { /* best-effort */ });
+      }
+
       // Validate, then optional force-rebuild, then up.
       onProgress?.('Validating compose…');
-      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' config -q`);
+      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} config -q`);
       if (cfg.code !== 0) {
         const detail = tail(cfg.stderr || cfg.stdout, 2000);
         await this.record(instanceId, project, 'error', detail);
@@ -293,7 +316,7 @@ export class DockerStackService {
       }
       if (opts.forceRebuild) {
         onProgress?.('Building images…');
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
@@ -301,7 +324,7 @@ export class DockerStackService {
         }
       }
       onProgress?.('Starting containers…');
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${composeFile}' up -d ${composeUpFlags(opts)}`.trim(), undefined, UP_TIMEOUT_MS);
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} up -d ${composeUpFlags(opts)}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);

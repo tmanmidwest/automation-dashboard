@@ -13,12 +13,13 @@ import { DockerDeployTarget } from './docker-deploy-target';
 import { EcsDeployTarget } from './ecs-deploy-target';
 import { ecsProfileFrom } from './ecs-target';
 import { buildEnvMap, escapeEnvValue } from './deploy-target';
+import { sanitizeMounts } from './compose-override';
 import { parseDotenv } from './compose-introspect';
 import { runSsh } from '../connectors/docker/docker-ssh';
 import type { DeployTarget, DestroyContext } from './deploy-target';
 import type {
   DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
-  ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs, ExtraEnvEntry,
+  ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs, ExtraEnvEntry, ReplicatorMount,
   DeploymentEnvView, DeploymentEnvEntry, DeploymentEnvOrigin, DeploymentEnvDrift, ReplicatorFixedPort,
 } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
@@ -70,6 +71,25 @@ function splitExtras(
     }
   }
   return { values, secrets, secretNames };
+}
+
+/**
+ * The real compose service names an app exposes, gathered from everywhere Cerebro
+ * records them (schema variables, fixed ports, resolved ports). A mount must
+ * attach to one of these so the generated override never invents a phantom,
+ * image-less service. Empty when detection found none — then any service is
+ * allowed (see `sanitizeMounts`).
+ */
+function knownServicesOf(
+  variables: ReplicatorVariable[],
+  fixedPorts: ReplicatorFixedPort[],
+  portList: ReplicatorPort[] = [],
+): Set<string> {
+  const s = new Set<string>();
+  for (const v of variables) if (v.service) s.add(v.service);
+  for (const p of fixedPorts) if (p.service) s.add(p.service);
+  for (const p of portList) if (p.service) s.add(p.service);
+  return s;
 }
 
 /**
@@ -197,6 +217,15 @@ export class DeploymentService {
       throw new BadRequestException(`Give the extra secret variable(s) a value: ${blankExtraSecret.join(', ')}.`);
     }
 
+    // Operator-added volume mounts. A host bind only makes sense on a Docker host;
+    // ECS/Fargate has no host filesystem, so reject them there rather than ignore.
+    if (targetKind !== 'docker' && (input.mounts?.length ?? 0) > 0) {
+      throw new BadRequestException('Volume mounts are only supported on Docker-host deployments, not ECS/Fargate.');
+    }
+    const mounts = targetKind === 'docker'
+      ? sanitizeMounts(input.mounts, knownServicesOf(variables, fixedPorts, portList))
+      : [];
+
     const row = await this.prisma.replicatorDeployment.create({
       data: {
         appId: app.id,
@@ -208,6 +237,7 @@ export class DeploymentService {
         secretVars,
         extraEnv: extras.values,
         extraSecretVars: extras.secretNames,
+        extraMounts: mounts as unknown as object,
         ports: portList as unknown as object,
         status: 'pending',
         phase: 'Queued…',
@@ -234,6 +264,7 @@ export class DeploymentService {
       deploymentId: row.id, app, variables, project, targetKind, targetInstanceId: input.dockerInstanceId,
       portList, values: nonSecretValues, secrets: input.secrets,
       extras: { ...extras.values, ...extras.secrets },
+      mounts,
       forceRebuild: !!input.forceRebuild,
       taskCpu: input.taskCpu, taskMemory: input.taskMemory, actor, kind: 'deploy',
     });
@@ -260,6 +291,7 @@ export class DeploymentService {
     const stored = await this.resolveStored(row);
     const secrets = stored.secrets;
     let extras = stored.extras;
+    let mounts = (row.extraMounts as unknown as ReplicatorMount[]) ?? [];
 
     // Edit mode: merge the supplied changes over the stored config, validate, and
     // persist BEFORE running — so a failed validation never mutates the deployment.
@@ -336,9 +368,20 @@ export class DeploymentService {
         if (!keptSecrets.has(name)) await this.secrets.remove(secretKey(row.id, name), actor).catch(() => {});
       }
 
+      // Volume mounts replace the stored set (same as extras): the operator edits
+      // the whole list, so an omitted mount is dropped. Leaving the field out of
+      // the request keeps the stored mounts untouched.
+      if (targetKind !== 'docker' && (opts.mounts?.length ?? 0) > 0) {
+        throw new BadRequestException('Volume mounts are only supported on Docker-host deployments, not ECS/Fargate.');
+      }
+      const nextMounts = opts.mounts === undefined
+        ? mounts
+        : sanitizeMounts(opts.mounts, knownServicesOf(variables, fixedPorts, newPortList));
+
       portList = newPortList;
       nonSecretValues = mergedValues;
       extras = resolvedExtras;
+      mounts = nextMounts;
       await this.prisma.replicatorDeployment.update({
         where: { id: row.id },
         data: {
@@ -347,6 +390,7 @@ export class DeploymentService {
           secretVars: [...secretVarSet],
           extraEnv: nextExtras.values,
           extraSecretVars: nextExtras.secretNames,
+          extraMounts: nextMounts as unknown as object,
         },
       });
     }
@@ -354,7 +398,7 @@ export class DeploymentService {
     const updated = await this.prisma.replicatorDeployment.update({ where: { id: row.id }, data: { status: 'updating', phase: 'Queued…' } });
     void this.runDeployment({
       deploymentId: row.id, app, variables, project: row.project, targetKind, targetInstanceId: row.dockerInstanceId,
-      portList, values: nonSecretValues, secrets, extras, forceRebuild: !!opts.forceRebuild,
+      portList, values: nonSecretValues, secrets, extras, mounts, forceRebuild: !!opts.forceRebuild,
       existingEcs: (row.ecs as unknown as EcsDeploymentRefs | null) ?? null, actor, kind: 'redeploy',
     });
     return this.map(updated, app.name);
@@ -369,10 +413,10 @@ export class DeploymentService {
     deploymentId: string; app: AppRow; variables: ReplicatorVariable[]; project: string;
     targetKind: TargetKind; targetInstanceId: string;
     portList: ReplicatorPort[]; values: Record<string, string>; secrets: Record<string, string>;
-    extras: Record<string, string>;
+    extras: Record<string, string>; mounts: ReplicatorMount[];
     forceRebuild: boolean; taskCpu?: string; taskMemory?: string; existingEcs?: EcsDeploymentRefs | null; actor: ActorCtx; kind: 'deploy' | 'redeploy';
   }): Promise<void> {
-    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, extras, forceRebuild, taskCpu, taskMemory, existingEcs, actor, kind } = args;
+    const { deploymentId, app, variables, project, targetKind, targetInstanceId, portList, values, secrets, extras, mounts, forceRebuild, taskCpu, taskMemory, existingEcs, actor, kind } = args;
     const setPhase = (phase: string | null) => {
       void this.prisma.replicatorDeployment.update({ where: { id: deploymentId }, data: { phase } }).catch(() => {});
       if (phase) void this.logging.info('replicator', `[${project}] ${phase}`);
@@ -387,7 +431,7 @@ export class DeploymentService {
         {
           deploymentId, targetInstanceId, project,
           source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey },
-          variables, portList, values, secrets, extras, forceRebuild, taskCpu, taskMemory, existingEcs,
+          variables, portList, values, secrets, extras, mounts, forceRebuild, taskCpu, taskMemory, existingEcs,
         },
         (phase) => setPhase(phase),
       );
@@ -764,6 +808,7 @@ export class DeploymentService {
       secretVars: row.secretVars ?? [],
       extraEnv: (row.extraEnv as unknown as Record<string, string>) ?? {},
       extraSecretVars: row.extraSecretVars ?? [],
+      extraMounts: (row.extraMounts as unknown as ReplicatorMount[]) ?? [],
       ports: (row.ports as unknown as ReplicatorPort[]) ?? [],
       status: row.status as ReplicatorDeploymentStatus,
       phase: row.phase,

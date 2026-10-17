@@ -370,6 +370,9 @@ model ReplicatorDeployment {
   /// Names of operator-added entries whose values live in the vault, in the same
   /// `deployment:<id>:<name>` namespace as `secretVars`.
   extraSecretVars  String[]            @default([])
+  /// Operator-added volume mounts (ReplicatorMount[]) as JSON, layered on via a
+  /// generated docker-compose.override.yml at deploy time. Docker target only.
+  extraMounts      Json                @default("[]")
   /// Published ports (ReplicatorPort[]) as JSON.
   ports            Json                @default("[]")
   status           String              @default("pending")

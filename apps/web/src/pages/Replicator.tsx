@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil, FileText, Lock } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil, FileText, Lock, HardDrive } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
-  DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin, ReplicatorFixedPort,
+  DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin, ReplicatorFixedPort, ReplicatorMount,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -544,7 +544,12 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   const [values, setValues] = useState<Record<string, string>>({});
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [extras, setExtras] = useState<ExtraRow[]>([]);
+  const [mounts, setMounts] = useState<MountRow[]>([]);
   const schemaNames = useMemo(() => new Set(app.variables.map((v) => v.name)), [app.variables]);
+  const serviceOptions = useMemo(
+    () => [...new Set([...app.variables.map((v) => v.service), ...app.fixedPorts.map((p) => p.service)].filter((s): s is string => !!s))],
+    [app.variables, app.fixedPorts],
+  );
   const [ports, setPorts] = useState<Record<string, number>>({});
   const [taskCpu, setTaskCpu] = useState('256');
   const [taskMemory, setTaskMemory] = useState('512');
@@ -600,7 +605,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
       await api.post(`/api/replicator/apps/${app.id}/deploy`, {
         dockerInstanceId: instanceId, targetKind, name, values, secrets,
         ports: isEcs ? {} : ports, forceRebuild, extraEnv: extraEntriesOf(extras),
-        ...(isEcs ? { taskCpu, taskMemory } : {}),
+        ...(isEcs ? { taskCpu, taskMemory } : { mounts: mountEntriesOf(mounts) }),
       });
       onDeployed();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Deploy failed.'); setBusy(false); }
@@ -705,6 +710,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
               </div>
             )}
             <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} />
+            {!isEcs && <MountsEditor rows={mounts} onChange={setMounts} services={serviceOptions} />}
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
               Force rebuild image{isEcs ? '' : 's'} (repos that build their own image)
@@ -747,7 +753,13 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
   const [extras, setExtras] = useState<ExtraRow[]>(
     () => extraRowsFrom(deployment.extraEnv, deployment.extraSecretVars),
   );
+  const [mounts, setMounts] = useState<MountRow[]>(() => mountRowsFrom(deployment.extraMounts));
   const schemaNames = useMemo(() => new Set(app.variables.map((v) => v.name)), [app.variables]);
+  const serviceOptions = useMemo(
+    () => [...new Set([...app.variables.map((v) => v.service), ...app.fixedPorts.map((p) => p.service)].filter((s): s is string => !!s))],
+    [app.variables, app.fixedPorts],
+  );
+  const isEcs = (deployment.targetKind ?? 'docker') === 'ecs';
   const [forceRebuild, setForceRebuild] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -756,6 +768,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
     try {
       await api.post(`/api/replicator/deployments/${deployment.id}/redeploy`, {
         edit: true, values, secrets, ports, forceRebuild, extraEnv: extraEntriesOf(extras),
+        ...(isEcs ? {} : { mounts: mountEntriesOf(mounts) }),
       });
       onDone();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Redeploy failed.'); setBusy(false); }
@@ -763,7 +776,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
 
   return (
     <Dialog open onClose={onClose} size="lg" title={`Edit & redeploy · ${deployment.project}`}
-      description="Change values, rotate secrets, move host ports, or edit this instance's extra environment, then redeploy. The stack restarts with the new config."
+      description="Change values, rotate secrets, move host ports, or edit this instance's extra environment and volume mounts, then redeploy. The stack restarts with the new config."
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -789,6 +802,7 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
           ))}
         </div>
         <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} allowKeepBlank />
+        {!isEcs && <MountsEditor rows={mounts} onChange={setMounts} services={serviceOptions} />}
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input type="checkbox" checked={forceRebuild} onChange={(e) => setForceRebuild(e.target.checked)} />
           Force rebuild images (repos that build their own image)
@@ -1587,6 +1601,117 @@ function ExtraEnvEditor({ rows, onChange, schemaNames, allowKeepBlank }: {
               <Button type="button" size="sm" variant="ghost" onClick={() => setPasting(true)}>Paste .env</Button>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Volume mounts (per-deployment additions) ────────────────────────
+//
+// The repo's compose is the shared app manifest, so it can't carry host-specific
+// paths — a NAS share, a local data dir — and those differ per instance anyway.
+// These mounts are layered on via a generated compose override at deploy time; the
+// repo's own compose is never edited. Docker target only.
+
+/** A row in the mounts grid. */
+interface MountRow { id: number; service: string; type: 'bind' | 'volume'; source: string; target: string; readOnly: boolean }
+
+let mountRowSeq = 0;
+const nextMountRowId = () => ++mountRowSeq;
+
+/** Rebuild the grid from a deployment's stored mounts. */
+function mountRowsFrom(mounts: ReplicatorMount[] | undefined): MountRow[] {
+  return (mounts ?? []).map((m) => ({ id: nextMountRowId(), service: m.service, type: m.type, source: m.source, target: m.target, readOnly: m.readOnly }));
+}
+
+/** Grid rows → the wire shape, dropping rows the operator left blank. */
+function mountEntriesOf(rows: MountRow[]): ReplicatorMount[] {
+  return rows
+    .filter((r) => r.source.trim() && r.target.trim())
+    .map((r) => ({ service: r.service.trim(), type: r.type, source: r.source.trim(), target: r.target.trim(), readOnly: r.readOnly }));
+}
+
+function MountsEditor({ rows, onChange, services }: {
+  rows: MountRow[]; onChange: (next: MountRow[]) => void;
+  /** Known compose service names, offered as suggestions for the service field. */
+  services: string[];
+}) {
+  const [open, setOpen] = useState(rows.length > 0);
+  const listId = 'mount-services';
+
+  const patch = (id: number, next: Partial<MountRow>) => onChange(rows.map((r) => (r.id === id ? { ...r, ...next } : r)));
+  const add = () => onChange([...rows, { id: nextMountRowId(), service: services[0] ?? '', type: 'bind', source: '', target: '', readOnly: false }]);
+  const remove = (id: number) => onChange(rows.filter((r) => r.id !== id));
+
+  const problem = (r: MountRow): string | null => {
+    const source = r.source.trim();
+    const target = r.target.trim();
+    if (!source && !target) return null; // an untouched blank row is dropped, not an error
+    if (!r.service.trim()) return 'Pick a service.';
+    if (!source) return r.type === 'bind' ? 'The host path is required.' : 'The volume name is required.';
+    if (!target) return 'The container path is required.';
+    if (!target.startsWith('/')) return 'The container path must be absolute (start with /).';
+    if (r.type === 'bind' && !source.startsWith('/')) return 'The host path must be absolute (start with /).';
+    if (rows.filter((o) => o.service.trim() === r.service.trim() && o.target.trim() === target).length > 1) return `${r.service.trim()} already has a mount at ${target}.`;
+    return null;
+  };
+
+  const named = rows.filter((r) => r.source.trim() || r.target.trim()).length;
+
+  return (
+    <div className="rounded-lg border border-border/60">
+      <datalist id={listId}>{services.map((s) => <option key={s} value={s} />)}</datalist>
+      <button type="button" className="w-full flex items-center justify-between px-3 py-2 text-sm"
+        onClick={() => setOpen((o) => !o)}>
+        <span className="flex items-center gap-2">
+          <HardDrive className="h-4 w-4 text-muted-foreground" />
+          Volumes &amp; mounts
+          {named > 0 && <span className="text-xs text-muted-foreground">{named} mount{named === 1 ? '' : 's'}</span>}
+        </span>
+        <span className="text-xs text-muted-foreground">{open ? 'Hide' : 'Show'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Mount a host path (e.g. a NAS share already mounted on the Docker host) or a Docker named volume into a
+            container. Layered on at deploy via a compose override — the repo’s own compose is untouched. A bind’s host
+            path must already exist on the host.
+          </p>
+
+          {rows.map((r) => {
+            const err = problem(r);
+            return (
+              <div key={r.id} className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <select className="h-9 rounded-md border border-input bg-background/60 px-2 text-xs"
+                    value={r.type} onChange={(e) => patch(r.id, { type: e.target.value as 'bind' | 'volume' })}>
+                    <option value="bind">bind</option>
+                    <option value="volume">volume</option>
+                  </select>
+                  <Input className="w-28 font-mono text-xs" value={r.service} placeholder="service" list={listId}
+                    onChange={(e) => patch(r.id, { service: e.target.value })} />
+                  <Input className="flex-1 min-w-[9rem] font-mono text-xs" value={r.source}
+                    placeholder={r.type === 'bind' ? '/mnt/nas/share' : 'volume-name'}
+                    onChange={(e) => patch(r.id, { source: e.target.value })} />
+                  <span className="text-muted-foreground text-xs">→</span>
+                  <Input className="flex-1 min-w-[9rem] font-mono text-xs" value={r.target} placeholder="/data"
+                    onChange={(e) => patch(r.id, { target: e.target.value })} />
+                  <label className="flex items-center gap-1.5 text-xs cursor-pointer shrink-0">
+                    <input type="checkbox" checked={r.readOnly} onChange={(e) => patch(r.id, { readOnly: e.target.checked })} /> ro
+                  </label>
+                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                    aria-label="Remove mount" title="Remove this mount" onClick={() => remove(r.id)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {err && <p className="text-xs text-destructive">{err}</p>}
+              </div>
+            );
+          })}
+
+          <Button type="button" size="sm" variant="outline" onClick={add}><Plus className="h-4 w-4" /> Add mount</Button>
         </div>
       )}
     </div>

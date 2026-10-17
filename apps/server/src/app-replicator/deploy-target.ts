@@ -1,4 +1,4 @@
-import type { ReplicatorVariable, ReplicatorPort, EcsDeploymentRefs, TargetKind } from '@cerebro/shared';
+import type { ReplicatorVariable, ReplicatorPort, EcsDeploymentRefs, TargetKind, ReplicatorMount } from '@cerebro/shared';
 
 export type { EcsDeploymentRefs };
 
@@ -120,6 +120,8 @@ export interface DeploySpec {
   secrets: Record<string, string>;
   /** Operator-added env entries, resolved to plaintext (secrets revealed). */
   extras: Record<string, string>;
+  /** Operator-added volume mounts, validated. Docker materializes them via a compose override; ECS ignores them. */
+  mounts: ReplicatorMount[];
   forceRebuild: boolean;
   /** ECS only. */
   taskCpu?: string;

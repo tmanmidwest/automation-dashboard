@@ -4,6 +4,7 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { DockerStackService } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { buildEnvMap, toDotenv, type DeployTarget, type DeploySpec, type DeployOutcome, type DestroyContext } from './deploy-target';
+import { renderComposeOverride } from './compose-override';
 
 /**
  * The original App Replicator target: materialize a deployment as a compose stack
@@ -38,11 +39,14 @@ export class DockerDeployTarget implements DeployTarget {
   async deploy(spec: DeploySpec, onPhase: (phase: string) => void): Promise<DeployOutcome> {
     const target = await this.targetFor(spec.targetInstanceId);
     const env = toDotenv(buildEnvMap(spec.variables, spec.project, spec.portList, spec.values, spec.secrets, spec.extras));
+    // Operator-added mounts become a generated compose override merged at `up`
+    // (null when there are none, which clears any override left on the host).
+    const overrideCompose = renderComposeOverride(spec.project, spec.mounts ?? []) ?? undefined;
     const result = await this.stacks.deployGit(
       target,
       spec.targetInstanceId,
       spec.project,
-      { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath, credKey: spec.source.gitCredKey, env },
+      { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath, credKey: spec.source.gitCredKey, env, overrideCompose },
       { pull: true, forceRebuild: spec.forceRebuild },
       onPhase,
     );

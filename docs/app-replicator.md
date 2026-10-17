@@ -215,6 +215,37 @@ to, so removal has to be expressible: the edit dialog submits the whole grid, an
 deleted, and its vault secret is removed right then rather than waiting for teardown. A blank value
 on an entry already marked secret still means "keep the stored one".
 
+### Per-deployment volume mounts
+
+Env keys are the common per-instance addition; the other is a **volume** the repo's compose can't
+know about — a NAS share, a host data directory. The deploy wizard and **Edit & redeploy** both carry
+a **Volumes & mounts** grid (Docker target only — Fargate has no host filesystem): per row a `bind`
+(an existing absolute host path) or a Docker `volume` (a named volume), the compose **service** it
+attaches to, the absolute **container path**, and a read-only toggle. Stored as `extraMounts` JSON on
+the deployment row; they **replace** rather than merge, exactly like extras.
+
+**How they reach the container — a generated compose override, never an edit of the repo.** The
+replicator deploys the cloned compose verbatim (`docker compose -f <repo compose> up`). To add a
+mount, `renderComposeOverride()` emits a second compose file —
+`<stacksDir>/<project>/cerebro.override.yml`, written *beside* the clone (so a `git reset --hard`
+can't touch it) — and `deployGit` passes it as an extra `-f`, which Docker merges over the base. The
+base manifest stays pristine, so a schema refresh or an upstream change never clobbers the operator's
+mounts. No mounts → the stale override is removed, so a deleted mount actually goes away. The override
+uses the long mount syntax (a `:` in a path can't be misparsed) and sets `create_host_path: false` on
+binds, so a host path that isn't there (a NAS share that didn't mount) fails loudly instead of
+silently binding an empty local directory.
+
+**`sanitizeMounts()` is the security edge.** A host bind punches straight through the per-instance
+isolation that is the whole point of the replicator, so the server refuses the Docker socket and the
+host paths that would hand a "deployment" the box (`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`,
+`/root`, `/run`, `/var/run`, `/var/lib/docker`), requires absolute paths, blocks `..` traversal, and
+requires the service to be a real one in the app's compose (so the override can't invent a phantom,
+image-less service). Only these specific fields are exposed — deliberately **not** a raw compose
+fragment, which would re-open `privileged`, `cap_add`, `network_mode`, or new services and dissolve
+the isolation guarantee. Writes stay `replicator:write` + session-only and are audited with the
+(re)deploy. Named volumes an operator adds are *not* removed on teardown (`docker compose down`
+without `-v`), erring toward not destroying data.
+
 ### Seeing what actually got written
 
 `GET /api/replicator/deployments/:id/env` resolves a deployment's environment **through the same
