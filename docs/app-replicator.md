@@ -224,7 +224,15 @@ a **Volumes & mounts** grid (Docker target only — Fargate has no host filesyst
 attaches to, the absolute **container path**, and a read-only toggle. Stored as `extraMounts` JSON on
 the deployment row; they **replace** rather than merge, exactly like extras.
 
-**How they reach the container — a generated compose override, never an edit of the repo.** The
+**The override also carries the deployment's extra env.** An app's compose only receives an operator
+extra if it interpolates it (`- KEY=${KEY}`) or pulls in the stack's `.env` via `env_file:`. Many apps
+do neither for an *optional* key — bambuddy ships `BAMBUDDY_EXTERNAL_ROOTS` **commented out**, so writing
+it to `.env` alone does nothing. So `renderComposeOverride` also injects the extra env straight into
+each known service's `environment:`, which makes an extra take effect regardless of what the repo's
+compose mentions. (`$` is doubled, like in the `.env` writer, since Compose interpolates the override
+too.) The same `.env` is still written for the schema variables.
+
+**How mounts reach the container — a generated compose override, never an edit of the repo.** The
 replicator deploys the cloned compose verbatim (`docker compose -f <repo compose> up`). To add a
 mount, `renderComposeOverride()` emits a second compose file —
 `<stacksDir>/<project>/cerebro.override.yml`, written *beside* the clone (so a `git reset --hard`

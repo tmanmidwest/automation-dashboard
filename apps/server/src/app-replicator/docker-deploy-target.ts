@@ -39,9 +39,15 @@ export class DockerDeployTarget implements DeployTarget {
   async deploy(spec: DeploySpec, onPhase: (phase: string) => void): Promise<DeployOutcome> {
     const target = await this.targetFor(spec.targetInstanceId);
     const env = toDotenv(buildEnvMap(spec.variables, spec.project, spec.portList, spec.values, spec.secrets, spec.extras));
-    // Operator-added mounts become a generated compose override merged at `up`
-    // (null when there are none, which clears any override left on the host).
-    const overrideCompose = renderComposeOverride(spec.project, spec.mounts ?? []) ?? undefined;
+    // Operator-added mounts + extra env become a generated compose override merged
+    // at `up` (null when there's nothing to add, which clears any stale override).
+    // Extra env is injected into every known service so it reaches the container
+    // even when the app's compose never references it (no `${VAR}` / no env_file).
+    const envServices = [...new Set(
+      [...spec.variables.map((v) => v.service), ...spec.portList.map((p) => p.service), ...spec.mounts.map((m) => m.service)]
+        .filter((s): s is string => !!s),
+    )];
+    const overrideCompose = renderComposeOverride(spec.project, spec.mounts ?? [], spec.extras ?? {}, envServices) ?? undefined;
     const result = await this.stacks.deployGit(
       target,
       spec.targetInstanceId,
