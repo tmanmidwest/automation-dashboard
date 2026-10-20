@@ -425,15 +425,32 @@ export function Secrets() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <p className="font-medium truncate">{s.label}</p>
+                          <p className="font-medium truncate" title={s.key}>{s.label}</p>
                           <span className={cn('text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5', HEALTH[s.health].cls)}>
                             {HEALTH[s.health].label}
                           </span>
+                          {s.orphaned && (
+                            <span
+                              className="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-400"
+                              title="The connector this secret belonged to has been deleted. Safe to remove if nothing else uses it."
+                            >
+                              Orphaned
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground truncate">
                           {s.description ? `${s.description} · ` : ''}
-                          <code>{s.key}</code>
-                          {s.owningConnectorId && (
+                          {s.connector ? (
+                            // Connector keys embed an opaque instance id; say what owns it instead.
+                            <span title={s.key}>
+                              {s.connector.typeName ?? s.connector.type} connector · {s.connector.fieldLabel}
+                            </span>
+                          ) : s.orphaned ? (
+                            <span title={s.key}>From a deleted connector</span>
+                          ) : (
+                            <code>{s.key}</code>
+                          )}
+                          {s.connector && s.owningConnectorId && (
                             <>
                               {' · '}
                               <Link to={`/connectors/${s.owningConnectorId}`} className="text-accent hover:underline">

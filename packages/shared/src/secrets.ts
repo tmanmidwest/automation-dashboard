@@ -17,6 +17,10 @@ export interface SecretSummary {
   kind: SecretKind;
   category: SecretCategory;
   owningConnectorId?: string | null;
+  /** For `connector:<id>:<field>` keys whose connector still exists: who owns it. */
+  connector?: { name: string; type: string; typeName?: string | null; fieldLabel: string } | null;
+  /** A connector secret whose connector instance no longer exists. */
+  orphaned?: boolean;
   rotateAfterDays?: number | null;
   expiresAt?: string | null;
   lastUsedAt?: string | null;
