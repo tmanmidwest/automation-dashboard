@@ -26,7 +26,6 @@ const TIMEOUT_MS = 20_000;
 const AUTH_MODES: ZumaAuthMode[] = ['client_credentials', 'token'];
 const OWNER_ROLES = ['Business Owner', 'Technical Owner'];
 const LABEL_RE = /^[a-z0-9_-]+$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const DEFAULT_CONNECTION: ZumaConnectionInput = {
   enabled: false,
@@ -372,7 +371,7 @@ export function cleanGovernance(input: unknown): Prisma.InputJsonValue | typeof 
     const email = String(o?.email ?? '').trim();
     if (!name && !email) continue;
     if (!name || name.length > 100) throw new BadRequestException('Each owner needs a name (100 characters max).');
-    if (!EMAIL_RE.test(email) || email.length > 255) throw new BadRequestException(`"${email}" is not a valid owner email.`);
+    if (email.length > 255 || !isEmail(email)) throw new BadRequestException(`"${email}" is not a valid owner email.`);
     if (!OWNER_ROLES.includes(o.role)) throw new BadRequestException('Owner role must be Business Owner or Technical Owner.');
     owners.push({ name, email, role: o.role });
   }
@@ -412,7 +411,7 @@ export function cleanGovernance(input: unknown): Prisma.InputJsonValue | typeof 
 function cleanConnection(input: Partial<ZumaConnectionInput>): Partial<ZumaConnectionInput> {
   const out: Partial<ZumaConnectionInput> = {};
   const url = (v: unknown, what: string) => {
-    const s = String(v ?? '').trim().replace(/\/+$/, '');
+    const s = trimSlashes(String(v ?? '').trim());
     if (s && !/^https?:\/\//i.test(s)) throw new BadRequestException(`${what} must start with http:// or https://.`);
     return s;
   };
@@ -431,7 +430,22 @@ function cleanConnection(input: Partial<ZumaConnectionInput>): Partial<ZumaConne
 }
 
 function publicUrl(cfg: ZumaConnectionInput): string | null {
-  return (cfg.publicUrl || process.env.APP_URL || '').replace(/\/+$/, '') || null;
+  return trimSlashes(cfg.publicUrl || process.env.APP_URL || '') || null;
+}
+
+function trimSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === '/') end--;
+  return s.slice(0, end);
+}
+
+/** name@domain.tld with no whitespace; Zuma does the real check against the tenant. */
+function isEmail(s: string): boolean {
+  const at = s.indexOf('@');
+  if (at < 1 || at !== s.lastIndexOf('@') || /\s/.test(s)) return false;
+  const domain = s.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  return dot > 0 && dot < domain.length - 1;
 }
 
 function hostOf(url: string): string {
