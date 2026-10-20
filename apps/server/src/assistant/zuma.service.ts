@@ -91,7 +91,6 @@ export class ZumaService {
     const ready =
       cfg.enabled &&
       !!cfg.baseUrl &&
-      !!cfg.tenantId &&
       credentialSet &&
       (cfg.authMode === 'token' || (!!cfg.tokenUrl && !!cfg.clientId));
     return { ...cfg, credentialSet, ready, effectivePublicUrl: publicUrl(cfg) };
@@ -266,13 +265,14 @@ export class ZumaService {
   private async request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T | null> {
     const cfg = await this.config();
     if (!cfg.enabled) throw new BadRequestException('The Saviynt Zuma connection is turned off. Enable it in Settings → Saviynt Zuma.');
-    if (!cfg.baseUrl || !cfg.tenantId) throw new BadRequestException('Set the Zuma URL and tenant ID in Settings → Saviynt Zuma first.');
+    if (!cfg.baseUrl) throw new BadRequestException('Set the Zuma URL in Settings → Saviynt Zuma first.');
     const send = async (token: string) =>
       fetch(`${cfg.baseUrl}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${token}`,
-          'X-Tenant-Id': cfg.tenantId,
+          // Optional: sent only when set (Zuma scopes reads to it).
+          ...(cfg.tenantId ? { 'X-Tenant-Id': cfg.tenantId } : {}),
           Accept: 'application/json',
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
