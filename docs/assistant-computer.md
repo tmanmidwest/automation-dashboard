@@ -2,6 +2,26 @@
 
 Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
 
+> **Saviynt Zuma registry — what shipped.** Agents can be registered in the Saviynt Zuma agent
+> registry (Agent API v2). Registration is outbound: Cerebro calls Zuma and Zuma assigns the agent
+> ID. Settings → Saviynt Zuma holds the tenant connection (`zuma.config` setting: URL, tenant ID
+> sent as `X-Tenant-Id`, Cerebro's public URL) and the credential in the vault as
+> `zuma.credential`: an OAuth client secret (client-credentials grant against a token URL, token
+> cached and refreshed, one retry on 401) or a pasted bearer token. Each agent has a **Governance**
+> card (`governance` JSON, migration `0047`): environment (required to register), criticality,
+> agent type, owners, owner team and labels (normalized to Zuma's `^[a-z0-9_-]+$`). **Save and
+> register** POSTs the agent with `sourceId = cerebro-<agent id>` and `platform = cerebro`, so a
+> retried registration upserts instead of duplicating; **Save and sync** PUTs the updatable fields
+> afterwards. Zuma's documented PUT can't change owners, owner team or labels, so the card warns
+> when those changed after registration (hash in `zumaExtrasHash`). `zumaAgentId`, `zumaStatus`,
+> `zumaSyncedAt` and `zumaLastError` are stored on the agent; **Status** re-reads the lifecycle
+> status and **Unlink** forgets the registration locally (Zuma has no delete). Not yet done:
+> lifecycle enforcement (blocking agents Saviynt suspends) and usage reporting, pending Saviynt's
+> docs for those endpoints. Endpoints (all `agents:manage`): `GET|PUT
+> /api/assistant/zuma/connection`, `POST /api/assistant/zuma/connection/test`, `POST
+> /api/assistant/zuma/agents/:id/sync`, `POST /api/assistant/zuma/agents/:id/status`, `DELETE
+> /api/assistant/zuma/agents/:id`. All writes are audited.
+
 > **MCP tool controls + Test panel — what shipped.** Per agent, each attached MCP server's tools
 > can be switched off (`mcpDisabledTools`) or allowed to run without the approval prompt
 > (`mcpAutoApproveTools`), keyed `<serverId>:<toolName>` (migration `0046`). Auto-approve is

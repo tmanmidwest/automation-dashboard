@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { AgentChat } from '@/components/AgentChat';
+import { AgentGovernanceCard } from '@/components/AgentGovernanceCard';
 
 const BACKENDS: { value: LlmBackend; label: string; placeholder: string; needsKey?: boolean }[] = [
   { value: 'ollama', label: 'Ollama (self-hosted)', placeholder: 'http://ollama:11434' },
@@ -26,7 +27,7 @@ const BACKENDS: { value: LlmBackend; label: string; placeholder: string; needsKe
 
 const selectCls = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
 
-type Draft = AssistantAgentInput & Partial<Pick<AssistantAgentView, 'id' | 'isDefault' | 'apiKeySet' | 'ready' | 'updatedAt'>>;
+type Draft = AssistantAgentInput & Partial<Pick<AssistantAgentView, 'id' | 'isDefault' | 'apiKeySet' | 'ready' | 'updatedAt' | 'zuma'>>;
 
 // Mirrors DEFAULT_ASSISTANT_CONFIG / DEFAULT_AGENT_MAX_ROUNDS (web imports types only from shared).
 const NEW_AGENT: Draft = {
@@ -46,6 +47,7 @@ const NEW_AGENT: Draft = {
   mcpServerIds: [],
   mcpDisabledTools: [],
   mcpAutoApproveTools: [],
+  governance: null,
 };
 
 /** Settings → Agents → one agent: General, Model, Instructions, Tools. */
@@ -103,6 +105,7 @@ export function AgentEditor() {
         mcpServerIds: agent.mcpServerIds,
         mcpDisabledTools: agent.mcpDisabledTools,
         mcpAutoApproveTools: agent.mcpAutoApproveTools,
+        governance: agent.governance ?? null,
       };
       if (apiKey) body.apiKey = apiKey;
       const saved = isNew
@@ -507,6 +510,15 @@ export function AgentEditor() {
             )}
           </CardContent>
         </Card>
+
+        <AgentGovernanceCard
+          agentId={isNew ? undefined : agent.id}
+          governance={agent.governance ?? null}
+          zuma={agent.zuma}
+          onChange={(g) => set('governance', g)}
+          onSave={save}
+          onSynced={setAgent}
+        />
 
         {!isNew && agent.id && (
           <Card className="lg:col-span-2">

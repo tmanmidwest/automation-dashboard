@@ -58,6 +58,12 @@ export function Agents() {
                   </p>
                   <p className={a.ready ? 'text-xs text-emerald-500 mt-1' : 'text-xs text-amber-500 mt-1'}>
                     {a.ready ? 'Ready' : a.enabled ? 'Not configured' : 'Disabled'}
+                    {a.zuma.agentId && (
+                      <span className={a.zuma.outOfDate || a.zuma.lastError ? 'text-amber-500' : 'text-muted-foreground'}>
+                        {' · '}Zuma{a.zuma.status ? `: ${a.zuma.status}` : ''}
+                        {a.zuma.lastError ? ' (sync failed)' : a.zuma.outOfDate ? ' (out of date)' : ''}
+                      </span>
+                    )}
                   </p>
                 </div>
               </CardContent>

@@ -355,6 +355,7 @@ function inferMeta(key: string): { label: string; category: SecretCategory; owni
   if (key.startsWith('notify.')) return { label: humanize(key), category: 'notification' };
   if (key === 'oauth:jwtSecret') return { label: 'OAuth signing key', category: 'api' };
   if (key === 'assistant.apiKey') return { label: 'Computer API key · default agent', category: 'api' };
+  if (key === 'zuma.credential') return { label: 'Saviynt Zuma credential', category: 'api' };
   if (key.startsWith('mcp.')) {
     const id = key.split('.')[1];
     return { label: `MCP server credential · ${id ?? ''}`.trim(), category: 'api' };
