@@ -1,11 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw } from 'lucide-react';
-import type { VersionInfo, DashboardOverview, OverviewGuest, AuditLogEntry, MonitorSummary, MonitorStatus } from '@cerebro/shared';
+import { Link, useNavigate } from 'react-router-dom';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle } from 'lucide-react';
+import type { VersionInfo, DashboardOverview, MonitorSummary, MonitorStatus, TimelineEvent, TimelineKind, TimelineSeverity, TimelinePage } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
+
+// Timeline presentation — web imports only *types* from shared (its CJS build can't
+// surface named runtime exports to Rollup), so the label/accent tables live here, in
+// lockstep with @cerebro/shared's TIMELINE_KINDS / TIMELINE_SEVERITIES.
+const TL_KINDS: TimelineKind[] = ['audit', 'app_log', 'notification', 'job', 'monitor'];
+const TL_KIND_LABEL: Record<TimelineKind, string> = {
+  audit: 'Audit',
+  app_log: 'System',
+  notification: 'Alert',
+  job: 'Job',
+  monitor: 'Monitor',
+};
+const TL_SEVERITY: Record<TimelineSeverity, { spine: string; text: string; dot: string }> = {
+  info: { spine: 'bg-accent', text: 'text-accent', dot: 'hsl(var(--accent))' },
+  success: { spine: 'bg-emerald-400', text: 'text-emerald-400', dot: 'hsl(160 84% 55%)' },
+  warning: { spine: 'bg-amber-400', text: 'text-amber-400', dot: 'hsl(43 96% 56%)' },
+  critical: { spine: 'bg-destructive', text: 'text-destructive', dot: 'hsl(var(--destructive))' },
+};
+
+/** Where a timeline row links to, if anywhere (mirrors the Ship's Log). */
+function timelineTarget(e: TimelineEvent): string | null {
+  if (!e.source) return null;
+  if (e.kind === 'monitor') return `/monitors/${e.source}`;
+  if (e.kind === 'job' || e.kind === 'notification' || e.kind === 'audit') return `/connectors/${e.source}`;
+  return null;
+}
 
 function useCountUp(target: number, ms = 700) {
   const [n, setN] = useState(0);
@@ -164,7 +190,7 @@ function StatusList({ items, storageKey, nominal, unitPlural }: {
             onClick={() => setShowAll(!showAll)}
             className="ml-auto shrink-0 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground transition-colors hover:text-foreground"
           >
-            {showAll ? 'Collapse \u2039' : `All ${items.length} ${unitPlural} \u203a`}
+            {showAll ? 'Collapse ‹' : `All ${items.length} ${unitPlural} ›`}
           </button>
         )}
       </div>
@@ -241,37 +267,57 @@ function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{
   );
 }
 
+/** One line in the "Needs attention" banner. */
+function AttnRow({ color, label, detail, to }: { color: string; label: string; detail?: string; to: string | null }) {
+  const body = (
+    <>
+      <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color, boxShadow: `0 0 6px ${color}` }} aria-hidden />
+      <span className="text-sm truncate">{label}</span>
+      {detail && <span className="ml-auto pl-2 text-xs text-muted-foreground truncate max-w-[45%] shrink-0">{detail}</span>}
+    </>
+  );
+  const cls = 'flex items-center gap-2.5 rounded-md px-2 py-1.5 min-h-[34px]';
+  return to ? (
+    <Link to={to} className={cn(cls, 'hover:bg-background/40 transition-colors')}>{body}</Link>
+  ) : (
+    <div className={cls}>{body}</div>
+  );
+}
+
 export function Dashboard() {
   const { user, can } = useAuth();
+  const navigate = useNavigate();
   const canMonitors = can('monitors:read');
+  const canAudit = can('audit:read');
   const [monitors, setMonitors] = useState<MonitorSummary[] | null>(null);
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
-  const [audit, setAudit] = useState<AuditLogEntry[]>([]);
   const [userCount, setUserCount] = useState(0);
+  // Live event feed (Ship's Log over SSE): seeded with recent history, then tailed live.
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [live, setLive] = useState(false);
   const startedRef = useRef(Date.now());
   const lastPollRef = useRef(Date.now());
   const gotDataRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
   const [, tick] = useState(0);
+  const FEED_CAP = 60;
 
-  // Core telemetry (connectors + activity) — the fast 5s loop.
+  // Core telemetry (connectors + stats) — the fast 5s loop. Activity no longer polls here;
+  // it rides the live SSE stream below.
   const pollCore = useCallback(async () => {
-    await Promise.all([
-      api.get<DashboardOverview>('/api/connectors/overview').then((data) => {
-        lastPollRef.current = Date.now();
-        setOverview((prev) => {
-          const empty = data.metrics.length === 0 && data.guests.length === 0;
-          if (!empty) gotDataRef.current = true;
-          // Keep the last good telemetry if a poll momentarily returns nothing.
-          if (empty && prev && (prev.metrics.length > 0 || prev.guests.length > 0)) {
-            return { ...prev, connectors: data.connectors };
-          }
-          return data;
-        });
-      }).catch(() => {}),
-      api.get<AuditLogEntry[]>('/api/logs/audit?limit=14').then(setAudit).catch(() => {}),
-    ]);
+    await api.get<DashboardOverview>('/api/connectors/overview').then((data) => {
+      lastPollRef.current = Date.now();
+      setOverview((prev) => {
+        const empty = data.metrics.length === 0 && data.guests.length === 0;
+        if (!empty) gotDataRef.current = true;
+        // Keep the last good telemetry if a poll momentarily returns nothing.
+        if (empty && prev && (prev.metrics.length > 0 || prev.guests.length > 0)) {
+          return { ...prev, connectors: data.connectors };
+        }
+        return data;
+      });
+    }).catch(() => {});
   }, []);
 
   // Uptime monitors — their own slower 10s loop (the list endpoint aggregates history).
@@ -280,7 +326,7 @@ export function Dashboard() {
     await api.get<MonitorSummary[]>('/api/monitors').then(setMonitors).catch(() => {});
   }, [canMonitors]);
 
-  // Manual "Refresh" — pulls connectors, activity and monitors at once.
+  // Manual "Refresh" — pulls connectors and monitors at once (the feed is already live).
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -310,6 +356,32 @@ export function Dashboard() {
     return () => clearInterval(t);
   }, [canMonitors, loadMonitors]);
 
+  // Live activity: backfill recent events, then tail the SSE stream. Audit events are only
+  // requested when the operator may read them (the server enforces this too).
+  useEffect(() => {
+    const kinds = TL_KINDS.filter((k) => k !== 'audit' || canAudit);
+    const kindsParam = kinds.join(',');
+    let closed = false;
+
+    const backfill = new URLSearchParams({ kinds: kindsParam, limit: '40' });
+    api.get<TimelinePage>(`/api/timeline?${backfill.toString()}`)
+      .then((pg) => { if (!closed) setEvents(pg.events.slice(0, FEED_CAP)); })
+      .catch(() => {});
+
+    const es = new EventSource(`/api/timeline/live?${new URLSearchParams({ kinds: kindsParam }).toString()}`);
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false);
+    es.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data) as TimelineEvent;
+        setEvents((prev) => (prev.some((e) => e.id === ev.id) ? prev : [ev, ...prev].slice(0, FEED_CAP)));
+      } catch {
+        /* ignore malformed frames */
+      }
+    };
+    return () => { closed = true; es.close(); };
+  }, [canAudit]);
+
   const monUp = monitors?.filter((m) => m.status === 'up').length ?? 0;
   const monDown = monitors?.filter((m) => m.status === 'down') ?? [];
   const monPending = monitors?.filter((m) => m.status === 'pending').length ?? 0;
@@ -334,6 +406,18 @@ export function Dashboard() {
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
 
+  // ── Attention: what needs the operator NOW, surfaced above everything else ──
+  // Down connectors + down monitors + recent warning/critical events (auth failures,
+  // connector/app errors, delivered alerts). Monitor-kind events are omitted here because
+  // down monitors are already listed explicitly, to avoid double-counting.
+  const nowMs = Date.now();
+  const attnEvents = events
+    .filter((e) => e.kind !== 'monitor')
+    .filter((e) => (e.severity === 'critical' || e.severity === 'warning') && nowMs - new Date(e.ts).getTime() < 30 * 60_000)
+    .slice(0, 6);
+  const attnCount = offline.length + monDown.length + attnEvents.length;
+  const hasCritical = offline.length > 0 || monDown.length > 0 || attnEvents.some((e) => e.severity === 'critical');
+
   // Normalized rows for the two status panels; healthy entries collapse to glyphs.
   const monitorItems: StatusItem[] = (monitors ?? [])
     .slice()
@@ -342,7 +426,7 @@ export function Dashboard() {
       key: m.id,
       to: `/monitors/${m.id}`,
       name: m.name,
-      title: `${m.name} \u00b7 ${m.status}${m.lastLatencyMs != null ? ` \u00b7 ${m.lastLatencyMs} ms` : ''}`,
+      title: `${m.name} · ${m.status}${m.lastLatencyMs != null ? ` · ${m.lastLatencyMs} ms` : ''}`,
       shape: 'diamond',
       color: monitorColor(m.status),
       glow: m.status !== 'pending' && m.status !== 'paused',
@@ -359,7 +443,7 @@ export function Dashboard() {
       key: String(i),
       to: '/connectors',
       name: src.name,
-      title: src.message ?? `${src.name} \u00b7 ${src.ok ? 'online' : 'unreachable'}`,
+      title: src.message ?? `${src.name} · ${src.ok ? 'online' : 'unreachable'}`,
       shape: 'dot',
       color: src.ok ? 'hsl(160 84% 55%)' : 'hsl(var(--destructive))',
       glow: src.ok,
@@ -398,6 +482,43 @@ export function Dashboard() {
           Refresh
         </Button>
       </div>
+
+      {/* ── Attention zone — always first; the sensitive/important content up top ── */}
+      {attnCount === 0 ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-4 py-2.5">
+          <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+          <span className="font-lcars text-sm tracking-[0.14em] text-emerald-300/90">ALL SYSTEMS NOMINAL</span>
+          <span className="ml-auto flex items-center gap-1.5 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground">
+            <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+            {live ? 'LIVE' : 'RECONNECTING'}
+          </span>
+        </div>
+      ) : (
+        <div className={cn('rounded-xl border p-4', hasCritical ? 'border-destructive/50 bg-destructive/5' : 'border-amber-500/40 bg-amber-500/5')}>
+          <div className="flex items-center gap-2.5 mb-2">
+            <AlertTriangle className={cn('h-4 w-4 shrink-0', hasCritical ? 'text-destructive' : 'text-amber-400')} />
+            <h3 className="font-lcars text-sm font-semibold tracking-[0.14em]">NEEDS ATTENTION</h3>
+            <span className="ml-auto flex items-center gap-2 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground tabular-nums">
+              <span className="flex items-center gap-1.5">
+                <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+                {live ? 'LIVE' : 'RECONNECTING'}
+              </span>
+              · {attnCount} item{attnCount > 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="grid gap-1 sm:grid-cols-2">
+            {offline.map((s, i) => (
+              <AttnRow key={`conn-${i}`} color="hsl(var(--destructive))" label={`Connector offline · ${s.name}`} detail={s.message ?? 'unreachable'} to="/connectors" />
+            ))}
+            {monDown.map((m) => (
+              <AttnRow key={`mon-${m.id}`} color="hsl(var(--destructive))" label={`Monitor down · ${m.name}`} detail={m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : 'no response'} to={`/monitors/${m.id}`} />
+            ))}
+            {attnEvents.map((e) => (
+              <AttnRow key={e.id} color={TL_SEVERITY[e.severity].dot} label={e.title} detail={e.actor?.email ?? TL_KIND_LABEL[e.kind]} to={timelineTarget(e)} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Monitors + Connectors — the at-a-glance status row */}
       <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-2')}>
@@ -450,6 +571,55 @@ export function Dashboard() {
         </Panel>
       </div>
 
+      {/* ── Live activity — real-time event stream (replaces the polled audit list) ── */}
+      <Panel
+        title="Live Activity"
+        accent="primary"
+        tag={
+          <span className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5">
+              <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+              {live ? 'LIVE' : 'OFFLINE'}
+            </span>
+            <span className="flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" /> {ops}</span>
+            <Link to="/timeline" className="hover:text-foreground">View all ›</Link>
+          </span>
+        }
+      >
+        <div className="max-h-[320px] overflow-y-auto -mx-1">
+          {events.length === 0 ? (
+            <div className="text-center text-muted-foreground py-6 text-sm">Waiting for events…</div>
+          ) : (
+            <div className="divide-y divide-border/40">
+              {events.map((e) => {
+                const sev = TL_SEVERITY[e.severity];
+                const target = timelineTarget(e);
+                return (
+                  <div
+                    key={e.id}
+                    className={cn('flex gap-2.5 px-2 py-1.5 items-start animate-fade-in', target && 'cursor-pointer hover:bg-muted/40 transition-colors')}
+                    onClick={target ? () => navigate(target) : undefined}
+                  >
+                    <span className={cn('mt-0.5 w-1 self-stretch rounded-full shrink-0', sev.spine)} aria-hidden />
+                    <span className="text-muted-foreground/70 shrink-0 w-[4.5rem] text-xs tabular-nums pt-0.5">
+                      {new Date(e.ts).toLocaleTimeString()}
+                    </span>
+                    <span className={cn('shrink-0 w-14 text-[0.6rem] uppercase tracking-wider font-semibold pt-1', sev.text)}>
+                      {TL_KIND_LABEL[e.kind]}
+                    </span>
+                    <div className="flex-1 min-w-0 text-sm break-words">
+                      {e.title}
+                      {e.actor?.email && <span className="text-xs text-muted-foreground"> · {e.actor.email}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {/* ── Reference stats below — the numbers that change slowly ── */}
       {/* Telemetry tiles */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/vm" />
@@ -539,23 +709,6 @@ export function Dashboard() {
           </div>
         </div>
       )}
-
-      {/* Activity feed */}
-      <Panel title="Activity Feed" tag={<span className="flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" /> {ops} operators</span>}>
-        <div className="font-mono text-xs max-h-[240px] overflow-y-auto -mx-1">
-          {audit.length === 0 ? (
-            <div className="text-center text-muted-foreground py-6">No recent activity.</div>
-          ) : (
-            audit.map((a) => (
-              <div key={a.id} className="flex gap-3 px-2 py-1 animate-fade-in">
-                <span className="text-muted-foreground/70 shrink-0 w-36">{new Date(a.createdAt).toLocaleTimeString()}</span>
-                <span className="text-accent shrink-0 w-52 truncate">{a.action}</span>
-                <span className="text-muted-foreground truncate">{a.actorEmail ?? 'system'}{a.target ? ` → ${a.target}` : ''}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </Panel>
 
       <div className="flex items-center justify-center gap-2 pt-1 text-[11px] font-lcars tracking-[0.2em] text-muted-foreground/50">
         <Radio className="h-3 w-3" /> Cerebro Core · LCARS
