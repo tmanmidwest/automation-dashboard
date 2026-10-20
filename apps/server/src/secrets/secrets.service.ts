@@ -354,6 +354,11 @@ function inferMeta(key: string): { label: string; category: SecretCategory; owni
   if (key === 'smtp.password') return { label: 'SMTP password', category: 'notification' };
   if (key.startsWith('notify.')) return { label: humanize(key), category: 'notification' };
   if (key === 'oauth:jwtSecret') return { label: 'OAuth signing key', category: 'api' };
+  if (key === 'assistant.apiKey') return { label: 'Computer API key · default agent', category: 'api' };
+  if (key.startsWith('assistant.agent.')) {
+    const id = key.split('.')[2];
+    return { label: `Computer API key · agent ${id ?? ''}`.trim(), category: 'api' };
+  }
   if (key.startsWith('idp:')) {
     const id = key.split(':')[1];
     return { label: `SSO client secret · ${id ?? ''}`.trim(), category: 'api' };

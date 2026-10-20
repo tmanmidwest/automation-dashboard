@@ -3,6 +3,7 @@
  * See docs/assistant-computer.md.
  */
 import type { AutomationRuleInput } from './automations';
+import type { Permission } from './rbac';
 
 /** Which LLM backend the assistant talks to. */
 export type LlmBackend = 'ollama' | 'openai-compat' | 'anthropic';
@@ -45,6 +46,69 @@ export const DEFAULT_ASSISTANT_CONFIG: AssistantConfig = {
   contextPrimer: true,
 };
 
+// ── Agent profiles ──
+//
+// A named Computer configuration: model + instructions + tool selection + who may use it.
+// The default agent ("Computer") is the one Settings → Computer edits through
+// /api/assistant/config; the rest are managed at /api/assistant/agents.
+
+/** Which tools an agent offers: every tool the caller may use, or only a chosen list. */
+export type AssistantToolMode = 'all' | 'selected';
+
+/** Body of POST/PUT /api/assistant/agents. `apiKey` (write-only) goes to the vault. */
+export interface AssistantAgentInput {
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  backend: LlmBackend;
+  baseUrl: string;
+  model: string;
+  temperature: number;
+  /** Agent-specific instructions, appended after the built-in safety preamble. */
+  instructions?: string | null;
+  contextPrimer: boolean;
+  /** Max tool-calling rounds per turn (loop guard), 1–20. */
+  maxRounds: number;
+  toolMode: AssistantToolMode;
+  /** Tool names offered when `toolMode` is 'selected'. Still intersected with the caller's RBAC. */
+  tools: string[];
+  /** Role slugs that may chat with this agent. Empty = anyone with assistant:use. */
+  allowedRoles: string[];
+}
+
+/** An agent as the editor sees it (never the API key itself). */
+export interface AssistantAgentView extends AssistantAgentInput {
+  id: string;
+  isDefault: boolean;
+  apiKeySet: boolean;
+  /** enabled && model set && (baseUrl set || anthropic). */
+  ready: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** An agent as the chat picker sees it. */
+export interface AssistantAgentSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  isDefault: boolean;
+  ready: boolean;
+  backend: LlmBackend;
+  model: string;
+}
+
+/** A built-in tool, for the agent editor's tool picker. */
+export interface AssistantToolInfo {
+  name: string;
+  description: string;
+  kind: 'read' | 'action';
+  permission: Permission;
+  destructive: boolean;
+}
+
+export const DEFAULT_AGENT_MAX_ROUNDS = 6;
+
 /** One turn in the conversation the client sends up. */
 export interface AssistantChatMessage {
   role: 'user' | 'assistant';
@@ -53,6 +117,8 @@ export interface AssistantChatMessage {
 
 export interface AssistantChatRequest {
   messages: AssistantChatMessage[];
+  /** Which agent profile answers. Omitted = the default agent. */
+  agentId?: string;
 }
 
 /**

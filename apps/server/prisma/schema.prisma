@@ -73,6 +73,34 @@ model UserPreference {
   @@unique([userId, key])
 }
 
+/// A Computer agent profile (docs/assistant-computer.md, "Agent profiles"): model +
+/// instructions + tool selection + who may use it. Exactly one row is the default agent,
+/// seeded on boot from the legacy `assistant.config` setting. Not to be confused with
+/// `Agent`, which is a Fabric host agent. The API key lives in the vault, never here.
+model AssistantAgent {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  enabled       Boolean  @default(true)
+  isDefault     Boolean  @default(false)
+  /// 'ollama' | 'openai-compat' | 'anthropic'
+  backend       String   @default("ollama")
+  baseUrl       String   @default("")
+  model         String   @default("")
+  temperature   Float    @default(0.2)
+  /// Appended after the built-in safety preamble.
+  instructions  String?
+  contextPrimer Boolean  @default(true)
+  maxRounds     Int      @default(6)
+  /// 'all' = every tool the caller may use; 'selected' = only `tools` (still RBAC-filtered).
+  toolMode      String   @default("all")
+  tools         String[] @default([])
+  /// Role slugs allowed to chat with this agent; empty = anyone with assistant:use.
+  allowedRoles  String[] @default([])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
 /// One single-use TOTP recovery code. Only the bcrypt hash is stored; consumed codes are
 /// kept (consumedAt set) for the audit trail until the user regenerates the set.
 model UserRecoveryCode {

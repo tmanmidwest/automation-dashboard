@@ -51,7 +51,8 @@ export type RuleAction =
   | { type: 'webhook'; url: string; method?: 'GET' | 'POST'; body?: string }
   /** Ask the Computer (in-app LLM) headlessly — it runs read-only tools, produces a
    *  short answer grounded in the triggering event, and delivers it as a notification. */
-  | { type: 'ask_computer'; prompt: string; title?: string; severity?: AutomationSeverity };
+  // agentId: which Computer agent answers (omitted = the default agent).
+  | { type: 'ask_computer'; prompt: string; title?: string; severity?: AutomationSeverity; agentId?: string };
 
 export interface AutomationRule {
   id: string;

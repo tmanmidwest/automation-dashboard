@@ -4,6 +4,8 @@ import { SettingsModule } from '../settings/settings.module';
 import { ConnectorsModule } from '../connectors/connectors.module';
 import { MonitorsModule } from '../monitors/monitors.module';
 import { TimelineModule } from '../timeline/timeline.module';
+import { AssistantAgentsService } from './assistant-agents.service';
+import { AssistantAgentsController } from './assistant-agents.controller';
 import { AssistantConfigService } from './assistant-config.service';
 import { AssistantContextService } from './assistant-context.service';
 import { AssistantService } from './assistant.service';
@@ -19,8 +21,9 @@ import { ASSISTANT_AUTOMATION_PORT } from './assistant.port';
  */
 @Module({
   imports: [ToolsModule, SettingsModule, ConnectorsModule, MonitorsModule, TimelineModule],
-  controllers: [AssistantController],
+  controllers: [AssistantController, AssistantAgentsController],
   providers: [
+    AssistantAgentsService,
     AssistantConfigService,
     AssistantContextService,
     AssistantService,
@@ -30,6 +33,6 @@ import { ASSISTANT_AUTOMATION_PORT } from './assistant.port';
     // ModuleRef without importing this module (avoids a module cycle).
     { provide: ASSISTANT_AUTOMATION_PORT, useExisting: AssistantService },
   ],
-  exports: [AssistantConfigService, AssistantService, ASSISTANT_AUTOMATION_PORT],
+  exports: [AssistantAgentsService, AssistantConfigService, AssistantService, ASSISTANT_AUTOMATION_PORT],
 })
 export class AssistantModule {}

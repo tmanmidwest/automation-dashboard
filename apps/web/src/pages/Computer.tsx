@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Send, Cpu, Wrench, CheckCircle2, XCircle, Loader2, ShieldAlert, AlertTriangle } from 'lucide-react';
 import type {
+  AssistantAgentSummary,
   AssistantChatMessage,
-  AssistantConfigView,
   AssistantPendingCall,
   AssistantStreamEvent,
 } from '@cerebro/shared';
@@ -36,7 +36,11 @@ export function Computer() {
   const { can } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [config, setConfig] = useState<AssistantConfigView | null>(null);
+  const [agents, setAgents] = useState<AssistantAgentSummary[] | null>(null);
+  // An agent picked elsewhere (e.g. the agent editor's Chat button) arrives in nav state.
+  const [agentId, setAgentId] = useState<string | null>(
+    () => (location.state as { agentId?: string } | null)?.agentId ?? null,
+  );
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -44,18 +48,26 @@ export function Computer() {
   const autoAsked = useRef(false);
 
   useEffect(() => {
-    api.get<AssistantConfigView>('/api/assistant/config').then(setConfig).catch(() => setConfig(null));
+    api.get<AssistantAgentSummary[]>('/api/assistant/agents').then(setAgents).catch(() => setAgents(null));
   }, []);
+
+  const agent = agents?.find((a) => a.id === agentId) ?? agents?.find((a) => a.isDefault) ?? agents?.[0] ?? null;
+
+  function switchAgent(id: string) {
+    if (busy || id === agent?.id) return;
+    setAgentId(id);
+    setMessages([]); // a conversation (and any paused action) belongs to one agent
+  }
 
   // A question handed over from the ⌘K palette (navigate('/computer', { state: { ask } })).
   useEffect(() => {
     const ask = (location.state as { ask?: string } | null)?.ask?.trim();
-    if (!ask || autoAsked.current || !config?.ready) return;
+    if (!ask || autoAsked.current || !agent?.ready) return;
     autoAsked.current = true;
     navigate(location.pathname, { replace: true, state: {} }); // clear so a refresh won't resend
     void send(ask);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, location.state]);
+  }, [agent, location.state]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -136,7 +148,7 @@ export function Computer() {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: history, agentId: agent?.id }),
       });
       await consume(res);
     } catch (err) {
@@ -165,20 +177,43 @@ export function Computer() {
     }
   }
 
-  const notReady = config && !config.ready;
+  const notReady = agent && !agent.ready;
+  const setupLink = agent && !agent.isDefault ? `/settings/agents/${agent.id}` : '/settings/computer';
+  const canSetUp = agent && !agent.isDefault ? can('agents:manage') : can('settings:write');
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
       <PageHeader
         title="Computer"
-        description="Ask the Computer about your infrastructure. State-changing actions ask you to confirm first."
+        description={
+          agent && !agent.isDefault && agent.description
+            ? agent.description
+            : 'Ask the Computer about your infrastructure. State-changing actions ask you to confirm first.'
+        }
+        actions={
+          agents && agents.length > 1 ? (
+            <select
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={agent?.id ?? ''}
+              disabled={busy}
+              onChange={(e) => switchAgent(e.target.value)}
+              title="Which agent answers"
+            >
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}{a.ready ? '' : ' (not ready)'}
+                </option>
+              ))}
+            </select>
+          ) : undefined
+        }
       />
 
       {notReady && (
         <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm">
-          The Computer isn't configured yet.{' '}
-          {can('settings:write') ? (
-            <Link to="/settings/computer" className="underline font-medium">
+          {agent.isDefault ? "The Computer isn't configured yet." : `The "${agent.name}" agent isn't configured or is disabled.`}{' '}
+          {canSetUp ? (
+            <Link to={setupLink} className="underline font-medium">
               Set up a model backend →
             </Link>
           ) : (
@@ -211,7 +246,7 @@ export function Computer() {
       >
         <input
           className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-          placeholder="Ask the Computer…"
+          placeholder={agent && !agent.isDefault ? `Ask ${agent.name}…` : 'Ask the Computer…'}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={busy || !!notReady}
