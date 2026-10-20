@@ -48,6 +48,10 @@ export interface CatalogTool {
   /** action only: arg keys to strip before the call is written to the audit trail
    *  (e.g. plaintext secrets). Honoured by both the MCP factory and the assistant. */
   redactKeys?: string[];
+  /** A tool from an external source (an MCP server): its arguments are given as JSON Schema
+   *  in `jsonSchema` instead of zod, and its arg values are never written to the audit trail. */
+  jsonSchema?: Record<string, unknown>;
+  external?: boolean;
   run: (args: Record<string, unknown>) => Promise<unknown>;
 }
 

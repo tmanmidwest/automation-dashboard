@@ -97,8 +97,33 @@ model AssistantAgent {
   tools         String[] @default([])
   /// Role slugs allowed to chat with this agent; empty = anyone with assistant:use.
   allowedRoles  String[] @default([])
+  /// External MCP servers (McpServer ids) whose tools this agent offers.
+  mcpServerIds  String[] @default([])
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+}
+
+/// An external MCP server the Computer can call as a tool source (docs/assistant-computer.md,
+/// "External MCP servers"). Registered once, attached to agents by id. The credential lives in
+/// the vault (`mcp.<id>.credential`), never here. `tools` is the pinned tool list from the last
+/// refresh: only those tools are offered, so a server that changes its tools needs a manager to
+/// refresh (re-approve) them.
+model McpServer {
+  id               String    @id @default(cuid())
+  name             String
+  description      String?
+  enabled          Boolean   @default(true)
+  /// Streamable HTTP endpoint, e.g. https://mcp.example.com/mcp
+  url              String
+  /// 'none' | 'bearer' (Authorization: Bearer <credential>) | 'header' (<authHeader>: <credential>)
+  authType         String    @default("none")
+  authHeader       String?
+  /// Pinned tool list from the last refresh: [{ name, description, inputSchema, destructive }].
+  tools            Json      @default("[]")
+  toolsRefreshedAt DateTime?
+  lastError        String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 /// One single-use TOTP recovery code. Only the bcrypt hash is stored; consumed codes are

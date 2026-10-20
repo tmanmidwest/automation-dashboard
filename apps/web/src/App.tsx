@@ -41,6 +41,7 @@ import { BackupRestore } from '@/pages/settings/BackupRestore';
 import { ComputerSettings } from '@/pages/settings/Computer';
 import { Agents } from '@/pages/settings/Agents';
 import { AgentEditor } from '@/pages/settings/AgentEditor';
+import { McpServers } from '@/pages/settings/McpServers';
 
 function FullscreenBrand() {
   return (
@@ -127,6 +128,7 @@ function Router() {
       <Route path="/settings/computer" element={<Protected><RequirePerm perm="settings:write"><ComputerSettings /></RequirePerm></Protected>} />
       <Route path="/settings/agents" element={<Protected><RequirePerm perm="agents:manage"><Agents /></RequirePerm></Protected>} />
       <Route path="/settings/agents/:id" element={<Protected><RequirePerm perm="agents:manage"><AgentEditor /></RequirePerm></Protected>} />
+      <Route path="/settings/mcp-servers" element={<Protected><RequirePerm perm="agents:manage"><McpServers /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 
