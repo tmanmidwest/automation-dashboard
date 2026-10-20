@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { AssistantAgent } from '@prisma/client';
 import type { AssistantConfig, AssistantConfigView, AssistantModelInfo, LlmBackend } from '@cerebro/shared';
+import type { ActorCtx } from '../secrets/secrets.service';
 import { AssistantAgentsService } from './assistant-agents.service';
 
 /**
@@ -39,8 +40,8 @@ export class AssistantConfigService {
     return this.getView();
   }
 
-  async setApiKey(plaintext: string): Promise<void> {
-    await this.agents.setApiKey(await this.agents.getDefault(), plaintext);
+  async setApiKey(plaintext: string, actor?: ActorCtx): Promise<void> {
+    await this.agents.setApiKey(await this.agents.getDefault(), plaintext, actor);
   }
 
   /** List models the default agent's backend advertises (best-effort). */

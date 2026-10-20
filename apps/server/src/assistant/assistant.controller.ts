@@ -43,13 +43,16 @@ export class AssistantController {
   /** Update assistant configuration. */
   @Put('config')
   @RequirePermissions('settings:write')
-  updateConfig(@Body() body: Partial<AssistantConfig> & { apiKey?: string }): Promise<AssistantConfigView> {
+  updateConfig(
+    @CurrentUser() user: SessionUser,
+    @Body() body: Partial<AssistantConfig> & { apiKey?: string },
+  ): Promise<AssistantConfigView> {
     const { apiKey, ...patch } = body;
-    return this.applyConfig(patch, apiKey);
+    return this.applyConfig(patch, apiKey, user);
   }
 
-  private async applyConfig(patch: Partial<AssistantConfig>, apiKey?: string): Promise<AssistantConfigView> {
-    if (apiKey !== undefined) await this.config.setApiKey(apiKey);
+  private async applyConfig(patch: Partial<AssistantConfig>, apiKey: string | undefined, user: SessionUser): Promise<AssistantConfigView> {
+    if (apiKey !== undefined) await this.config.setApiKey(apiKey, { actorId: user.id, actorEmail: user.email });
     return this.config.update(patch);
   }
 

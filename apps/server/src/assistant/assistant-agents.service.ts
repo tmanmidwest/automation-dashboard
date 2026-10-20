@@ -15,6 +15,7 @@ import {
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import type { ActorCtx } from '../secrets/secrets.service';
 import type { LlmProvider } from './llm-provider';
 import { OllamaProvider } from './providers/ollama.provider';
 import { OpenAiCompatProvider } from './providers/openai-compat.provider';
@@ -114,34 +115,39 @@ export class AssistantAgentsService implements OnModuleInit {
     return this.view(await this.get(id));
   }
 
-  async create(input: AssistantAgentInput, apiKey?: string): Promise<AssistantAgentView> {
+  async create(input: AssistantAgentInput, apiKey?: string, actor?: ActorCtx): Promise<AssistantAgentView> {
     const data = clean(input, null);
     const governance = input.governance != null ? { governance: cleanGovernance(input.governance) } : {};
     // clean() always sets `name` on a create (or throws).
     const row = await this.prisma.assistantAgent.create({ data: { ...data, ...governance, name: data.name!, isDefault: false } });
-    if (apiKey) await this.setApiKey(row, apiKey);
+    if (apiKey) await this.setApiKey(row, apiKey, actor);
     return this.view(row);
   }
 
-  async update(id: string, patch: Partial<AssistantAgentInput>, apiKey?: string): Promise<AssistantAgentView> {
+  async update(
+    id: string,
+    patch: Partial<AssistantAgentInput>,
+    apiKey?: string,
+    actor?: ActorCtx,
+  ): Promise<AssistantAgentView> {
     const current = await this.get(id);
     const governance = patch.governance !== undefined ? { governance: cleanGovernance(patch.governance) } : {};
     const row = await this.prisma.assistantAgent.update({ where: { id }, data: { ...clean(patch, current), ...governance } });
-    if (apiKey !== undefined) await this.setApiKey(row, apiKey);
+    if (apiKey !== undefined) await this.setApiKey(row, apiKey, actor);
     return this.view(row);
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, actor?: ActorCtx): Promise<void> {
     const row = await this.get(id);
     if (row.isDefault) throw new BadRequestException('The default agent cannot be deleted.');
     await this.prisma.assistantAgent.delete({ where: { id } });
-    if (await this.settings.hasSecret(this.secretKey(row))) await this.settings.deleteSecret(this.secretKey(row));
+    if (await this.settings.hasSecret(this.secretKey(row))) await this.settings.deleteSecret(this.secretKey(row), actor);
   }
 
   /** Set (or, with an empty string, clear) an agent's API key in the vault. */
-  async setApiKey(row: AssistantAgent, plaintext: string): Promise<void> {
-    if (plaintext) await this.settings.setSecret(this.secretKey(row), plaintext);
-    else if (await this.settings.hasSecret(this.secretKey(row))) await this.settings.deleteSecret(this.secretKey(row));
+  async setApiKey(row: AssistantAgent, plaintext: string, actor?: ActorCtx): Promise<void> {
+    if (plaintext) await this.settings.setSecret(this.secretKey(row), plaintext, actor);
+    else if (await this.settings.hasSecret(this.secretKey(row))) await this.settings.deleteSecret(this.secretKey(row), actor);
   }
 
   /**

@@ -13,6 +13,8 @@ import { AuditService } from '../logging/audit.service';
 import { ToolCatalogService } from '../tools/tool-catalog.service';
 import { AssistantAgentsService } from './assistant-agents.service';
 
+const actor = (u: SessionUser) => ({ actorId: u.id, actorEmail: u.email });
+
 /** Synthetic principal holding every permission, used only to enumerate the tool catalog. */
 const CATALOG_PROBE_USER: SessionUser = {
   id: 'system:catalog',
@@ -78,7 +80,7 @@ export class AssistantAgentsController {
     @Body() body: AssistantAgentInput & { apiKey?: string },
   ): Promise<AssistantAgentView> {
     const { apiKey, ...input } = body ?? ({} as AssistantAgentInput);
-    const view = await this.agents.create(input, apiKey || undefined);
+    const view = await this.agents.create(input, apiKey || undefined, actor(user));
     await this.record(user, 'assistant.agent.created', view);
     return view;
   }
@@ -91,7 +93,7 @@ export class AssistantAgentsController {
     @Body() body: Partial<AssistantAgentInput> & { apiKey?: string },
   ): Promise<AssistantAgentView> {
     const { apiKey, ...patch } = body ?? {};
-    const view = await this.agents.update(id, patch, apiKey);
+    const view = await this.agents.update(id, patch, apiKey, actor(user));
     await this.record(user, 'assistant.agent.updated', view, { apiKeyChanged: apiKey !== undefined });
     return view;
   }
@@ -100,7 +102,7 @@ export class AssistantAgentsController {
   @RequirePermissions('agents:manage')
   async remove(@CurrentUser() user: SessionUser, @Param('id') id: string): Promise<{ ok: true }> {
     const view = await this.agents.getView(id);
-    await this.agents.remove(id);
+    await this.agents.remove(id, actor(user));
     await this.record(user, 'assistant.agent.deleted', view);
     return { ok: true };
   }

@@ -14,6 +14,7 @@ import {
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import type { ActorCtx } from '../secrets/secrets.service';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require('../../package.json') as { version: string };
@@ -96,12 +97,16 @@ export class ZumaService {
     return { ...cfg, credentialSet, ready, effectivePublicUrl: publicUrl(cfg) };
   }
 
-  async setConnection(patch: Partial<ZumaConnectionInput>, credential?: string): Promise<ZumaConnectionView> {
+  async setConnection(
+    patch: Partial<ZumaConnectionInput>,
+    credential?: string,
+    actor?: ActorCtx,
+  ): Promise<ZumaConnectionView> {
     const cfg = { ...(await this.config()), ...cleanConnection(patch) };
     await this.settings.set(CONFIG_KEY, cfg);
     if (credential !== undefined) {
-      if (credential) await this.settings.setSecret(CREDENTIAL_KEY, credential);
-      else if (await this.settings.hasSecret(CREDENTIAL_KEY)) await this.settings.deleteSecret(CREDENTIAL_KEY);
+      if (credential) await this.settings.setSecret(CREDENTIAL_KEY, credential, actor);
+      else if (await this.settings.hasSecret(CREDENTIAL_KEY)) await this.settings.deleteSecret(CREDENTIAL_KEY, actor);
     }
     this.token = null;
     return this.getConnection();

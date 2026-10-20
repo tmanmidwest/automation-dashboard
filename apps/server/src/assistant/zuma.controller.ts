@@ -30,7 +30,7 @@ export class ZumaController {
     @Body() body: Partial<ZumaConnectionInput> & { credential?: string },
   ): Promise<ZumaConnectionView> {
     const { credential, ...patch } = body ?? {};
-    const view = await this.zuma.setConnection(patch, credential);
+    const view = await this.zuma.setConnection(patch, credential, { actorId: user.id, actorEmail: user.email });
     await this.record(user, 'assistant.zuma.connection_updated', 'zuma', {
       baseUrl: view.baseUrl,
       tenantId: view.tenantId,
