@@ -4,8 +4,8 @@ Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds
 
 > **Saviynt Zuma registry — what shipped.** Agents can be registered in the Saviynt Zuma agent
 > registry (Agent API v2). Registration is outbound: Cerebro calls Zuma and Zuma assigns the agent
-> ID. Settings → Saviynt Zuma holds the tenant connection (`zuma.config` setting: URL, tenant ID
-> sent as `X-Tenant-Id`, Cerebro's public URL) and the credential in the vault as
+> ID. Settings → Saviynt Zuma holds the tenant connection (`zuma.config` setting: URL, optional tenant
+> ID sent as `X-Tenant-Id` only when set, Cerebro's public URL) and the credential in the vault as
 > `zuma.credential`: an OAuth client secret (client-credentials grant against a token URL, token
 > cached and refreshed, one retry on 401) or a pasted bearer token. Each agent has a **Governance**
 > card (`governance` JSON, migration `0047`): environment (required to register), criticality,

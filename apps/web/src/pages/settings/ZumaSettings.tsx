@@ -120,8 +120,8 @@ export function ZumaSettings() {
               <p className="text-xs text-muted-foreground">Without the path; Cerebro adds /agent/v2/registry/agents.</p>
             </div>
             <div className="space-y-1.5">
-              <Label>Tenant ID</Label>
-              <Input value={cfg.tenantId} onChange={(e) => set('tenantId', e.target.value)} placeholder="Sent as X-Tenant-Id" />
+              <Label>Tenant ID <span className="text-xs font-normal text-muted-foreground">(optional)</span></Label>
+              <Input value={cfg.tenantId} onChange={(e) => set('tenantId', e.target.value)} placeholder="Sent as X-Tenant-Id when set" />
             </div>
             <div className="space-y-1.5">
               <Label>Cerebro public URL</Label>

@@ -45,6 +45,7 @@ export interface ZumaConnectionInput {
   enabled: boolean;
   /** e.g. https://identisphere-dev.saviyntqa.com */
   baseUrl: string;
+  /** Optional. Sent as X-Tenant-Id when set; blank omits the header. */
   tenantId: string;
   authMode: ZumaAuthMode;
   /** client_credentials only: the OAuth2 token endpoint. */
@@ -59,7 +60,7 @@ export interface ZumaConnectionInput {
 
 export interface ZumaConnectionView extends ZumaConnectionInput {
   credentialSet: boolean;
-  /** enabled, base URL, tenant and credential set (and client ID / token URL for client_credentials). */
+  /** enabled, base URL and credential set (and client ID / token URL for client_credentials). */
   ready: boolean;
   /** The address agents are registered with (publicUrl, else APP_URL, else null). */
   effectivePublicUrl: string | null;
