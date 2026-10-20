@@ -76,6 +76,11 @@ export interface AssistantAgentInput {
   allowedRoles: string[];
   /** External MCP servers whose (pinned) tools this agent offers. Their actions always need approval. */
   mcpServerIds: string[];
+  /** MCP tools switched off for this agent, as `<serverId>:<toolName>`. */
+  mcpDisabledTools: string[];
+  /** MCP tools that run without the approval prompt, as `<serverId>:<toolName>`. Never
+   *  honoured for a tool the server marks destructive. */
+  mcpAutoApproveTools: string[];
 }
 
 /** An agent as the editor sees it (never the API key itself). */

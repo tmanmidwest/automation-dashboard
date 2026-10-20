@@ -204,6 +204,8 @@ export class AssistantAgentsService implements OnModuleInit {
       tools: row.tools,
       allowedRoles: row.allowedRoles,
       mcpServerIds: row.mcpServerIds,
+      mcpDisabledTools: row.mcpDisabledTools,
+      mcpAutoApproveTools: row.mcpAutoApproveTools,
       apiKeySet: await this.apiKeySet(row),
       ready: isReady(row),
       createdAt: row.createdAt.toISOString(),
@@ -277,6 +279,8 @@ function clean(input: Partial<AssistantAgentInput>, current: AssistantAgent | nu
   if (input.tools !== undefined) out.tools = stringList(input.tools);
   if (input.allowedRoles !== undefined) out.allowedRoles = stringList(input.allowedRoles);
   if (input.mcpServerIds !== undefined) out.mcpServerIds = stringList(input.mcpServerIds);
+  if (input.mcpDisabledTools !== undefined) out.mcpDisabledTools = stringList(input.mcpDisabledTools);
+  if (input.mcpAutoApproveTools !== undefined) out.mcpAutoApproveTools = stringList(input.mcpAutoApproveTools);
   return out;
 }
 

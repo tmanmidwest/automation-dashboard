@@ -230,7 +230,7 @@ export class AssistantService implements AssistantAutomationPort {
 
   /** The tools this agent offers this user, as a dispatch map and as LLM tool schemas: the
    *  user's RBAC-filtered catalog narrowed to the agent's selection, plus the pinned tools of
-   *  the agent's MCP servers (always approval-required actions). `readOnly` drops
+   *  the agent's MCP servers (approval-required actions unless the agent auto-approves one). `readOnly` drops
    *  state-changing tools entirely, MCP tools included — used for headless runs where no
    *  human can confirm. */
   private async contextFor(user: SessionUser, agent: AssistantAgent, readOnly = false): Promise<ToolContext> {
@@ -239,7 +239,9 @@ export class AssistantService implements AssistantAutomationPort {
       .build(user)
       .filter((t) => !readOnly || t.kind === 'read')
       .filter((t) => !selected || selected.has(t.name));
-    const external = readOnly ? [] : await this.mcp.catalogTools(agent.mcpServerIds).catch((err) => {
+    const external = readOnly ? [] : await this.mcp
+      .catalogTools(agent.mcpServerIds, { disabled: agent.mcpDisabledTools, autoApprove: agent.mcpAutoApproveTools })
+      .catch((err) => {
       void this.logging.warn('assistant', `MCP tools unavailable: ${err instanceof Error ? err.message : String(err)}`);
       return [] as CatalogTool[];
     });

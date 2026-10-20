@@ -2,6 +2,14 @@
 
 Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
 
+> **MCP tool controls + Test panel — what shipped.** Per agent, each attached MCP server's tools
+> can be switched off (`mcpDisabledTools`) or allowed to run without the approval prompt
+> (`mcpAutoApproveTools`), keyed `<serverId>:<toolName>` (migration `0046`). Auto-approve is
+> ignored for a tool the server marks destructive, and MCP tools are still never offered to
+> headless runs. The chat UI moved into a reusable `components/AgentChat.tsx`; the agent editor
+> has a **Test** card that chats with the saved agent (saving starts a new test conversation),
+> and ⌘K questions now also work while already on the Computer page.
+
 > **External MCP servers — what shipped.** Settings → MCP Servers registers Streamable HTTP MCP
 > servers (`McpServer` table, migration `0045`) with auth none / bearer / custom header; the
 > credential lives in the vault as `mcp.<id>.credential`. **Refresh tools** connects

@@ -28,8 +28,8 @@ const EMPTY: Form = { name: '', description: '', enabled: true, url: '', authTyp
 
 /**
  * Settings → MCP Servers: external MCP servers the Computer's agents can call. Refreshing a
- * server pins its current tool list; only pinned tools are offered, and every call needs the
- * operator's approval in chat.
+ * server pins its current tool list; only pinned tools are offered, and calls need the
+ * operator's approval in chat unless an agent auto-approves that (non-destructive) tool.
  */
 export function McpServers() {
   const [servers, setServers] = useState<McpServerView[] | null>(null);
@@ -107,7 +107,7 @@ export function McpServers() {
     <>
       <PageHeader
         title="MCP Servers"
-        description="External MCP servers your agents can use as tools. Refresh pins the server's tool list; every call still asks for approval in chat."
+        description="External MCP servers your agents can use as tools. Refresh pins the server's tool list. Calls ask for approval in chat unless an agent lets a tool run without asking."
         actions={<Button onClick={() => { setForm(EMPTY); setFormError(null); }}><Plus className="h-4 w-4" /> Add server</Button>}
       />
       {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
