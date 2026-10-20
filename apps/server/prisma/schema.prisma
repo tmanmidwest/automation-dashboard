@@ -103,6 +103,17 @@ model AssistantAgent {
   /// agent, and tools that run without the approval prompt (never ones the server marks destructive).
   mcpDisabledTools    String[] @default([])
   mcpAutoApproveTools String[] @default([])
+  /// Saviynt Zuma governance details (AgentGovernance): environment, criticality, owners, labels.
+  governance    Json?
+  /// Zuma registry sync state. zumaAgentId is assigned by Zuma on registration. The hashes are of
+  /// the last body sent (updatable fields) and of the owners/labels sent at registration, which
+  /// the documented API can't change afterwards.
+  zumaAgentId      String?
+  zumaStatus       String?
+  zumaSyncedAt     DateTime?
+  zumaLastError    String?
+  zumaPayloadHash  String?
+  zumaExtrasHash   String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }

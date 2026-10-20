@@ -4,6 +4,7 @@
  */
 import type { AutomationRuleInput } from './automations';
 import type { Permission } from './rbac';
+import type { AgentGovernance, ZumaSyncState } from './zuma';
 
 /** Which LLM backend the assistant talks to. */
 export type LlmBackend = 'ollama' | 'openai-compat' | 'anthropic';
@@ -81,6 +82,8 @@ export interface AssistantAgentInput {
   /** MCP tools that run without the approval prompt, as `<serverId>:<toolName>`. Never
    *  honoured for a tool the server marks destructive. */
   mcpAutoApproveTools: string[];
+  /** Governance details for the Saviynt Zuma registry; null = not filled in. */
+  governance?: AgentGovernance | null;
 }
 
 /** An agent as the editor sees it (never the API key itself). */
@@ -88,6 +91,8 @@ export interface AssistantAgentView extends AssistantAgentInput {
   id: string;
   isDefault: boolean;
   apiKeySet: boolean;
+  governance: AgentGovernance | null;
+  zuma: ZumaSyncState;
   /** enabled && model set && (baseUrl set || anthropic). */
   ready: boolean;
   createdAt: string;

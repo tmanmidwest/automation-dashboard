@@ -8,6 +8,7 @@ import {
   type AssistantAgentView,
   type AssistantConfig,
   type AssistantModelInfo,
+  type AgentGovernance,
   type AssistantToolMode,
   type LlmBackend,
   type SessionUser,
@@ -18,6 +19,7 @@ import type { LlmProvider } from './llm-provider';
 import { OllamaProvider } from './providers/ollama.provider';
 import { OpenAiCompatProvider } from './providers/openai-compat.provider';
 import { AnthropicProvider } from './providers/anthropic.provider';
+import { ZumaService, cleanGovernance } from './zuma.service';
 
 /** The legacy single-agent config key, read once to seed the default agent. */
 const LEGACY_CONFIG_KEY = 'assistant.config';
@@ -40,6 +42,7 @@ export class AssistantAgentsService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
+    private readonly zuma: ZumaService,
   ) {}
 
   async onModuleInit() {
@@ -113,15 +116,17 @@ export class AssistantAgentsService implements OnModuleInit {
 
   async create(input: AssistantAgentInput, apiKey?: string): Promise<AssistantAgentView> {
     const data = clean(input, null);
+    const governance = input.governance != null ? { governance: cleanGovernance(input.governance) } : {};
     // clean() always sets `name` on a create (or throws).
-    const row = await this.prisma.assistantAgent.create({ data: { ...data, name: data.name!, isDefault: false } });
+    const row = await this.prisma.assistantAgent.create({ data: { ...data, ...governance, name: data.name!, isDefault: false } });
     if (apiKey) await this.setApiKey(row, apiKey);
     return this.view(row);
   }
 
   async update(id: string, patch: Partial<AssistantAgentInput>, apiKey?: string): Promise<AssistantAgentView> {
     const current = await this.get(id);
-    const row = await this.prisma.assistantAgent.update({ where: { id }, data: clean(patch, current) });
+    const governance = patch.governance !== undefined ? { governance: cleanGovernance(patch.governance) } : {};
+    const row = await this.prisma.assistantAgent.update({ where: { id }, data: { ...clean(patch, current), ...governance } });
     if (apiKey !== undefined) await this.setApiKey(row, apiKey);
     return this.view(row);
   }
@@ -186,7 +191,7 @@ export class AssistantAgentsService implements OnModuleInit {
     return row.isDefault ? DEFAULT_API_KEY_SECRET : `assistant.agent.${row.id}.apiKey`;
   }
 
-  private async view(row: AssistantAgent): Promise<AssistantAgentView> {
+  async view(row: AssistantAgent): Promise<AssistantAgentView> {
     return {
       id: row.id,
       name: row.name,
@@ -207,6 +212,8 @@ export class AssistantAgentsService implements OnModuleInit {
       mcpDisabledTools: row.mcpDisabledTools,
       mcpAutoApproveTools: row.mcpAutoApproveTools,
       apiKeySet: await this.apiKeySet(row),
+      governance: (row.governance as unknown as AgentGovernance | null) ?? null,
+      zuma: await this.zuma.state(row),
       ready: isReady(row),
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -238,7 +245,9 @@ function isReady(row: AssistantAgent): boolean {
  * rest fall back to defaults.
  */
 function clean(input: Partial<AssistantAgentInput>, current: AssistantAgent | null) {
-  const out: Partial<Omit<AssistantAgent, 'id' | 'isDefault' | 'createdAt' | 'updatedAt'>> = {};
+  const out: Partial<
+    Omit<AssistantAgent, 'id' | 'isDefault' | 'createdAt' | 'updatedAt' | 'governance' | `zuma${string}`>
+  > = {};
   const creating = current === null;
 
   if (input.name !== undefined || creating) {
