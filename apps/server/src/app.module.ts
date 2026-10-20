@@ -43,7 +43,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'public'),
       // Exclude API/MCP/OAuth routes so controllers win over the SPA.
-      exclude: ['/api/(.*)', '/mcp', '/oauth/(.*)', '/.well-known/(.*)'],
+      exclude: ['/api/{*path}', '/mcp', '/oauth/{*path}', '/.well-known/{*path}'],
     }),
     PrismaModule,
     CommonModule,

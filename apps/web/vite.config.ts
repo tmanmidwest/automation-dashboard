@@ -1,6 +1,5 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import path from 'path';
 
 // During dev, the UI runs on 5173 and proxies API calls to the Nest server on 3000.
 // In production the Nest server serves the built assets directly.
@@ -8,7 +7,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': `${import.meta.dirname}/src`,
     },
   },
   server: {
@@ -26,5 +25,5 @@ export default defineConfig({
     // noVNC 1.7 uses top-level await, which needs a modern target.
     target: 'es2022',
   },
-  esbuild: { target: 'es2022' },
+  oxc: { target: 'es2022' },
 });
