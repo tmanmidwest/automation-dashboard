@@ -7,6 +7,7 @@ import type {
   AssistantModelInfo,
   AssistantToolInfo,
   LlmBackend,
+  McpServerView,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -41,6 +42,7 @@ const NEW_AGENT: Draft = {
   toolMode: 'all',
   tools: [],
   allowedRoles: [],
+  mcpServerIds: [],
 };
 
 /** Settings → Agents → one agent: General, Model, Instructions, Tools. */
@@ -52,6 +54,7 @@ export function AgentEditor() {
   const [apiKey, setApiKey] = useState('');
   const [tools, setTools] = useState<AssistantToolInfo[]>([]);
   const [roles, setRoles] = useState<{ slug: string; name: string }[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerView[]>([]);
   const [models, setModels] = useState<AssistantModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -66,6 +69,7 @@ export function AgentEditor() {
       setAgent(NEW_AGENT);
     }
     api.get<AssistantToolInfo[]>('/api/assistant/tools').then(setTools).catch(() => setTools([]));
+    api.get<McpServerView[]>('/api/assistant/mcp-servers').then(setMcpServers).catch(() => setMcpServers([]));
     // Needs users:read; without it the role picker simply stays empty.
     api.get<{ slug: string; name: string }[]>('/api/roles').then(setRoles).catch(() => setRoles([]));
   }, [id, isNew]);
@@ -93,6 +97,7 @@ export function AgentEditor() {
         toolMode: agent.toolMode,
         tools: agent.tools,
         allowedRoles: agent.allowedRoles,
+        mcpServerIds: agent.mcpServerIds,
       };
       if (apiKey) body.apiKey = apiKey;
       const saved = isNew
@@ -396,6 +401,51 @@ export function AgentEditor() {
                   );
                 })}
               </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>MCP servers</CardTitle>
+            <CardDescription>
+              External tools. They run with the server's own credential, not the user's permissions, so every call asks for
+              approval in chat, and they are never used in automations.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {mcpServers.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No MCP servers registered. <Link className="underline" to="/settings/mcp-servers">Add one</Link>.
+              </p>
+            ) : (
+              mcpServers.map((s) => (
+                <label key={s.id} className="flex items-start gap-3 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 mt-0.5"
+                    checked={agent.mcpServerIds.includes(s.id)}
+                    onChange={(e) =>
+                      set('mcpServerIds', e.target.checked
+                        ? [...agent.mcpServerIds, s.id]
+                        : agent.mcpServerIds.filter((x) => x !== s.id))
+                    }
+                  />
+                  <span>
+                    {s.name}
+                    <span className="block text-xs text-muted-foreground">
+                      {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
+                      {!s.enabled && ' · disabled'}
+                      {s.lastError && ' · last refresh failed'}
+                    </span>
+                  </span>
+                </label>
+              ))
+            )}
+            {mcpServers.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                <Link className="underline" to="/settings/mcp-servers">Manage MCP servers</Link>
+              </p>
             )}
           </CardContent>
         </Card>

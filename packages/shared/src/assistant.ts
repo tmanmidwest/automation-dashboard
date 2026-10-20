@@ -74,6 +74,8 @@ export interface AssistantAgentInput {
   tools: string[];
   /** Role slugs that may chat with this agent. Empty = anyone with assistant:use. */
   allowedRoles: string[];
+  /** External MCP servers whose (pinned) tools this agent offers. Their actions always need approval. */
+  mcpServerIds: string[];
 }
 
 /** An agent as the editor sees it (never the API key itself). */
@@ -108,6 +110,45 @@ export interface AssistantToolInfo {
 }
 
 export const DEFAULT_AGENT_MAX_ROUNDS = 6;
+
+// ── External MCP servers (a Computer tool source) ──
+
+/** How Cerebro authenticates to an MCP server. The credential itself lives in the vault. */
+export type McpAuthType = 'none' | 'bearer' | 'header';
+
+/** One tool discovered on an MCP server (pinned at the last refresh). */
+export interface McpToolInfo {
+  name: string;
+  description: string;
+  /** JSON Schema of the tool's arguments, as the server advertised it. */
+  inputSchema: Record<string, unknown>;
+  /** The server's own destructiveHint/readOnlyHint (untrusted; shown, not relied on). */
+  destructive: boolean;
+  readOnly: boolean;
+}
+
+/** Body of POST/PUT /api/assistant/mcp-servers. `credential` (write-only) goes to the vault. */
+export interface McpServerInput {
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  url: string;
+  authType: McpAuthType;
+  /** Header name when authType is 'header', e.g. X-API-Key. */
+  authHeader?: string | null;
+}
+
+export interface McpServerView extends McpServerInput {
+  id: string;
+  credentialSet: boolean;
+  tools: McpToolInfo[];
+  toolsRefreshedAt: string | null;
+  lastError: string | null;
+  /** Agents this server is attached to (names), for the delete warning. */
+  agents: string[];
+  createdAt: string;
+  updatedAt: string;
+}
 
 /** One turn in the conversation the client sends up. */
 export interface AssistantChatMessage {

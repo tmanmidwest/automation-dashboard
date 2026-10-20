@@ -2,6 +2,20 @@
 
 Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
 
+> **External MCP servers — what shipped.** Settings → MCP Servers registers Streamable HTTP MCP
+> servers (`McpServer` table, migration `0045`) with auth none / bearer / custom header; the
+> credential lives in the vault as `mcp.<id>.credential`. **Refresh tools** connects
+> (`McpServersService`, SDK client, pooled sessions, 15 s list / 60 s call timeouts) and **pins**
+> the tool list: only pinned tools are offered, so a server that changes its tools must be
+> refreshed (re-approved) by a manager. Agents attach servers via `mcpServerIds` (agent editor →
+> MCP servers). In the loop, MCP tools are named `mcp_<server>_<id4>__<tool>` (≤ 64 chars), are
+> **always** approval-required actions regardless of the server's own hints, are never offered in
+> headless `ask_computer` runs, and are audited with arg *keys* only (values may be secret).
+> Remote descriptions are capped at 1 000 chars and results at 20 000. Remote tools run with the
+> server's credential, not the user's RBAC, which is why approval is mandatory. Endpoints (all
+> `agents:manage`): `GET|POST /api/assistant/mcp-servers`, `GET|PUT|DELETE
+> /api/assistant/mcp-servers/:id`, `POST /api/assistant/mcp-servers/:id/refresh`.
+
 > **Agent profiles — what shipped.** The single global config became named **agents**
 > (`AssistantAgent` table, migration `0044`; not to be confused with the Fabric `Agent`). Each
 > agent has its own backend/URL/model/temperature, API key (vault: `assistant.agent.<id>.apiKey`;

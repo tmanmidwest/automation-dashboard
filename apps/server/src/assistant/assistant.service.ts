@@ -11,6 +11,7 @@ import { ToolCatalogService, type CatalogTool } from '../tools/tool-catalog.serv
 import { LoggingService } from '../logging/logging.service';
 import { AuditService } from '../logging/audit.service';
 import { AssistantAgentsService } from './assistant-agents.service';
+import { McpServersService } from './mcp-servers.service';
 import { AssistantContextService } from './assistant-context.service';
 import { PendingActionStore, type CapturedCall } from './pending-action.store';
 import type { AssistantAutomationPort } from './assistant.port';
@@ -82,6 +83,7 @@ export class AssistantService implements AssistantAutomationPort {
   constructor(
     private readonly catalog: ToolCatalogService,
     private readonly agents: AssistantAgentsService,
+    private readonly mcp: McpServersService,
     private readonly context: AssistantContextService,
     private readonly pending: PendingActionStore,
     private readonly audit: AuditService,
@@ -95,7 +97,7 @@ export class AssistantService implements AssistantAutomationPort {
       yield { type: 'error', message: setup.error };
       return;
     }
-    const ctx = this.contextFor(user, setup.agent);
+    const ctx = await this.contextFor(user, setup.agent);
 
     let system = systemPrompt(setup.agent);
     if (setup.agent.contextPrimer) {
@@ -129,7 +131,7 @@ export class AssistantService implements AssistantAutomationPort {
       yield { type: 'error', message: setup.error };
       return;
     }
-    const ctx = this.contextFor(user, setup.agent);
+    const ctx = await this.contextFor(user, setup.agent);
     const call = p.calls[p.index];
     const tool = ctx.byName.get(call.name);
     const messages = p.messages;
@@ -167,7 +169,7 @@ export class AssistantService implements AssistantAutomationPort {
     const setup = await this.setup(agentId);
     if ('error' in setup) throw new Error(setup.error);
     const user = SYSTEM_AUTOMATION_USER;
-    const ctx = this.contextFor(user, setup.agent, true); // read-only: no confirm gate can exist headless
+    const ctx = await this.contextFor(user, setup.agent, true); // read-only: no confirm gate can exist headless
 
     const system =
       `${systemPrompt(setup.agent)}\n\nYou are running headlessly inside an automation rule — no human is ` +
@@ -227,19 +229,26 @@ export class AssistantService implements AssistantAutomationPort {
   }
 
   /** The tools this agent offers this user, as a dispatch map and as LLM tool schemas: the
-   *  user's RBAC-filtered catalog, narrowed to the agent's selection. `readOnly` drops
-   *  state-changing tools entirely — used for headless runs where no human can confirm. */
-  private contextFor(user: SessionUser, agent: AssistantAgent, readOnly = false): ToolContext {
+   *  user's RBAC-filtered catalog narrowed to the agent's selection, plus the pinned tools of
+   *  the agent's MCP servers (always approval-required actions). `readOnly` drops
+   *  state-changing tools entirely, MCP tools included — used for headless runs where no
+   *  human can confirm. */
+  private async contextFor(user: SessionUser, agent: AssistantAgent, readOnly = false): Promise<ToolContext> {
     const selected = agent.toolMode === 'selected' ? new Set(agent.tools) : null;
-    const tools = this.catalog
+    const builtIn = this.catalog
       .build(user)
       .filter((t) => !readOnly || t.kind === 'read')
       .filter((t) => !selected || selected.has(t.name));
+    const external = readOnly ? [] : await this.mcp.catalogTools(agent.mcpServerIds).catch((err) => {
+      void this.logging.warn('assistant', `MCP tools unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as CatalogTool[];
+    });
+    const tools = [...builtIn, ...external];
     return {
       byName: new Map(tools.map((t) => [t.name, t])),
       wireTools: tools.map((t) => ({
         type: 'function',
-        function: { name: t.name, description: t.description, parameters: toParameterSchema(t.inputSchema) },
+        function: { name: t.name, description: t.description, parameters: t.jsonSchema ?? toParameterSchema(t.inputSchema) },
       })),
     };
   }
@@ -367,8 +376,12 @@ export class AssistantService implements AssistantAutomationPort {
     }
     try {
       const data = await tool.run(call.args);
-      if (tool.kind === 'action') await this.recordAudit(user, call.name, call.args, tool.redactKeys);
-      return { ok: true, text: JSON.stringify(data) };
+      if (tool.kind === 'action') {
+        // An external tool's args may carry anything (we can't know which are secret): audit keys only.
+        const auditArgs = tool.external ? { argKeys: Object.keys(call.args), external: true } : call.args;
+        await this.recordAudit(user, call.name, auditArgs, tool.redactKeys);
+      }
+      return { ok: true, text: typeof data === 'string' ? data : JSON.stringify(data) };
     } catch (err) {
       return { ok: false, text: `Error: ${err instanceof Error ? err.message : String(err)}` };
     }

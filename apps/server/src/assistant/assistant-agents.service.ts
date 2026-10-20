@@ -203,6 +203,7 @@ export class AssistantAgentsService implements OnModuleInit {
       toolMode: row.toolMode as AssistantToolMode,
       tools: row.tools,
       allowedRoles: row.allowedRoles,
+      mcpServerIds: row.mcpServerIds,
       apiKeySet: await this.apiKeySet(row),
       ready: isReady(row),
       createdAt: row.createdAt.toISOString(),
@@ -275,6 +276,7 @@ function clean(input: Partial<AssistantAgentInput>, current: AssistantAgent | nu
   }
   if (input.tools !== undefined) out.tools = stringList(input.tools);
   if (input.allowedRoles !== undefined) out.allowedRoles = stringList(input.allowedRoles);
+  if (input.mcpServerIds !== undefined) out.mcpServerIds = stringList(input.mcpServerIds);
   return out;
 }
 

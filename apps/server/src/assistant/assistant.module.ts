@@ -7,6 +7,8 @@ import { TimelineModule } from '../timeline/timeline.module';
 import { AssistantAgentsService } from './assistant-agents.service';
 import { AssistantAgentsController } from './assistant-agents.controller';
 import { AssistantConfigService } from './assistant-config.service';
+import { McpServersService } from './mcp-servers.service';
+import { McpServersController } from './mcp-servers.controller';
 import { AssistantContextService } from './assistant-context.service';
 import { AssistantService } from './assistant.service';
 import { OllamaProvisionService } from './ollama-provision.service';
@@ -21,9 +23,10 @@ import { ASSISTANT_AUTOMATION_PORT } from './assistant.port';
  */
 @Module({
   imports: [ToolsModule, SettingsModule, ConnectorsModule, MonitorsModule, TimelineModule],
-  controllers: [AssistantController, AssistantAgentsController],
+  controllers: [AssistantController, AssistantAgentsController, McpServersController],
   providers: [
     AssistantAgentsService,
+    McpServersService,
     AssistantConfigService,
     AssistantContextService,
     AssistantService,
