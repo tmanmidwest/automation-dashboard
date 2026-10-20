@@ -609,9 +609,13 @@ export function Dashboard() {
   // connector/app errors, delivered alerts). Monitor-kind events are omitted here because
   // down monitors are already listed explicitly, to avoid double-counting.
   const nowMs = Date.now();
+  // The banner is a summary, so collapse repeats of the same alert (same title delivered twice —
+  // e.g. one per notification channel, or a re-fire) to the single most-recent occurrence.
+  const seenAttnTitles = new Set<string>();
   const attnEvents = events
     .filter((e) => e.kind !== 'monitor')
     .filter((e) => (e.severity === 'critical' || e.severity === 'warning') && nowMs - new Date(e.ts).getTime() < 30 * 60_000)
+    .filter((e) => { if (seenAttnTitles.has(e.title)) return false; seenAttnTitles.add(e.title); return true; })
     .slice(0, 6);
   // Unified attention list so each item can be acknowledged (session-scoped) and counted once.
   const attnItemsAll: AttnItem[] = [
