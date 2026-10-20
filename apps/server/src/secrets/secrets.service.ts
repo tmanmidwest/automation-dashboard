@@ -1,9 +1,11 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../common/crypto.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
-import type { SecretCategory, SecretHealth, SecretMetaInput, SecretSummary } from '@cerebro/shared';
+import type { ConnectorManifest, SecretCategory, SecretHealth, SecretMetaInput, SecretSummary } from '@cerebro/shared';
+import { ConnectorRegistry } from '../connectors/connector-registry.service';
 
 /** Who is performing an administrative secret write, for the audit trail. */
 export interface ActorCtx {
@@ -34,6 +36,7 @@ export class SecretsService implements OnModuleInit {
     private readonly crypto: CryptoService,
     private readonly audit: AuditService,
     private readonly logging: LoggingService,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   async onModuleInit() {
@@ -202,23 +205,54 @@ export class SecretsService implements OnModuleInit {
     const [secrets, metas, connectors] = await Promise.all([
       this.prisma.secret.findMany({ select: { key: true, updatedAt: true } }),
       this.prisma.secretMeta.findMany(),
-      this.prisma.connectorInstance.findMany({ select: { id: true, name: true } }).catch(() => []),
+      this.prisma.connectorInstance
+        .findMany({ select: { id: true, name: true, connectorId: true } })
+        .catch(() => null),
     ]);
     const metaByKey = new Map(metas.map((m) => [m.key, m]));
-    const connectorName = new Map(connectors.map((c) => [c.id, c.name]));
+    const instances = new Map((connectors ?? []).map((c) => [c.id, c]));
+    const manifests = this.connectorManifests();
     return secrets
       .map((s) => {
-        const summary = this.toSummary(s.key, metaByKey.get(s.key), s.updatedAt);
-        // Connector secrets are keyed `connector:<id>:<field>` and auto-labelled
-        // with the opaque id. If we have no custom label, show the connector's
-        // name instead so it's identifiable in the vault.
-        if (summary.owningConnectorId && s.key.startsWith('connector:') && !metaByKey.get(s.key)?.label) {
-          const name = connectorName.get(summary.owningConnectorId);
-          if (name) summary.label = `${name} · ${humanize(s.key.split(':')[2] ?? 'secret')}`;
+        const meta = metaByKey.get(s.key);
+        const summary = this.toSummary(s.key, meta, s.updatedAt);
+        if (!s.key.startsWith('connector:') || !summary.owningConnectorId) return summary;
+
+        // Connector secrets are keyed `connector:<id>:<field>` and the backfill
+        // stores the opaque id as their label. Resolve the owning connector so
+        // the vault shows e.g. "Home Proxmox · Token secret" instead — but only
+        // replace the label when it's still the auto-generated one, so an
+        // admin's custom label always wins.
+        const field = s.key.split(':')[2] ?? 'secret';
+        const autoLabel = !meta?.label || meta.label === inferMeta(s.key).label;
+        const instance = instances.get(summary.owningConnectorId);
+        if (instance) {
+          const manifest = manifests.get(instance.connectorId);
+          const fieldLabel = manifest?.configFields.find((f) => f.key === field)?.label ?? humanize(field);
+          summary.connector = { name: instance.name, type: instance.connectorId, typeName: manifest?.name ?? null, fieldLabel };
+          if (autoLabel) summary.label = `${instance.name} · ${fieldLabel}`;
+        } else if (connectors) {
+          // Only call it orphaned when the instance lookup actually succeeded.
+          summary.orphaned = true;
+          if (autoLabel) summary.label = `Deleted connector · ${humanize(field)}`;
         }
         return summary;
       })
       .sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
+  }
+
+  /**
+   * Connector manifests by id, for friendly connector/field names. Resolved
+   * lazily via ModuleRef: ConnectorsModule imports this module, so a direct
+   * injection would form a cycle. Best-effort — empty if unavailable.
+   */
+  private connectorManifests(): Map<string, ConnectorManifest> {
+    try {
+      const registry = this.moduleRef.get(ConnectorRegistry, { strict: false });
+      return new Map(registry.manifests().map((m) => [m.id, m]));
+    } catch {
+      return new Map();
+    }
   }
 
   /** Entries whose rotation policy makes them due or expired (for the reminder cron). */
@@ -328,6 +362,12 @@ function inferMeta(key: string): { label: string; category: SecretCategory; owni
 }
 
 function humanize(key: string): string {
-  const s = key.replace(/[.:_]/g, ' ').trim();
+  // Split camelCase too, so `secretAccessKey` reads "Secret access key".
+  const s = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[.:_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
