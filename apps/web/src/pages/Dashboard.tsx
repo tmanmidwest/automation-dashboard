@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle, GripVertical, Eye, EyeOff, Settings2, RotateCcw, Siren, BellOff, X } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, MonitorSummary, MonitorStatus, TimelineEvent, TimelineKind, TimelineSeverity, TimelinePage } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -267,20 +267,101 @@ function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{
   );
 }
 
-/** One line in the "Needs attention" banner. */
-function AttnRow({ color, label, detail, to }: { color: string; label: string; detail?: string; to: string | null }) {
-  const body = (
+/** A single actionable item in the Attention zone (a down connector/monitor, or a recent
+ *  warning/critical event). `key` is stable so it can be acknowledged; `critical` drives the
+ *  banner colour and the Red Alert klaxon. */
+type AttnItem = { key: string; color: string; label: string; detail?: string; to: string | null; critical: boolean };
+
+/** One line in the "Needs attention" banner, with an acknowledge (dismiss) control. */
+function AttnRow({ color, label, detail, to, onAck }: { color: string; label: string; detail?: string; to: string | null; onAck?: () => void }) {
+  const inner = (
     <>
       <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color, boxShadow: `0 0 6px ${color}` }} aria-hidden />
       <span className="text-sm truncate">{label}</span>
-      {detail && <span className="ml-auto pl-2 text-xs text-muted-foreground truncate max-w-[45%] shrink-0">{detail}</span>}
+      {detail && <span className="ml-auto pl-2 text-xs text-muted-foreground truncate max-w-[40%] shrink-0">{detail}</span>}
     </>
   );
-  const cls = 'flex items-center gap-2.5 rounded-md px-2 py-1.5 min-h-[34px]';
-  return to ? (
-    <Link to={to} className={cn(cls, 'hover:bg-background/40 transition-colors')}>{body}</Link>
-  ) : (
-    <div className={cls}>{body}</div>
+  const cls = 'flex items-center gap-2.5 rounded-md px-2 py-1.5 min-h-[34px] flex-1 min-w-0';
+  return (
+    <div className="flex items-center gap-1">
+      {to ? (
+        <Link to={to} className={cn(cls, 'hover:bg-background/40 transition-colors')}>{inner}</Link>
+      ) : (
+        <div className={cls}>{inner}</div>
+      )}
+      {onAck && (
+        <button
+          type="button"
+          onClick={onAck}
+          title="Acknowledge — hide until it recurs"
+          aria-label="Acknowledge"
+          className="shrink-0 rounded p-1 text-muted-foreground/70 transition-colors hover:bg-background/40 hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Customizable layout (P2 / P2.5) ─────────────────────────────────────────
+// The dashboard body is a list of reorderable, hideable widgets. The Attention banner is
+// NOT one of them — it stays pinned on top. Order + hidden set persist PER USER on the
+// server (GET/PUT /api/account/preferences/dashboard-layout), so the layout follows the
+// user across devices rather than living in one browser.
+type WidgetId = 'status' | 'activity' | 'telemetry' | 'monitorsSummary' | 'spend' | 'backups';
+const DEFAULT_ORDER: WidgetId[] = ['status', 'activity', 'telemetry', 'monitorsSummary', 'spend', 'backups'];
+type DashLayout = { order: WidgetId[]; hidden: WidgetId[] };
+const LAYOUT_PREF_KEY = 'dashboard-layout';
+const DEFAULT_LAYOUT: DashLayout = { order: [...DEFAULT_ORDER], hidden: [] };
+
+/** Coerce a stored (untrusted) preference value into a valid layout, dropping unknown ids and
+ *  appending any widgets missing from the saved order (so a newly-added widget never vanishes). */
+function normalizeLayout(raw: unknown): DashLayout {
+  if (!raw || typeof raw !== 'object') return { order: [...DEFAULT_ORDER], hidden: [] };
+  const parsed = raw as Partial<DashLayout>;
+  const saved = (parsed.order ?? []).filter((id): id is WidgetId => DEFAULT_ORDER.includes(id as WidgetId));
+  const order = [...saved, ...DEFAULT_ORDER.filter((id) => !saved.includes(id))];
+  const hidden = (parsed.hidden ?? []).filter((id): id is WidgetId => DEFAULT_ORDER.includes(id as WidgetId));
+  return { order, hidden };
+}
+
+/** Wraps a dashboard widget. In edit mode it adds a drag handle + hide toggle and becomes a
+ *  drag/drop target; otherwise it renders its children transparently. */
+function WidgetFrame({ title, editing, hidden, onToggleHidden, onDragStart, onDropOn, children }: {
+  title: string;
+  editing: boolean;
+  hidden: boolean;
+  onToggleHidden: () => void;
+  onDragStart: () => void;
+  onDropOn: () => void;
+  children: React.ReactNode;
+}) {
+  const [over, setOver] = useState(false);
+  if (!editing) return <>{children}</>;
+  return (
+    <div
+      draggable
+      onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(); }}
+      onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => { e.preventDefault(); setOver(false); onDropOn(); }}
+      className={cn('rounded-xl border-2 border-dashed p-2 transition-colors', over ? 'border-primary bg-primary/5' : 'border-border/50', hidden && 'opacity-45')}
+    >
+      <div className="flex items-center gap-2 mb-2 px-1">
+        <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab active:cursor-grabbing" />
+        <span className="font-lcars text-xs tracking-[0.14em] text-muted-foreground">{title}</span>
+        <button
+          type="button"
+          onClick={onToggleHidden}
+          className="ml-auto text-muted-foreground transition-colors hover:text-foreground"
+          title={hidden ? 'Show on dashboard' : 'Hide from dashboard'}
+        >
+          {hidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </button>
+      </div>
+      <div className={cn(hidden && 'pointer-events-none')}>{children}</div>
+    </div>
   );
 }
 
@@ -302,6 +383,50 @@ export function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [, tick] = useState(0);
   const FEED_CAP = 60;
+
+  // Customizable layout (P2 / P2.5): widget order + hidden set, persisted server-side so it
+  // follows the user across devices. The initial GET seeds `layout`; only user actions PUT.
+  const [editing, setEditing] = useState(false);
+  const [layout, setLayout] = useState<DashLayout>(DEFAULT_LAYOUT);
+  const layoutLoaded = useRef(false);
+  const dragId = useRef<WidgetId | null>(null);
+  useEffect(() => {
+    layoutLoaded.current = false;
+    api.get<{ value: unknown }>(`/api/account/preferences/${LAYOUT_PREF_KEY}`)
+      .then((r) => setLayout(normalizeLayout(r.value)))
+      .catch(() => setLayout(DEFAULT_LAYOUT))
+      .finally(() => { layoutLoaded.current = true; });
+  }, [user?.id]);
+  const persistLayout = useCallback((next: DashLayout) => {
+    setLayout(next);
+    // Don't echo the server's own value back before the initial load has landed.
+    if (layoutLoaded.current) api.put(`/api/account/preferences/${LAYOUT_PREF_KEY}`, { value: next }).catch(() => {});
+  }, []);
+  const resetLayout = useCallback(() => persistLayout({ order: [...DEFAULT_ORDER], hidden: [] }), [persistLayout]);
+  const toggleHidden = useCallback((id: WidgetId) => {
+    setLayout((prev) => {
+      const next = { ...prev, hidden: prev.hidden.includes(id) ? prev.hidden.filter((x) => x !== id) : [...prev.hidden, id] };
+      if (layoutLoaded.current) api.put(`/api/account/preferences/${LAYOUT_PREF_KEY}`, { value: next }).catch(() => {});
+      return next;
+    });
+  }, []);
+  const moveWidget = useCallback((from: WidgetId, to: WidgetId) => {
+    if (from === to) return;
+    setLayout((prev) => {
+      const order = prev.order.filter((x) => x !== from);
+      const idx = order.indexOf(to);
+      order.splice(idx < 0 ? order.length : idx, 0, from);
+      const next = { ...prev, order };
+      if (layoutLoaded.current) api.put(`/api/account/preferences/${LAYOUT_PREF_KEY}`, { value: next }).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  // P3: acknowledged attention items (session-scoped — hide the current noise; a new
+  // occurrence re-surfaces) and the Red Alert klaxon's silence toggle.
+  const [acked, setAcked] = useState<Set<string>>(new Set());
+  const ackItem = useCallback((key: string) => setAcked((prev) => new Set(prev).add(key)), []);
+  const [alarmSilenced, setAlarmSilenced] = useState(false);
 
   // Core telemetry (connectors + stats) — the fast 5s loop. Activity no longer polls here;
   // it rides the live SSE stream below.
@@ -415,8 +540,19 @@ export function Dashboard() {
     .filter((e) => e.kind !== 'monitor')
     .filter((e) => (e.severity === 'critical' || e.severity === 'warning') && nowMs - new Date(e.ts).getTime() < 30 * 60_000)
     .slice(0, 6);
-  const attnCount = offline.length + monDown.length + attnEvents.length;
-  const hasCritical = offline.length > 0 || monDown.length > 0 || attnEvents.some((e) => e.severity === 'critical');
+  // Unified attention list so each item can be acknowledged (session-scoped) and counted once.
+  const attnItemsAll: AttnItem[] = [
+    ...offline.map((s): AttnItem => ({ key: `conn:${s.name}`, color: 'hsl(var(--destructive))', label: `Connector offline · ${s.name}`, detail: s.message ?? 'unreachable', to: '/connectors', critical: true })),
+    ...monDown.map((m): AttnItem => ({ key: `mon:${m.id}`, color: 'hsl(var(--destructive))', label: `Monitor down · ${m.name}`, detail: m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : 'no response', to: `/monitors/${m.id}`, critical: true })),
+    ...attnEvents.map((e): AttnItem => ({ key: `ev:${e.id}`, color: TL_SEVERITY[e.severity].dot, label: e.title, detail: e.actor?.email ?? TL_KIND_LABEL[e.kind], to: timelineTarget(e), critical: e.severity === 'critical' })),
+  ];
+  const attnItems = attnItemsAll.filter((i) => !acked.has(i.key));
+  const attnCount = attnItems.length;
+  const hasCritical = attnItems.some((i) => i.critical);
+  // Red Alert: a page-level klaxon when anything critical is unacknowledged. Auto-clears (and
+  // re-arms) as criticals come and go; the operator can silence the current alarm.
+  useEffect(() => { if (!hasCritical) setAlarmSilenced(false); }, [hasCritical]);
+  const redAlert = hasCritical && !alarmSilenced;
 
   // Normalized rows for the two status panels; healthy entries collapse to glyphs.
   const monitorItems: StatusItem[] = (monitors ?? [])
@@ -457,181 +593,137 @@ export function Dashboard() {
   const nodes = useCountUp(metric('nodes'));
   const ops = useCountUp(userCount);
 
-  return (
-    <div className="animate-fade-in space-y-4">
-      <div className="flex items-start gap-3">
-        <span className="lcars-accentbar mt-2" aria-hidden />
-        <div>
-          <div className="flex items-center gap-2 font-lcars text-xs tracking-[0.24em] text-accent/80">
-            <span className={cn('h-1.5 w-1.5 rounded-full', stale ? 'bg-destructive animate-pulse' : 'bg-emerald-400 animate-pulse')} />
-            {stale ? 'Signal lost' : 'Scanning'} · {connOk}/{connTotal} systems linked
-          </div>
-          <h1 className="font-lcars text-3xl font-semibold leading-none mt-1">
-            Welcome back, {user?.displayName?.split(' ')[0] ?? 'Operator'}
-          </h1>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="ml-auto mt-1"
-          onClick={() => refreshAll()}
-          disabled={refreshing}
-          aria-label="Refresh telemetry now"
-        >
-          <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
-          Refresh
-        </Button>
-      </div>
+  // ── Widget registry — the reorderable body. `available` hides a widget whose data is
+  // absent (e.g. no cloud spend). Order + visibility come from `layout`. ──
+  const widgets: Record<WidgetId, { title: string; available: boolean; node: React.ReactNode }> = {
+    status: {
+      title: 'Monitors & Connectors',
+      available: true,
+      node: (
+        <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-2')}>
+          {canMonitors && (
+            <Panel
+              title="Monitors"
+              to="/monitors"
+              accent="primary"
+              tag={monitors && monitors.length > 0 ? (
+                <span className="tabular-nums">
+                  {monDown.length > 0 && <span className="text-destructive">{monDown.length} down · </span>}
+                  {monUp}/{monitors.length - monPaused} up
+                </span>
+              ) : undefined}
+            >
+              {monitorItems.length > 0 ? (
+                <StatusList
+                  items={monitorItems}
+                  storageKey="cerebro.dash.monitors.showAll"
+                  nominal="All monitors reporting."
+                  unitPlural="monitors"
+                />
+              ) : (
+                <div className="grid place-items-center text-center text-sm text-muted-foreground py-8">
+                  {monitors ? 'No monitors configured.' : 'Loading monitors…'}
+                </div>
+              )}
+            </Panel>
+          )}
 
-      {/* ── Attention zone — always first; the sensitive/important content up top ── */}
-      {attnCount === 0 ? (
-        <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-4 py-2.5">
-          <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
-          <span className="font-lcars text-sm tracking-[0.14em] text-emerald-300/90">ALL SYSTEMS NOMINAL</span>
-          <span className="ml-auto flex items-center gap-1.5 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground">
-            <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
-            {live ? 'LIVE' : 'RECONNECTING'}
-          </span>
-        </div>
-      ) : (
-        <div className={cn('rounded-xl border p-4', hasCritical ? 'border-destructive/50 bg-destructive/5' : 'border-amber-500/40 bg-amber-500/5')}>
-          <div className="flex items-center gap-2.5 mb-2">
-            <AlertTriangle className={cn('h-4 w-4 shrink-0', hasCritical ? 'text-destructive' : 'text-amber-400')} />
-            <h3 className="font-lcars text-sm font-semibold tracking-[0.14em]">NEEDS ATTENTION</h3>
-            <span className="ml-auto flex items-center gap-2 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground tabular-nums">
-              <span className="flex items-center gap-1.5">
-                <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
-                {live ? 'LIVE' : 'RECONNECTING'}
-              </span>
-              · {attnCount} item{attnCount > 1 ? 's' : ''}
-            </span>
-          </div>
-          <div className="grid gap-1 sm:grid-cols-2">
-            {offline.map((s, i) => (
-              <AttnRow key={`conn-${i}`} color="hsl(var(--destructive))" label={`Connector offline · ${s.name}`} detail={s.message ?? 'unreachable'} to="/connectors" />
-            ))}
-            {monDown.map((m) => (
-              <AttnRow key={`mon-${m.id}`} color="hsl(var(--destructive))" label={`Monitor down · ${m.name}`} detail={m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : 'no response'} to={`/monitors/${m.id}`} />
-            ))}
-            {attnEvents.map((e) => (
-              <AttnRow key={e.id} color={TL_SEVERITY[e.severity].dot} label={e.title} detail={e.actor?.email ?? TL_KIND_LABEL[e.kind]} to={timelineTarget(e)} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Monitors + Connectors — the at-a-glance status row */}
-      <div className={cn('grid gap-4', canMonitors && 'lg:grid-cols-2')}>
-        {canMonitors && (
           <Panel
-            title="Monitors"
-            to="/monitors"
-            accent="primary"
-            tag={monitors && monitors.length > 0 ? (
-              <span className="tabular-nums">
-                {monDown.length > 0 && <span className="text-destructive">{monDown.length} down · </span>}
-                {monUp}/{monitors.length - monPaused} up
-              </span>
-            ) : undefined}
+            title="Connectors"
+            to="/connectors"
+            accent="accent"
+            tag={<span className="tabular-nums">{offline.length > 0 && <span className="text-destructive">{offline.length} down · </span>}{connOk}/{connTotal} up</span>}
+            className={cn(offline.length > 0 && 'border-amber-500/40')}
           >
-            {monitorItems.length > 0 ? (
-              <StatusList
-                items={monitorItems}
-                storageKey="cerebro.dash.monitors.showAll"
-                nominal="All monitors reporting."
-                unitPlural="monitors"
-              />
-            ) : (
+            {connectorItems.length === 0 ? (
               <div className="grid place-items-center text-center text-sm text-muted-foreground py-8">
-                {monitors ? 'No monitors configured.' : 'Loading monitors…'}
+                {overview ? 'No connectors configured.' : 'Scanning…'}
               </div>
+            ) : (
+              <StatusList
+                items={connectorItems}
+                storageKey="cerebro.dash.connectors.showAll"
+                nominal="All connectors online."
+                unitPlural="connectors"
+              />
             )}
           </Panel>
-        )}
-
-        <Panel
-          title="Connectors"
-          to="/connectors"
-          accent="accent"
-          tag={<span className="tabular-nums">{offline.length > 0 && <span className="text-destructive">{offline.length} down · </span>}{connOk}/{connTotal} up</span>}
-          className={cn(offline.length > 0 && 'border-amber-500/40')}
-        >
-          {connectorItems.length === 0 ? (
-            <div className="grid place-items-center text-center text-sm text-muted-foreground py-8">
-              {overview ? 'No connectors configured.' : 'Scanning…'}
-            </div>
-          ) : (
-            <StatusList
-              items={connectorItems}
-              storageKey="cerebro.dash.connectors.showAll"
-              nominal="All connectors online."
-              unitPlural="connectors"
-            />
-          )}
-        </Panel>
-      </div>
-
-      {/* ── Live activity — real-time event stream (replaces the polled audit list) ── */}
-      <Panel
-        title="Live Activity"
-        accent="primary"
-        tag={
-          <span className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5">
-              <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
-              {live ? 'LIVE' : 'OFFLINE'}
-            </span>
-            <span className="flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" /> {ops}</span>
-            <Link to="/timeline" className="hover:text-foreground">View all ›</Link>
-          </span>
-        }
-      >
-        <div className="max-h-[320px] overflow-y-auto -mx-1">
-          {events.length === 0 ? (
-            <div className="text-center text-muted-foreground py-6 text-sm">Waiting for events…</div>
-          ) : (
-            <div className="divide-y divide-border/40">
-              {events.map((e) => {
-                const sev = TL_SEVERITY[e.severity];
-                const target = timelineTarget(e);
-                return (
-                  <div
-                    key={e.id}
-                    className={cn('flex gap-2.5 px-2 py-1.5 items-start animate-fade-in', target && 'cursor-pointer hover:bg-muted/40 transition-colors')}
-                    onClick={target ? () => navigate(target) : undefined}
-                  >
-                    <span className={cn('mt-0.5 w-1 self-stretch rounded-full shrink-0', sev.spine)} aria-hidden />
-                    <span className="text-muted-foreground/70 shrink-0 w-[4.5rem] text-xs tabular-nums pt-0.5">
-                      {new Date(e.ts).toLocaleTimeString()}
-                    </span>
-                    <span className={cn('shrink-0 w-14 text-[0.6rem] uppercase tracking-wider font-semibold pt-1', sev.text)}>
-                      {TL_KIND_LABEL[e.kind]}
-                    </span>
-                    <div className="flex-1 min-w-0 text-sm break-words">
-                      {e.title}
-                      {e.actor?.email && <span className="text-xs text-muted-foreground"> · {e.actor.email}</span>}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
-      </Panel>
+      ),
+    },
 
-      {/* ── Reference stats below — the numbers that change slowly ── */}
-      {/* Telemetry tiles */}
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-        <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/vm" />
-        <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} to="/overview/container" />
-        <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" to="/overview/nodes" />
-        <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} to="/overview/nodes" />
-        <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
-        <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
-      </div>
+    activity: {
+      title: 'Live Activity',
+      available: true,
+      node: (
+        <Panel
+          title="Live Activity"
+          accent="primary"
+          tag={
+            <span className="flex items-center gap-3">
+              <span className="flex items-center gap-1.5">
+                <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+                {live ? 'LIVE' : 'OFFLINE'}
+              </span>
+              <span className="flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" /> {ops}</span>
+              <Link to="/timeline" className="hover:text-foreground">View all ›</Link>
+            </span>
+          }
+        >
+          <div className="max-h-[320px] overflow-y-auto -mx-1">
+            {events.length === 0 ? (
+              <div className="text-center text-muted-foreground py-6 text-sm">Waiting for events…</div>
+            ) : (
+              <div className="divide-y divide-border/40">
+                {events.map((e) => {
+                  const sev = TL_SEVERITY[e.severity];
+                  const target = timelineTarget(e);
+                  return (
+                    <div
+                      key={e.id}
+                      className={cn('flex gap-2.5 px-2 py-1.5 items-start animate-fade-in', target && 'cursor-pointer hover:bg-muted/40 transition-colors')}
+                      onClick={target ? () => navigate(target) : undefined}
+                    >
+                      <span className={cn('mt-0.5 w-1 self-stretch rounded-full shrink-0', sev.spine)} aria-hidden />
+                      <span className="text-muted-foreground/70 shrink-0 w-[4.5rem] text-xs tabular-nums pt-0.5">
+                        {new Date(e.ts).toLocaleTimeString()}
+                      </span>
+                      <span className={cn('shrink-0 w-14 text-[0.6rem] uppercase tracking-wider font-semibold pt-1', sev.text)}>
+                        {TL_KIND_LABEL[e.kind]}
+                      </span>
+                      <div className="flex-1 min-w-0 text-sm break-words">
+                        {e.title}
+                        {e.actor?.email && <span className="text-xs text-muted-foreground"> · {e.actor.email}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </Panel>
+      ),
+    },
 
-      {/* Uptime monitor summary tiles */}
-      {monitors && monitors.length > 0 && (
+    telemetry: {
+      title: 'Infrastructure',
+      available: true,
+      node: (
+        <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <StatTile icon={Server} label="VMs running" value={String(vms)} sub={`${metric('vmsTotal')} total`} to="/overview/vm" />
+          <StatTile icon={Boxes} label="Containers" value={String(cts)} sub={`${metric('ctsTotal')} total`} to="/overview/container" />
+          <StatTile icon={Network} label="Nodes online" value={String(nodes)} sub="cluster" to="/overview/nodes" />
+          <GaugeTile icon={Cpu} label="Cluster CPU" pct={metric('cpuPct')} to="/overview/nodes" />
+          <GaugeTile icon={Activity} label="Cluster RAM" pct={metric('memPct')} to="/overview/nodes" />
+          <StatTile icon={Clock} label="Core uptime" value={uptimeSince(version?.builtAt ?? new Date(startedRef.current).toISOString())} sub={version ? `v${version.version}` : 'online'} />
+        </div>
+      ),
+    },
+
+    monitorsSummary: {
+      title: 'Monitor summary',
+      available: !!(monitors && monitors.length > 0),
+      node: (
         <div>
           <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <HeartPulse className="h-3.5 w-3.5 text-accent" /> Monitors
@@ -640,7 +732,7 @@ export function Dashboard() {
             <StatTile
               icon={HeartPulse}
               label="Monitors up"
-              value={`${monUp} / ${monitors.length - monPaused}`}
+              value={`${monUp} / ${(monitors?.length ?? 0) - monPaused}`}
               sub={[monPending > 0 ? `${monPending} pending` : null, monPaused > 0 ? `${monPaused} paused` : null].filter(Boolean).join(' · ') || 'all checks reporting'}
               to="/monitors"
             />
@@ -660,10 +752,13 @@ export function Dashboard() {
             />
           </div>
         </div>
-      )}
+      ),
+    },
 
-      {/* Cloud spend — its own row so it doesn't crowd the telemetry tiles */}
-      {costMtd && (
+    spend: {
+      title: 'Cloud spend',
+      available: !!costMtd,
+      node: costMtd ? (
         <div>
           <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <DollarSign className="h-3.5 w-3.5 text-accent" /> Cloud spend
@@ -679,10 +774,13 @@ export function Dashboard() {
             )}
           </div>
         </div>
-      )}
+      ) : null,
+    },
 
-      {/* Backups — Backblaze B2, shown only when a backup connector is configured */}
-      {hasBackblaze && (
+    backups: {
+      title: 'Backups',
+      available: hasBackblaze,
+      node: (
         <div>
           <div className="flex items-center gap-2 mb-2 font-lcars text-xs tracking-[0.14em] text-muted-foreground">
             <Archive className="h-3.5 w-3.5 text-accent" /> Backups
@@ -708,7 +806,143 @@ export function Dashboard() {
             )}
           </div>
         </div>
+      ),
+    },
+  };
+
+  // Auto-bubble (P3): a widget with an active problem floats to the top in view mode, without
+  // disturbing the user's saved order. Edit mode shows the raw saved order so drag is predictable.
+  const widgetHasIssue = (id: WidgetId): boolean => {
+    if (id === 'status') return offline.length > 0 || monDown.length > 0;
+    if (id === 'monitorsSummary') return monDown.length > 0;
+    if (id === 'backups') return !!b2LastOk && b2LastOk.value === false;
+    return false;
+  };
+  const renderOrder = editing
+    ? layout.order
+    : [...layout.order.filter(widgetHasIssue), ...layout.order.filter((id) => !widgetHasIssue(id))];
+
+  return (
+    <div className="animate-fade-in space-y-4">
+      {/* Red Alert (P3): a pulsing red vignette + klaxon bar whenever something critical is
+          unacknowledged. Silenceable; re-arms when a new critical appears. */}
+      {redAlert && (
+        <div
+          className="pointer-events-none fixed inset-0 z-40 animate-pulse"
+          style={{ boxShadow: 'inset 0 0 120px hsl(var(--destructive) / 0.35)' }}
+          aria-hidden
+        />
       )}
+      {redAlert && (
+        <div className="flex items-center gap-2.5 rounded-xl border border-destructive/60 bg-destructive/10 px-4 py-2.5 animate-pulse">
+          <Siren className="h-5 w-5 text-destructive shrink-0" />
+          <span className="font-lcars text-sm font-semibold tracking-[0.2em] text-destructive">RED ALERT</span>
+          <span className="font-lcars text-xs tracking-[0.14em] text-destructive/80 tabular-nums">
+            {attnItems.filter((i) => i.critical).length} critical
+          </span>
+          <Button variant="outline" size="sm" className="ml-auto" onClick={() => setAlarmSilenced(true)}>
+            <BellOff className="h-4 w-4" />
+            Silence
+          </Button>
+        </div>
+      )}
+      <div className="flex items-start gap-3">
+        <span className="lcars-accentbar mt-2" aria-hidden />
+        <div>
+          <div className="flex items-center gap-2 font-lcars text-xs tracking-[0.24em] text-accent/80">
+            <span className={cn('h-1.5 w-1.5 rounded-full', stale ? 'bg-destructive animate-pulse' : 'bg-emerald-400 animate-pulse')} />
+            {stale ? 'Signal lost' : 'Scanning'} · {connOk}/{connTotal} systems linked
+          </div>
+          <h1 className="font-lcars text-3xl font-semibold leading-none mt-1">
+            Welcome back, {user?.displayName?.split(' ')[0] ?? 'Operator'}
+          </h1>
+        </div>
+        <div className="ml-auto mt-1 flex items-center gap-2">
+          {editing && (
+            <Button variant="ghost" size="sm" onClick={resetLayout} aria-label="Reset dashboard layout">
+              <RotateCcw className="h-4 w-4" />
+              Reset
+            </Button>
+          )}
+          <Button
+            variant={editing ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setEditing((v) => !v)}
+            aria-label={editing ? 'Finish editing layout' : 'Edit dashboard layout'}
+          >
+            <Settings2 className="h-4 w-4" />
+            {editing ? 'Done' : 'Edit layout'}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refreshAll()}
+            disabled={refreshing}
+            aria-label="Refresh telemetry now"
+          >
+            <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      {editing && (
+        <p className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          Drag the <GripVertical className="inline h-3.5 w-3.5 align-text-bottom" /> handle to reorder panels, or use the eye to hide one. The Attention banner always stays on top. Changes save automatically for your account.
+        </p>
+      )}
+
+      {/* ── Attention zone — always first; the sensitive/important content up top ── */}
+      {attnCount === 0 ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-4 py-2.5">
+          <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+          <span className="font-lcars text-sm tracking-[0.14em] text-emerald-300/90">ALL SYSTEMS NOMINAL</span>
+          <span className="ml-auto flex items-center gap-1.5 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground">
+            <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+            {live ? 'LIVE' : 'RECONNECTING'}
+          </span>
+        </div>
+      ) : (
+        <div className={cn('rounded-xl border p-4', hasCritical ? 'border-destructive/50 bg-destructive/5' : 'border-amber-500/40 bg-amber-500/5')}>
+          <div className="flex items-center gap-2.5 mb-2">
+            <AlertTriangle className={cn('h-4 w-4 shrink-0', hasCritical ? 'text-destructive' : 'text-amber-400')} />
+            <h3 className="font-lcars text-sm font-semibold tracking-[0.14em]">NEEDS ATTENTION</h3>
+            <span className="ml-auto flex items-center gap-2 font-lcars text-[11px] tracking-[0.14em] text-muted-foreground tabular-nums">
+              <span className="flex items-center gap-1.5">
+                <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+                {live ? 'LIVE' : 'RECONNECTING'}
+              </span>
+              · {attnCount} item{attnCount > 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="grid gap-1 sm:grid-cols-2">
+            {attnItems.map((i) => (
+              <AttnRow key={i.key} color={i.color} label={i.label} detail={i.detail} to={i.to} onAck={() => ackItem(i.key)} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Reorderable widget body (auto-bubbles problem widgets up in view mode) ── */}
+      {renderOrder.map((id) => {
+        const w = widgets[id];
+        if (!w || !w.available) return null;
+        const hidden = layout.hidden.includes(id);
+        if (hidden && !editing) return null;
+        return (
+          <WidgetFrame
+            key={id}
+            title={w.title}
+            editing={editing}
+            hidden={hidden}
+            onToggleHidden={() => toggleHidden(id)}
+            onDragStart={() => { dragId.current = id; }}
+            onDropOn={() => { if (dragId.current) moveWidget(dragId.current, id); dragId.current = null; }}
+          >
+            {w.node}
+          </WidgetFrame>
+        );
+      })}
 
       <div className="flex items-center justify-center gap-2 pt-1 text-[11px] font-lcars tracking-[0.2em] text-muted-foreground/50">
         <Radio className="h-3 w-3" /> Cerebro Core · LCARS

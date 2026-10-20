@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { randomInt } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -24,6 +25,25 @@ export class AccountService {
     private readonly mail: MailService,
     private readonly audit: AuditService,
   ) {}
+
+  /** Read one of the current user's UI preferences (e.g. the dashboard layout). */
+  async getPreference(userId: string, key: string): Promise<unknown> {
+    const row = await this.prisma.userPreference.findUnique({ where: { userId_key: { userId, key } } });
+    return row?.value ?? null;
+  }
+
+  /** Upsert one of the current user's UI preferences. Caps the payload so a preference blob
+   *  can't be used to stuff the DB. */
+  async setPreference(userId: string, key: string, value: unknown): Promise<void> {
+    if (key.length > 128) throw new BadRequestException('Preference key too long.');
+    if (JSON.stringify(value ?? null).length > 64_000) throw new BadRequestException('Preference value too large.');
+    const data = (value ?? null) as Prisma.InputJsonValue;
+    await this.prisma.userPreference.upsert({
+      where: { userId_key: { userId, key } },
+      create: { userId, key, value: data },
+      update: { value: data },
+    });
+  }
 
   async requestPasswordChange(userId: string): Promise<{ ok: true; email: string }> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { IsString, MinLength, MaxLength } from 'class-validator';
 import type { SessionUser } from '@cerebro/shared';
@@ -45,6 +45,23 @@ export class AccountController {
       await this.throttle.recordFailure(ip, key);
       throw e;
     }
+  }
+
+  /** The current user's own UI preferences (dashboard layout, etc.) — server-side so they
+   *  follow the user across devices. Scoped to the session user; no extra permission. */
+  @Get('preferences/:key')
+  async getPreference(@Param('key') key: string, @CurrentUser() user: SessionUser): Promise<{ value: unknown }> {
+    return { value: await this.account.getPreference(user.id, key) };
+  }
+
+  @Put('preferences/:key')
+  async setPreference(
+    @Param('key') key: string,
+    @Body() body: { value?: unknown },
+    @CurrentUser() user: SessionUser,
+  ): Promise<{ ok: true }> {
+    await this.account.setPreference(user.id, key, body?.value ?? null);
+    return { ok: true };
   }
 
   @Post('password/request')

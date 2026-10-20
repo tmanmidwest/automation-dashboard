@@ -51,11 +51,26 @@ model User {
   oauthCodes         OAuthAuthorizationCode[]
   oauthGrants        OAuthGrant[]
   oauthRefreshTokens OAuthRefreshToken[]
+  /// Per-user UI preferences (e.g. the dashboard layout). One row per (user, key).
+  preferences        UserPreference[]
   lastLoginAt        DateTime?
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
   @@index([roleId])
+}
+
+/// Per-user key/value preferences — server-side so they follow the user across devices
+/// (unlike localStorage). Value is arbitrary JSON (the dashboard layout, etc.).
+model UserPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
 }
 
 /// One single-use TOTP recovery code. Only the bcrypt hash is stored; consumed codes are

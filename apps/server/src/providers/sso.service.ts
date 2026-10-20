@@ -195,6 +195,7 @@ export class SsoService {
     if (identity) {
       if (identity.user.disabled) throw new ForbiddenException('This account is disabled.');
       await this.prisma.user.update({ where: { id: identity.userId }, data: { lastLoginAt: new Date() } });
+      await this.recordSsoLogin(identity.userId, identity.user.email, provider.label);
       return identity.userId;
     }
 
@@ -240,6 +241,7 @@ export class SsoService {
         action: 'auth.sso_identity_linked',
         target: provider.label,
       });
+      await this.recordSsoLogin(existing.id, email, provider.label);
       return existing.id;
     }
 
@@ -273,7 +275,20 @@ export class SsoService {
       meta: { roleSlug: role.slug },
     });
     await this.logging.info('auth', `Provisioned ${email} via ${provider.label} as ${role.slug}.`);
+    await this.recordSsoLogin(user.id, email, provider.label);
     return user.id;
+  }
+
+  /** Record a successful SSO sign-in as a generic `auth.login` (mirroring the local /login
+   *  endpoint), so every login — local or SSO, new or returning — lands in the audit log and
+   *  the timeline. The SSO-specific events (provisioned / identity_linked) remain alongside it. */
+  private recordSsoLogin(userId: string, email: string | null | undefined, providerLabel: string) {
+    return this.audit.record({
+      actorId: userId,
+      actorEmail: email ?? undefined,
+      action: 'auth.login',
+      meta: { sso: providerLabel },
+    });
   }
 
   /** Ensures the given role exists (falls back to seeding a built-in if referenced). */
