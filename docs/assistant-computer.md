@@ -2,6 +2,22 @@
 
 Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
 
+> **Agent profiles — what shipped.** The single global config became named **agents**
+> (`AssistantAgent` table, migration `0044`; not to be confused with the Fabric `Agent`). Each
+> agent has its own backend/URL/model/temperature, API key (vault: `assistant.agent.<id>.apiKey`;
+> the default agent keeps `assistant.apiKey`), instructions (appended after the fixed safety
+> preamble), context primer, max tool rounds, tool selection (`toolMode` all | selected, always
+> intersected with the caller's RBAC), and a role allow-list. The default agent is seeded on boot
+> from the legacy `assistant.config` setting, and `/api/assistant/config` + Settings → Computer
+> now read/write that row, so existing installs and the Ollama wizard are unchanged. New
+> permission `agents:manage` (admin). Endpoints: `GET /api/assistant/agents` (`assistant:use`,
+> agents you may chat with), `GET /api/assistant/agents/manage`, `GET|POST|PUT|DELETE
+> /api/assistant/agents[/:id]`, `GET /api/assistant/agents/:id/models`, `GET /api/assistant/tools`
+> (all `agents:manage`). `POST /chat` takes `agentId`; a paused action resumes as the same agent;
+> `ask_computer` takes an optional `agentId` and stays read-only. UI: Settings → Agents (list +
+> editor: General, Model, Instructions, Tools), an agent picker on the Computer page, and an agent
+> picker on the `ask_computer` action. Next: external MCP servers as a tool source.
+
 > **Phase 4 — what shipped (automations bridge).** (a) **`ask_computer` automation action** — a new
 > `RuleAction` that runs the Computer headlessly (read-only tools, synthetic system principal, the
 > triggering event as context) and delivers its answer as a notification. Wired in

@@ -298,7 +298,7 @@ export class AutomationsService implements OnModuleInit, OnModuleDestroy {
           ? `kind=${event.kind}; severity=${event.severity}; title=${event.title}; ` +
             `source=${event.source ?? ''}; detail=${event.detail ?? ''}`
           : undefined;
-        const answer = await assistant.summarizeForAutomation(action.prompt, context);
+        const answer = await assistant.summarizeForAutomation(action.prompt, context, action.agentId || undefined);
         await this.notifications.dispatchAlert('automation.ask_computer', {
           title: action.title ?? 'Computer',
           body: answer || '(no answer)',

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock, DatabaseBackup, Cpu } from 'lucide-react';
+import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock, DatabaseBackup, Cpu, Bot } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -20,6 +20,7 @@ export function SettingsHome() {
     { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
     { to: '/settings/backup', icon: DatabaseBackup, title: 'Backup & Restore', desc: 'Full encrypted backup you can move to another machine.', perm: 'settings:write' },
     { to: '/settings/computer', icon: Cpu, title: 'Computer', desc: 'In-app LLM assistant — self-hosted or OpenAI-compatible model backend.', perm: 'settings:write' },
+    { to: '/settings/agents', icon: Bot, title: 'Agents', desc: 'Computer agents with their own model, instructions, and tools.', perm: 'agents:manage' },
   ];
   const sections = allSections.filter((s) => !s.perm || can(s.perm));
   return (

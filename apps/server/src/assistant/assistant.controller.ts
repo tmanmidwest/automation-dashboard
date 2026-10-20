@@ -149,7 +149,8 @@ export class AssistantController {
     @Res() res: Response,
   ): Promise<void> {
     const history = sanitizeHistory(body?.messages);
-    await this.stream(req, res, this.assistant.chat(user, history));
+    const agentId = typeof body?.agentId === 'string' && body.agentId ? body.agentId : undefined;
+    await this.stream(req, res, this.assistant.chat(user, history, agentId));
   }
 
   /**

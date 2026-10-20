@@ -18,6 +18,8 @@ export interface CapturedCall {
 export interface PendingAction {
   id: string;
   userId: string;
+  /** The agent the paused turn was running as. */
+  agentId: string;
   /** Full wire conversation up to and including the assistant's tool-calling turn, plus
    *  any tool results already produced this turn. */
   messages: WireMessage[];

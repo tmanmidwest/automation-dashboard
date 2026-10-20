@@ -39,6 +39,8 @@ import { Secrets } from '@/pages/settings/Secrets';
 import { OAuthClients } from '@/pages/settings/OAuthClients';
 import { BackupRestore } from '@/pages/settings/BackupRestore';
 import { ComputerSettings } from '@/pages/settings/Computer';
+import { Agents } from '@/pages/settings/Agents';
+import { AgentEditor } from '@/pages/settings/AgentEditor';
 
 function FullscreenBrand() {
   return (
@@ -123,6 +125,8 @@ function Router() {
       <Route path="/settings/oauth-clients" element={<Protected><RequirePerm perm="settings:read"><OAuthClients /></RequirePerm></Protected>} />
       <Route path="/settings/backup" element={<Protected><RequirePerm perm="settings:write"><BackupRestore /></RequirePerm></Protected>} />
       <Route path="/settings/computer" element={<Protected><RequirePerm perm="settings:write"><ComputerSettings /></RequirePerm></Protected>} />
+      <Route path="/settings/agents" element={<Protected><RequirePerm perm="agents:manage"><Agents /></RequirePerm></Protected>} />
+      <Route path="/settings/agents/:id" element={<Protected><RequirePerm perm="agents:manage"><AgentEditor /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
       <Route path="/about" element={<Protected><About /></Protected>} />
 

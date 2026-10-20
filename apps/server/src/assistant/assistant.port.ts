@@ -9,7 +9,7 @@ export const ASSISTANT_AUTOMATION_PORT = Symbol('ASSISTANT_AUTOMATION_PORT');
 export interface AssistantAutomationPort {
   /**
    * Run the Computer headlessly (no human, read-only tools only) with a prompt and optional
-   * event context, returning its final text answer.
+   * event context, as `agentId` (or the default agent), returning its final text answer.
    */
-  summarizeForAutomation(prompt: string, context?: string): Promise<string>;
+  summarizeForAutomation(prompt: string, context?: string, agentId?: string): Promise<string>;
 }

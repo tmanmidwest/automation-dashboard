@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, Play, Pencil, Zap, Cpu } from 'lucide-react';
 import type {
+  AssistantAgentSummary,
   AssistantRuleProposal,
   AutomationRule, AutomationRuleInput, AutomationRun,
   ConnectorInstanceSummary, ConnectorManifest, ConnectorOperation, ConnectorResource,
@@ -458,6 +459,22 @@ function ResourceSelect({ instanceId, kind, value, onChange }: {
   );
 }
 
+/** Which Computer agent answers an ask_computer action (blank = the default agent). */
+function AgentSelect({ value, onChange }: { value: string; onChange: (agentId: string) => void }) {
+  const [agents, setAgents] = useState<AssistantAgentSummary[]>([]);
+  useEffect(() => {
+    api.get<AssistantAgentSummary[]>('/api/assistant/agents').then(setAgents).catch(() => setAgents([]));
+  }, []);
+  if (agents.length <= 1 && !value) return null;
+  return (
+    <select className={selectCls + ' !mt-0'} value={value} onChange={(e) => onChange(e.target.value)} title="Which agent answers">
+      <option value="">Default agent</option>
+      {agents.filter((a) => !a.isDefault).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+      {value && !agents.some((a) => a.id === value) && <option value={value}>Unknown agent ({value})</option>}
+    </select>
+  );
+}
+
 function ActionRow({ action, connectors, monitors, manifests, loadManifest, onChange, onRemove }: {
   action: RuleAction; connectors: ConnectorInstanceSummary[]; monitors: MonitorSummary[]; manifests: Record<string, ConnectorManifest>;
   loadManifest: (connectorId: string) => Promise<ConnectorManifest | null>;
@@ -560,6 +577,7 @@ function ActionRow({ action, connectors, monitors, manifests, loadManifest, onCh
               {COND_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
+          <AgentSelect value={action.agentId ?? ''} onChange={(agentId) => onChange({ ...action, agentId: agentId || undefined })} />
           <textarea className="w-full min-h-[5rem] rounded-md border border-input bg-background/60 p-2 text-sm resize-y"
             placeholder="What should the Computer do? e.g. “Summarize what failed and suggest a likely cause.”"
             value={action.prompt} onChange={(e) => onChange({ ...action, prompt: e.target.value })} />

@@ -44,7 +44,8 @@ export type Permission =
   | 'fabric:manage' // enroll / revoke agents, edit targets
   | 'fabric:approve' // approve/deny four-eyes session requests
   // The Computer — in-app LLM assistant (session-only; runs tools as the user)
-  | 'assistant:use';
+  | 'assistant:use'
+  | 'agents:manage'; // create / edit Computer agent profiles (model, instructions, tools)
 
 /** The two built-in roles requested for launch: View Only and Full Control. */
 export const BUILTIN_ROLES = {
@@ -96,6 +97,7 @@ export const BUILTIN_ROLES = {
       'fabric:manage',
       'fabric:approve',
       'assistant:use',
+      'agents:manage',
     ] as Permission[],
   },
 } as const;
