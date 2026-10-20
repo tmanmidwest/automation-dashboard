@@ -99,6 +99,10 @@ model AssistantAgent {
   allowedRoles  String[] @default([])
   /// External MCP servers (McpServer ids) whose tools this agent offers.
   mcpServerIds  String[] @default([])
+  /// Per-agent MCP tool policy, keyed `<serverId>:<toolName>`: tools switched off for this
+  /// agent, and tools that run without the approval prompt (never ones the server marks destructive).
+  mcpDisabledTools    String[] @default([])
+  mcpAutoApproveTools String[] @default([])
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }

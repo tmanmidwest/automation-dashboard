@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { AgentChat } from '@/components/AgentChat';
 
 const BACKENDS: { value: LlmBackend; label: string; placeholder: string; needsKey?: boolean }[] = [
   { value: 'ollama', label: 'Ollama (self-hosted)', placeholder: 'http://ollama:11434' },
@@ -25,7 +26,7 @@ const BACKENDS: { value: LlmBackend; label: string; placeholder: string; needsKe
 
 const selectCls = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
 
-type Draft = AssistantAgentInput & Partial<Pick<AssistantAgentView, 'id' | 'isDefault' | 'apiKeySet'>>;
+type Draft = AssistantAgentInput & Partial<Pick<AssistantAgentView, 'id' | 'isDefault' | 'apiKeySet' | 'ready' | 'updatedAt'>>;
 
 // Mirrors DEFAULT_ASSISTANT_CONFIG / DEFAULT_AGENT_MAX_ROUNDS (web imports types only from shared).
 const NEW_AGENT: Draft = {
@@ -43,6 +44,8 @@ const NEW_AGENT: Draft = {
   tools: [],
   allowedRoles: [],
   mcpServerIds: [],
+  mcpDisabledTools: [],
+  mcpAutoApproveTools: [],
 };
 
 /** Settings → Agents → one agent: General, Model, Instructions, Tools. */
@@ -98,6 +101,8 @@ export function AgentEditor() {
         tools: agent.tools,
         allowedRoles: agent.allowedRoles,
         mcpServerIds: agent.mcpServerIds,
+        mcpDisabledTools: agent.mcpDisabledTools,
+        mcpAutoApproveTools: agent.mcpAutoApproveTools,
       };
       if (apiKey) body.apiKey = apiKey;
       const saved = isNew
@@ -162,6 +167,9 @@ export function AgentEditor() {
 
   const backend = BACKENDS.find((b) => b.value === agent.backend);
   const selected = new Set(agent.tools);
+  // Add or remove one `<serverId>:<tool>` key in an MCP policy list.
+  const toggleKey = (field: 'mcpDisabledTools' | 'mcpAutoApproveTools', key: string, add: boolean) =>
+    set(field, add ? [...new Set([...agent[field], key])] : agent[field].filter((k) => k !== key));
   const toggleTools = (names: string[], on: boolean) => {
     const next = new Set(selected);
     for (const n of names) {
@@ -409,46 +417,117 @@ export function AgentEditor() {
           <CardHeader>
             <CardTitle>MCP servers</CardTitle>
             <CardDescription>
-              External tools. They run with the server's own credential, not the user's permissions, so every call asks for
-              approval in chat, and they are never used in automations.
+              External tools. They run with the server's own credential, not the user's permissions, and are never used in
+              automations. Each call asks for approval in chat unless you mark it to run without asking.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-3">
             {mcpServers.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No MCP servers registered. <Link className="underline" to="/settings/mcp-servers">Add one</Link>.
               </p>
             ) : (
-              mcpServers.map((s) => (
-                <label key={s.id} className="flex items-start gap-3 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 mt-0.5"
-                    checked={agent.mcpServerIds.includes(s.id)}
-                    onChange={(e) =>
-                      set('mcpServerIds', e.target.checked
-                        ? [...agent.mcpServerIds, s.id]
-                        : agent.mcpServerIds.filter((x) => x !== s.id))
-                    }
-                  />
-                  <span>
-                    {s.name}
-                    <span className="block text-xs text-muted-foreground">
-                      {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
-                      {!s.enabled && ' · disabled'}
-                      {s.lastError && ' · last refresh failed'}
-                    </span>
-                  </span>
-                </label>
-              ))
+              mcpServers.map((s) => {
+                const attached = agent.mcpServerIds.includes(s.id);
+                return (
+                  <div key={s.id} className="rounded-md border border-input p-3 space-y-2">
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 mt-0.5"
+                        checked={attached}
+                        onChange={(e) =>
+                          set('mcpServerIds', e.target.checked
+                            ? [...agent.mcpServerIds, s.id]
+                            : agent.mcpServerIds.filter((x) => x !== s.id))
+                        }
+                      />
+                      <span>
+                        {s.name}
+                        <span className="block text-xs text-muted-foreground">
+                          {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
+                          {!s.enabled && ' · disabled'}
+                          {s.lastError && ' · last refresh failed'}
+                        </span>
+                      </span>
+                    </label>
+                    {attached && s.tools.length > 0 && (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-xs text-muted-foreground text-left">
+                            <th className="font-normal py-1">Tool</th>
+                            <th className="font-normal py-1 w-20 text-center">On</th>
+                            <th className="font-normal py-1 w-36 text-center">Run without asking</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {s.tools.map((t) => {
+                            const key = `${s.id}:${t.name}`;
+                            const on = !agent.mcpDisabledTools.includes(key);
+                            const auto = agent.mcpAutoApproveTools.includes(key);
+                            return (
+                              <tr key={key} className="border-t border-border/50" title={t.description}>
+                                <td className="py-1.5 pr-2">
+                                  <span className="font-mono text-xs">{t.name}</span>{' '}
+                                  {t.destructive && <span className="text-[10px] uppercase text-red-500">destructive</span>}
+                                </td>
+                                <td className="text-center">
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4"
+                                    checked={on}
+                                    onChange={(e) => toggleKey('mcpDisabledTools', key, !e.target.checked)}
+                                  />
+                                </td>
+                                <td className="text-center">
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4"
+                                    checked={auto && !t.destructive}
+                                    disabled={!on || t.destructive}
+                                    title={t.destructive ? 'Destructive tools always ask for approval.' : undefined}
+                                    onChange={(e) => toggleKey('mcpAutoApproveTools', key, e.target.checked)}
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                );
+              })
             )}
             {mcpServers.length > 0 && (
               <p className="text-xs text-muted-foreground">
-                <Link className="underline" to="/settings/mcp-servers">Manage MCP servers</Link>
+                Only turn off approval for tools you are sure only read data: the server's own "read-only" label is not
+                checked by Cerebro. <Link className="underline" to="/settings/mcp-servers">Manage MCP servers</Link>
               </p>
             )}
           </CardContent>
         </Card>
+
+        {!isNew && agent.id && (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle>Test</CardTitle>
+              <CardDescription>
+                Chat with the saved version of this agent. Save your changes first; saving starts a new test conversation.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AgentChat
+                key={`${agent.id}:${agent.updatedAt ?? ''}`}
+                className="h-[28rem]"
+                agentId={agent.id}
+                disabled={!agent.ready}
+                placeholder={agent.ready ? `Ask ${agent.name}…` : 'Enable the agent and set a model to test it'}
+                emptyHint="Try a question this agent is meant to handle. Actions still ask for approval."
+              />
+            </CardContent>
+          </Card>
+        )}
       </div>
     </>
   );

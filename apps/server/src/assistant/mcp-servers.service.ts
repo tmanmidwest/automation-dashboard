@@ -134,11 +134,18 @@ export class McpServersService implements OnModuleDestroy {
   // ── Tools for the agent loop ───────────────────────────────────
 
   /**
-   * The pinned tools of the given (enabled) servers as catalog tools. Every one is an
-   * approval-required action, whatever the server's own hints say. Names are namespaced
-   * `mcp_<server>__<tool>` (≤ 64 chars, the strictest provider limit).
+   * The pinned tools of the given (enabled) servers as catalog tools, minus the agent's
+   * `disabled` ones. Every one is an approval-required action unless the agent auto-approves
+   * it, and a tool the server marks destructive always needs approval. Names are namespaced
+   * `mcp_<server>__<tool>` (≤ 64 chars, the strictest provider limit). Policy keys are
+   * `<serverId>:<toolName>`.
    */
-  async catalogTools(serverIds: string[]): Promise<CatalogTool[]> {
+  async catalogTools(
+    serverIds: string[],
+    policy: { disabled?: string[]; autoApprove?: string[] } = {},
+  ): Promise<CatalogTool[]> {
+    const disabled = new Set(policy.disabled ?? []);
+    const autoApprove = new Set(policy.autoApprove ?? []);
     if (serverIds.length === 0) return [];
     const rows = await this.prisma.mcpServer.findMany({ where: { id: { in: serverIds }, enabled: true } });
     const out: CatalogTool[] = [];
@@ -146,6 +153,8 @@ export class McpServersService implements OnModuleDestroy {
     for (const row of rows) {
       const prefix = `mcp_${slug(row.name).slice(0, 16)}_${row.id.slice(-4)}__`;
       for (const t of toolList(row.tools)) {
+        const key = `${row.id}:${t.name}`;
+        if (disabled.has(key)) continue;
         const name = `${prefix}${t.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`.slice(0, 64);
         if (seen.has(name)) continue;
         seen.add(name);
@@ -156,7 +165,7 @@ export class McpServersService implements OnModuleDestroy {
           jsonSchema: t.inputSchema,
           permission: 'assistant:use',
           kind: 'action',
-          confirm: true,
+          confirm: t.destructive || !autoApprove.has(key),
           destructive: t.destructive,
           external: true,
           run: (args) => this.callTool(row.id, t.name, args),
