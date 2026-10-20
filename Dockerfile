@@ -24,14 +24,19 @@ WORKDIR /app
 ARG GIT_SHA=dev
 ENV VITE_GIT_SHA=$GIT_SHA
 ENV GIT_SHA=$GIT_SHA
-COPY --from=deps /app/node_modules ./node_modules
+# Copy the whole deps tree, not just the root node_modules: npm nests a workspace's
+# deps under apps/<name>/node_modules when they can't be hoisted (e.g. vite in
+# apps/web, Nest 12 in apps/server). .dockerignore keeps COPY . . from clobbering them.
+COPY --from=deps /app ./
 COPY . .
 RUN npm run build --workspace @cerebro/shared \
  && npm run build --workspace @cerebro/web \
  && npm run prisma:generate --workspace @cerebro/server \
  && npm run build --workspace @cerebro/server
 # Place built UI where the server serves static files from.
-RUN mkdir -p apps/server/public && cp -r apps/web/dist/* apps/server/public/
+# The server's nested node_modules may not exist if everything hoists; create it so
+# the runtime COPY below always has a source.
+RUN mkdir -p apps/server/public apps/server/node_modules && cp -r apps/web/dist/* apps/server/public/
 
 # 2b) Build the Fabric agent binaries (Go). Cross-compiled, static (CGO off), so
 # they run on any Linux/Windows host. Served by the server at
@@ -114,6 +119,7 @@ RUN mkdir -p /data/signal
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json
+COPY --from=build /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/server/public ./apps/server/public
 COPY --from=build /app/apps/server/prisma ./apps/server/prisma
