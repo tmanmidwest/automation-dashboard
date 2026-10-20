@@ -326,6 +326,54 @@ function normalizeLayout(raw: unknown): DashLayout {
   return { order, hidden };
 }
 
+// ── Refresh cadence (P3) ────────────────────────────────────────────────────
+// The widgets don't each have their own feed: telemetry/connectors/spend/backups all come
+// from the `overview` poll, monitorsSummary+status share the `monitors` poll, and Activity is
+// live SSE. So cadence is tunable per *feed* (what actually hits the API), persisted per-user.
+// ms = 0 means "manual only" (just the Refresh button). Stored under `dashboard-cadence`.
+type Cadence = { overviewMs: number; monitorsMs: number };
+const DEFAULT_CADENCE: Cadence = { overviewMs: 5000, monitorsMs: 10000 };
+const CADENCE_PREF_KEY = 'dashboard-cadence';
+const OVERVIEW_OPTS: { label: string; ms: number }[] = [
+  { label: '5s', ms: 5000 }, { label: '15s', ms: 15000 }, { label: '30s', ms: 30000 }, { label: '60s', ms: 60000 }, { label: 'Manual', ms: 0 },
+];
+const MONITOR_OPTS: { label: string; ms: number }[] = [
+  { label: '10s', ms: 10000 }, { label: '30s', ms: 30000 }, { label: '60s', ms: 60000 }, { label: 'Manual', ms: 0 },
+];
+
+function normalizeCadence(raw: unknown): Cadence {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_CADENCE };
+  const r = raw as Partial<Cadence>;
+  const pick = (v: unknown, fallback: number, opts: { ms: number }[]) =>
+    typeof v === 'number' && opts.some((o) => o.ms === v) ? v : fallback;
+  return {
+    overviewMs: pick(r.overviewMs, DEFAULT_CADENCE.overviewMs, OVERVIEW_OPTS),
+    monitorsMs: pick(r.monitorsMs, DEFAULT_CADENCE.monitorsMs, MONITOR_OPTS),
+  };
+}
+
+/** A labelled row of cadence choices (pills) for one feed. */
+function CadenceRow({ label, opts, value, onChange }: { label: string; opts: { label: string; ms: number }[]; value: number; onChange: (ms: number) => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="font-lcars text-xs tracking-[0.12em] text-muted-foreground w-44 shrink-0">{label}</span>
+      {opts.map((o) => (
+        <button
+          key={o.ms}
+          type="button"
+          onClick={() => onChange(o.ms)}
+          className={cn(
+            'px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors',
+            value === o.ms ? 'bg-primary text-primary-foreground border-primary' : 'bg-card border-border text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Wraps a dashboard widget. In edit mode it adds a drag handle + hide toggle and becomes a
  *  drag/drop target; otherwise it renders its children transparently. */
 function WidgetFrame({ title, editing, hidden, onToggleHidden, onDragStart, onDropOn, children }: {
@@ -428,6 +476,21 @@ export function Dashboard() {
   const ackItem = useCallback((key: string) => setAcked((prev) => new Set(prev).add(key)), []);
   const [alarmSilenced, setAlarmSilenced] = useState(false);
 
+  // P3: per-feed refresh cadence, persisted server-side alongside the layout.
+  const [cadence, setCadence] = useState<Cadence>(DEFAULT_CADENCE);
+  const cadenceLoaded = useRef(false);
+  useEffect(() => {
+    cadenceLoaded.current = false;
+    api.get<{ value: unknown }>(`/api/account/preferences/${CADENCE_PREF_KEY}`)
+      .then((r) => setCadence(normalizeCadence(r.value)))
+      .catch(() => setCadence(DEFAULT_CADENCE))
+      .finally(() => { cadenceLoaded.current = true; });
+  }, [user?.id]);
+  const setCadencePref = useCallback((next: Cadence) => {
+    setCadence(next);
+    if (cadenceLoaded.current) api.put(`/api/account/preferences/${CADENCE_PREF_KEY}`, { value: next }).catch(() => {});
+  }, []);
+
   // Core telemetry (connectors + stats) — the fast 5s loop. Activity no longer polls here;
   // it rides the live SSE stream below.
   const pollCore = useCallback(async () => {
@@ -467,19 +530,27 @@ export function Dashboard() {
     api.get<Array<unknown>>('/api/users').then((u) => setUserCount(u.length)).catch(() => {});
     pollCore();
     // Fast catch-up retries so a transient first-load failure (e.g. the session cookie
-    // still settling right after login) recovers in under a second, not on the next 5s tick.
+    // still settling right after login) recovers in under a second, not on the next tick.
     const retries = [700, 1600, 3000].map((ms) => setTimeout(() => { if (!gotDataRef.current) pollCore(); }, ms));
-    const t = setInterval(() => { pollCore(); tick((x) => x + 1); }, 5000);
+    // 1s clock drives the relative-time / stale indicator re-renders (independent of the poll).
     const clock = setInterval(() => tick((x) => x + 1), 1000);
-    return () => { clearInterval(t); clearInterval(clock); retries.forEach(clearTimeout); };
+    return () => { clearInterval(clock); retries.forEach(clearTimeout); };
   }, [pollCore]);
+
+  // Overview poll — cadence-tunable (0 = manual only, i.e. just the Refresh button).
+  useEffect(() => {
+    if (cadence.overviewMs <= 0) return;
+    const t = setInterval(() => pollCore(), cadence.overviewMs);
+    return () => clearInterval(t);
+  }, [pollCore, cadence.overviewMs]);
 
   useEffect(() => {
     if (!canMonitors) return;
     loadMonitors();
-    const t = setInterval(loadMonitors, 10000);
+    if (cadence.monitorsMs <= 0) return;
+    const t = setInterval(loadMonitors, cadence.monitorsMs);
     return () => clearInterval(t);
-  }, [canMonitors, loadMonitors]);
+  }, [canMonitors, loadMonitors, cadence.monitorsMs]);
 
   // Live activity: backfill recent events, then tail the SSE stream. Audit events are only
   // requested when the operator may read them (the server enforces this too).
@@ -527,7 +598,9 @@ export function Dashboard() {
   const sources = overview?.sources ?? [];
   const offline = sources.filter((s) => !s.ok);
   const secsSinceScan = Math.floor((Date.now() - lastPollRef.current) / 1000);
-  const stale = secsSinceScan > 15;
+  // Only flag "signal lost" when auto-refresh is on, scaled to the chosen cadence so a slow
+  // 60s poll doesn't look like an outage at 15s. Manual mode never shows as stale.
+  const stale = cadence.overviewMs > 0 && secsSinceScan > Math.max(15, Math.round(cadence.overviewMs / 1000) * 2 + 5);
   const connOk = overview?.connectors.ok ?? 0;
   const connTotal = overview?.connectors.total ?? 0;
 
@@ -887,9 +960,27 @@ export function Dashboard() {
       </div>
 
       {editing && (
-        <p className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          Drag the <GripVertical className="inline h-3.5 w-3.5 align-text-bottom" /> handle to reorder panels, or use the eye to hide one. The Attention banner always stays on top. Changes save automatically for your account.
-        </p>
+        <div className="space-y-3">
+          <p className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            Drag the <GripVertical className="inline h-3.5 w-3.5 align-text-bottom" /> handle to reorder panels, or use the eye to hide one. The Attention banner always stays on top. Changes save automatically for your account.
+          </p>
+          <div className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
+            <div className="font-lcars text-xs tracking-[0.16em] text-muted-foreground">REFRESH RATES</div>
+            <CadenceRow
+              label="Telemetry & connectors"
+              opts={OVERVIEW_OPTS}
+              value={cadence.overviewMs}
+              onChange={(ms) => setCadencePref({ ...cadence, overviewMs: ms })}
+            />
+            <CadenceRow
+              label="Monitors"
+              opts={MONITOR_OPTS}
+              value={cadence.monitorsMs}
+              onChange={(ms) => setCadencePref({ ...cadence, monitorsMs: ms })}
+            />
+            <p className="text-xs text-muted-foreground">Live Activity streams in real time (SSE) — no polling to tune. "Manual" refreshes only via the Refresh button.</p>
+          </div>
+        </div>
       )}
 
       {/* ── Attention zone — always first; the sensitive/important content up top ── */}
