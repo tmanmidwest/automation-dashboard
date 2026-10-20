@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { SecretsService } from '../secrets/secrets.service';
+import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 
 /**
  * Central store for all UI-driven configuration.
@@ -38,8 +38,9 @@ export class SettingsService {
 
   // ── Secret vault (delegated to SecretsService) ────────────────
 
-  setSecret(key: string, plaintext: string): Promise<void> {
-    return this.secrets.set(key, plaintext);
+  /** With `ctx`, the write is audited as an administrative vault write. */
+  setSecret(key: string, plaintext: string, ctx?: ActorCtx): Promise<void> {
+    return this.secrets.set(key, plaintext, undefined, ctx);
   }
 
   getSecret(key: string): Promise<string | null> {
@@ -50,7 +51,7 @@ export class SettingsService {
     return this.secrets.has(key);
   }
 
-  deleteSecret(key: string): Promise<void> {
-    return this.secrets.remove(key);
+  deleteSecret(key: string, ctx?: ActorCtx): Promise<void> {
+    return this.secrets.remove(key, ctx);
   }
 }

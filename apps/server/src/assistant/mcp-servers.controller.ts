@@ -4,6 +4,8 @@ import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators
 import { AuditService } from '../logging/audit.service';
 import { McpServersService } from './mcp-servers.service';
 
+const actor = (u: SessionUser) => ({ actorId: u.id, actorEmail: u.email });
+
 /**
  * External MCP servers the Computer's agents can use as tools. Managing them (and pinning
  * their tool list with /refresh) needs `agents:manage`. Session-only.
@@ -33,7 +35,7 @@ export class McpServersController {
     @Body() body: McpServerInput & { credential?: string },
   ): Promise<McpServerView> {
     const { credential, ...input } = body ?? ({} as McpServerInput);
-    const view = await this.servers.create(input, credential || undefined);
+    const view = await this.servers.create(input, credential || undefined, actor(user));
     await this.record(user, 'assistant.mcp_server.created', view);
     return view;
   }
@@ -45,7 +47,7 @@ export class McpServersController {
     @Body() body: Partial<McpServerInput> & { credential?: string },
   ): Promise<McpServerView> {
     const { credential, ...patch } = body ?? {};
-    const view = await this.servers.update(id, patch, credential);
+    const view = await this.servers.update(id, patch, credential, actor(user));
     await this.record(user, 'assistant.mcp_server.updated', view, { credentialChanged: credential !== undefined });
     return view;
   }
@@ -53,7 +55,7 @@ export class McpServersController {
   @Delete(':id')
   async remove(@CurrentUser() user: SessionUser, @Param('id') id: string): Promise<{ ok: true }> {
     const view = await this.servers.getView(id);
-    await this.servers.remove(id);
+    await this.servers.remove(id, actor(user));
     await this.record(user, 'assistant.mcp_server.deleted', view);
     return { ok: true };
   }

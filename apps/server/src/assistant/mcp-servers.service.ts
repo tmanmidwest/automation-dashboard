@@ -6,6 +6,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { McpAuthType, McpServerInput, McpServerView, McpToolInfo } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import type { ActorCtx } from '../secrets/secrets.service';
 import type { CatalogTool } from '../tools/tool-catalog.service';
 
 const AUTH_TYPES: McpAuthType[] = ['none', 'bearer', 'header'];
@@ -57,27 +58,27 @@ export class McpServersService implements OnModuleDestroy {
     return this.view(await this.get(id));
   }
 
-  async create(input: McpServerInput, credential?: string): Promise<McpServerView> {
+  async create(input: McpServerInput, credential?: string, actor?: ActorCtx): Promise<McpServerView> {
     const data = clean(input, true);
     const row = await this.prisma.mcpServer.create({
       data: { ...data, name: data.name!, url: data.url! },
     });
-    if (credential) await this.settings.setSecret(secretKey(row.id), credential);
+    if (credential) await this.settings.setSecret(secretKey(row.id), credential, actor);
     return this.view(row);
   }
 
-  async update(id: string, patch: Partial<McpServerInput>, credential?: string): Promise<McpServerView> {
+  async update(id: string, patch: Partial<McpServerInput>, credential?: string, actor?: ActorCtx): Promise<McpServerView> {
     await this.get(id);
     const row = await this.prisma.mcpServer.update({ where: { id }, data: clean(patch, false) });
     if (credential !== undefined) {
-      if (credential) await this.settings.setSecret(secretKey(id), credential);
-      else if (await this.settings.hasSecret(secretKey(id))) await this.settings.deleteSecret(secretKey(id));
+      if (credential) await this.settings.setSecret(secretKey(id), credential, actor);
+      else if (await this.settings.hasSecret(secretKey(id))) await this.settings.deleteSecret(secretKey(id), actor);
     }
     await this.disconnect(id); // URL/auth may have changed
     return this.view(row);
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, actor?: ActorCtx): Promise<void> {
     await this.get(id);
     await this.disconnect(id);
     // Detach from every agent, then delete the server and its credential.
@@ -89,7 +90,7 @@ export class McpServersService implements OnModuleDestroy {
       });
     }
     await this.prisma.mcpServer.delete({ where: { id } });
-    if (await this.settings.hasSecret(secretKey(id))) await this.settings.deleteSecret(secretKey(id));
+    if (await this.settings.hasSecret(secretKey(id))) await this.settings.deleteSecret(secretKey(id), actor);
   }
 
   /**

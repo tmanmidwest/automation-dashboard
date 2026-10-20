@@ -19,6 +19,7 @@ cryptography.
 | AES-256-GCM encrypt/decrypt | pre-existing | `apps/server/src/common/crypto.service.ts` |
 | Ciphertext store (`key` → `ciphertext`) | pre-existing | `Secret` model; `settings.service.ts` (now delegates to `SecretsService`) |
 | Connector creds stored as `connector:<id>:<field>` | pre-existing | connectors write via `setSecret` |
+| Computer agent keys (`assistant.apiKey`, `assistant.agent.<id>.apiKey`), MCP credentials (`mcp.<id>.credential`), Zuma (`zuma.credential`) | Built (2026-10) | listed with the owning agent/server name, an `owner` backlink and Orphaned badge; delete warns what breaks; writes from the settings pages are audited as `secret.created/rotated/deleted` |
 | TOTP secrets encrypted | pre-existing | `auth/totp.service.ts` |
 | Metadata (label, category, timestamps, policy) | **Built** | `SecretMeta` table + migration `0009` |
 | Management UI | **Built** | `apps/web/src/pages/settings/Secrets.tsx` (`/settings/secrets`) |

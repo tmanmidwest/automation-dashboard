@@ -247,9 +247,15 @@ export function Secrets() {
   async function remove(s: SecretSummary) {
     const uses = usage[s.key] ?? [];
     const warn =
-      s.category === 'connector'
-        ? 'A connector may still use this credential and stop working. '
-        : '';
+      s.owner?.kind === 'agent'
+        ? `The "${s.owner.name}" agent uses this API key and will lose access to its model. `
+        : s.owner?.kind === 'mcp'
+          ? `The "${s.owner.name}" MCP server uses this credential; agents calling its tools will fail to authenticate. `
+          : s.owner?.kind === 'zuma'
+            ? 'The Saviynt Zuma connection uses this credential; registering and syncing agents will stop working. '
+            : s.category === 'connector'
+              ? 'A connector may still use this credential and stop working. '
+              : '';
     // A vault-reference backup restores its .env FROM this key, so deleting it
     // quietly makes those snapshots unrestorable.
     const stackWarn = uses.length
@@ -432,7 +438,7 @@ export function Secrets() {
                           {s.orphaned && (
                             <span
                               className="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-400"
-                              title="The connector this secret belonged to has been deleted. Safe to remove if nothing else uses it."
+                              title={`The ${s.key.startsWith('connector:') ? 'connector' : 'agent or MCP server'} this secret belonged to has been deleted. Safe to remove if nothing else uses it.`}
                             >
                               Orphaned
                             </span>
@@ -445,8 +451,12 @@ export function Secrets() {
                             <span title={s.key}>
                               {s.connector.typeName ?? s.connector.type} connector · {s.connector.fieldLabel}
                             </span>
+                          ) : s.owner ? (
+                            <span title={s.key}>
+                              {s.owner.kind === 'agent' ? 'Computer agent' : s.owner.kind === 'mcp' ? 'MCP server' : 'Saviynt Zuma'}
+                            </span>
                           ) : s.orphaned ? (
-                            <span title={s.key}>From a deleted connector</span>
+                            <span title={s.key}>{s.key.startsWith('connector:') ? 'From a deleted connector' : 'From a deleted agent or MCP server'}</span>
                           ) : (
                             <code>{s.key}</code>
                           )}
@@ -455,6 +465,14 @@ export function Secrets() {
                               {' · '}
                               <Link to={`/connectors/${s.owningConnectorId}`} className="text-accent hover:underline">
                                 open connector
+                              </Link>
+                            </>
+                          )}
+                          {s.owner && (
+                            <>
+                              {' · '}
+                              <Link to={s.owner.href} className="text-accent hover:underline">
+                                {s.owner.kind === 'agent' ? 'open agent' : s.owner.kind === 'mcp' ? 'open MCP servers' : 'open Zuma settings'}
                               </Link>
                             </>
                           )}

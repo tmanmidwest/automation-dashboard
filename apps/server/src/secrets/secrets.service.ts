@@ -202,12 +202,14 @@ export class SecretsService implements OnModuleInit {
 
   /** All vault entries as metadata-only summaries (never the value). */
   async list(): Promise<SecretSummary[]> {
-    const [secrets, metas, connectors] = await Promise.all([
+    const [secrets, metas, connectors, agents, mcpServers] = await Promise.all([
       this.prisma.secret.findMany({ select: { key: true, updatedAt: true } }),
       this.prisma.secretMeta.findMany(),
       this.prisma.connectorInstance
         .findMany({ select: { id: true, name: true, connectorId: true } })
         .catch(() => null),
+      this.prisma.assistantAgent.findMany({ select: { id: true, name: true, isDefault: true } }).catch(() => null),
+      this.prisma.mcpServer.findMany({ select: { id: true, name: true } }).catch(() => null),
     ]);
     const metaByKey = new Map(metas.map((m) => [m.key, m]));
     const instances = new Map((connectors ?? []).map((c) => [c.id, c]));
@@ -216,6 +218,15 @@ export class SecretsService implements OnModuleInit {
       .map((s) => {
         const meta = metaByKey.get(s.key);
         const summary = this.toSummary(s.key, meta, s.updatedAt);
+        const autoLabel = !meta?.label || meta.label === inferMeta(s.key).label;
+        const assistantOwner = resolveAssistantOwner(s.key, agents, mcpServers);
+        if (assistantOwner) {
+          // Agent and MCP keys embed an opaque id; name the owner instead (a custom label wins).
+          summary.owner = assistantOwner.owner;
+          summary.orphaned = assistantOwner.orphaned || undefined;
+          if (autoLabel) summary.label = assistantOwner.label;
+          return summary;
+        }
         if (!s.key.startsWith('connector:') || !summary.owningConnectorId) return summary;
 
         // Connector secrets are keyed `connector:<id>:<field>` and the backfill
@@ -224,7 +235,6 @@ export class SecretsService implements OnModuleInit {
         // replace the label when it's still the auto-generated one, so an
         // admin's custom label always wins.
         const field = s.key.split(':')[2] ?? 'secret';
-        const autoLabel = !meta?.label || meta.label === inferMeta(s.key).label;
         const instance = instances.get(summary.owningConnectorId);
         if (instance) {
           const manifest = manifests.get(instance.connectorId);
@@ -336,6 +346,45 @@ function cleanMeta(meta?: SecretMetaInput): Record<string, unknown> {
   if (meta.rotateAfterDays !== undefined) out.rotateAfterDays = meta.rotateAfterDays;
   if (meta.expiresAt !== undefined) out.expiresAt = meta.expiresAt ? new Date(meta.expiresAt) : null;
   return out;
+}
+
+/**
+ * Owner of a Computer agent API key, MCP server credential or the Zuma credential, resolved
+ * against the live rows. Null for other keys. `orphaned` only when the lookup succeeded.
+ */
+function resolveAssistantOwner(
+  key: string,
+  agents: { id: string; name: string; isDefault: boolean }[] | null,
+  servers: { id: string; name: string }[] | null,
+): { owner: NonNullable<SecretSummary['owner']> | null; label: string; orphaned: boolean } | null {
+  if (key === 'zuma.credential') {
+    return { owner: { kind: 'zuma', name: 'Saviynt Zuma', href: '/settings/zuma' }, label: 'Saviynt Zuma credential', orphaned: false };
+  }
+  const agentMatch = key === 'assistant.apiKey' ? null : /^assistant\.agent\.([^.]+)\.apiKey$/.exec(key);
+  if (key === 'assistant.apiKey' || agentMatch) {
+    const agent = agents?.find((a) => (agentMatch ? a.id === agentMatch[1] : a.isDefault));
+    if (agent) {
+      return {
+        owner: { kind: 'agent', name: agent.name, href: `/settings/agents/${agent.id}` },
+        label: `${agent.name} · Computer agent API key`,
+        orphaned: false,
+      };
+    }
+    return { owner: null, label: 'Deleted Computer agent · API key', orphaned: agents !== null };
+  }
+  const mcpMatch = /^mcp\.([^.]+)\.credential$/.exec(key);
+  if (mcpMatch) {
+    const server = servers?.find((s) => s.id === mcpMatch[1]);
+    if (server) {
+      return {
+        owner: { kind: 'mcp', name: server.name, href: '/settings/mcp-servers' },
+        label: `${server.name} · MCP server credential`,
+        orphaned: false,
+      };
+    }
+    return { owner: null, label: 'Deleted MCP server · credential', orphaned: servers !== null };
+  }
+  return null;
 }
 
 /** Infer a label + category from a secret's key naming convention. */

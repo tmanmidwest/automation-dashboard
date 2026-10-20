@@ -19,7 +19,10 @@ export interface SecretSummary {
   owningConnectorId?: string | null;
   /** For `connector:<id>:<field>` keys whose connector still exists: who owns it. */
   connector?: { name: string; type: string; typeName?: string | null; fieldLabel: string } | null;
-  /** A connector secret whose connector instance no longer exists. */
+  /** For Computer agent API keys, MCP server credentials and the Zuma credential: the
+   *  setting that uses it, with a link to open it. */
+  owner?: { kind: 'agent' | 'mcp' | 'zuma'; name: string; href: string } | null;
+  /** A connector, agent or MCP server secret whose owner no longer exists. */
   orphaned?: boolean;
   rotateAfterDays?: number | null;
   expiresAt?: string | null;
