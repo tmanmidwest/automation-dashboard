@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
-import { ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import type { OAuthClientCreated, OAuthClientSummary, SessionUser } from '@cerebro/shared';
 import { CurrentUser, RequirePermissions } from '../auth/decorators';
 import { AuditService } from '../logging/audit.service';
@@ -7,14 +7,19 @@ import { OAuthClientService } from './oauth-client.service';
 
 class CreateClientDto {
   @IsString() @MaxLength(80) name!: string;
-  @IsArray() @ArrayNotEmpty() @IsString({ each: true }) redirectUris!: string[];
-  @IsOptional() @IsIn(['public', 'confidential']) type?: 'public' | 'confidential';
+  /** Required for public/confidential clients (checked by the service); ignored for machine. */
+  @IsOptional() @IsArray() @IsString({ each: true }) redirectUris?: string[];
+  @IsOptional() @IsIn(['public', 'confidential', 'machine']) type?: 'public' | 'confidential' | 'machine';
+  @IsOptional() @IsArray() @IsString({ each: true }) allowedScopes?: string[];
+  @IsOptional() @IsArray() @IsString({ each: true }) ipAllowlist?: string[];
 }
 
 class UpdateClientDto {
   @IsOptional() @IsString() @MaxLength(80) name?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) redirectUris?: string[];
   @IsOptional() @IsBoolean() disabled?: boolean;
+  @IsOptional() @IsArray() @IsString({ each: true }) allowedScopes?: string[];
+  @IsOptional() @IsArray() @IsString({ each: true }) ipAllowlist?: string[];
 }
 
 @Controller('api/settings/oauth/clients')
@@ -57,9 +62,24 @@ export class OAuthAdminController {
       actorEmail: user.email,
       action: 'oauth.client_updated',
       target: client.name,
-      meta: { clientId: client.clientId, disabled: client.disabled },
+      meta: { clientId: client.clientId, disabled: client.disabled, allowedScopes: client.allowedScopes, ipAllowlist: client.ipAllowlist },
     });
     return client;
+  }
+
+  /** Issue a new secret (shown once); the old one stops working immediately. */
+  @Post(':id/rotate-secret')
+  @RequirePermissions('settings:write')
+  async rotate(@Param('id') id: string, @CurrentUser() user: SessionUser): Promise<OAuthClientCreated> {
+    const rotated = await this.clients.rotateSecret(id);
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'oauth.client_secret_rotated',
+      target: rotated.client.name,
+      meta: { clientId: rotated.client.clientId },
+    });
+    return rotated;
   }
 
   @Delete(':id')

@@ -3,12 +3,17 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import type { OAuthClient } from '@prisma/client';
 import type { Permission } from '@cerebro/shared';
 import type { OAuthGrantSummary } from '@cerebro/shared';
-import { GRANTABLE_TOKEN_SCOPES } from '@cerebro/shared';
+import { GRANTABLE_TOKEN_SCOPES, MACHINE_CLIENT_SCOPES } from '@cerebro/shared';
+import { ipAllowed } from '../common/ip-allowlist';
+import { RateLimiter } from '../common/rate-limiter';
 import { PrismaService } from '../prisma/prisma.service';
-import { OAuthTokenService } from '../auth/oauth-token.service';
+import { AGENT_CATALOG_RESOURCE_PATH, MACHINE_TOKEN_TTL_SEC, OAuthTokenService } from '../auth/oauth-token.service';
 
 /** OAuth error carrying a spec error code. `redirectable` = safe to report via redirect_uri. */
 export class OAuthFlowError extends Error {
+  /** Set when a registered client's own request was refused (worth auditing). */
+  clientName?: string;
+
   constructor(
     readonly code: string,
     readonly description: string,
@@ -25,9 +30,13 @@ export interface TokenResponse {
   access_token: string;
   token_type: 'Bearer';
   expires_in: number;
-  refresh_token: string;
+  /** Absent for the client_credentials grant (the client just asks again). */
+  refresh_token?: string;
   scope: string;
 }
+
+/** Token requests per machine client per minute. */
+const MACHINE_TOKEN_RATE = new RateLimiter(10, 60_000);
 
 /**
  * Core OAuth 2.1 authorization-server logic: request validation, PKCE, remembered consent,
@@ -83,7 +92,7 @@ export class OAuthFlowService {
 
   /** Authenticate a client at the token endpoint. Public → PKCE only; confidential → secret. */
   authenticateClient(client: OAuthClient, presentedSecret: string | undefined): void {
-    if (client.type !== 'confidential') return; // public client, PKCE is the proof
+    if (client.type === 'public') return; // public client, PKCE is the proof
     if (!client.clientSecretHash || !presentedSecret) {
       throw new OAuthFlowError('invalid_client', 'Client authentication failed.', false);
     }
@@ -122,6 +131,9 @@ export class OAuthFlowService {
   }): Promise<{ client: OAuthClient; redirectUri: string }> {
     const client = await this.getEnabledClient(q.client_id ?? '');
     if (!client) throw new OAuthFlowError('invalid_client', 'Unknown or disabled client.', false);
+    if (client.type === 'machine') {
+      throw new OAuthFlowError('unauthorized_client', 'Machine clients use the client_credentials grant only.', false);
+    }
 
     const redirectUri = q.redirect_uri ?? '';
     if (!redirectUri || !this.redirectUriMatches(client.redirectUris, redirectUri)) {
@@ -253,6 +265,9 @@ export class OAuthFlowService {
     const client = await this.getEnabledClient(input.clientId ?? '');
     if (!client) throw new OAuthFlowError('invalid_client', 'Unknown or disabled client.', false);
     this.authenticateClient(client, input.clientSecret);
+    if (client.type === 'machine') {
+      throw new OAuthFlowError('unauthorized_client', 'Machine clients use the client_credentials grant only.', false);
+    }
 
     if (!input.refreshToken) {
       throw new OAuthFlowError('invalid_request', 'refresh_token is required.', false);
@@ -391,13 +406,61 @@ export class OAuthFlowService {
     });
   }
 
+  /**
+   * client_credentials grant, machine clients only: a short-lived access token for the
+   * client itself (no user, no refresh token), limited to the client's allowed scopes and
+   * bound to the agent catalog. Source address must pass the client's IP allowlist.
+   */
+  async clientCredentials(input: {
+    clientId?: string;
+    clientSecret?: string;
+    scope?: string;
+    ip?: string;
+  }): Promise<TokenResponse & { clientName: string }> {
+    const client = await this.getEnabledClient(input.clientId ?? '');
+    if (!client) throw new OAuthFlowError('invalid_client', 'Unknown or disabled client.', false);
+    if (client.type !== 'machine') {
+      throw new OAuthFlowError('unauthorized_client', 'Only machine clients may use client_credentials.', false);
+    }
+    const allowed = MACHINE_CLIENT_SCOPES.filter((s) => client.allowedScopes.includes(s));
+    const requested = this.parseScopes(input.scope);
+    const scopes = requested.length ? requested : allowed;
+    try {
+      const retryAfter = MACHINE_TOKEN_RATE.hit(client.clientId);
+      if (retryAfter !== null) {
+        throw new OAuthFlowError('slow_down', `Too many token requests; retry in ${retryAfter}s.`, false);
+      }
+      this.authenticateClient(client, input.clientSecret);
+      if (!ipAllowed(client.ipAllowlist, input.ip)) {
+        throw new OAuthFlowError('access_denied', 'This address is not in the client\'s IP allowlist.', false);
+      }
+      if (!scopes.length || scopes.some((s) => !allowed.includes(s))) {
+        throw new OAuthFlowError('invalid_scope', `This client may request: ${allowed.join(' ') || 'nothing'}.`, false);
+      }
+    } catch (e) {
+      if (e instanceof OAuthFlowError) e.clientName = client.name;
+      throw e;
+    }
+
+    const { token, expiresInSec } = await this.tokens.signAccessToken({
+      userId: client.clientId,
+      clientId: client.clientId,
+      scopes,
+      machine: true,
+      ttlSec: MACHINE_TOKEN_TTL_SEC,
+      resource: this.tokens.audienceFor(AGENT_CATALOG_RESOURCE_PATH),
+    });
+    await this.prisma.oAuthClient.update({ where: { id: client.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);
+    return { access_token: token, token_type: 'Bearer', expires_in: expiresInSec, scope: scopes.join(' '), clientName: client.name };
+  }
+
   /** Mint an access-token JWT + a stored refresh token for the given grant. */
   private async issueTokens(
     userId: string,
     clientId: string,
     scopes: Permission[],
     resource?: string,
-  ): Promise<TokenResponse> {
+  ): Promise<TokenResponse & { refresh_token: string }> {
     const { token: accessToken, expiresInSec } = await this.tokens.signAccessToken({
       userId,
       clientId,

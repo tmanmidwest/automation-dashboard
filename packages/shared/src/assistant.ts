@@ -84,6 +84,8 @@ export interface AssistantAgentInput {
   mcpAutoApproveTools: string[];
   /** Governance details for the Saviynt Zuma registry; null = not filled in. */
   governance?: AgentGovernance | null;
+  /** Leave this agent out of the external agent catalog (GET /api/v1/agents). */
+  catalogHidden?: boolean;
 }
 
 /** An agent as the editor sees it (never the API key itself). */
@@ -93,6 +95,9 @@ export interface AssistantAgentView extends AssistantAgentInput {
   apiKeySet: boolean;
   governance: AgentGovernance | null;
   zuma: ZumaSyncState;
+  catalogHidden: boolean;
+  /** Bumps on every save; reported as the agent's version in the external catalog. */
+  revision: number;
   /** enabled && model set && (baseUrl set || anthropic). */
   ready: boolean;
   createdAt: string;

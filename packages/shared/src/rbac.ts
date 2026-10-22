@@ -45,7 +45,8 @@ export type Permission =
   | 'fabric:approve' // approve/deny four-eyes session requests
   // The Computer — in-app LLM assistant (session-only; runs tools as the user)
   | 'assistant:use'
-  | 'agents:manage'; // create / edit Computer agent profiles (model, instructions, tools)
+  | 'agents:manage' // create / edit Computer agent profiles (model, instructions, tools)
+  | 'agents:read'; // read the external agent catalog (GET /api/v1/agents); grantable to tokens and machine clients
 
 /** The two built-in roles requested for launch: View Only and Full Control. */
 export const BUILTIN_ROLES = {
@@ -98,6 +99,7 @@ export const BUILTIN_ROLES = {
       'fabric:approve',
       'assistant:use',
       'agents:manage',
+      'agents:read',
     ] as Permission[],
   },
 } as const;
@@ -140,7 +142,16 @@ export const GRANTABLE_TOKEN_SCOPES: Permission[] = [
   // `cerebro access` CLI. `fabric:manage` stays session-only (enroll/revoke).
   'fabric:read',
   'fabric:connect',
+  // Read-only agent catalog for external inventories (Saviynt). Also the only scope a
+  // machine (client-credentials) OAuth client may hold: MACHINE_CLIENT_SCOPES.
+  'agents:read',
 ];
+
+/**
+ * Scopes a machine OAuth client (client_credentials grant, no user behind it) may hold.
+ * Its tokens are also confined to the catalog routes (/api/v1/agents) by the auth guard.
+ */
+export const MACHINE_CLIENT_SCOPES: Permission[] = ['agents:read'];
 
 /** True for a grantable scope that lets a credential change state (not read-only). */
 export function isWriteScope(scope: Permission): boolean {

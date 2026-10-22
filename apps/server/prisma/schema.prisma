@@ -114,6 +114,10 @@ model AssistantAgent {
   zumaLastError    String?
   zumaPayloadHash  String?
   zumaExtrasHash   String?
+  /// Left out of the external agent catalog (GET /api/v1/agents).
+  catalogHidden Boolean  @default(false)
+  /// Bumps on every save; the agent's version in the external catalog.
+  revision      Int      @default(1)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }
@@ -233,7 +237,8 @@ model OAuthClient {
   clientId         String   @unique
   /// Human label shown on the consent screen and in Settings.
   name             String
-  /// 'public' (PKCE, no secret) or 'confidential' (secret required).
+  /// 'public' (PKCE, no secret), 'confidential' (secret required) or 'machine'
+  /// (client_credentials only: no user, no redirect; tokens confined to the agent catalog).
   type             String   @default("public")
   /// sha256 of the client secret; null for public clients.
   clientSecretHash String?
@@ -241,6 +246,12 @@ model OAuthClient {
   redirectUris     String[]
   /// Disabled clients cannot start an authorization or exchange tokens.
   disabled         Boolean  @default(false)
+  /// 'machine' clients only (client_credentials): scopes it may request, source IP/CIDR
+  /// allowlist (empty = any), and usage/rotation stamps.
+  allowedScopes    String[] @default([])
+  ipAllowlist      String[] @default([])
+  lastUsedAt       DateTime?
+  secretRotatedAt  DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }

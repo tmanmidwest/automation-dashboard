@@ -132,7 +132,10 @@ export class AssistantAgentsService implements OnModuleInit {
   ): Promise<AssistantAgentView> {
     const current = await this.get(id);
     const governance = patch.governance !== undefined ? { governance: cleanGovernance(patch.governance) } : {};
-    const row = await this.prisma.assistantAgent.update({ where: { id }, data: { ...clean(patch, current), ...governance } });
+    const row = await this.prisma.assistantAgent.update({
+      where: { id },
+      data: { ...clean(patch, current), ...governance, revision: { increment: 1 } },
+    });
     if (apiKey !== undefined) await this.setApiKey(row, apiKey, actor);
     return this.view(row);
   }
@@ -220,6 +223,8 @@ export class AssistantAgentsService implements OnModuleInit {
       apiKeySet: await this.apiKeySet(row),
       governance: (row.governance as unknown as AgentGovernance | null) ?? null,
       zuma: await this.zuma.state(row),
+      catalogHidden: row.catalogHidden,
+      revision: row.revision,
       ready: isReady(row),
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -252,7 +257,7 @@ function isReady(row: AssistantAgent): boolean {
  */
 function clean(input: Partial<AssistantAgentInput>, current: AssistantAgent | null) {
   const out: Partial<
-    Omit<AssistantAgent, 'id' | 'isDefault' | 'createdAt' | 'updatedAt' | 'governance' | `zuma${string}`>
+    Omit<AssistantAgent, 'id' | 'isDefault' | 'createdAt' | 'updatedAt' | 'governance' | 'revision' | `zuma${string}`>
   > = {};
   const creating = current === null;
 
@@ -296,6 +301,7 @@ function clean(input: Partial<AssistantAgentInput>, current: AssistantAgent | nu
   if (input.mcpServerIds !== undefined) out.mcpServerIds = stringList(input.mcpServerIds);
   if (input.mcpDisabledTools !== undefined) out.mcpDisabledTools = stringList(input.mcpDisabledTools);
   if (input.mcpAutoApproveTools !== undefined) out.mcpAutoApproveTools = stringList(input.mcpAutoApproveTools);
+  if (input.catalogHidden !== undefined) out.catalogHidden = input.catalogHidden === true;
   return out;
 }
 
