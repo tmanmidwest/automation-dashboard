@@ -1,18 +1,22 @@
 import { Controller, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Public } from '../auth/decorators';
+import { AuditService } from '../logging/audit.service';
 import { OAuthFlowService, OAuthFlowError, TokenResponse } from './oauth-flow.service';
 
 /**
  * OAuth token endpoint. Public — clients authenticate with their own credentials (PKCE for
  * public clients, client secret for confidential), not a Cerebro session. Accepts
  * application/x-www-form-urlencoded or JSON. Supports the authorization_code and
- * refresh_token grants.
+ * refresh_token grants, and client_credentials for machine clients (audited).
  */
 @Public()
 @Controller('oauth')
 export class OAuthTokenController {
-  constructor(private readonly flow: OAuthFlowService) {}
+  constructor(
+    private readonly flow: OAuthFlowService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Post('token')
   async token(@Req() req: Request, @Res() res: Response): Promise<void> {
@@ -37,12 +41,42 @@ export class OAuthTokenController {
         case 'refresh_token':
           result = await this.flow.refreshTokens({ clientId, clientSecret, refreshToken: body.refresh_token });
           break;
+        case 'client_credentials': {
+          const { clientName, ...issued } = await this.flow.clientCredentials({ clientId, clientSecret, scope: body.scope, ip: req.ip });
+          await this.audit
+            .record({
+              actorId: `oauth-client:${clientId}`,
+              actorEmail: null,
+              action: 'oauth.client_token_issued',
+              target: clientName,
+              meta: { clientId, scope: issued.scope, ip: req.ip },
+            })
+            .catch(() => undefined);
+          result = issued;
+          break;
+        }
         default:
           throw new OAuthFlowError('unsupported_grant_type', 'Unsupported grant_type.', false);
       }
       res.status(200).json(result);
     } catch (err) {
       if (err instanceof OAuthFlowError) {
+        // Only refusals of a registered client are audited, so unknown ids can't flood the log.
+        if (body.grant_type === 'client_credentials' && err.clientName) {
+          await this.audit
+            .record({
+              actorId: `oauth-client:${clientId}`,
+              actorEmail: null,
+              action: 'oauth.client_token_denied',
+              target: err.clientName,
+              meta: { error: err.code, ip: req.ip },
+            })
+            .catch(() => undefined);
+        }
+        if (err.code === 'slow_down') {
+          res.status(429).json({ error: err.code, error_description: err.description });
+          return;
+        }
         const status = err.code === 'invalid_client' ? 401 : 400;
         if (status === 401) res.setHeader('WWW-Authenticate', 'Basic realm="oauth"');
         res.status(status).json({ error: err.code, error_description: err.description });

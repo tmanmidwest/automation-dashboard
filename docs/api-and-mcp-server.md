@@ -440,3 +440,66 @@ it never sees — is the cleaner long-term answer to secrets-through-the-model, 
 contract and is out of scope here.
 
 **Catalog size:** 22 → 43 tools. No DB migration, no new deps. Server + web + shared build clean.
+
+## Phase 7 — Read-only agent catalog for external inventories (BUILT 2026-10-22)
+
+Lets an identity governance tool (Saviynt's REST connector is the first user) discover every
+Computer agent and its metadata over REST. Read only: there are no create, update or delete routes
+on this path, and the credentials it uses can't reach anything else.
+
+### Endpoints
+
+- `GET /api/v1/agents` returns **every agent with all its metadata in one call**:
+  `{ items, totalCount, generatedAt }`. Paging is off unless asked for (`?page=&limit=`, limit 1–1000);
+  without it the response is capped at 1,000 agents.
+  Filters: `updatedSince` (ISO time, for delta imports), `status` (`ready|disabled|not_configured`),
+  `environment` (governance environment), `label=key:value`.
+- `GET /api/v1/agents/:id` returns one agent (404 when it's hidden or missing).
+
+Each entry (`AgentCatalogEntry` in `@cerebro/shared`) carries id, name, description, a link back to
+the agent's page, `platform: "cerebro"`, `platformVersion`, `revision` (bumped on every edit),
+created/updated times, status, enabled, default; `llm` (provider, model, endpoint **host** only,
+temperature, max rounds); `tools` (mode, built-in tools, MCP servers with host and tool approval
+flags); `access.allowedRoles`; `governance` (environment, criticality, agent type, owners, owner team,
+labels); and the Zuma registration (agent ID, status, last sync).
+
+The entry is built from an allowlist of fields. API keys, the agent's instructions, full endpoint
+URLs and anything from the Secrets Vault are never included.
+
+### Who can call it
+
+- **Permission `agents:read`** (admin role; grantable on API tokens). A person's session or an
+  `agents:read` API token works.
+- **Machine OAuth clients** (Settings → OAuth Clients → Register client → *Machine*). They use the
+  `client_credentials` grant at `POST /oauth/token` (client ID and secret as HTTP Basic or form
+  fields, `scope=agents:read`). Tokens last 15 minutes, have no refresh token, and carry the audience
+  `<APP_URL>/api/v1/agents`. A machine client's only allowed scope is `agents:read`.
+  Machine clients can't use the authorization-code or refresh grants.
+
+### Controls
+
+- Machine tokens are confined to `/api/v1/agents*` by the auth guard: any other route returns 403,
+  even ones that only need a signed-in user. `/mcp` rejects them too.
+- Every request re-checks the client: disabling or deleting it, or changing its IP allowlist,
+  takes effect on tokens already issued.
+- **IP allowlist** per machine client (single IPs or CIDRs, up to 100), checked at token issue and
+  on every call. It uses the request IP as Express sees it (`trust proxy` = 1), so it is only
+  meaningful when Cerebro sits behind the reverse proxy that sets `X-Forwarded-For`; exposed
+  directly, a caller could forge that header.
+- **Rotate secret** (key button on the client row) issues a new secret, shown once; the old one stops
+  working at once and tokens already issued run out within 15 minutes.
+- **Rate limits** (in memory, per server process): 60 catalog calls a minute per caller, 10 token
+  requests a minute per client. Over the limit returns 429 (the catalog also sends `Retry-After`).
+- **Hide from the external agent catalog** on an agent (General card) leaves it out of both endpoints.
+- **Audit:** `agents.catalog_listed` / `agents.catalog_read` (caller, client or token ID, IP, filters,
+  counts), `oauth.client_token_issued`, `oauth.client_token_denied` (registered clients only, so
+  unknown client IDs can't flood the log), `oauth.client_secret_rotated`.
+- Each machine client shows when it was last used and when its secret was last rotated.
+
+### Saviynt REST connector outline
+
+1. Register a machine client and copy its ID and secret.
+2. ConnectionJSON: token call to `https://<cerebro>/oauth/token` with
+   `grant_type=client_credentials&scope=agents:read`, then `Authorization: Bearer ${access_token}`.
+3. Import call: `GET https://<cerebro>/api/v1/agents`, mapping `items[*]` (or add
+   `?updatedSince=` for incremental runs).

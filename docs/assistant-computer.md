@@ -2,6 +2,10 @@
 
 Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
 
+> **External agent catalog.** Inventories such as Saviynt read every agent's metadata (owners,
+> labels, status, model, revision) from `GET /api/v1/agents` with an `agents:read` token or a
+> machine OAuth client. Read only; see `docs/api-and-mcp-server.md` → Phase 7.
+
 > **Saviynt Zuma registry — what shipped.** Agents can be registered in the Saviynt Zuma agent
 > registry (Agent API v2). Registration is outbound: Cerebro calls Zuma and Zuma assigns the agent
 > ID. Settings → Saviynt Zuma holds the tenant connection (`zuma.config` setting: URL, optional tenant

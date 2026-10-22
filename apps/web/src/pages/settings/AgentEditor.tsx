@@ -48,6 +48,7 @@ const NEW_AGENT: Draft = {
   mcpDisabledTools: [],
   mcpAutoApproveTools: [],
   governance: null,
+  catalogHidden: false,
 };
 
 /** Settings → Agents → one agent: General, Model, Instructions, Tools. */
@@ -105,6 +106,7 @@ export function AgentEditor() {
         mcpServerIds: agent.mcpServerIds,
         mcpDisabledTools: agent.mcpDisabledTools,
         mcpAutoApproveTools: agent.mcpAutoApproveTools,
+        catalogHidden: agent.catalogHidden ?? false,
         governance: agent.governance ?? null,
       };
       if (apiKey) body.apiKey = apiKey;
@@ -234,6 +236,16 @@ export function AgentEditor() {
             <label className="flex items-center gap-3 text-sm">
               <input type="checkbox" className="h-4 w-4" checked={agent.enabled} onChange={(e) => set('enabled', e.target.checked)} />
               Enabled
+            </label>
+            <label className="flex items-start gap-3 text-sm">
+              <input type="checkbox" className="h-4 w-4 mt-0.5" checked={agent.catalogHidden ?? false}
+                onChange={(e) => set('catalogHidden', e.target.checked)} />
+              <span>
+                Hide from the external agent catalog
+                <span className="block text-xs text-muted-foreground">
+                  Leaves this agent out of <code>GET /api/v1/agents</code>, which inventories such as Saviynt read.
+                </span>
+              </span>
             </label>
             <div className="space-y-1.5">
               <Label>Who can use it</Label>

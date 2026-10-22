@@ -165,11 +165,19 @@ export interface OAuthClientSummary {
   id: string;
   clientId: string;
   name: string;
-  type: 'public' | 'confidential';
+  /** 'machine' = client_credentials only (no user, no redirect), for services like Saviynt. */
+  type: 'public' | 'confidential' | 'machine';
   redirectUris: string[];
   disabled: boolean;
-  /** True for confidential clients that have a secret stored. */
+  /** True for confidential and machine clients that have a secret stored. */
   clientSecretSet: boolean;
+  /** Machine clients: the scopes it may request (a subset of MACHINE_CLIENT_SCOPES). */
+  allowedScopes: Permission[];
+  /** Machine clients: addresses or CIDR ranges allowed to get tokens and call the API. Empty = any. */
+  ipAllowlist: string[];
+  /** Machine clients: last token issued or API call. */
+  lastUsedAt: string | null;
+  secretRotatedAt: string | null;
   createdAt: string;
 }
 

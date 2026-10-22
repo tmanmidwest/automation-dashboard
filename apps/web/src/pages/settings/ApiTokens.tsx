@@ -20,6 +20,7 @@ const SCOPES: { scope: Permission; label: string; desc: string; write?: boolean 
   { scope: 'settings:read', label: 'Settings', desc: 'Read application settings.' },
   { scope: 'automations:read', label: 'Automations', desc: 'Read automation rules and their run history.' },
   { scope: 'replicator:read', label: 'App Replicator', desc: 'Read registered apps, deployments, and update status.' },
+  { scope: 'agents:read', label: 'Agent catalog', desc: 'Read every Computer agent with its owners, labels, status and model (GET /api/v1/agents).' },
   { scope: 'fabric:read', label: 'Fabric', desc: 'List Fabric machines, targets, and sessions (needed by the cerebro CLI).' },
   { scope: 'fabric:connect', label: 'Fabric connect', desc: 'Open SSH/RDP/VNC sessions and get CA certs signed via the cerebro CLI.', write: true },
   { scope: 'connectors:action', label: 'Connector actions', desc: 'Start/stop/reboot resources, run operations, delete resources.', write: true },

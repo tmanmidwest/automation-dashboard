@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Copy, Check, Trash2, Boxes, Power, ShieldOff } from 'lucide-react';
+import { Copy, Check, Trash2, Boxes, Power, ShieldOff, KeyRound, Server } from 'lucide-react';
 import type { OAuthClientCreated, OAuthClientSummary, OAuthGrantSummary } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -11,6 +11,17 @@ import { Label } from '@/components/ui/label';
 import { Dialog } from '@/components/ui/dialog';
 
 const BASE = '/api/settings/oauth/clients';
+
+type ClientType = OAuthClientSummary['type'];
+
+const TYPE_HELP: Record<ClientType, string> = {
+  public: 'PKCE, no secret — for desktop/CLI MCP clients.',
+  confidential: 'Has a secret — for server-side clients that sign in as a user.',
+  machine: 'Client credentials, no user — read-only access to the agent catalog (/api/v1/agents), e.g. a Saviynt REST connector.',
+};
+
+const linesOf = (text: string) => text.split('\n').map((s) => s.trim()).filter(Boolean);
+const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never');
 
 export function OAuthClients() {
   const { can } = useAuth();
@@ -24,11 +35,12 @@ export function OAuthClients() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [redirects, setRedirects] = useState('');
-  const [type, setType] = useState<'public' | 'confidential'>('public');
+  const [type, setType] = useState<ClientType>('public');
+  const [ipAllowlist, setIpAllowlist] = useState('');
   const [busy, setBusy] = useState(false);
 
   // Reveal-once (created client).
-  const [revealed, setRevealed] = useState<OAuthClientCreated | null>(null);
+  const [revealed, setRevealed] = useState<(OAuthClientCreated & { rotated?: boolean }) | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   async function load() {
@@ -59,6 +71,7 @@ export function OAuthClients() {
     setName('');
     setRedirects('');
     setType('public');
+    setIpAllowlist('');
     setErr(null);
     setCreating(true);
   }
@@ -67,8 +80,10 @@ export function OAuthClients() {
     setBusy(true);
     setErr(null);
     try {
-      const redirectUris = redirects.split('\n').map((s) => s.trim()).filter(Boolean);
-      const created = await api.post<OAuthClientCreated>(BASE, { name: name.trim(), redirectUris, type });
+      const body = type === 'machine'
+        ? { name: name.trim(), type, ipAllowlist: linesOf(ipAllowlist) }
+        : { name: name.trim(), type, redirectUris: linesOf(redirects) };
+      const created = await api.post<OAuthClientCreated>(BASE, body);
       setCreating(false);
       setRevealed(created);
       setCopied(null);
@@ -86,6 +101,18 @@ export function OAuthClients() {
       await load();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to update client');
+    }
+  }
+
+  async function rotate(c: OAuthClientSummary) {
+    if (!confirm(`Issue a new secret for "${c.name}"? The current secret stops working right away; tokens already issued run out within 15 minutes.`)) return;
+    try {
+      const rotated = await api.post<OAuthClientCreated>(`${BASE}/${c.id}/rotate-secret`);
+      setRevealed({ ...rotated, rotated: true });
+      setCopied(null);
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to rotate the secret');
     }
   }
 
@@ -134,7 +161,7 @@ export function OAuthClients() {
               {clients.map((c) => (
                 <div key={c.id} className="flex items-center gap-4 py-3">
                   <div className="h-9 w-9 rounded-lg bg-primary/15 text-primary grid place-items-center shrink-0">
-                    <Boxes className="h-4 w-4" />
+                    {c.type === 'machine' ? <Server className="h-4 w-4" /> : <Boxes className="h-4 w-4" />}
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="font-medium truncate">
@@ -144,9 +171,20 @@ export function OAuthClients() {
                     <p className="text-xs text-muted-foreground truncate">
                       <code>{c.clientId}</code> · {c.type}{c.clientSecretSet ? ' · secret set' : ''}
                     </p>
+                    {c.type === 'machine' && (
+                      <p className="text-xs text-muted-foreground truncate">
+                        Scopes {c.allowedScopes.join(', ') || 'none'} · IPs {c.ipAllowlist.length ? c.ipAllowlist.join(', ') : 'any'} ·
+                        last used {when(c.lastUsedAt)}{c.secretRotatedAt ? ` · secret rotated ${when(c.secretRotatedAt)}` : ''}
+                      </p>
+                    )}
                   </div>
                   {writable && (
                     <>
+                      {c.type !== 'public' && (
+                        <Button variant="ghost" size="icon" onClick={() => rotate(c)} aria-label={`Rotate secret for ${c.name}`} title="Rotate secret">
+                          <KeyRound className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button variant="ghost" size="icon" onClick={() => toggleDisabled(c)} aria-label={c.disabled ? `Enable ${c.name}` : `Disable ${c.name}`}>
                         <Power className={`h-4 w-4 ${c.disabled ? 'text-muted-foreground' : 'text-emerald-400'}`} />
                       </Button>
@@ -194,11 +232,11 @@ export function OAuthClients() {
         open={creating}
         onClose={() => setCreating(false)}
         title="Register OAuth client"
-        description="Public clients use PKCE and need no secret; confidential clients get a secret shown once."
+        description="Public clients use PKCE and need no secret; confidential and machine clients get a secret shown once."
         footer={
           <>
             <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
-            <Button onClick={submitCreate} disabled={busy || !name.trim() || !redirects.trim()}>
+            <Button onClick={submitCreate} disabled={busy || !name.trim() || (type !== 'machine' && !redirects.trim())}>
               {busy ? 'Registering…' : 'Register'}
             </Button>
           </>
@@ -215,32 +253,48 @@ export function OAuthClients() {
             <Input value={name} placeholder="Claude Desktop" onChange={(e) => setName(e.target.value)} />
           </div>
           <div>
-            <Label>Redirect URIs <span className="text-muted-foreground font-normal">(one per line)</span></Label>
-            <textarea
-              value={redirects}
-              onChange={(e) => setRedirects(e.target.value)}
-              rows={3}
-              placeholder={'http://localhost/callback\nhttps://client.example.com/callback'}
-              className="mt-1 w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
-            />
-          </div>
-          <div>
             <Label>Client type</Label>
             <div className="mt-1 space-y-2">
-              {(['public', 'confidential'] as const).map((t) => (
+              {(['public', 'confidential', 'machine'] as const).map((t) => (
                 <label key={t} className="flex items-start gap-3 cursor-pointer rounded-md border border-border p-3 hover:bg-muted/50">
                   <input type="radio" name="ctype" className="mt-0.5 h-4 w-4 accent-[hsl(var(--primary))]"
                     checked={type === t} onChange={() => setType(t)} />
                   <span>
                     <span className="text-sm font-medium capitalize">{t}</span>
                     <span className="block text-xs text-muted-foreground">
-                      {t === 'public' ? 'PKCE, no secret — for desktop/CLI MCP clients.' : 'Has a secret — for server-side clients.'}
+                      {TYPE_HELP[t]}
                     </span>
                   </span>
                 </label>
               ))}
             </div>
           </div>
+          {type === 'machine' ? (
+            <div>
+              <Label>Allowed IP addresses <span className="text-muted-foreground font-normal">(one IP or CIDR per line; blank allows any)</span></Label>
+              <textarea
+                value={ipAllowlist}
+                onChange={(e) => setIpAllowlist(e.target.value)}
+                rows={3}
+                placeholder={'203.0.113.10\n198.51.100.0/24'}
+                className="mt-1 w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Scope is fixed to <code>agents:read</code>. Tokens last 15 minutes and only work on <code>/api/v1/agents</code>.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <Label>Redirect URIs <span className="text-muted-foreground font-normal">(one per line)</span></Label>
+              <textarea
+                value={redirects}
+                onChange={(e) => setRedirects(e.target.value)}
+                rows={3}
+                placeholder={'http://localhost/callback\nhttps://client.example.com/callback'}
+                className="mt-1 w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
+              />
+            </div>
+          )}
         </div>
       </Dialog>
 
@@ -248,7 +302,7 @@ export function OAuthClients() {
       <Dialog
         open={!!revealed}
         onClose={() => setRevealed(null)}
-        title="Client registered"
+        title={revealed?.rotated ? 'New secret issued' : 'Client registered'}
         description={revealed?.clientSecret ? 'Copy the secret now — it is shown only once.' : 'Configure your client with this client ID.'}
         footer={<Button onClick={() => setRevealed(null)}>Done</Button>}
       >
@@ -272,6 +326,15 @@ export function OAuthClients() {
                     {copied === 'secret' ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
                   </Button>
                 </div>
+              </div>
+            )}
+            {revealed.client.type === 'machine' && (
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>
+                  Token URL: <code>{window.location.origin}/oauth/token</code> with <code>grant_type=client_credentials</code> and
+                  scope <code>agents:read</code> (client ID and secret as HTTP Basic or form fields).
+                </p>
+                <p>Then call <code>GET {window.location.origin}/api/v1/agents</code> with <code>Authorization: Bearer &lt;token&gt;</code>.</p>
               </div>
             )}
           </div>

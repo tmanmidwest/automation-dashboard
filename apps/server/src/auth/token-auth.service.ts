@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
-import type { Permission, SessionUser } from '@cerebro/shared';
+import { MACHINE_CLIENT_SCOPES, type Permission, type SessionUser } from '@cerebro/shared';
+import { ipAllowed } from '../common/ip-allowlist';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoggingService } from '../logging/logging.service';
 import { AuthService } from './auth.service';
@@ -13,6 +14,8 @@ export interface TokenPrincipal {
   tokenId?: string;
   /** Set when authenticated by an OAuth access token. */
   oauthClientId?: string;
+  /** A machine OAuth client (client_credentials): no user behind it, confined to the agent catalog. */
+  machineClient?: boolean;
 }
 
 const TOKEN_PREFIX = 'cbro_';
@@ -55,13 +58,13 @@ export class TokenAuthService {
    * valid, active bearer token. Never throws for a bad token — the guard decides the
    * response — but treats structural problems and unknown tokens identically.
    */
-  async resolve(authHeader: string | undefined): Promise<TokenPrincipal | null> {
+  async resolve(authHeader: string | undefined, ip?: string): Promise<TokenPrincipal | null> {
     const raw = this.extractBearer(authHeader);
     if (!raw) return null;
 
     // Two bearer credential types share this path: static API tokens (`cbro_…`) and
     // OAuth access tokens (JWTs). Both resolve to the same scoped principal.
-    if (!raw.startsWith(TOKEN_PREFIX)) return this.resolveOAuth(raw);
+    if (!raw.startsWith(TOKEN_PREFIX)) return this.resolveOAuth(raw, ip);
 
     const body = raw.slice(TOKEN_PREFIX.length);
     const sep = body.indexOf('_');
@@ -109,7 +112,7 @@ export class TokenAuthService {
    * Resolve an OAuth access token (JWT). Same principal model as an API token: the token's
    * scopes are intersected with the owner's current role permissions on every request.
    */
-  private async resolveOAuth(raw: string): Promise<TokenPrincipal | null> {
+  private async resolveOAuth(raw: string, ip?: string): Promise<TokenPrincipal | null> {
     // Cheap structural gate — a JWT is three dot-separated segments — before verifying.
     if (raw.split('.').length !== 3) {
       this.logging.warn(
@@ -128,6 +131,8 @@ export class TokenAuthService {
       return null;
     }
 
+    if (claims.sub_type === 'client') return this.resolveMachineClient(claims.sub, claims.scope, ip);
+
     const owner = await this.authService.buildSessionUser(claims.sub);
     if (!owner) {
       this.logging.warn('auth', 'OAuth token rejected: subject user missing or disabled.', { sub: claims.sub });
@@ -138,6 +143,40 @@ export class TokenAuthService {
     const permissions = owner.permissions.filter((p) => scopes.includes(p));
 
     return { user: { ...owner, permissions }, oauthClientId: claims.client_id };
+  }
+
+  /**
+   * A machine client's token. Re-checked against the client on every request, so disabling
+   * a client, narrowing its scopes or its IP allowlist takes effect before the token expires.
+   */
+  private async resolveMachineClient(clientId: string, scope: string, ip?: string): Promise<TokenPrincipal | null> {
+    const client = await this.prisma.oAuthClient.findUnique({ where: { clientId } });
+    if (!client || client.type !== 'machine' || client.disabled) {
+      this.logging.warn('auth', 'Machine client token rejected: client missing, disabled or not a machine client.', { clientId });
+      return null;
+    }
+    if (!ipAllowed(client.ipAllowlist, ip)) {
+      this.logging.warn('auth', 'Machine client token rejected: source address not in the client\'s IP allowlist.', { clientId, ip });
+      return null;
+    }
+    const scopes = new Set(scope.split(' ').filter(Boolean));
+    const permissions = MACHINE_CLIENT_SCOPES.filter((p) => scopes.has(p) && client.allowedScopes.includes(p));
+    if (!client.lastUsedAt || Date.now() - client.lastUsedAt.getTime() >= LAST_USED_THROTTLE_MS) {
+      await this.prisma.oAuthClient.update({ where: { id: client.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);
+    }
+    return {
+      user: {
+        id: `oauth-client:${client.clientId}`,
+        email: `${client.clientId}@oauth-client.local`,
+        displayName: client.name,
+        roleSlug: 'machine-client',
+        roleName: 'Machine client',
+        permissions,
+        authProvider: 'local',
+      },
+      oauthClientId: client.clientId,
+      machineClient: true,
+    };
   }
 
   private extractBearer(authHeader: string | undefined): string | null {

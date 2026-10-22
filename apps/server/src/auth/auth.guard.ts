@@ -13,6 +13,12 @@ import { LoggingService } from '../logging/logging.service';
  * downstream permission checks are identical. Routes marked @Public() bypass auth;
  * routes marked @SessionOnly() reject bearer tokens (credential management).
  */
+const CATALOG_PATH = '/api/v1/agents';
+
+function isCatalogPath(path: string): boolean {
+  return path === CATALOG_PATH || path.startsWith(`${CATALOG_PATH}/`);
+}
+
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
   constructor(
@@ -52,8 +58,14 @@ export class SessionAuthGuard implements CanActivate {
     }
 
     // 2. Fall back to a bearer API token.
-    const principal = await this.tokenAuth.resolve(req.headers.authorization);
+    const principal = await this.tokenAuth.resolve(req.headers.authorization, req.ip);
     if (principal) {
+      // A machine client has no user behind it: it may only read the agent catalog, so it
+      // can't reach routes that check authentication but no particular permission.
+      if (principal.machineClient && !isCatalogPath(req.path)) {
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: machine OAuth clients may only call /api/v1/agents.`);
+        throw new ForbiddenException('This client may only read the agent catalog (/api/v1/agents).');
+      }
       if (sessionOnly) {
         this.logging.warn('auth', `Rejected ${req.method} ${req.path}: this route requires an interactive session, not a bearer token.`);
         throw new ForbiddenException('This action requires an interactive session, not an API token.');
