@@ -5,6 +5,7 @@ import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { ProviderIcon } from '@/components/ProviderIcon';
+import { LocalLoginPolicyCard } from '@/components/LocalLoginPolicyCard';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -129,7 +130,7 @@ export function Authentication() {
     <>
       <PageHeader
         title="Authentication"
-        description="Local accounts are always available. Add one or more single sign-on providers."
+        description="Control password sign-in and add one or more single sign-on providers."
         actions={writable && editing === null && (
           <Button onClick={openNew}><Plus className="h-4 w-4" /> Add provider</Button>
         )}
@@ -142,6 +143,8 @@ export function Authentication() {
           {msg.text}
         </div>
       )}
+
+      {editing === null && <LocalLoginPolicyCard writable={writable} />}
 
       {editing !== null && (
         <Card className="mb-6 border-primary/40">
@@ -259,7 +262,7 @@ export function Authentication() {
           <CardContent className="pt-10 pb-10 text-center">
             <p className="font-medium">No SSO providers yet</p>
             <p className="text-sm text-muted-foreground mt-1">
-              Add Google, Microsoft Entra, Authentik, or any OpenID Connect provider. Local sign-in stays available.
+              Add Google, Microsoft Entra, Authentik, or any OpenID Connect provider.
             </p>
           </CardContent>
         </Card>

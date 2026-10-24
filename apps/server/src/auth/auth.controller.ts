@@ -1,9 +1,10 @@
 import { Body, Controller, Get, Post, Req, UnauthorizedException } from '@nestjs/common';
 import type { Request } from 'express';
-import type { FirstRunStatus, SessionUser } from '@cerebro/shared';
+import type { FirstRunStatus, LocalLoginAvailability, SessionUser } from '@cerebro/shared';
 import { AuthService } from './auth.service';
 import { TotpService } from './totp.service';
 import { LoginThrottleService } from './login-throttle.service';
+import { LocalLoginPolicyService } from './local-login-policy.service';
 import { AuditService } from '../logging/audit.service';
 import { Public, CurrentUser } from './decorators';
 import { LoginDto, LoginTotpDto, SetupDto } from './dto';
@@ -20,12 +21,20 @@ export class AuthController {
     private readonly totp: TotpService,
     private readonly audit: AuditService,
     private readonly throttle: LoginThrottleService,
+    private readonly localPolicy: LocalLoginPolicyService,
   ) {}
 
   @Public()
   @Get('first-run')
   async firstRun(): Promise<FirstRunStatus> {
     return { needsSetup: await this.auth.isFirstRun() };
+  }
+
+  /** Whether the login page should show the email/password form to this client. */
+  @Public()
+  @Get('local-login')
+  async localLogin(@Req() req: Request): Promise<LocalLoginAvailability> {
+    return { available: await this.localPolicy.isAllowed(req.ip) };
   }
 
   @Public()
@@ -39,6 +48,9 @@ export class AuthController {
   @Public()
   @Post('login')
   async login(@Body() dto: LoginDto, @Req() req: Request): Promise<{ ok: true } | { mfaRequired: true }> {
+    // IP policy first: a refused network never reaches the password check, so it can't
+    // probe accounts or burn their lockout budget.
+    await this.localPolicy.assertAllowed(req.ip, dto.email);
     await this.throttle.assertAllowed(req.ip, dto.email);
     const userId = await this.auth.validateLocal(dto.email, dto.password);
     if (!userId) {
@@ -82,6 +94,7 @@ export class AuthController {
       await this.clearPendingMfa_(req);
       throw new UnauthorizedException('Too many incorrect codes. Start over.');
     }
+    await this.localPolicy.assertAllowed(req.ip);
 
     // Rate-limit the second factor per account (across challenges), so re-minting a
     // fresh challenge can't be used to keep guessing the 6-digit code.
