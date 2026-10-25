@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, Plus, Pencil, Trash2, Maximize2, X, VideoOff, RefreshCw, Play, Square, ImageIcon, GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
-import type { ConnectorInstanceSummary, ConnectorResource, ViewscreenCamera, ViewscreenConfig } from '@cerebro/shared';
+import type { ConnectorInstanceSummary, ConnectorResource, ConnectorResourceList, ViewscreenCamera, ViewscreenConfig } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -428,8 +428,8 @@ function CameraEditor({
     if (!instanceId) { setCameras(null); return; }
     setCameras(null);
     setLoadErr(null);
-    api.get<ConnectorResource[]>(`/api/connectors/instances/${instanceId}/resources?kind=camera`)
-      .then(setCameras)
+    api.get<ConnectorResourceList>(`/api/connectors/instances/${instanceId}/resources?kind=camera`)
+      .then((r) => setCameras(r.resources))
       .catch((e) => setLoadErr(e?.message ?? 'Failed to load cameras.'));
   }, [instanceId]);
 

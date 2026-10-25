@@ -8,7 +8,7 @@ import { LoggingService } from '../logging/logging.service';
 import { ConnectorRegistry } from './connector-registry.service';
 import { JobService } from './job.service';
 import type {
-  ConnectorContext, ConnectorResource, ConnectorOption, ConnectorConsoleTarget, ConnectorStreamTarget, ConnectorNode,
+  ConnectorContext, ConnectorResource, ConnectorResourceList, ConnectorOption, ConnectorConsoleTarget, ConnectorStreamTarget, ConnectorNode,
   DashboardOverview, OverviewMetric, OverviewGuest, OverviewSource, OperationResult,
 } from '@cerebro/shared';
 import type { ConnectorInstance } from '@prisma/client';
@@ -281,6 +281,28 @@ export class ConnectorInstanceService implements OnModuleInit {
     return result;
   }
 
+  /**
+   * Per-(instance,kind) last-good resource list. Opening a connector serves
+   * this instantly instead of blocking on a live fetch (which, for a connector
+   * like Backblaze, means a slow `restic snapshots` call to B2). The live fetch
+   * only runs on an explicit refresh, when nothing is cached yet, or after a
+   * mutation invalidates the entry. In-memory only — lists can be large, and a
+   * cold cache after a redeploy just means the first open fetches live.
+   */
+  private resourceCache = new Map<string, { at: number; resources: ConnectorResource[] }>();
+
+  /** Drop every cached resource list for an instance (after a mutation changes them). */
+  private invalidateResourceCache(id: string): void {
+    for (const key of this.resourceCache.keys()) {
+      if (key.startsWith(`${id}:`)) this.resourceCache.delete(key);
+    }
+  }
+
+  /**
+   * Fetch a connector's resources live, and warm the cache as a side effect.
+   * This is the internal/live path — callers that always need current data
+   * (ingress, fleet, search, migrations, …) use it directly.
+   */
   async listResources(id: string, kind: string): Promise<ConnectorResource[]> {
     const instance = await this.get(id);
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
@@ -288,6 +310,7 @@ export class ConnectorInstanceService implements OnModuleInit {
     try {
       const res = await this.connectorFor(instance).listResources(ctx, kind);
       this.markSynced(id);
+      this.resourceCache.set(`${id}:${kind}`, { at: Date.now(), resources: res });
       return res;
     } catch (err) {
       // Surface the connector's own error message to the UI instead of a bare 500.
@@ -295,11 +318,38 @@ export class ConnectorInstanceService implements OnModuleInit {
     }
   }
 
+  /**
+   * UI-facing list: serve the last-good cache on open (instant, no blocking live
+   * fetch) and only go live on an explicit refresh or a cold cache. On a live
+   * failure, fall back to the cache rather than blanking the page.
+   */
+  async listResourcesCached(
+    id: string,
+    kind: string,
+    opts?: { refresh?: boolean },
+  ): Promise<ConnectorResourceList> {
+    const cacheKey = `${id}:${kind}`;
+    const cached = this.resourceCache.get(cacheKey);
+    if (!opts?.refresh && cached) {
+      return { resources: cached.resources, syncedAt: new Date(cached.at).toISOString(), stale: true };
+    }
+    try {
+      const res = await this.listResources(id, kind); // live fetch + warms the cache
+      const entry = this.resourceCache.get(cacheKey);
+      return { resources: res, syncedAt: new Date(entry?.at ?? Date.now()).toISOString(), stale: false };
+    } catch (err) {
+      if (cached) return { resources: cached.resources, syncedAt: new Date(cached.at).toISOString(), stale: true };
+      throw err;
+    }
+  }
+
   async performAction(id: string, kind: string, resourceId: string, actionId: string) {
     const instance = await this.get(id);
     if (!instance.enabled) throw new BadRequestException('This connector is disabled.');
     const ctx = await this.buildContext(instance);
-    return this.connectorFor(instance).performAction(ctx, kind, resourceId, actionId);
+    const result = await this.connectorFor(instance).performAction(ctx, kind, resourceId, actionId);
+    this.invalidateResourceCache(id); // an action may have changed the resource list
+    return result;
   }
 
   /**
@@ -344,7 +394,9 @@ export class ConnectorInstanceService implements OnModuleInit {
       throw new BadRequestException('This connector does not support deleting resources.');
     }
     const ctx = await this.buildContext(instance);
-    return connector.deleteResource(ctx, kind, resourceId);
+    const result = await connector.deleteResource(ctx, kind, resourceId);
+    this.invalidateResourceCache(id); // the deleted resource should drop out of the list
+    return result;
   }
 
   async listSubResources(id: string, kind: string, resourceId: string, subKind: string) {

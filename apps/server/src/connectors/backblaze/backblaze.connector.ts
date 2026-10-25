@@ -13,7 +13,7 @@ import type {
   OperationProgress,
   TestConnectionResult,
 } from '@cerebro/shared';
-import { Restic, ResticAuth, type ResticSnapshot, type ResticFile, type ResticRepoStats } from './restic';
+import { Restic, ResticAuth, ResticError, type ResticSnapshot, type ResticFile, type ResticRepoStats } from './restic';
 import type { BackupRunService, BackupRunView } from './backup-run.service';
 import type { BackupStateService } from './backup-state.service';
 import type { VmNameService } from './vm-name.service';
@@ -283,6 +283,18 @@ export class BackblazeConnector implements Connector {
         submitLabel: 'Prune now',
         intent: 'destructive',
         background: true, // prune can take minutes → run in the background with the page banner
+        fields: [],
+      },
+      {
+        id: 'clear-lock',
+        label: 'Clear repository lock',
+        description:
+          'Force-remove a leftover restic lock on the B2 repository. Use this only if a backup or prune reports "repository is already locked" and no backup is actually running — it usually means a prior run was interrupted (e.g. the container restarted).',
+        scope: 'create',
+        kind: SNAPSHOT_KIND,
+        icon: 'unlock',
+        submitLabel: 'Clear lock',
+        intent: 'destructive',
         fields: [],
       },
       {
@@ -666,8 +678,47 @@ export class BackblazeConnector implements Connector {
   ): Promise<OperationResult> {
     if (operationId === 'backup-now') return this.runBackup(ctx, values, onProgress, signal);
     if (operationId === 'apply-retention') return this.runRetention(ctx, onProgress, signal);
+    if (operationId === 'clear-lock') return this.runClearLock(ctx, signal);
     if (operationId === 'restore-file') return this.runRestore(ctx, resourceId, values, onProgress, signal);
     return { ok: false, message: `Unknown operation "${operationId}".` };
+  }
+
+  /**
+   * Run an exclusive restic op (backup/prune) with lock self-healing: if it
+   * fails *only* because the repo is already locked — a leftover lock a crashed
+   * or restarted container left behind, which plain `unlock` won't clear
+   * because it can't verify a dead PID on a vanished host — force-clear the
+   * lock and retry once. Safe because Cerebro is the repo's only writer.
+   */
+  private async withLockRecovery<T>(
+    restic: Restic,
+    ctx: ConnectorContext,
+    onProgress: OperationProgress,
+    op: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      if (!(err instanceof ResticError) || err.code !== 'locked') throw err;
+      onProgress('Repository was locked by an interrupted run — clearing the stale lock and retrying…');
+      ctx.log('warn', 'Restic repo was already locked; force-clearing a stale lock (--remove-all) and retrying once.');
+      await restic.unlock(signal, true);
+      return await op();
+    }
+  }
+
+  /** Force-remove any leftover restic lock on the repo (UI action + self-heal fallback). */
+  private async runClearLock(ctx: ConnectorContext, signal?: AbortSignal): Promise<OperationResult> {
+    try {
+      await new Restic(this.authFrom(ctx)).unlock(signal, true);
+      ctx.log('info', 'Cleared restic repository lock(s) on the B2 repo.');
+      return { ok: true, message: 'Cleared any leftover lock on the B2 repository. You can run a backup or prune now.' };
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Could not clear the lock.';
+      ctx.log('error', `Clear lock failed: ${m}`);
+      return { ok: false, message: m };
+    }
   }
 
   /** Prune B2 snapshots older than the configured retention, on demand (no backup). */
@@ -685,7 +736,7 @@ export class BackblazeConnector implements Connector {
       const restic = new Restic(this.authFrom(ctx));
       await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'} (this can take a few minutes)…`);
-      await restic.forgetOlderThan(retentionDays, signal);
+      await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal), signal);
       ctx.log('warn', `Applied retention: kept within ${retentionDays}d, pruned older snapshots.`);
       return record(true, `Retention applied — kept the last ${retentionDays} day${retentionDays === 1 ? '' : 's'} and pruned older snapshots from B2.`);
     } catch (err) {
@@ -745,14 +796,14 @@ export class BackblazeConnector implements Connector {
       await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Backing up ${archives} backup${archives === 1 ? '' : 's'} from ${dumpPath} to B2…`);
       let lastEmit = 0;
-      const summary = await restic.backup([dumpPath], ['cerebro'], (s) => {
+      const summary = await this.withLockRecovery(restic, ctx, onProgress, () => restic.backup([dumpPath], ['cerebro'], (s) => {
         const now = Date.now();
         if (now - lastEmit >= 3000) {
           lastEmit = now;
           const eta = s.secondsRemaining != null ? ` (~${s.secondsRemaining < 60 ? `${s.secondsRemaining}s` : `${Math.round(s.secondsRemaining / 60)}m`} left)` : '';
           onProgress(`  backing up… ${s.percent}%${eta}`);
         }
-      }, signal);
+      }, signal), signal);
       const added = summary.bytesAdded != null ? fmtBytes(summary.bytesAdded) : '—';
       onProgress(`  ✓ snapshot ${summary.snapshotId?.slice(0, 8) ?? '?'} created (${added} new)`);
 
@@ -760,7 +811,7 @@ export class BackblazeConnector implements Connector {
       if (retentionDays > 0) {
         onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'}…`);
         try {
-          await restic.forgetOlderThan(retentionDays, signal);
+          await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal), signal);
           retentionMsg = ` Pruned to the last ${retentionDays} day${retentionDays === 1 ? '' : 's'}.`;
         } catch (err) {
           retentionMsg = ` (retention failed: ${err instanceof Error ? err.message : 'error'})`;

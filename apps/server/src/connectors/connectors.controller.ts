@@ -193,8 +193,12 @@ export class ConnectorsController {
 
   @Get('instances/:id/resources')
   @RequirePermissions('connectors:read')
-  async resources(@Param('id') id: string, @Query('kind') kind: string) {
-    return this.instances.listResources(id, kind);
+  async resources(
+    @Param('id') id: string,
+    @Query('kind') kind: string,
+    @Query('refresh') refresh?: string,
+  ) {
+    return this.instances.listResourcesCached(id, kind, { refresh: refresh === '1' || refresh === 'true' });
   }
 
   @Get('instances/:id/nodes')

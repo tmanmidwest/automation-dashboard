@@ -237,6 +237,20 @@ export interface ConnectorResource {
   tags?: Record<string, string>;
 }
 
+/**
+ * Response of the resource-list endpoint. The server serves the last-good list
+ * from an in-memory cache on open (fast) and only re-fetches live from the
+ * connector on an explicit refresh; `syncedAt` is when the returned list was
+ * actually fetched live, and `stale` is true when it came from the cache.
+ */
+export interface ConnectorResourceList {
+  resources: ConnectorResource[];
+  /** ISO time the returned list was last fetched live, or null if never. */
+  syncedAt: string | null;
+  /** True when these rows came from the cache rather than a fresh live fetch. */
+  stale: boolean;
+}
+
 /** A labelled value in a resource's detail view. */
 export interface ConnectorDetailItem {
   label: string;

@@ -75,6 +75,9 @@ function friendly(err: unknown): ResticError {
   if (/no such host|dial tcp|timeout|connection refused|network is unreachable/i.test(msg)) {
     return new ResticError('Could not reach Backblaze B2 — network/DNS problem.', 'network');
   }
+  if (/unable to create lock|repository is already locked|already locked/i.test(msg)) {
+    return new ResticError('The repository is locked by another restic run (often a leftover lock from a crashed or restarted container).', 'locked');
+  }
   // Trim restic's multi-line noise to the first meaningful line.
   const first = msg.split('\n').map((l) => l.trim()).filter(Boolean)[0] || 'restic command failed.';
   return new ResticError(first);
@@ -104,9 +107,19 @@ export class Restic {
     }
   }
 
-  /** Remove *stale* locks (from a killed/cancelled restic process). Never touches a live lock. */
-  async unlock(signal?: AbortSignal): Promise<void> {
-    await this.run(['unlock'], 8 * 1024 * 1024, signal);
+  /**
+   * Remove locks left by a killed/cancelled restic process.
+   *
+   * By default restic only drops *stale* locks — ones whose PID is dead on
+   * *this* host. A lock left by a prior container can't be verified that way
+   * (its hostname is the old container id, now gone), so it lingers until it
+   * ages out. `removeAll` passes `--remove-all`, which clears those too; it is
+   * safe here because Cerebro is the repo's only writer and serialises its own
+   * backup/prune jobs, so there is never a second live restic to clobber.
+   */
+  async unlock(signal?: AbortSignal, removeAll = false): Promise<void> {
+    const args = removeAll ? ['unlock', '--remove-all'] : ['unlock'];
+    await this.run(args, 8 * 1024 * 1024, signal);
   }
 
   /** restic version string (also a cheap "is the binary present" probe). */

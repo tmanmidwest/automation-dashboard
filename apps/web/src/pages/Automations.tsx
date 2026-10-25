@@ -4,7 +4,7 @@ import type {
   AssistantAgentSummary,
   AssistantRuleProposal,
   AutomationRule, AutomationRuleInput, AutomationRun,
-  ConnectorInstanceSummary, ConnectorManifest, ConnectorOperation, ConnectorResource,
+  ConnectorInstanceSummary, ConnectorManifest, ConnectorOperation, ConnectorResource, ConnectorResourceList,
   MonitorSummary, RuleAction, RuleCondition, RuleTrigger,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -431,8 +431,8 @@ function useResources(instanceId: string | undefined, kind: string | undefined):
     if (!instanceId || !kind) { setList(null); return; }
     let cancelled = false;
     setList(null);
-    api.get<ConnectorResource[]>(`/api/connectors/instances/${instanceId}/resources?kind=${encodeURIComponent(kind)}`)
-      .then((r) => { if (!cancelled) setList(r); })
+    api.get<ConnectorResourceList>(`/api/connectors/instances/${instanceId}/resources?kind=${encodeURIComponent(kind)}`)
+      .then((r) => { if (!cancelled) setList(r.resources); })
       .catch(() => { if (!cancelled) setList([]); });
     return () => { cancelled = true; };
   }, [instanceId, kind]);

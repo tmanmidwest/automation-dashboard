@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Loader2, Server, Boxes, Network, ChevronRight } from 'lucide-react';
-import type { ConnectorInstanceSummary, ConnectorResource, ConnectorNode, ConnectorManifest } from '@cerebro/shared';
+import type { ConnectorInstanceSummary, ConnectorResource, ConnectorResourceList, ConnectorNode, ConnectorManifest } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
@@ -58,7 +58,7 @@ export function OverviewResources() {
             }
             const kinds = kindsByConnector.get(inst.connectorId) ?? [];
             const perKind = await Promise.all(
-              kinds.map((k) => api.get<ConnectorResource[]>(`/api/connectors/instances/${inst.id}/resources?kind=${k}`).catch(() => [])),
+              kinds.map((k) => api.get<ConnectorResourceList>(`/api/connectors/instances/${inst.id}/resources?kind=${k}`).then((r) => r.resources).catch(() => [])),
             );
             return { connector: inst, resources: perKind.flat(), nodes: [] as ConnectorNode[] };
           }),

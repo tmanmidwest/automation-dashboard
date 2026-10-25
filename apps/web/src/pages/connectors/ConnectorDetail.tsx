@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, PlugZap, Pencil, Trash2, RefreshCw, Loader2, Rocket, Plus, Cpu, ChevronUp, ChevronDown, ChevronsUpDown, MonitorPlay, TerminalSquare, ScrollText, X, Ban } from 'lucide-react';
 import type {
-  ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorAction,
+  ConnectorInstanceConfig, ConnectorManifest, ConnectorResource, ConnectorResourceList, ConnectorAction,
   ConnectorResourceDetail, ConnectorOperation, OverviewMetric, ConnectorJobStatus,
 } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -122,12 +122,19 @@ export function ConnectorDetail() {
     load().catch((e) => setMsg({ ok: false, text: e instanceof ApiError ? e.message : 'Failed to load' }));
   }, [id]);
 
-  const loadResources = useCallback(async () => {
+  // Opening the connector (and switching kinds) serves the server's last-good
+  // cache — instant, no blocking live fetch. `refresh` forces a live re-fetch
+  // from the connector: the manual Refresh button, a finished background job,
+  // and anything that just mutated a resource all pass true.
+  const loadResources = useCallback(async (refresh = false) => {
     if (!kind || !inst?.enabled) return;
     setLoadingRes(true);
     try {
-      setResources(await api.get<ConnectorResource[]>(`/api/connectors/instances/${id}/resources?kind=${kind}`));
-      setSyncedAt(new Date().toISOString());
+      const r = await api.get<ConnectorResourceList>(
+        `/api/connectors/instances/${id}/resources?kind=${kind}${refresh ? '&refresh=1' : ''}`,
+      );
+      setResources(r.resources);
+      setSyncedAt(r.syncedAt);
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Failed to load resources' });
       setResources([]);
@@ -136,7 +143,7 @@ export function ConnectorDetail() {
     }
   }, [id, kind, inst?.enabled]);
 
-  useEffect(() => { void loadResources(); }, [loadResources]);
+  useEffect(() => { void loadResources(false); }, [loadResources]);
 
   // Once the deep-linked kind's resources are in, open that resource's drawer (once).
   useEffect(() => {
@@ -171,7 +178,7 @@ export function ConnectorDetail() {
         if (!alive) return;
         // A job just finished (count dropped) → refresh the resource list + overview tiles.
         if (prevActiveRef.current > 0 && jobs.length < prevActiveRef.current) {
-          void loadResources();
+          void loadResources(true);
           api.get<{ metrics: OverviewMetric[] }>(`/api/connectors/instances/${id}/overview`).then((o) => setConnMetrics(o.metrics)).catch(() => {});
         }
         prevActiveRef.current = jobs.length;
@@ -289,7 +296,7 @@ export function ConnectorDetail() {
         `/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(res.id)}/actions/${action.id}`,
       );
       setMsg({ ok: r.ok, text: r.message });
-      setTimeout(loadResources, 1200);
+      setTimeout(() => void loadResources(true), 1200);
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Action failed' });
     } finally {
@@ -363,7 +370,7 @@ export function ConnectorDetail() {
       }
       setMsg({ ok: status === 'success', text: message || (status === 'success' ? 'Done.' : 'Operation failed.') });
       await loadSubResources(detailFor.id);
-      loadResources();
+      void loadResources(true);
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Operation failed' });
     } finally {
@@ -380,7 +387,7 @@ export function ConnectorDetail() {
         `/api/connectors/instances/${id}/resources/${kind}/${encodeURIComponent(detailFor.id)}`,
       );
       setMsg({ ok: r.ok, text: r.message });
-      if (r.ok) { setDetailFor(null); loadResources(); }
+      if (r.ok) { setDetailFor(null); void loadResources(true); }
     } catch (err) {
       setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Delete failed' });
     } finally {
@@ -638,7 +645,7 @@ export function ConnectorDetail() {
                   )}
                 </select>
               )}
-              <Button variant="ghost" size="sm" onClick={loadResources} disabled={loadingRes}>
+              <Button variant="ghost" size="sm" onClick={() => void loadResources(true)} disabled={loadingRes}>
                 <RefreshCw className={cn('h-4 w-4', loadingRes && 'animate-spin')} /> Refresh
               </Button>
             </div>
@@ -965,7 +972,7 @@ export function ConnectorDetail() {
           onDone={(createdId) => {
             setActiveOp(null);
             if (createdId && activeOp.kind && activeOp.kind !== kind) setKind(activeOp.kind);
-            setTimeout(loadResources, 800);
+            setTimeout(() => void loadResources(true), 800);
           }}
         />
       )}
@@ -983,7 +990,7 @@ export function ConnectorDetail() {
             setSubDialog(null);
             if (detailFor) {
               if (reload) void loadSubResources(detailFor.id);
-              loadResources();
+              void loadResources(true);
             }
           }}
         />
@@ -1001,7 +1008,7 @@ export function ConnectorDetail() {
             const target = detailFor;
             setResourceOp(null);
             if (target) openDetail(target); // refresh the detail to show new CPU/RAM
-            loadResources();
+            void loadResources(true);
           }}
         />
       )}
