@@ -31,7 +31,7 @@ export class OAuthMetadataController {
       token_endpoint: `${base}/oauth/token`,
       revocation_endpoint: `${base}/oauth/revoke`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
       scopes_supported: SUPPORTED_SCOPES,

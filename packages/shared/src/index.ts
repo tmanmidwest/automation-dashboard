@@ -12,3 +12,4 @@ export * from './assistant';
 export * from './fabric';
 export * from './stack-backup';
 export * from './zuma';
+export * from './agent-catalog';
