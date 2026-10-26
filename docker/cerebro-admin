@@ -1,0 +1,4 @@
+#!/bin/sh
+# Break-glass admin CLI. Run inside the server container, e.g.
+#   docker compose exec app cerebro-admin local-login allow-all
+cd /app/apps/server && exec node dist/cli.js "$@"

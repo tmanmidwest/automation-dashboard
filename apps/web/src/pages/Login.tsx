@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import type { PublicIdentityProvider } from '@cerebro/shared';
+import type { LocalLoginAvailability, PublicIdentityProvider } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { AuthFrame } from '@/components/AuthFrame';
@@ -18,6 +18,8 @@ export function Login() {
   const [error, setError] = useState<string | null>(params.get('error'));
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<PublicIdentityProvider[]>([]);
+  // Password sign-in can be restricted by IP (Settings → Authentication); hide the form when refused.
+  const [localAvailable, setLocalAvailable] = useState(true);
   // Second-factor step: shown after a correct password when the account has TOTP enabled.
   const [mfaStep, setMfaStep] = useState(false);
   const [code, setCode] = useState('');
@@ -25,6 +27,7 @@ export function Login() {
 
   useEffect(() => {
     api.get<PublicIdentityProvider[]>('/api/auth/providers').then(setProviders).catch(() => {});
+    api.get<LocalLoginAvailability>('/api/auth/local-login').then((r) => setLocalAvailable(r.available)).catch(() => {});
   }, []);
 
   // Complete sign-in after the session is fully established. Honors a safe, same-origin
@@ -118,6 +121,12 @@ export function Login() {
                   </button>
                 </div>
               </form>
+            ) : !localAvailable ? (
+              providers.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  Password sign-in is not available from your network, and no single sign-on provider is enabled.
+                </p>
+              )
             ) : (
               <form onSubmit={submit} className="space-y-4">
                 <div>
@@ -138,9 +147,11 @@ export function Login() {
 
             {!mfaStep && providers.length > 0 && (
               <>
-                <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
-                  <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
-                </div>
+                {localAvailable && (
+                  <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
+                    <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
+                  </div>
+                )}
                 <div className="space-y-2">
                   {providers.map((p) => (
                     <Button key={p.slug} variant="outline" className="w-full"
