@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or retention prune is running, the connector's health check and overview skip
   restic (serving the last-known snapshot picture) instead of logging a lock warning
   every minute and raising a false "Connector unreachable" alert.
+- **Repo size updates after a prune or backup** — the Backblaze repo-size tile (cached
+  for 6h) is now refreshed as soon as a backup or retention prune finishes, instead of
+  showing the pre-prune size until the cache expires.
 ### Fixed
 - **Backblaze retention never pruned old snapshots** — `restic forget --keep-within`
   ran per host+paths group and always kept each group's newest snapshot. Cerebro's
