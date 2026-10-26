@@ -4,6 +4,9 @@ import type { Writable } from 'node:stream';
 
 const execFileAsync = promisify(execFile);
 
+/** Hostname recorded on every snapshot Cerebro writes (see backup()). */
+const BACKUP_HOST = 'cerebro';
+
 /**
  * Thin wrapper around the `restic` CLI, pointed at a Backblaze B2 repository.
  *
@@ -195,7 +198,10 @@ export class Restic {
     onStatus?: (s: { percent: number; secondsRemaining?: number }) => void,
     signal?: AbortSignal,
   ): Promise<{ snapshotId?: string; filesNew?: number; filesChanged?: number; bytesAdded?: number; bytesProcessed?: number }> {
-    const args = ['backup'];
+    // Fixed hostname: restic defaults to the machine hostname, which inside Docker
+    // is the container id and changes on every rebuild — scattering snapshots
+    // across one-off host groups.
+    const args = ['backup', '--host', BACKUP_HOST];
     for (const t of tags) args.push('--tag', t);
     args.push('--json', '--', ...paths);
     return new Promise((resolve, reject) => {
@@ -245,9 +251,14 @@ export class Restic {
   /**
    * Age-based retention: keep snapshots within the last `days` (relative to the
    * newest snapshot — so the latest is always kept) and prune the rest from B2.
+   *
+   * `--group-by ''` treats the whole repo as one group. restic's default
+   * (host,paths) applies the policy per group and always keeps each group's
+   * newest snapshot, so snapshots from old container hostnames or the retired
+   * Proxmox-side job would never be forgotten.
    */
   async forgetOlderThan(days: number, signal?: AbortSignal): Promise<void> {
-    await this.run(['forget', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune'], 128 * 1024 * 1024, signal);
+    await this.run(['forget', '--group-by', '', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune'], 128 * 1024 * 1024, signal);
   }
 
   /**
