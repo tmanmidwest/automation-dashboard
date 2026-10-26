@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working SSO identity. Break-glass from the Docker host:
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
+### Fixed
+- **Backblaze retention never pruned old snapshots** — `restic forget --keep-within`
+  ran per host+paths group and always kept each group's newest snapshot. Cerebro's
+  snapshots were recorded under the container id as hostname (new on every rebuild),
+  and the retired Proxmox-side job's snapshots formed their own group, so nothing ever
+  aged out. Retention now treats the whole repo as one group, and backups record a
+  fixed `cerebro` hostname. The first prune after upgrading removes every snapshot
+  older than the configured window, including the old Proxmox-side ones.
 
 ## [0.4.1] — 2026-09-22
 ### Security — Fabric re-review hardening

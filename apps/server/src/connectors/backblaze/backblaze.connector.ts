@@ -217,7 +217,7 @@ export class BackblazeConnector implements Connector {
         label: 'Delete backups older than (days)',
         type: 'number',
         placeholder: '30',
-        help: 'After each backup, prune B2 snapshots older than this many days (the latest is always kept). Blank or 0 = keep everything.',
+        help: 'After each backup, prune B2 snapshots older than this many days, counted from the newest snapshot (which is always kept). Applies to every snapshot in the repo, including ones from other hosts. Blank or 0 = keep everything.',
       },
       {
         key: 'costPerTbMonth',
