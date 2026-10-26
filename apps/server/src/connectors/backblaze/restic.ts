@@ -257,8 +257,35 @@ export class Restic {
    * newest snapshot, so snapshots from old container hostnames or the retired
    * Proxmox-side job would never be forgotten.
    */
-  async forgetOlderThan(days: number, signal?: AbortSignal): Promise<void> {
-    await this.run(['forget', '--group-by', '', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune'], 128 * 1024 * 1024, signal);
+  async forgetOlderThan(days: number, signal?: AbortSignal, onLine?: (line: string) => void): Promise<void> {
+    const args = ['forget', '--group-by', '', '--keep-within', `${Math.max(1, Math.floor(days))}d`, '--prune'];
+    // Stream the output so the caller can show prune phases as they happen. With
+    // a progress rate set, restic also prints "[m:ss] NN.NN% …" lines for the
+    // long steps (repacking, deleting packs) even though stdout isn't a TTY.
+    const env = { ...this.env(), RESTIC_PROGRESS_FPS: '0.2' };
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('restic', args, { env, signal });
+      let stderr = '';
+      let buf = '';
+      const emit = (raw: string) => {
+        // Progress updates may be \r-separated; keep only the latest frame.
+        const line = raw.split('\r').pop()!.trimEnd();
+        if (line.trim() && onLine) onLine(line);
+      };
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const l of lines) emit(l);
+      });
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      child.on('error', (err) => reject(friendly(err)));
+      child.on('close', (code) => {
+        if (buf) emit(buf);
+        if (code === 0) resolve();
+        else reject(friendly({ code: code ?? undefined, stderr }));
+      });
+    });
   }
 
   /**

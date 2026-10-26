@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working SSO identity. Break-glass from the Docker host:
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
+### Changed
+- **Backblaze retention shows live progress** — "Apply retention now" (and the prune
+  after each backup) now streams restic's steps into the progress banner: how many
+  snapshots are kept/removed, each prune phase, and a percentage for the long
+  repack/delete steps, instead of one static "Pruning…" line.
+- **No more "repository is locked" noise during a prune** — while a Backblaze backup
+  or retention prune is running, the connector's health check and overview skip
+  restic (serving the last-known snapshot picture) instead of logging a lock warning
+  every minute and raising a false "Connector unreachable" alert.
 ### Fixed
 - **Backblaze retention never pruned old snapshots** — `restic forget --keep-within`
   ran per host+paths group and always kept each group's newest snapshot. Cerebro's
