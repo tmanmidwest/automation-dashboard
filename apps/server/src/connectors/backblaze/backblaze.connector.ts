@@ -722,6 +722,9 @@ export class BackblazeConnector implements Connector {
       return await op();
     } finally {
       if (ctx.instanceId) this.busy.delete(ctx.instanceId);
+      // A backup adds data and a prune removes it — drop the cached repo size
+      // (6h TTL) so the next overview shows the new figure.
+      this.invalidateCache(ctx);
     }
   }
 
