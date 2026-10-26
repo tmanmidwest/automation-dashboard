@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **Password sign-in IP policy** (Settings → Authentication) — restrict email +
+  password sign-in to listed IPs/CIDR ranges (e.g. your LAN or VPN) or turn it off and
+  use SSO only. Blocked clients get a 403 before any password check and the login page
+  hides the form. Saving a policy that would lock you out is refused unless you have a
+  working SSO identity. Break-glass from the Docker host:
+  `docker compose exec app cerebro-admin local-login allow-all`. See
+  `docs/local-login-policy.md`.
 ### Fixed
 - **Backblaze retention never pruned old snapshots** — `restic forget --keep-within`
   ran per host+paths group and always kept each group's newest snapshot. Cerebro's

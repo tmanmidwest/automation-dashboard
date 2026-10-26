@@ -133,6 +133,9 @@ ENV FABRIC_CLI_DIST_DIR=/app/cli-dist
 COPY --from=cli-build /cli-dist ./cli-dist
 COPY docker/entrypoint.sh ./docker/entrypoint.sh
 RUN chmod +x ./docker/entrypoint.sh
+# Break-glass admin CLI (docs/local-login-policy.md): `docker compose exec app cerebro-admin ...`
+COPY docker/cerebro-admin /usr/local/bin/cerebro-admin
+RUN chmod +x /usr/local/bin/cerebro-admin
 # Remote Browser build context — the app auto-builds this image on first use
 # (via the Docker socket), so no manual `docker build` step is needed. The env var
 # points the app straight at it (cwd is apps/server, not /app).
