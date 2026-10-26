@@ -736,7 +736,7 @@ export class BackblazeConnector implements Connector {
       const restic = new Restic(this.authFrom(ctx));
       await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'} (this can take a few minutes)…`);
-      await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal), signal);
+      await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
       ctx.log('warn', `Applied retention: kept within ${retentionDays}d, pruned older snapshots.`);
       return record(true, `Retention applied — kept the last ${retentionDays} day${retentionDays === 1 ? '' : 's'} and pruned older snapshots from B2.`);
     } catch (err) {
@@ -811,7 +811,7 @@ export class BackblazeConnector implements Connector {
       if (retentionDays > 0) {
         onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'}…`);
         try {
-          await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal), signal);
+          await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
           retentionMsg = ` Pruned to the last ${retentionDays} day${retentionDays === 1 ? '' : 's'}.`;
         } catch (err) {
           retentionMsg = ` (retention failed: ${err instanceof Error ? err.message : 'error'})`;
@@ -1000,4 +1000,25 @@ export class BackblazeConnector implements Connector {
       return { metrics, guests };
     }
   }
+}
+
+/**
+ * Turn `restic forget --prune` output into banner steps: pass phase lines
+ * through ("remove 11 snapshots", "repacking packs", …), drop the snapshot
+ * tables, and throttle the "[m:ss] NN% …" progress lines.
+ */
+function pruneProgress(onProgress: OperationProgress): (line: string) => void {
+  let lastPct = 0;
+  return (line) => {
+    if (/^\[\d+:\d+(:\d+)?\]\s+\d/.test(line)) {
+      const now = Date.now();
+      if (now - lastPct < 5000) return;
+      lastPct = now;
+      onProgress(`  ${line}`);
+      return;
+    }
+    // Snapshot table rows, headers, rules and footers.
+    if (/^[0-9a-f]{8}\s|^-{3,}|^ID\s+Time|^\d+ snapshots?$|^\s/.test(line)) return;
+    onProgress(`  ${line}`);
+  };
 }
