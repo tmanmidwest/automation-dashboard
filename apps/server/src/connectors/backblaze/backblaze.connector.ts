@@ -95,6 +95,14 @@ const STATS_TTL_MS = 6 * 60 * 60 * 1000;
  * systemd + restic pipeline stays the single owner of writes.
  */
 export class BackblazeConnector implements Connector {
+  /**
+   * Instances with a backup or prune in flight → what is running. A prune holds
+   * restic's exclusive lock for as long as it runs (an hour+ on a large repo),
+   * so the periodic health check and overview skip restic meanwhile instead of
+   * logging "locked" every minute and raising a false "unreachable" alert.
+   */
+  private readonly busy = new Map<string, string>();
+
   constructor(
     /** Durable backup/restore-history store. */
     private readonly runs?: BackupRunService,
@@ -391,12 +399,17 @@ export class BackblazeConnector implements Connector {
     // ── Restic / B2 side ──
     let repoOk = false;
     let repoMsg: string;
+    const busyWith = ctx.instanceId ? this.busy.get(ctx.instanceId) : undefined;
     try {
-      const restic = new Restic(auth);
-      const snaps = await restic.snapshots();
-      const latest = snaps[0];
-      repoOk = true;
-      repoMsg = `${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}${latest?.time ? `, latest ${ageStr(latest.time)}` : ''}`;
+      if (busyWith) {
+        repoOk = true;
+        repoMsg = `busy — ${busyWith} in progress, check skipped`;
+      } else {
+        const snaps = await new Restic(auth).snapshots();
+        const latest = snaps[0];
+        repoOk = true;
+        repoMsg = `${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}${latest?.time ? `, latest ${ageStr(latest.time)}` : ''}`;
+      }
       details.repository = auth.repository;
       details.repo = repoMsg;
     } catch (err) {
@@ -694,9 +707,11 @@ export class BackblazeConnector implements Connector {
     restic: Restic,
     ctx: ConnectorContext,
     onProgress: OperationProgress,
+    what: string,
     op: () => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
+    if (ctx.instanceId) this.busy.set(ctx.instanceId, what);
     try {
       return await op();
     } catch (err) {
@@ -705,6 +720,8 @@ export class BackblazeConnector implements Connector {
       ctx.log('warn', 'Restic repo was already locked; force-clearing a stale lock (--remove-all) and retrying once.');
       await restic.unlock(signal, true);
       return await op();
+    } finally {
+      if (ctx.instanceId) this.busy.delete(ctx.instanceId);
     }
   }
 
@@ -736,7 +753,7 @@ export class BackblazeConnector implements Connector {
       const restic = new Restic(this.authFrom(ctx));
       await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'} (this can take a few minutes)…`);
-      await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
+      await this.withLockRecovery(restic, ctx, onProgress, 'retention prune', () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
       ctx.log('warn', `Applied retention: kept within ${retentionDays}d, pruned older snapshots.`);
       return record(true, `Retention applied — kept the last ${retentionDays} day${retentionDays === 1 ? '' : 's'} and pruned older snapshots from B2.`);
     } catch (err) {
@@ -796,7 +813,7 @@ export class BackblazeConnector implements Connector {
       await restic.unlock(signal).catch(() => {}); // clear a stale lock from a prior cancel/crash
       onProgress(`Backing up ${archives} backup${archives === 1 ? '' : 's'} from ${dumpPath} to B2…`);
       let lastEmit = 0;
-      const summary = await this.withLockRecovery(restic, ctx, onProgress, () => restic.backup([dumpPath], ['cerebro'], (s) => {
+      const summary = await this.withLockRecovery(restic, ctx, onProgress, 'backup', () => restic.backup([dumpPath], ['cerebro'], (s) => {
         const now = Date.now();
         if (now - lastEmit >= 3000) {
           lastEmit = now;
@@ -811,7 +828,7 @@ export class BackblazeConnector implements Connector {
       if (retentionDays > 0) {
         onProgress(`Pruning snapshots older than ${retentionDays} day${retentionDays === 1 ? '' : 's'}…`);
         try {
-          await this.withLockRecovery(restic, ctx, onProgress, () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
+          await this.withLockRecovery(restic, ctx, onProgress, 'retention prune', () => restic.forgetOlderThan(retentionDays, signal, pruneProgress(onProgress)), signal);
           retentionMsg = ` Pruned to the last ${retentionDays} day${retentionDays === 1 ? '' : 's'}.`;
         } catch (err) {
           retentionMsg = ` (retention failed: ${err instanceof Error ? err.message : 'error'})`;
@@ -950,6 +967,9 @@ export class BackblazeConnector implements Connector {
     const auth = this.authFrom(ctx);
     const restic = new Restic(auth);
 
+    // Mid backup/prune: serve the last-good picture without touching the locked repo.
+    if (ctx.instanceId && this.busy.has(ctx.instanceId)) return this.cachedOverview(ctx);
+
     try {
       const snaps = await restic.snapshots();
       const stats = await this.cachedStats(ctx, restic, auth.repository);
@@ -983,22 +1003,27 @@ export class BackblazeConnector implements Connector {
     } catch (err) {
       // B2/restic unreachable — serve the last-good picture from the DB rather than blanking out.
       ctx.log('warn', `Restic overview failed, serving cached state: ${err instanceof Error ? err.message : err}`);
-      const st = this.state && ctx.instanceId ? await this.state.load(ctx.instanceId) : undefined;
-      if (!st) return { metrics: [], guests: [] };
-      const metrics: OverviewMetric[] = [{ key: 'snapshots', label: 'Snapshots', value: st.snapshotCount, asOf: st.lastOkAt }];
-      if (st.latestSnapshotAt) {
-        const days = Math.max(0, Math.floor((Date.now() - new Date(st.latestSnapshotAt).getTime()) / 86400000));
-        metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: st.lastOkAt });
-      }
-      if (st.repoSizeBytes != null) {
-        metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((st.repoSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB', asOf: st.lastOkAt });
-      }
-      await this.appendBackupMeta(ctx, metrics, st.repoSizeBytes);
-      const guests = st.snapshots.slice(0, 40).map((s) => ({
-        name: `${s.shortId} · ${s.time ? fmtDate(new Date(s.time)) : '—'}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.host || 'restic',
-      }));
-      return { metrics, guests };
+      return this.cachedOverview(ctx);
     }
+  }
+
+  /** The overview rebuilt from the durable BackupState mirror (no restic calls). */
+  private async cachedOverview(ctx: ConnectorContext): Promise<ConnectorOverview> {
+    const st = this.state && ctx.instanceId ? await this.state.load(ctx.instanceId) : undefined;
+    if (!st) return { metrics: [], guests: [] };
+    const metrics: OverviewMetric[] = [{ key: 'snapshots', label: 'Snapshots', value: st.snapshotCount, asOf: st.lastOkAt }];
+    if (st.latestSnapshotAt) {
+      const days = Math.max(0, Math.floor((Date.now() - new Date(st.latestSnapshotAt).getTime()) / 86400000));
+      metrics.push({ key: 'latestAgeDays', label: 'Latest backup (days ago)', value: days, asOf: st.lastOkAt });
+    }
+    if (st.repoSizeBytes != null) {
+      metrics.push({ key: 'repoSizeGb', label: 'Repo size', value: Math.round((st.repoSizeBytes / 1024 ** 3) * 100) / 100, unit: 'GB', asOf: st.lastOkAt });
+    }
+    await this.appendBackupMeta(ctx, metrics, st.repoSizeBytes);
+    const guests = st.snapshots.slice(0, 40).map((s) => ({
+      name: `${s.shortId} · ${s.time ? fmtDate(new Date(s.time)) : '—'}`, kind: SNAPSHOT_KIND, status: 'snapshot', node: s.host || 'restic',
+    }));
+    return { metrics, guests };
   }
 }
 
