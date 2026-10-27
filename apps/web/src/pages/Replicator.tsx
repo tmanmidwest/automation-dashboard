@@ -106,6 +106,13 @@ export function Replicator() {
     return m;
   }, [deployments]);
 
+  // Docker host IP per connector instance, so each deployment row can show where
+  // to reach its published ports directly.
+  const hostIps = useMemo(
+    () => new Map(targets.filter((t) => t.targetKind === 'docker' && t.hostIp).map((t) => [t.instanceId, t.hostIp])),
+    [targets],
+  );
+
   // While any deploy/redeploy is running in the background, poll so the row's
   // phase + final status update on their own.
   const inFlight = deployments.some((d) => d.status === 'pending' || d.status === 'updating');
@@ -149,6 +156,7 @@ export function Replicator() {
               deployments={deploymentsByApp.get(app.id) ?? []}
               canWrite={canWrite}
               hasIngress={ingressTargets.length > 0}
+              hostIps={hostIps}
               onDeploy={() => setDeployFor(app)}
               onRefreshSchema={() => setRefreshFor(app)}
               onEdit={(d) => setEditFor({ app, d })}
@@ -213,8 +221,10 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSchema, onEdit, onIngress, onEnv, onChanged, setErr }: {
+function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, onRefreshSchema, onEdit, onIngress, onEnv, onChanged, setErr }: {
   app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
+  /** Docker connector instance id → host IP/name from its SSH config. */
+  hostIps: Map<string, string>;
   onDeploy: () => void; onRefreshSchema: () => void; onEdit: (d: ReplicatorDeployment) => void;
   onIngress: (d: ReplicatorDeployment) => void; onEnv: (d: ReplicatorDeployment) => void;
   onChanged: () => void; setErr: (s: string | null) => void;
@@ -291,6 +301,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, onDeploy, onRefreshSc
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
                       {d.dockerInstanceName ?? d.dockerInstanceId}
+                      {d.targetKind !== 'ecs' && hostIps.get(d.dockerInstanceId) && (
+                        <span className="font-mono"> ({hostIps.get(d.dockerInstanceId)})</span>
+                      )}
                       {d.targetKind === 'ecs'
                         ? (d.ecs?.cluster ? ` · cluster ${d.ecs.cluster}` : '')
                         : d.ports.map((p) => ` · ${p.hostPort}→${p.containerPort}`).join('')}
