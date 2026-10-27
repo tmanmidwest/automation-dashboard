@@ -50,6 +50,8 @@ export interface FleetHostMetrics {
 export interface FleetHost {
   instanceId: string;
   name: string;
+  /** The host's address (explicit SSH host, else the Docker endpoint host) — shown next to the name so operators can reach it directly. Omitted for a socket-only endpoint with no host. */
+  address?: string;
   /** The connector's overview call succeeded (host reachable). */
   online: boolean;
   /** Error message when offline. */

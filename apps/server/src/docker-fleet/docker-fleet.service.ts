@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
+import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import type {
   ConnectorResource,
   DockerFleet,
@@ -106,7 +107,7 @@ export class DockerFleetService implements OnModuleInit {
   async refreshHost(instanceId: string): Promise<FleetHost> {
     const inst = await this.instances.get(instanceId);
     if (inst.connectorId !== DOCKER) throw new BadRequestException('Not a Docker connector.');
-    const host = await this.host(instanceId, inst.name);
+    const host = await this.host(instanceId, inst.name, effectiveSshHost((inst.config as Record<string, unknown>) ?? {}));
     const prev = this.cache?.data.hosts ?? [];
     const hosts = prev.some((h) => h.instanceId === instanceId)
       ? prev.map((h) => (h.instanceId === instanceId ? host : h))
@@ -121,7 +122,7 @@ export class DockerFleetService implements OnModuleInit {
   private async compute(): Promise<DockerFleet> {
     const all = await this.instances.list();
     const docker = all.filter((i) => i.connectorId === DOCKER && i.enabled);
-    const hosts = await Promise.all(docker.map((i) => this.host(i.id, i.name)));
+    const hosts = await Promise.all(docker.map((i) => this.host(i.id, i.name, effectiveSshHost((i.config as Record<string, unknown>) ?? {}))));
     hosts.sort((a, b) => a.name.localeCompare(b.name));
     return { hosts, totals: this.totals(hosts) };
   }
@@ -148,7 +149,7 @@ export class DockerFleetService implements OnModuleInit {
     };
   }
 
-  private async host(instanceId: string, name: string): Promise<FleetHost> {
+  private async host(instanceId: string, name: string, address: string): Promise<FleetHost> {
     try {
       const [overview, stacks, containers] = await Promise.all([
         this.instances.connectorOverview(instanceId),
@@ -158,6 +159,7 @@ export class DockerFleetService implements OnModuleInit {
       return {
         instanceId,
         name,
+        address: address || undefined,
         online: true,
         metrics: metricsFrom(overview.metrics),
         stacks: buildStacks(instanceId, stacks, containers),
@@ -166,6 +168,7 @@ export class DockerFleetService implements OnModuleInit {
       return {
         instanceId,
         name,
+        address: address || undefined,
         online: false,
         error: err instanceof Error ? err.message : 'Host unreachable.',
         metrics: emptyMetrics(),
