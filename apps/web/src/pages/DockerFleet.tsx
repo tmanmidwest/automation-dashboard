@@ -395,6 +395,7 @@ function StacksView(p: {
                 {collapsed ? <ChevronRight className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
                 <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="font-semibold">{h.name}</span>
+                {h.address && <span className="font-mono text-xs text-muted-foreground shrink-0">{h.address}</span>}
                 <span className={cn('h-2 w-2 rounded-full shrink-0', h.online ? 'bg-emerald-400' : 'bg-destructive')} title={h.online ? 'Online' : (h.error ?? 'Offline')} />
                 <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground flex-wrap justify-end">
                   {!h.online ? <span className="text-destructive">{h.error ?? 'offline'}</span> : <>
