@@ -1,12 +1,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix, resolve, sep } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
 import { assertSafeGitUrl, assertSafeGitRef, gitSafeEnv } from '../common/git-safety';
 import type { GitCredential, IntrospectRepoInput, IntrospectResult, ReplicatorVariable } from '@cerebro/shared';
-import { introspectCompose, generateComposeWrapper, exposedPortOf, parseDotenv, envFileVariables, mergeEnvFileVars } from './compose-introspect';
+import { introspectCompose, parseDotenv, envFileVariables, mergeEnvFileVars } from './compose-introspect';
+import { detectGeneratedCompose, UNDETECTED_REPO_MESSAGE, type GeneratedCompose } from './source-detect';
 
 /** Standard compose filenames to auto-detect when no explicit path is given. */
 const COMPOSE_CANDIDATES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
@@ -58,59 +59,48 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
 
-      // Shallow clone at the ref. A ref that's a commit SHA can't be --branch'd,
-      // so fall back to a default clone + checkout.
-      try {
-        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', gitUrl, repoDir], workdir, env);
-      } catch (err) {
-        if (!ref) throw err;
-        await this.run('git', [...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
-        await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
-      }
+      const cloned = await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
+      const refWarnings = cloned.warning ? [cloned.warning] : [];
+      const resolvedRef = cloned.ref !== ref ? cloned.ref : undefined;
+      const found = await this.locateCompose(repoDir, input.gitPath);
 
-      // Locate the compose file (explicit path, else auto-detect).
-      const explicit = input.gitPath?.trim().replace(/^\/+/, '');
-      let composePath: string | null = null;
-      if (explicit) {
-        if (await exists(join(repoDir, explicit))) composePath = explicit;
-        else throw new BadRequestException(`No file at "${explicit}" in the repo.`);
-      } else {
-        for (const c of COMPOSE_CANDIDATES) {
-          if (await exists(join(repoDir, c))) { composePath = c; break; }
-        }
-      }
-
-      if (composePath) {
-        const text = await readFile(join(repoDir, composePath), 'utf8');
+      if (found.composePath) {
+        const text = await readFile(found.composeAbs, 'utf8');
         const parsed = introspectCompose(text);
-        const env = await this.readEnvFiles(repoDir, composePath, parsed.envFiles);
+        const envs = await this.readEnvFiles(repoDir, found.composePath, parsed.envFiles);
         return {
-          variables: mergeEnvFileVars(parsed.variables, env.variables),
+          variables: mergeEnvFileVars(parsed.variables, envs.variables),
           fixedPorts: parsed.fixedPorts,
           services: parsed.services,
-          composePath,
+          composePath: found.composePath,
           usesGeneratedCompose: false,
-          envFiles: env.files,
-          warnings: [...parsed.warnings, ...env.warnings],
+          envFiles: envs.files,
+          warnings: [...refWarnings, ...parsed.warnings, ...envs.warnings],
+          resolvedRef,
         };
       }
 
-      // No compose file — synthesize a wrapper from the Dockerfile if present.
-      if (await exists(join(repoDir, 'Dockerfile'))) {
-        const dockerfile = await readFile(join(repoDir, 'Dockerfile'), 'utf8');
-        const exposed = exposedPortOf(dockerfile) ?? 8080;
-        const wrapper = generateComposeWrapper(exposed);
-        const parsed = introspectCompose(wrapper);
-        parsed.warnings.unshift(
-          `No compose file found; generated a wrapper exposing port ${exposed}. Committing a docker-compose.yml is recommended before deploying.`,
-        );
-        return { ...parsed, composePath: 'docker-compose.yml (generated)', usesGeneratedCompose: true, envFiles: [] };
-      }
-
-      throw new BadRequestException('No docker-compose.yml or Dockerfile found in the repository.');
+      // No compose file — Cerebro generates one (from the Dockerfile, or a
+      // recognized layout like WordPress) and writes it at deploy time.
+      // A committed .env.example isn't imported here: the generated compose has no
+      // env_file, so those keys would never reach the container. The operator can
+      // still add them as extra variables per deployment.
+      const gen = found.generated!;
+      const parsed = introspectCompose(gen.compose);
+      return {
+        variables: parsed.variables,
+        fixedPorts: parsed.fixedPorts,
+        services: parsed.services,
+        composePath: `docker-compose.yml (generated: ${gen.kind})`,
+        usesGeneratedCompose: true,
+        envFiles: [],
+        warnings: [...refWarnings, gen.warning, ...parsed.warnings],
+        resolvedRef,
+        generatedCompose: gen.compose,
+      };
     } catch (err) {
       const msg = redact(err instanceof Error ? err.message : 'Failed to read the repository.', cred);
       throw err instanceof BadRequestException ? new BadRequestException(msg) : new BadRequestException(`Could not introspect the repo: ${msg}`);
@@ -210,8 +200,9 @@ export class RepoIntrospectService {
   /**
    * Shallow-clone the repo and return the raw compose file text — what the ECS
    * target needs to translate the compose into a Fargate task definition (the
-   * register-time introspector only returns the derived variable schema). A
-   * Dockerfile-only repo yields the generated wrapper text. See
+   * register-time introspector only returns the derived variable schema). A repo
+   * with no compose yields Cerebro's generated one — the Docker target writes that
+   * beside the checkout at deploy time. See
    * docs/app-replicator-ecs-target.md.
    */
   async fetchComposeText(input: IntrospectRepoInput): Promise<{ text: string; composePath: string; usesGeneratedCompose: boolean }> {
@@ -227,39 +218,85 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
-      try {
-        await this.run('git', [...helper, 'clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', gitUrl, repoDir], workdir, env);
-      } catch (err) {
-        if (!ref) throw err;
-        await this.run('git', [...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
-        await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
+      await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
+      const found = await this.locateCompose(repoDir, input.gitPath);
+      if (found.composePath) {
+        const text = await readFile(found.composeAbs, 'utf8');
+        return { text, composePath: found.composePath, usesGeneratedCompose: false };
       }
-      const explicit = input.gitPath?.trim().replace(/^\/+/, '');
-      let composePath: string | null = null;
-      if (explicit) {
-        if (await exists(join(repoDir, explicit))) composePath = explicit;
-        else throw new BadRequestException(`No file at "${explicit}" in the repo.`);
-      } else {
-        for (const c of COMPOSE_CANDIDATES) if (await exists(join(repoDir, c))) { composePath = c; break; }
-      }
-      if (composePath) {
-        const text = await readFile(join(repoDir, composePath), 'utf8');
-        return { text, composePath, usesGeneratedCompose: false };
-      }
-      if (await exists(join(repoDir, 'Dockerfile'))) {
-        const dockerfile = await readFile(join(repoDir, 'Dockerfile'), 'utf8');
-        const wrapper = generateComposeWrapper(exposedPortOf(dockerfile) ?? 8080);
-        return { text: wrapper, composePath: 'docker-compose.yml (generated)', usesGeneratedCompose: true };
-      }
-      throw new BadRequestException('No docker-compose.yml or Dockerfile found in the repository.');
+      return { text: found.generated!.compose, composePath: `docker-compose.yml (generated: ${found.generated!.kind})`, usesGeneratedCompose: true };
     } catch (err) {
       const msg = redact(err instanceof Error ? err.message : 'Failed to read the repository.', cred);
       throw err instanceof BadRequestException ? new BadRequestException(msg) : new BadRequestException(`Could not read the compose file: ${msg}`);
     } finally {
       await rm(workdir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /**
+   * Shallow-clone `gitUrl` at `ref` into `repoDir`. A commit SHA can't be
+   * `--branch`'d, so it falls back to a full clone + checkout. A branch/tag name
+   * the remote simply doesn't have — most often the form's "main" default on a
+   * repo whose branch is "master", like WordPress — is not worth a full clone of
+   * the whole history: the remote's default branch is used instead, with a
+   * warning, and returned so the caller can store the real ref.
+   */
+  private async cloneAt(
+    helper: string[], gitUrl: string, ref: string, repoDir: string, workdir: string, env: NodeJS.ProcessEnv,
+  ): Promise<{ ref: string; warning: string | null }> {
+    const shallow = (r: string) => this.git([...helper, 'clone', '--depth', '1', ...(r ? ['--branch', r] : []), '--', gitUrl, repoDir], workdir, env);
+    try {
+      await shallow(ref);
+      return { ref, warning: null };
+    } catch (err) {
+      if (!ref) throw err;
+      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
+      if (!/^[0-9a-f]{7,40}$/i.test(ref)) {
+        const listed = await this.git([...helper, 'ls-remote', '--heads', '--tags', '--', gitUrl, ref], workdir, env).catch(() => null);
+        if (listed != null && !listed.trim()) {
+          const head = await this.git([...helper, 'ls-remote', '--symref', '--', gitUrl, 'HEAD'], workdir, env).catch(() => '');
+          // The remote's answer is untrusted: only a plain branch name goes back into git.
+          const def = head.match(/^ref:\s+refs\/heads\/([A-Za-z0-9._\/]+)\s+HEAD/m)?.[1];
+          if (!def || def.startsWith('-') || def.includes('..')) throw new BadRequestException(`The repo has no branch or tag named "${ref}".`);
+          await shallow(def);
+          return { ref: def, warning: `The repo has no "${ref}" branch or tag, so its default branch "${def}" was used instead.` };
+        }
+      }
+      await this.git([...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
+      await this.git(['-C', repoDir, 'checkout', ref], workdir, env);
+      return { ref, warning: null };
+    }
+  }
+
+  /**
+   * Find the compose file in a clone: the explicit path when one is given (and
+   * must exist), else a standard filename at the root. With none, fall back to a
+   * generated compose; a repo Cerebro can't recognize at all is a clear error.
+   */
+  private async locateCompose(
+    repoDir: string, gitPath?: string | null,
+  ): Promise<{ composePath: string; composeAbs: string; generated?: undefined } | { composePath: null; composeAbs?: undefined; generated: GeneratedCompose }> {
+    const explicit = gitPath?.trim().replace(/^\/+/, '');
+    if (explicit) {
+      // gitPath is operator input: resolve it and refuse anything outside the clone.
+      const root = resolve(repoDir);
+      const abs = resolve(root, explicit);
+      if (!abs.startsWith(root + sep) || !(await exists(abs))) {
+        throw new BadRequestException(`No file at "${explicit}" in the repo.`);
+      }
+      return { composePath: explicit, composeAbs: abs };
+    }
+    for (const c of COMPOSE_CANDIDATES) {
+      if (await exists(join(repoDir, c))) return { composePath: c, composeAbs: join(repoDir, c) };
+    }
+    const generated = await detectGeneratedCompose({
+      has: (p) => exists(join(repoDir, p)),
+      read: (p) => readFile(join(repoDir, p), 'utf8').catch(() => null),
+    });
+    if (!generated) throw new BadRequestException(UNDETECTED_REPO_MESSAGE);
+    return { composePath: null, generated };
   }
 
   /**
@@ -281,9 +318,9 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
-      const out = await this.run('git', [...helper, 'ls-remote', gitUrl, ref], workdir, env);
+      const out = await this.git([...helper, 'ls-remote', gitUrl, ref], workdir, env);
       const sha = out.split(/\s+/)[0]?.trim() ?? '';
       return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
     } catch {
@@ -300,14 +337,16 @@ export class RepoIntrospectService {
     try { return JSON.parse(raw) as GitCredential; } catch { return { secret: raw }; }
   }
 
-  /** Promise wrapper over execFile with a hard timeout; feeds optional stdin. */
-  private run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin?: string): Promise<string> {
+  /**
+   * Run git (never a shell) with a hard timeout. Repo URLs and refs reach it only
+   * as discrete argv entries, already checked by git-safety.
+   */
+  private git(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = execFile(cmd, args, { cwd, env, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile('git', args, { cwd, env, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || stdout || err.message).toString().trim()));
         else resolve(stdout.toString());
       });
-      if (stdin != null) { child.stdin?.end(stdin); }
     });
   }
 }

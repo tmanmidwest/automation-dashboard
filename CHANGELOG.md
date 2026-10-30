@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **App Replicator deploys repos without a docker-compose.yml** — a repo with only a
+  Dockerfile, or a recognizable WordPress, Node, PHP or static-site layout, gets a
+  generated compose (shown at register time) and now deploys to Docker hosts. A
+  WordPress checkout (e.g. github.com/WordPress/WordPress) runs on the official
+  wordpress image with a MariaDB service. A branch that doesn't exist (the `main`
+  default on a `master` repo) falls back to the repo's default branch instead of
+  failing. See `docs/app-replicator.md`.
 - **Password sign-in IP policy** (Settings → Authentication) — restrict email +
   password sign-in to listed IPs/CIDR ranges (e.g. your LAN or VPN) or turn it off and
   use SSO only. Blocked clients get a 403 before any password check and the login page

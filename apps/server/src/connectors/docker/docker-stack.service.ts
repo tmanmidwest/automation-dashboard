@@ -46,7 +46,18 @@ export interface StackGitSource {
    * any override previously written for this stack.
    */
   overrideCompose?: string;
+  /**
+   * A compose Cerebro generated for a repo that ships none (App Replicator). When
+   * set, it is written to `<stack>/docker-compose.cerebro.yml` beside the checkout
+   * — not inside it, so the `.env` it reads sits outside the build context — and
+   * used instead of `gitPath`. Stored on the stack row so a connector-side
+   * redeploy or rollback can rewrite it.
+   */
+  generatedCompose?: string;
 }
+
+/** Where a generated compose (see `StackGitSource.generatedCompose`) lives, relative to the stack dir. */
+export const GENERATED_COMPOSE_FILE = 'docker-compose.cerebro.yml';
 
 /**
  * SSH step timeouts for deploys — a clone/build/up can far exceed runSsh's 120s
@@ -133,7 +144,7 @@ export class DockerStackService {
   private saveGit(instanceId: string, name: string, src: StackGitSource) {
     const project = projectName(name);
     const data = {
-      source: 'git', compose: '', env: src.env || null,
+      source: 'git', compose: src.generatedCompose || '', env: src.env || null,
       gitUrl: src.gitUrl, gitRef: src.gitRef || null, gitPath: src.gitPath || null, gitCredKey: src.credKey || null,
     };
     return this.prisma.dockerStack.upsert({
@@ -249,7 +260,8 @@ export class DockerStackService {
 
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const dir = `${base}/repo`;
-    const composeFile = `${dir}/${relCompose}`;
+    const generated = !!src.generatedCompose?.trim();
+    const composeFile = generated ? `${base}/${GENERATED_COMPOSE_FILE}` : `${dir}/${relCompose}`;
     const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
     const credFile = `${base}/.gitcred`;
     // Cerebro's generated compose override lives beside the repo (not inside it, so
@@ -285,6 +297,14 @@ export class DockerStackService {
         const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
         await this.record(instanceId, project, 'error', detail);
         return { ok: false, message: `Git ${isRepo ? 'update' : 'clone'} failed: ${detail}` };
+      }
+
+      // A generated compose is (re)written on every deploy, after the checkout is current.
+      if (generated) {
+        const wg = await runSsh(target.ssh, `cat > '${composeFile}'`, src.generatedCompose);
+        if (wg.code !== 0) throw new Error('Failed to write the generated compose file on the host.');
+      } else {
+        await runSsh(target.ssh, `rm -f '${base}/${GENERATED_COMPOSE_FILE}'`).catch(() => { /* best-effort */ });
       }
 
       // Write the .env beside the compose (only if provided).
@@ -334,7 +354,7 @@ export class DockerStackService {
       const commit = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
       await this.record(instanceId, project, 'success', out);
       await this.recordRevision(instanceId, project, {
-        compose: '', env: src.env ?? '', source: 'git',
+        compose: src.generatedCompose || '', env: src.env ?? '', source: 'git',
         gitUrl: src.gitUrl, gitRef: src.gitRef ?? null, gitPath: src.gitPath ?? null, commit,
       });
       return { ok: true, message: `Deployed "${project}" from git${commit ? ` @ ${commit.slice(0, 7)}` : ''}.${out ? `\n${out}` : ''}` };
@@ -504,7 +524,7 @@ export class DockerStackService {
     const project = projectName(name);
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const stored = await this.get(instanceId, name).catch(() => null);
-    if (stored?.source === 'git') return `${base}/repo/${safeComposeRel(stored.gitPath)}`;
+    if (stored?.source === 'git') return gitStackComposePath(target.stacksDir, project, stored.gitPath, !!stored.compose);
     return `${base}/docker-compose.yml`;
   }
 
@@ -606,12 +626,14 @@ export function projectName(name: string): string {
 
 /**
  * Where a git-sourced stack's `.env` lives on the host: beside its compose file,
- * under `<stacksDir>/<project>/repo/`. Exported so a caller that reads the file
+ * under `<stacksDir>/<project>/repo/` — or one level up, beside a generated
+ * compose (`generated`, see `StackGitSource.generatedCompose`). Exported so a caller that reads the file
  * back — the App Replicator's environment drift check — derives the path from the
  * same validated logic that wrote it, rather than re-deriving it and silently
  * comparing against the wrong file.
  */
-export function gitStackEnvPath(stacksDir: string, name: string, gitPath?: string | null): string {
+export function gitStackEnvPath(stacksDir: string, name: string, gitPath?: string | null, generated = false): string {
+  if (generated) return `${trimSlash(stacksDir)}/${projectName(name)}/.env`;
   const dir = `${trimSlash(stacksDir)}/${projectName(name)}/repo`;
   const composeFile = `${dir}/${safeComposeRel(gitPath)}`;
   return `${composeFile.replace(/\/[^/]*$/, '') || dir}/.env`;
@@ -620,7 +642,8 @@ export function gitStackEnvPath(stacksDir: string, name: string, gitPath?: strin
 /** The host path to a git stack's compose file in its cloned repo. Exported so backup
  *  can read the compose of a git-sourced stack (e.g. an App Replicator deployment),
  *  whose text is not stored in Cerebro's DB. Validates the chars like the deploy path. */
-export function gitStackComposePath(stacksDir: string, name: string, gitPath?: string | null): string {
+export function gitStackComposePath(stacksDir: string, name: string, gitPath?: string | null, generated = false): string {
+  if (generated) return `${trimSlash(stacksDir)}/${projectName(name)}/${GENERATED_COMPOSE_FILE}`;
   return `${trimSlash(stacksDir)}/${projectName(name)}/repo/${safeComposeRel(gitPath)}`;
 }
 

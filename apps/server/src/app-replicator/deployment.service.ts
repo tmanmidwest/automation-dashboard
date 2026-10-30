@@ -169,14 +169,16 @@ export class DeploymentService {
   async deploy(appId: string, input: DeployInput, actor: ActorCtx): Promise<ReplicatorDeployment> {
     const app = await this.prisma.replicatorApp.findUnique({ where: { id: appId } });
     if (!app) throw new NotFoundException('App not found.');
-    if (app.usesGeneratedCompose) {
-      throw new BadRequestException('This app has no committed docker-compose.yml (Cerebro generated a preview wrapper). Commit a compose file to deploy — Dockerfile-only deploys land in a follow-up.');
-    }
     const variables = (app.variables as unknown as ReplicatorVariable[]) ?? [];
     const project = projectName(input.name);
     if (!project) throw new BadRequestException('A valid deployment name is required.');
 
     const targetKind: TargetKind = input.targetKind ?? 'docker';
+    // A generated compose builds from an inline Dockerfile, which the ECS image
+    // builder (a plain `docker build` of the repo) can't follow.
+    if (app.usesGeneratedCompose && targetKind !== 'docker') {
+      throw new BadRequestException('This app has no docker-compose.yml of its own, so it can only be deployed to a Docker host for now — commit a Dockerfile and compose file to deploy it to ECS.');
+    }
 
     // Name must be unique per target instance.
     const clash = await this.prisma.replicatorDeployment.findFirst({ where: { dockerInstanceId: input.dockerInstanceId, project } });
@@ -430,7 +432,7 @@ export class DeploymentService {
       const outcome = await this.targetImpl(targetKind).deploy(
         {
           deploymentId, targetInstanceId, project,
-          source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey },
+          source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey, generated: app.usesGeneratedCompose },
           variables, portList, values, secrets, extras, mounts, forceRebuild, taskCpu, taskMemory, existingEcs,
         },
         (phase) => setPhase(phase),
@@ -504,7 +506,7 @@ export class DeploymentService {
       // make the whole view unavailable.
       try {
         const target = await this.targetFor(row.dockerInstanceId);
-        path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath);
+        path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose);
       } catch { path = null; }
     }
     return {
@@ -535,7 +537,7 @@ export class DeploymentService {
     let path: string;
     try {
       target = await this.targetFor(row.dockerInstanceId);
-      path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath);
+      path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose);
     } catch (err) {
       return { available: false, message: err instanceof Error ? err.message : 'The Docker target is unavailable.', ...empty };
     }

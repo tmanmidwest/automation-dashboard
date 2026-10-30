@@ -253,12 +253,12 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
           </CardDescription>
           <p className="text-xs text-muted-foreground mt-1">
             {app.variables.length} variables · {ports} port{ports === 1 ? '' : 's'} · {secrets} secret{secrets === 1 ? '' : 's'}
-            {app.usesGeneratedCompose && <span className="text-amber-400"> · generated compose (deploy not yet supported)</span>}
+            {app.usesGeneratedCompose && <span className="text-amber-400" title="The repo has no docker-compose.yml; Cerebro generates one at deploy time. Docker hosts only."> · generated compose</span>}
           </p>
         </div>
         {canWrite && (
           <div className="flex items-center gap-2 shrink-0">
-            <Button onClick={onDeploy} disabled={app.usesGeneratedCompose}><Rocket className="h-4 w-4" /> Deploy</Button>
+            <Button onClick={onDeploy}><Rocket className="h-4 w-4" /> Deploy</Button>
             <Button variant="ghost" size="icon" aria-label="Refresh schema"
               title="Re-read the repo compose to pick up new variables"
               onClick={onRefreshSchema}>
@@ -380,6 +380,8 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     try {
       const r = await api.post<IntrospectResult>('/api/replicator/introspect', { gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined });
       setResult(r); setVars(r.variables); setFixedPorts(r.fixedPorts ?? []);
+      // The requested branch didn't exist (e.g. "main" on a "master" repo) — register the one actually read.
+      if (r.resolvedRef) setGitRef(r.resolvedRef);
       if (!name && gitUrl) setName(gitUrl.replace(/\.git$/, '').split('/').pop() || '');
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Introspection failed.'); }
     finally { setBusy(false); }
@@ -431,6 +433,12 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
               {' '}· services: {result.services.join(', ') || '—'}.
               Image tag &amp; container name are set per deployment automatically.
             </p>
+            {result.generatedCompose && (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground">Show the generated compose</summary>
+                <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted/40 p-2 font-mono">{result.generatedCompose}</pre>
+              </details>
+            )}
             <VariableSchemaEditor vars={vars} onChange={setVars} />
             <FixedPortEditor ports={fixedPorts} onChange={setFixedPorts} />
           </div>

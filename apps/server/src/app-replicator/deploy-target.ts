@@ -113,7 +113,8 @@ export interface DeploySpec {
   /** Target ConnectorInstance id (Docker or AWS). */
   targetInstanceId: string;
   project: string;
-  source: { gitUrl: string; gitRef: string; gitPath: string | null; gitCredKey: string | null };
+  /** `generated`: the repo has no compose of its own, so the target supplies Cerebro's generated one. */
+  source: { gitUrl: string; gitRef: string; gitPath: string | null; gitCredKey: string | null; generated?: boolean };
   variables: ReplicatorVariable[];
   portList: ReplicatorPort[];
   values: Record<string, string>;
