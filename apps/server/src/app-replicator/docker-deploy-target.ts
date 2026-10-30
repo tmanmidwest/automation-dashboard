@@ -5,6 +5,7 @@ import { DockerStackService } from '../connectors/docker/docker-stack.service';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { buildEnvMap, toDotenv, type DeployTarget, type DeploySpec, type DeployOutcome, type DestroyContext } from './deploy-target';
 import { renderComposeOverride } from './compose-override';
+import { RepoIntrospectService } from './repo-introspect.service';
 
 /**
  * The original App Replicator target: materialize a deployment as a compose stack
@@ -21,6 +22,7 @@ export class DockerDeployTarget implements DeployTarget {
     private readonly prisma: PrismaService,
     private readonly instances: ConnectorInstanceService,
     private readonly stacks: DockerStackService,
+    private readonly repo: RepoIntrospectService,
   ) {}
 
   /** Build the SSH deploy target for a Docker connector instance (throws if not deployable). */
@@ -48,11 +50,26 @@ export class DockerDeployTarget implements DeployTarget {
         .filter((s): s is string => !!s),
     )];
     const overrideCompose = renderComposeOverride(spec.project, spec.mounts ?? [], spec.extras ?? {}, envServices) ?? undefined;
+
+    // A repo with no compose of its own: regenerate Cerebro's compose from the
+    // current checkout (so it tracks the repo), written beside it on the host.
+    // Should the repo have since committed a real compose, that one is used.
+    let gitPath = spec.source.gitPath;
+    let generatedCompose: string | undefined;
+    if (spec.source.generated) {
+      onPhase('Generating compose…');
+      const c = await this.repo.fetchComposeText({
+        gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
+      });
+      if (c.usesGeneratedCompose) generatedCompose = c.text;
+      else gitPath = c.composePath;
+    }
+
     const result = await this.stacks.deployGit(
       target,
       spec.targetInstanceId,
       spec.project,
-      { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath, credKey: spec.source.gitCredKey, env, overrideCompose },
+      { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath, credKey: spec.source.gitCredKey, env, overrideCompose, generatedCompose },
       { pull: true, forceRebuild: spec.forceRebuild },
       onPhase,
     );

@@ -756,7 +756,7 @@ export class DockerConnector implements Connector {
         onProgress(`Redeploying stack "${_resourceId}"…`);
         if (stored.source === 'git' && stored.gitUrl) {
           return await this.stacks.deployGit(this.sshTargetFrom(ctx), instanceId, _resourceId,
-            { gitUrl: stored.gitUrl, gitRef: stored.gitRef, gitPath: stored.gitPath, credKey: stored.gitCredKey, env: stored.env ?? '' },
+            { gitUrl: stored.gitUrl, gitRef: stored.gitRef, gitPath: stored.gitPath, credKey: stored.gitCredKey, env: stored.env ?? '', generatedCompose: stored.compose || undefined },
             optsFrom(values));
         }
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, stored.compose, stored.env ?? '', optsFrom(values));
@@ -771,7 +771,7 @@ export class DockerConnector implements Connector {
           const stored = await this.stacks.get(instanceId, _resourceId);
           // Roll back to the exact previously-deployed commit.
           return await this.stacks.deployGit(this.sshTargetFrom(ctx), instanceId, _resourceId,
-            { gitUrl: prev.gitUrl, gitRef: prev.commit ?? prev.gitRef, gitPath: prev.gitPath, credKey: stored?.gitCredKey, env: prev.env ?? '' });
+            { gitUrl: prev.gitUrl, gitRef: prev.commit ?? prev.gitRef, gitPath: prev.gitPath, credKey: stored?.gitCredKey, env: prev.env ?? '', generatedCompose: prev.compose || undefined });
         }
         return await this.stacks.deploy(this.sshTargetFrom(ctx), instanceId, _resourceId, prev.compose, prev.env ?? '');
       }

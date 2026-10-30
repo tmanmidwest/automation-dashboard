@@ -500,14 +500,15 @@ export function mergeEnvFileVars(composeVars: ReplicatorVariable[], envVars: Rep
  * For a repo that ships only a Dockerfile (no compose), synthesize a minimal
  * parameterized compose wrapper so the same downstream flow (variable form,
  * per-instance image/name, port mapping) applies uniformly. `exposed` is the
- * container port from the Dockerfile's EXPOSE (defaults to 8080).
+ * container port from the Dockerfile's EXPOSE (defaults to 8080); `context` is
+ * the build context relative to where the compose is written.
  */
-export function generateComposeWrapper(exposed: number): string {
+export function generateComposeWrapper(exposed: number, context = '.'): string {
   const port = exposed > 0 ? exposed : 8080;
   return [
     'services:',
     '  app:',
-    '    build: .',
+    `    build: ${context}`,
     '    image: ${APP_IMAGE:-app:local}',
     '    container_name: ${APP_CONTAINER_NAME:-app}',
     '    ports:',

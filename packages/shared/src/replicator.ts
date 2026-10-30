@@ -60,7 +60,7 @@ export interface ReplicatorApp {
   variables: ReplicatorVariable[];
   /** Reachable ports not backed by an adjustable `${VAR}` (literals, ranges, host-network, manual). */
   fixedPorts: ReplicatorFixedPort[];
-  /** True when the repo had only a Dockerfile and Cerebro generated a compose wrapper. */
+  /** True when the repo has no compose file and Cerebro generates one (from its Dockerfile or a detected layout) at deploy time. */
   usesGeneratedCompose: boolean;
   createdAt: string;
   updatedAt: string;
@@ -299,6 +299,10 @@ export interface IntrospectResult {
   /** Env files read out of the repo, relative to its root (e.g. `.env.example`). */
   envFiles: string[];
   warnings: string[];
+  /** The ref actually cloned, when the requested one didn't exist and the repo's default branch was used. */
+  resolvedRef?: string;
+  /** The compose Cerebro generated (usesGeneratedCompose only), for review at register time. */
+  generatedCompose?: string;
 }
 
 /** What a schema refresh would change relative to the app's stored variables. */

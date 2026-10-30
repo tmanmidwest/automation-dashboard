@@ -282,13 +282,31 @@ The host path comes from `gitStackEnvPath()`, exported from `DockerStackService`
 the writer derive it from the same validated logic instead of re-deriving it and silently comparing
 against the wrong file.
 
-**Dockerfile-only repos (no compose):** Cerebro generates a minimal compose wrapper
-(`build: .`, one parameterized published port from the Dockerfile's `EXPOSE`, an
-`image:`/`container_name:` it manages) and runs it through the *same* introspector, so registering
-and previewing an app's variables works uniformly. *(Phase 1 status: introspection + registration of
-Dockerfile-only apps works; **deploying** them is gated with a clear message until the wrapper is
-written to the host as part of deploy — a fast-follow. Repos that commit a compose file — the common
-case, and the hrDemoWebApp acceptance app — deploy fully.)*
+**Repos with no compose file:** Cerebro generates one (`source-detect.ts`) and runs it through the
+*same* introspector, so the variable form, per-instance image/name and port mapping work uniformly.
+A repo with a `Dockerfile` gets a minimal wrapper (`build:` the repo, one parameterized port from its
+`EXPOSE`). A repo with neither is matched against a few marker-file layouts, each built from an
+inline Dockerfile (`dockerfile_inline`, Docker Compose 2.17+) on a stock base image:
+
+| Layout | Detected by | Runs as |
+|---|---|---|
+| WordPress | `wp-includes/version.php` + `wp-config-sample.php` | `wordpress:php8.3-apache` with the repo copied in, plus a `mariadb:11` service; `WORDPRESS_DB_PASSWORD` required, uploads + DB in named volumes |
+| Node | `package.json` with a `start` script | `node:22-alpine`, npm/yarn/pnpm by lockfile, `build` script if present, `PORT=3000` |
+| PHP | `index.php` at the root | `php:8.3-apache` serving the repo root (no Composer install) |
+| Static | `index.html` at the root | `nginx:alpine` serving the repo root |
+
+Anything else fails introspection with a message asking for a Dockerfile or compose file. At deploy
+time the compose is regenerated from the current checkout and written to
+`<stacksDir>/<project>/docker-compose.cerebro.yml` — beside `repo/`, not inside it — with
+`build.context: ./repo`, so the `.env` (which holds the deployment's secrets) is outside the build
+context and never lands in an image or a web root. It is also stored on the managed stack row, so
+the Docker connector's own redeploy/rollback rewrites it. If the repo later commits a real compose,
+the next deploy uses that instead. Generated-compose apps deploy to Docker hosts only; the ECS
+builder does a plain `docker build` of the repo and can't follow an inline Dockerfile.
+
+**A ref that doesn't exist** (most often the form's `main` default on a repo whose branch is
+`master`, like WordPress) no longer triggers a full-history clone: introspection falls back to the
+remote's default branch with a warning, and the register form switches its ref to it.
 
 ## Deployment flow (the wizard)
 
@@ -380,7 +398,7 @@ interface App {
   gitPath?: string;                          // compose file path within the repo
   gitCredKey?: string;                       // vault kind='git' secret key
   variables: VariableSpec[];                 // snapshotted at register/refresh time
-  usesGeneratedCompose: boolean;             // Dockerfile-only wrapper case
+  usesGeneratedCompose: boolean;             // no compose in the repo; Cerebro generates one
   createdAt; updatedAt;
 }
 
