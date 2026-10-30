@@ -68,7 +68,7 @@ export class RepoIntrospectService {
       const found = await this.locateCompose(repoDir, input.gitPath);
 
       if (found.composePath) {
-        const text = await readFile(join(repoDir, found.composePath), 'utf8');
+        const text = await readFile(found.composeAbs, 'utf8');
         const parsed = introspectCompose(text);
         const envs = await this.readEnvFiles(repoDir, found.composePath, parsed.envFiles);
         return {
@@ -223,7 +223,7 @@ export class RepoIntrospectService {
       await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
       const found = await this.locateCompose(repoDir, input.gitPath);
       if (found.composePath) {
-        const text = await readFile(join(repoDir, found.composePath), 'utf8');
+        const text = await readFile(found.composeAbs, 'utf8');
         return { text, composePath: found.composePath, usesGeneratedCompose: false };
       }
       return { text: found.generated!.compose, composePath: `docker-compose.yml (generated: ${found.generated!.kind})`, usesGeneratedCompose: true };
@@ -257,8 +257,9 @@ export class RepoIntrospectService {
         const listed = await this.run('git', [...helper, 'ls-remote', '--heads', '--tags', '--', gitUrl, ref], workdir, env).catch(() => null);
         if (listed != null && !listed.trim()) {
           const head = await this.run('git', [...helper, 'ls-remote', '--symref', '--', gitUrl, 'HEAD'], workdir, env).catch(() => '');
-          const def = head.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD/m)?.[1];
-          if (!def) throw new BadRequestException(`The repo has no branch or tag named "${ref}".`);
+          // The remote's answer is untrusted: only a plain branch name goes back into git.
+          const def = head.match(/^ref:\s+refs\/heads\/([A-Za-z0-9._\/]+)\s+HEAD/m)?.[1];
+          if (!def || def.startsWith('-') || def.includes('..')) throw new BadRequestException(`The repo has no branch or tag named "${ref}".`);
           await shallow(def);
           return { ref: def, warning: `The repo has no "${ref}" branch or tag, so its default branch "${def}" was used instead.` };
         }
@@ -276,14 +277,16 @@ export class RepoIntrospectService {
    */
   private async locateCompose(
     repoDir: string, gitPath?: string | null,
-  ): Promise<{ composePath: string; generated?: undefined } | { composePath: null; generated: GeneratedCompose }> {
+  ): Promise<{ composePath: string; composeAbs: string; generated?: undefined } | { composePath: null; composeAbs?: undefined; generated: GeneratedCompose }> {
     const explicit = gitPath?.trim().replace(/^\/+/, '');
     if (explicit) {
-      if (this.insideRepo(repoDir, explicit) && (await exists(join(repoDir, explicit)))) return { composePath: explicit };
+      // gitPath is operator input: read only the confined absolute path, never a re-join of it.
+      const abs = this.insideRepo(repoDir, explicit);
+      if (abs && (await exists(abs))) return { composePath: explicit, composeAbs: abs };
       throw new BadRequestException(`No file at "${explicit}" in the repo.`);
     }
     for (const c of COMPOSE_CANDIDATES) {
-      if (await exists(join(repoDir, c))) return { composePath: c };
+      if (await exists(join(repoDir, c))) return { composePath: c, composeAbs: join(repoDir, c) };
     }
     const generated = await detectGeneratedCompose({
       has: (p) => exists(join(repoDir, p)),
