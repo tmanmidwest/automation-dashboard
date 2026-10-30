@@ -280,10 +280,13 @@ export class RepoIntrospectService {
   ): Promise<{ composePath: string; composeAbs: string; generated?: undefined } | { composePath: null; composeAbs?: undefined; generated: GeneratedCompose }> {
     const explicit = gitPath?.trim().replace(/^\/+/, '');
     if (explicit) {
-      // gitPath is operator input: read only the confined absolute path, never a re-join of it.
-      const abs = this.insideRepo(repoDir, explicit);
-      if (abs && (await exists(abs))) return { composePath: explicit, composeAbs: abs };
-      throw new BadRequestException(`No file at "${explicit}" in the repo.`);
+      // gitPath is operator input: resolve it and refuse anything outside the clone.
+      const root = resolve(repoDir);
+      const abs = resolve(root, explicit);
+      if (!abs.startsWith(root + sep) || !(await exists(abs))) {
+        throw new BadRequestException(`No file at "${explicit}" in the repo.`);
+      }
+      return { composePath: explicit, composeAbs: abs };
     }
     for (const c of COMPOSE_CANDIDATES) {
       if (await exists(join(repoDir, c))) return { composePath: c, composeAbs: join(repoDir, c) };
