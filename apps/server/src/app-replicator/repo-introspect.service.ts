@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix, resolve, sep } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
@@ -59,7 +59,7 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
 
       const cloned = await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
@@ -218,7 +218,7 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
       await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
       const found = await this.locateCompose(repoDir, input.gitPath);
@@ -246,7 +246,7 @@ export class RepoIntrospectService {
   private async cloneAt(
     helper: string[], gitUrl: string, ref: string, repoDir: string, workdir: string, env: NodeJS.ProcessEnv,
   ): Promise<{ ref: string; warning: string | null }> {
-    const shallow = (r: string) => this.run('git', [...helper, 'clone', '--depth', '1', ...(r ? ['--branch', r] : []), '--', gitUrl, repoDir], workdir, env);
+    const shallow = (r: string) => this.git([...helper, 'clone', '--depth', '1', ...(r ? ['--branch', r] : []), '--', gitUrl, repoDir], workdir, env);
     try {
       await shallow(ref);
       return { ref, warning: null };
@@ -254,9 +254,9 @@ export class RepoIntrospectService {
       if (!ref) throw err;
       await rm(repoDir, { recursive: true, force: true }).catch(() => {});
       if (!/^[0-9a-f]{7,40}$/i.test(ref)) {
-        const listed = await this.run('git', [...helper, 'ls-remote', '--heads', '--tags', '--', gitUrl, ref], workdir, env).catch(() => null);
+        const listed = await this.git([...helper, 'ls-remote', '--heads', '--tags', '--', gitUrl, ref], workdir, env).catch(() => null);
         if (listed != null && !listed.trim()) {
-          const head = await this.run('git', [...helper, 'ls-remote', '--symref', '--', gitUrl, 'HEAD'], workdir, env).catch(() => '');
+          const head = await this.git([...helper, 'ls-remote', '--symref', '--', gitUrl, 'HEAD'], workdir, env).catch(() => '');
           // The remote's answer is untrusted: only a plain branch name goes back into git.
           const def = head.match(/^ref:\s+refs\/heads\/([A-Za-z0-9._\/]+)\s+HEAD/m)?.[1];
           if (!def || def.startsWith('-') || def.includes('..')) throw new BadRequestException(`The repo has no branch or tag named "${ref}".`);
@@ -264,8 +264,8 @@ export class RepoIntrospectService {
           return { ref: def, warning: `The repo has no "${ref}" branch or tag, so its default branch "${def}" was used instead.` };
         }
       }
-      await this.run('git', [...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
-      await this.run('git', ['-C', repoDir, 'checkout', ref], workdir, env);
+      await this.git([...helper, 'clone', '--', gitUrl, repoDir], workdir, env);
+      await this.git(['-C', repoDir, 'checkout', ref], workdir, env);
       return { ref, warning: null };
     }
   }
@@ -318,9 +318,9 @@ export class RepoIntrospectService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        await this.run('bash', ['-c', `umask 177 && cat > '${credFile}'`], workdir, env, line);
+        await writeFile(credFile, line, { mode: 0o600 });
       }
-      const out = await this.run('git', [...helper, 'ls-remote', gitUrl, ref], workdir, env);
+      const out = await this.git([...helper, 'ls-remote', gitUrl, ref], workdir, env);
       const sha = out.split(/\s+/)[0]?.trim() ?? '';
       return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
     } catch {
@@ -337,14 +337,16 @@ export class RepoIntrospectService {
     try { return JSON.parse(raw) as GitCredential; } catch { return { secret: raw }; }
   }
 
-  /** Promise wrapper over execFile with a hard timeout; feeds optional stdin. */
-  private run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin?: string): Promise<string> {
+  /**
+   * Run git (never a shell) with a hard timeout. Repo URLs and refs reach it only
+   * as discrete argv entries, already checked by git-safety.
+   */
+  private git(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = execFile(cmd, args, { cwd, env, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile('git', args, { cwd, env, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || stdout || err.message).toString().trim()));
         else resolve(stdout.toString());
       });
-      if (stdin != null) { child.stdin?.end(stdin); }
     });
   }
 }
