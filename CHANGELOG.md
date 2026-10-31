@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
 ### Changed
+- **Fabric Waypoint routes are easier to scan** — routes are grouped by type
+  (SSH → RDP → VNC → Web) and sorted by name within each group using a natural sort
+  (`docker02` before `docker10`). Routes render as compact tiles in a grid that fits
+  as many columns as the card width allows, and both the whole Routes panel and each
+  type group can be collapsed (remembered per browser). Searching narrows a Waypoint
+  to just the matching routes ("5 of 19"). The Manage routes dialog uses the same order.
 - **Backblaze retention shows live progress** — "Apply retention now" (and the prune
   after each backup) now streams restic's steps into the progress banner: how many
   snapshots are kept/removed, each prune phase, and a percentage for the long
