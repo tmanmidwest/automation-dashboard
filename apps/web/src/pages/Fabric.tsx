@@ -4,7 +4,7 @@ import {
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
   FolderOpen, Folder, File as FileIcon, FileSymlink, ArrowUp, Upload, Download, FolderPlus, Pencil, RefreshCw,
   ShieldCheck, Search, Network, Tag as TagIcon, LayoutGrid, List as ListIcon,
-  Waypoints, Globe, WifiOff,
+  Waypoints, Globe, WifiOff, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -46,6 +46,31 @@ const OS_META: Record<OsKey, { label: string; cls: string }> = {
   darwin: { label: 'macOS', cls: 'bg-zinc-400/15 text-zinc-200 border-zinc-400/30' },
   other: { label: 'Other / pending', cls: 'bg-muted text-muted-foreground border-border' },
 };
+// Waypoint route ordering: grouped by type (SSH → RDP → VNC → Web), then a
+// natural, case-insensitive name sort so "box2" lands before "box10".
+const ROUTE_KIND_ORDER = ['ssh', 'rdp', 'vnc', 'web'];
+const ROUTE_KIND_LABEL: Record<string, string> = { ssh: 'SSH', rdp: 'RDP', vnc: 'VNC', web: 'Web' };
+const naturalCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+function routeName(t: FabricTargetDto): string {
+  return t.label || (t.kind === 'web' ? t.webUrl || 'Remote Browser' : t.host);
+}
+function routeKindRank(kind: string): number {
+  const i = ROUTE_KIND_ORDER.indexOf(kind);
+  return i < 0 ? ROUTE_KIND_ORDER.length : i;
+}
+function compareRoutes(x: FabricTargetDto, y: FabricTargetDto): number {
+  return (
+    routeKindRank(x.kind) - routeKindRank(y.kind) ||
+    x.kind.localeCompare(y.kind) ||
+    naturalCollator.compare(routeName(x), routeName(y)) ||
+    naturalCollator.compare(x.host, y.host) ||
+    x.port - y.port
+  );
+}
+function routeMatches(t: FabricTargetDto, q: string): boolean {
+  return `${t.label ?? ''} ${t.host} ${t.port} ${t.group ?? ''} ${t.webUrl ?? ''} ${t.kind}`.toLowerCase().includes(q);
+}
+
 function osKey(os?: string | null): OsKey {
   const v = (os || '').toLowerCase();
   // Check darwin/mac BEFORE windows — "darwin" contains the substring "win".
@@ -224,6 +249,18 @@ export function Fabric() {
   const [view, setView] = useState<'cards' | 'list'>(() => {
     try { return localStorage.getItem('fabric.view') === 'list' ? 'list' : 'cards'; } catch { return 'cards'; }
   });
+  // Collapsed Waypoint route sections ("<agentId>" = whole panel,
+  // "<agentId>:<kind>" = one type group), remembered per browser.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('fabric.routes.collapsed') || '[]') as string[]); } catch { return new Set(); }
+  });
+  const toggleCollapsed = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      try { localStorage.setItem('fabric.routes.collapsed', JSON.stringify([...next])); } catch { /* storage blocked */ }
+      return next;
+    });
   const chooseView = (v: 'cards' | 'list') => {
     setView(v);
     try { localStorage.setItem('fabric.view', v); } catch { /* storage blocked */ }
@@ -719,13 +756,14 @@ export function Fabric() {
     );
   };
 
-  // A single Waypoint route as a full descriptive row: kind icon + label +
-  // host:port + group + credential/host-key marks, with Test / Files / Connect.
-  const routeIcon = (kind: string) =>
-    kind === 'web' ? <Globe className="h-4 w-4" />
-      : kind === 'rdp' ? <MonitorSmartphone className="h-4 w-4" />
-      : kind === 'vnc' ? <Monitor className="h-4 w-4" />
-      : <Terminal className="h-4 w-4" />;
+  // A single Waypoint route as a compact tile: kind icon + name + host:port +
+  // group/credential/host-key marks, with Test / Files / Connect on the right.
+  // The type is shown by the section header the tile sits under.
+  const routeIcon = (kind: string, cls = 'h-4 w-4') =>
+    kind === 'web' ? <Globe className={cls} />
+      : kind === 'rdp' ? <MonitorSmartphone className={cls} />
+      : kind === 'vnc' ? <Monitor className={cls} />
+      : <Terminal className={cls} />;
 
   const renderRouteRow = (a: FabricAgentDto, t: FabricTargetDto) => {
     const online = a.status === 'online';
@@ -733,31 +771,31 @@ export function Fabric() {
     const isWeb = t.kind === 'web';
     const pr = probe[t.id];
     const wb = webBusy[t.id];
-    const primary = t.label || (isWeb ? 'Remote Browser' : t.host);
+    const primary = routeName(t);
     const dest = isWeb ? (t.webUrl || '—') : `${t.host}:${t.port}`;
     const r = pr?.result;
+    const probeText = r
+      ? r.ok ? `reachable${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.banner ? ` · ${r.banner}` : ''}` : r.error || 'unreachable'
+      : null;
     return (
-      <div key={t.id} className="flex items-center gap-2.5 px-2.5 py-2">
+      <div key={t.id} className="flex items-center gap-2 min-w-0 rounded-md border border-border/60 bg-card/40 px-2.5 py-1.5 hover:border-border">
         <span className="text-primary/80 shrink-0">{routeIcon(t.kind)}</span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-sm font-medium truncate">{primary}</span>
-            <span className="rounded border border-border/60 bg-muted/40 px-1 py-px text-[0.6rem] uppercase tracking-wide text-muted-foreground">{t.kind}</span>
-            {t.group && <span className="rounded bg-secondary/20 px-1.5 py-px text-[0.6rem] text-secondary-foreground/80">{t.group}</span>}
-            {t.hasCredential && <KeyRound className="h-3 w-3 text-emerald-400/80" aria-hidden />}
-            {t.hostKeyPinned && <ShieldCheck className="h-3 w-3 text-emerald-400/80" aria-hidden />}
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-sm font-medium truncate" title={primary}>{primary}</span>
+            {t.group && <span className="shrink-0 max-w-[7rem] truncate rounded bg-secondary/20 px-1.5 py-px text-[0.6rem] text-secondary-foreground/80" title={t.group}>{t.group}</span>}
+            {t.hasCredential && <span className="shrink-0" title="Vault credential saved"><KeyRound className="h-3 w-3 text-emerald-400/80" aria-hidden /></span>}
+            {t.hostKeyPinned && <span className="shrink-0" title="Host key pinned"><ShieldCheck className="h-3 w-3 text-emerald-400/80" aria-hidden /></span>}
           </div>
-          <div className="text-xs text-muted-foreground font-mono truncate">{dest}</div>
-          {r && (
-            <p className={`text-[0.7rem] ${r.ok ? 'text-emerald-400' : 'text-destructive'}`}>
-              {r.ok ? `reachable${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.banner ? ` · ${r.banner}` : ''}` : r.error || 'unreachable'}
-            </p>
+          <div className="text-[0.7rem] text-muted-foreground font-mono truncate" title={dest}>{dest}</div>
+          {probeText && (
+            <p className={`text-[0.65rem] truncate ${r?.ok ? 'text-emerald-400' : 'text-destructive'}`} title={probeText}>{probeText}</p>
           )}
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-0.5 shrink-0">
           {!isWeb && (
             <Button
-              variant="ghost" size="sm" className="h-7 px-2 text-xs"
+              variant="ghost" size="sm" className="h-7 px-1.5 text-xs"
               disabled={!clickable || pr?.loading}
               title={clickable ? 'Test tunnel reachability' : online ? undefined : 'Waypoint offline'}
               onClick={clickable ? () => runProbe(a.id, t) : undefined}
@@ -777,7 +815,7 @@ export function Fabric() {
           )}
           {canConnect && (
             <Button
-              size="sm" className="h-7 px-2.5 text-xs"
+              size="sm" className="h-7 px-2 text-xs ml-0.5"
               disabled={!clickable || (isWeb && wb)}
               title={online ? (isWeb ? `Open Remote Browser → ${t.webUrl || ''}` : `Open ${t.kind.toUpperCase()} session${t.hasCredential ? ' (vault credential saved)' : ''}`) : 'Waypoint offline'}
               onClick={clickable ? () => (isWeb ? openRemoteBrowser(a, t) : openConnect(a, t)) : undefined}
@@ -792,14 +830,25 @@ export function Fabric() {
   };
 
   // A Waypoint panel: same identity header as an agent card, but its routes are
-  // listed as full rows (with a Connect button each) instead of terse chips.
+  // laid out as a grid of compact tiles, grouped by type (each group sorted by
+  // name and collapsible). While searching, only matching routes are shown —
+  // unless the Waypoint itself matched — and every section is forced open.
   const renderWaypointCard = (a: FabricAgentDto) => {
     const st = STATUS[a.status];
     const online = a.status === 'online';
     const adhoc = canConnect && a.egressCidrs.length > 0;
-    const routes = [...a.targets].sort((x, y) =>
-      (x.group ?? '').localeCompare(y.group ?? '') || x.kind.localeCompare(y.kind) || x.host.localeCompare(y.host) || x.port - y.port,
-    );
+    const q = search.trim().toLowerCase();
+    const selfMatch = !q || [a.name, a.hostname, a.localIp, a.os, a.osVersion, a.notes, ...a.tags]
+      .filter(Boolean).join(' ').toLowerCase().includes(q);
+    const allRoutes = [...a.targets].sort(compareRoutes);
+    const routes = selfMatch ? allRoutes : allRoutes.filter((t) => routeMatches(t, q));
+    const byKind: { kind: string; items: FabricTargetDto[] }[] = [];
+    for (const t of routes) {
+      const last = byKind[byKind.length - 1];
+      if (last && last.kind === t.kind) last.items.push(t);
+      else byKind.push({ kind: t.kind, items: [t] });
+    }
+    const panelOpen = !!q || !collapsed.has(a.id);
     return (
       <Card key={a.id} className="overflow-hidden">
         <CardContent className="p-4">
@@ -827,8 +876,23 @@ export function Fabric() {
 
           <div className="mt-3">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className="text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground">Routes</span>
-              <span className="text-[0.7rem] text-muted-foreground">{routes.length}</span>
+              <button
+                type="button"
+                onClick={() => toggleCollapsed(a.id)}
+                disabled={!!q || routes.length === 0}
+                aria-expanded={panelOpen}
+                title={panelOpen ? 'Collapse routes' : 'Expand routes'}
+                className="inline-flex items-center gap-1.5 rounded text-muted-foreground hover:text-foreground disabled:hover:text-muted-foreground"
+              >
+                {routes.length > 0 && (panelOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />)}
+                <span className="text-[0.7rem] font-medium uppercase tracking-wide">Routes</span>
+                <span className="text-[0.7rem]">{routes.length === allRoutes.length ? routes.length : `${routes.length} of ${allRoutes.length}`}</span>
+              </button>
+              {!panelOpen && byKind.length > 0 && (
+                <span className="text-[0.7rem] text-muted-foreground truncate">
+                  {byKind.map((g) => `${g.items.length} ${ROUTE_KIND_LABEL[g.kind] ?? g.kind.toUpperCase()}`).join(' · ')}
+                </span>
+              )}
               <div className="flex-1 h-px bg-border/60" />
               {canManage && (
                 <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setRoutesFor(a)}>
@@ -837,10 +901,36 @@ export function Fabric() {
               )}
             </div>
             {routes.length > 0 ? (
-              <div className="rounded-md border border-border/60 divide-y divide-border/60 bg-card/40">
-                {routes.map((t) => renderRouteRow(a, t))}
-              </div>
-            ) : (
+              panelOpen && (
+                <div className="space-y-2">
+                  {byKind.map((g) => {
+                    const key = `${a.id}:${g.kind}`;
+                    const open = !!q || !collapsed.has(key);
+                    return (
+                      <div key={g.kind}>
+                        <button
+                          type="button"
+                          onClick={() => toggleCollapsed(key)}
+                          disabled={!!q}
+                          aria-expanded={open}
+                          className="mb-1 inline-flex items-center gap-1.5 rounded text-[0.7rem] font-medium text-muted-foreground hover:text-foreground disabled:hover:text-muted-foreground"
+                        >
+                          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                          <span className="text-primary/80">{routeIcon(g.kind, 'h-3 w-3')}</span>
+                          {ROUTE_KIND_LABEL[g.kind] ?? g.kind.toUpperCase()}
+                          <span className="font-normal">{g.items.length}</span>
+                        </button>
+                        {open && (
+                          <div className="grid gap-1.5 grid-cols-[repeat(auto-fill,minmax(min(100%,22rem),1fr))]">
+                            {g.items.map((t) => renderRouteRow(a, t))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            ) : allRoutes.length > 0 ? null : (
               <button
                 type="button"
                 disabled={!canManage}
@@ -1055,7 +1145,7 @@ export function Fabric() {
                   <span className="text-xs text-muted-foreground">{waypoints.length}</span>
                   <div className="flex-1 h-px bg-border/60" />
                 </div>
-                <div className="grid gap-3 xl:grid-cols-2">
+                <div className="grid gap-3">
                   {waypoints.map(renderWaypointCard)}
                 </div>
               </section>
@@ -1750,9 +1840,7 @@ function RoutesDialog({
     }
   };
 
-  const items = [...agent.targets].sort((a, b) =>
-    (a.group ?? '').localeCompare(b.group ?? '') || a.kind.localeCompare(b.kind) || a.host.localeCompare(b.host) || a.port - b.port,
-  );
+  const items = [...agent.targets].sort(compareRoutes);
 
   return (
     <Dialog
