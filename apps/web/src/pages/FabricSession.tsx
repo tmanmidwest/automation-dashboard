@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import type { FabricSessionTicket } from '@cerebro/shared';
-import { SshTerminal, RdpViewer, VncViewer, makeReconnect, type ReconnectCtx } from './Fabric';
+import { SshTerminal, RdpViewer, VncViewer, makeReconnect, type ReconnectCtx, type SessionTitleInput } from './Fabric';
 
 /**
  * Standalone full-tab session viewer. The Fabric page mints the one-time ticket
@@ -13,7 +13,7 @@ import { SshTerminal, RdpViewer, VncViewer, makeReconnect, type ReconnectCtx } f
 interface Handoff {
   kind: 'ssh' | 'rdp' | 'vnc';
   ticket: FabricSessionTicket;
-  title: string;
+  title: SessionTitleInput;
   dynamicResize?: boolean;
   vncCreds?: { username?: string; password?: string };
   /** Ingredients to auto-reconnect (re-mint the session after a drop). */
