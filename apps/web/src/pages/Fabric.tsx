@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Radio, Plus, Trash2, ShieldOff, Loader2, Copy, Check, Terminal, MonitorSmartphone,
   Server, CircleDot, TerminalSquare, X, KeyRound, Monitor, Film, Play, Pause,
@@ -266,9 +266,9 @@ export function Fabric() {
     try { localStorage.setItem('fabric.view', v); } catch { /* storage blocked */ }
   };
   type Reconnect = () => Promise<FabricSessionTicket>;
-  const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: string; reopen?: () => void; reconnect?: Reconnect } | null>(null);
-  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: string; dynamicResize: boolean; reopen?: () => void; reconnect?: Reconnect } | null>(null);
-  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: string; creds?: { username?: string; password?: string }; reopen?: () => void; reconnect?: Reconnect; remoteBrowser?: boolean } | null>(null);
+  const [session, setSession] = useState<{ ticket: FabricSessionTicket; title: SessionTitleInput; reopen?: () => void; reconnect?: Reconnect } | null>(null);
+  const [rdpSession, setRdpSession] = useState<{ ticket: FabricSessionTicket; title: SessionTitleInput; dynamicResize: boolean; reopen?: () => void; reconnect?: Reconnect } | null>(null);
+  const [vncSession, setVncSession] = useState<{ ticket: FabricSessionTicket; title: SessionTitleInput; creds?: { username?: string; password?: string }; reopen?: () => void; reconnect?: Reconnect; remoteBrowser?: boolean } | null>(null);
 
   /**
    * Launch a session either in a new tab (default) or an in-page overlay. `win`
@@ -279,7 +279,7 @@ export function Fabric() {
   const launchViewer = (
     kind: 'ssh' | 'rdp' | 'vnc',
     ticket: FabricSessionTicket,
-    title: string,
+    title: SessionTitleInput,
     win: Window | null,
     extra?: {
       dynamicResize?: boolean;
@@ -326,7 +326,7 @@ export function Fabric() {
     try {
       const resp = await api.post<FabricRemoteBrowserTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
       const ticket = await awaitSession(resp);
-      launchViewer('vnc', ticket, `${agent.name} · ${t.webUrl || t.label || 'Remote Browser'}`, win, {
+      launchViewer('vnc', ticket, targetSessionTitle(agent, t), win, {
         vncCreds: ticket.password ? { password: ticket.password } : undefined,
         // On a drop, relaunch a fresh Remote Browser container for this route
         // (auto-reconnect + the manual "Reconnect" button). No saved credential
@@ -352,11 +352,11 @@ export function Fabric() {
       const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/desktop-session`);
       const ticket = await awaitSession(resp);
       if (ticket.proto === 'vnc') {
-        launchViewer('vnc', ticket, `${agent.name} · Desktop`, win, {
+        launchViewer('vnc', ticket, { name: agent.name, note: 'Desktop' }, win, {
           vncCreds: ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
         });
       } else {
-        launchViewer('rdp', ticket, `${agent.name} · Desktop`, win, { dynamicResize: true });
+        launchViewer('rdp', ticket, { name: agent.name, note: 'Desktop' }, win, { dynamicResize: true });
       }
     } catch (e) {
       win?.close();
@@ -1215,7 +1215,7 @@ export function Fabric() {
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win, opts) => {
             const a = connectFor.agent, t = connectFor.target;
-            launchViewer('rdp', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
+            launchViewer('rdp', ticket, targetSessionTitle(a, t), win, {
               dynamicResize: opts.dynamicResize,
               reopen: () => { setRdpSession(null); setConnectFor({ agent: a, target: t }); },
               reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
@@ -1234,7 +1234,7 @@ export function Fabric() {
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win) => {
             const a = connectFor.agent, t = connectFor.target;
-            launchViewer('ssh', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
+            launchViewer('ssh', ticket, targetSessionTitle(a, t), win, {
               reopen: () => { setSession(null); setConnectFor({ agent: a, target: t }); },
               reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
             });
@@ -1252,7 +1252,7 @@ export function Fabric() {
           onClose={() => setConnectFor(null)}
           onConnected={(ticket, win) => {
             const a = connectFor.agent, t = connectFor.target;
-            launchViewer('vnc', ticket, `${a.name} · ${t.host}:${t.port}`, win, {
+            launchViewer('vnc', ticket, targetSessionTitle(a, t), win, {
               vncCreds: ticket.username || ticket.password ? { username: ticket.username, password: ticket.password } : undefined,
               reopen: () => { setVncSession(null); setConnectFor({ agent: a, target: t }); },
               reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
@@ -2013,7 +2013,7 @@ function AdhocConnectDialog({
   onLaunch: (
     kind: 'ssh' | 'rdp' | 'vnc',
     ticket: FabricSessionTicket,
-    title: string,
+    title: SessionTitleInput,
     win: Window | null,
     extra?: { dynamicResize?: boolean; vncCreds?: { username?: string; password?: string } },
   ) => void;
@@ -2074,7 +2074,7 @@ function AdhocConnectDialog({
     const win = newTab ? window.open('about:blank', '_blank') : null;
     setBusy(true);
     try {
-      const title = `${agent.name} · ${host.trim()}:${port} (ad-hoc)`;
+      const title: SessionTitle = { name: host.trim(), addr: `:${port}`, via: agent.name, note: 'ad-hoc' };
       if (kind === 'vnc') {
         const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/adhoc/vnc-session`, base);
         const ticket = await awaitSession(resp, () => setWaiting(true));
@@ -2927,6 +2927,68 @@ function SshConnectDialog({
   );
 }
 
+/**
+ * What a session tab/overlay is connected to, kept structured so the header can
+ * give each part its own treatment: the endpoint's name leads, the address is
+ * secondary, and a Waypoint hop gets its own chip instead of reading like the
+ * destination. A plain string is still accepted (older handoffs).
+ */
+export interface SessionTitle {
+  /** The endpoint: a Waypoint route's label (or its host), else the agent's name. */
+  name: string;
+  /** The Waypoint the session is relayed through, when there is one. */
+  via?: string | null;
+  /** host:port (or URL) actually dialed; just ":port" when `name` is already the host. */
+  addr?: string | null;
+  /** Small trailing qualifier, e.g. "ad-hoc" or "Desktop". */
+  note?: string | null;
+}
+export type SessionTitleInput = string | SessionTitle;
+
+/** Title for a session to one of an agent's routes. */
+export function targetSessionTitle(agent: FabricAgentDto, t: FabricTargetDto): SessionTitle {
+  if (t.kind === 'web') {
+    const label = t.label?.trim();
+    return { name: label || t.webUrl || 'Remote Browser', via: agent.name, addr: label ? t.webUrl || null : null };
+  }
+  if (agent.mode === 'waypoint') {
+    const label = t.label?.trim();
+    return { name: label || t.host, via: agent.name, addr: label ? `${t.host}:${t.port}` : `:${t.port}` };
+  }
+  return { name: agent.name, addr: `${t.host}:${t.port}` };
+}
+
+/**
+ * Header title for a session viewer. Also names the browser tab after the
+ * endpoint ("web-01 · SSH — Cerebro") while mounted, so a row of session tabs
+ * can be told apart; restores the previous title on unmount (overlay mode).
+ */
+function SessionHeaderTitle({ proto, icon, title }: { proto: string; icon: ReactNode; title: SessionTitleInput }) {
+  const t: SessionTitle = typeof title === 'string' ? { name: title } : title;
+  useEffect(() => {
+    const prev = document.title;
+    document.title = `${t.name}${t.note ? ` (${t.note})` : ''} · ${proto} — Cerebro`;
+    return () => { document.title = prev; };
+  }, [t.name, t.note, proto]);
+  return (
+    <span className="text-sm inline-flex items-center gap-2 min-w-0">
+      {icon}
+      <span className="text-muted-foreground shrink-0">{proto} ·</span>
+      <span className="font-semibold truncate" title={t.name}>{t.name}</span>
+      {t.addr && <span className="font-mono text-xs text-muted-foreground truncate">{t.addr}</span>}
+      {t.note && <span className="text-xs text-muted-foreground shrink-0">({t.note})</span>}
+      {t.via && (
+        <span
+          className="inline-flex shrink-0 items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-primary"
+          title={`Relayed through the Waypoint ${t.via}`}
+        >
+          <Waypoints className="h-3 w-3" /> via {t.via}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function SshTerminal({
   session,
   title,
@@ -2935,7 +2997,7 @@ export function SshTerminal({
   reconnect,
 }: {
   session: FabricSessionTicket;
-  title: string;
+  title: SessionTitleInput;
   onClose: () => void;
   onReconnect?: () => void;
   reconnect?: () => Promise<FabricSessionTicket>;
@@ -3008,10 +3070,7 @@ export function SshTerminal({
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
       <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
-        <span className="text-sm inline-flex items-center gap-2">
-          <TerminalSquare className="h-4 w-4 text-primary" />
-          <span className="text-muted-foreground">SSH ·</span> {title}
-        </span>
+        <SessionHeaderTitle proto="SSH" icon={<TerminalSquare className="h-4 w-4 text-primary shrink-0" />} title={title} />
         <div className="flex items-center gap-3 text-sm">
           <span
             className={`inline-flex items-center gap-1.5 ${
@@ -3445,7 +3504,7 @@ export function RdpViewer({
   reconnect,
 }: {
   session: FabricSessionTicket;
-  title: string;
+  title: SessionTitleInput;
   dynamicResize: boolean;
   onClose: () => void;
   onReconnect?: () => void;
@@ -3564,10 +3623,7 @@ export function RdpViewer({
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
       <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
-        <span className="text-sm inline-flex items-center gap-2">
-          <MonitorSmartphone className="h-4 w-4 text-primary" />
-          <span className="text-muted-foreground">RDP ·</span> {title}
-        </span>
+        <SessionHeaderTitle proto="RDP" icon={<MonitorSmartphone className="h-4 w-4 text-primary shrink-0" />} title={title} />
         <div className="flex items-center gap-3 text-sm">
           <span
             className={`inline-flex items-center gap-1.5 ${
@@ -3619,7 +3675,7 @@ export function VncViewer({
   remoteBrowser,
 }: {
   session: FabricSessionTicket;
-  title: string;
+  title: SessionTitleInput;
   /** Optional saved credential to auto-fill (vaulted) instead of prompting. */
   creds?: { username?: string; password?: string };
   onClose: () => void;
@@ -3772,10 +3828,7 @@ export function VncViewer({
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
       <div className="h-12 shrink-0 bg-sidebar border-b border-border flex items-center justify-between px-4">
-        <span className="text-sm inline-flex items-center gap-2">
-          <Monitor className="h-4 w-4 text-primary" />
-          <span className="text-muted-foreground">VNC ·</span> {title}
-        </span>
+        <SessionHeaderTitle proto={remoteBrowser ? 'Web' : 'VNC'} icon={<Monitor className="h-4 w-4 text-primary shrink-0" />} title={title} />
         <div className="flex items-center gap-3 text-sm">
           <span
             className={`inline-flex items-center gap-1.5 ${
@@ -3846,7 +3899,7 @@ export function VncViewer({
             >
               <div className="flex items-center gap-2 text-sm">
                 <Monitor className="h-4 w-4 text-primary" />
-                <span className="font-medium">Authenticate to {title}</span>
+                <span className="font-medium">Authenticate to {typeof title === 'string' ? title : title.name}</span>
               </div>
               {credTypes.includes('username') && (
                 <p className="text-xs text-muted-foreground -mt-1">
