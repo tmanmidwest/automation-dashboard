@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle, GripVertical, Eye, EyeOff, Settings2, RotateCcw, Siren, BellOff, X } from 'lucide-react';
-import type { VersionInfo, DashboardOverview, MonitorSummary, MonitorStatus, TimelineEvent, TimelineKind, TimelineSeverity, TimelinePage } from '@cerebro/shared';
+import type { VersionInfo, DashboardOverview, OverviewSource, MonitorSummary, MonitorStatus, TimelineEvent, TimelineKind, TimelineSeverity, TimelinePage } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -612,8 +612,30 @@ export function Dashboard() {
   // The banner is a summary, so collapse repeats of the same alert (same title delivered twice —
   // e.g. one per notification channel, or a re-fire) to the single most-recent occurrence.
   const seenAttnTitles = new Set<string>();
+  // Connector health already has its own row (from the live connection status), so its
+  // connection alerts and connector log errors are only noise here: while the connector
+  // is down the "Connector offline" row stands for them, and once it's back up anything
+  // from before the recovery is stale (it would otherwise reappear on every page load for
+  // 30 minutes). Errors logged after it came back still show.
+  const connectorFor = (e: TimelineEvent): OverviewSource | undefined => {
+    if (e.kind === 'notification') {
+      const key = typeof e.meta?.alertKey === 'string' ? e.meta.alertKey : '';
+      return key.startsWith('connection.') ? sources.find((s) => s.id && s.id === e.source) : undefined;
+    }
+    if (e.kind === 'app_log' && e.source?.startsWith('connector:')) {
+      return sources.find((s) => e.title.includes(`[${s.name}] `));
+    }
+    return undefined;
+  };
+  const supersededByStatus = (e: TimelineEvent): boolean => {
+    const src = connectorFor(e);
+    if (!src) return false;
+    if (!src.ok) return true;
+    return !!src.since && new Date(e.ts).getTime() < new Date(src.since).getTime();
+  };
   const attnEvents = events
     .filter((e) => e.kind !== 'monitor')
+    .filter((e) => !supersededByStatus(e))
     .filter((e) => (e.severity === 'critical' || e.severity === 'warning') && nowMs - new Date(e.ts).getTime() < 30 * 60_000)
     .filter((e) => { if (seenAttnTitles.has(e.title)) return false; seenAttnTitles.add(e.title); return true; })
     .slice(0, 6);
