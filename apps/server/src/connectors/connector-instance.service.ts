@@ -275,10 +275,34 @@ export class ConnectorInstanceService implements OnModuleInit {
 
   async test(id: string) {
     const instance = await this.get(id);
-    const ctx = await this.buildContext(instance);
-    const result = await this.connectorFor(instance).testConnection(ctx);
-    if (result.ok) this.markSynced(id);
-    return result;
+    try {
+      const ctx = await this.buildContext(instance);
+      const result = await this.connectorFor(instance).testConnection(ctx);
+      if (result.ok) this.markSynced(id);
+      this.recordHealth(id, !!result.ok, result.message);
+      return result;
+    } catch (err) {
+      this.recordHealth(id, false, err instanceof Error ? err.message : 'unreachable');
+      throw err;
+    }
+  }
+
+  /**
+   * Latest connection-test outcome per instance. Fed by every test() call — chiefly the
+   * per-minute ConnectionMonitorService — so the dashboard's Connectors panel reports the
+   * same up/down state that raises the "Connector unreachable" alert. Absent = not tested
+   * since boot (the overview then falls back to "has telemetry" as before).
+   */
+  private health = new Map<string, { ok: boolean; message?: string; at: number; since: number }>();
+
+  private recordHealth(id: string, ok: boolean, message?: string): void {
+    const prev = this.health.get(id);
+    const now = Date.now();
+    const since = prev && prev.ok === ok ? prev.since : now;
+    this.health.set(id, { ok, message: message || undefined, at: now, since });
+    // A flip in reachability should show on the very next dashboard poll, not after the
+    // overview's short cache expires.
+    if (!prev || prev.ok !== ok) this.overviewCache = undefined;
   }
 
   /**
@@ -515,7 +539,8 @@ export class ConnectorInstanceService implements OnModuleInit {
    * failure (a slow/timed-out AWS call, say) while others succeed, we keep
    * folding its last-good numbers into the aggregate for a short window — so
    * the dashboard totals stay steady instead of flickering down and back up.
-   * Source health (`sources`/`ok`) still reflects the real, current failure.
+   * Source health (`sources`/`ok`) comes from the latest connection test (see
+   * `health`), so a down connector shows offline even while its numbers are kept.
    */
   private connectorTelemetry = new Map<string, { at: number; metrics: OverviewMetric[]; guests: { name: string; kind: string; status: string; node: string }[] }>();
   /** Connectors with a background warm in flight, so we never fetch one twice at once. */
@@ -631,16 +656,34 @@ export class ConnectorInstanceService implements OnModuleInit {
     // Warming also happens on the per-minute resource-monitor cron.
     for (const inst of instances) {
       const connector = this.registry.get(inst.connectorId);
-      if (!connector?.overview) continue;
+      const health = this.health.get(inst.id);
+      const down = !!health && !health.ok;
+      const base = { id: inst.id, name: inst.name, since: health ? new Date(health.since).toISOString() : undefined };
+      if (!connector?.overview) {
+        // No telemetry to show, but it still counts toward the total — report its
+        // connection health so ok/total and the panel agree.
+        if (down) sources.push({ ...base, ok: false, message: health!.message ?? 'unreachable' });
+        else {
+          ok++;
+          sources.push({ ...base, ok: true });
+        }
+        continue;
+      }
 
       const intervalMs = ((inst as ConnectorInstance & { refreshIntervalSec?: number }).refreshIntervalSec ?? 30) * 1000;
       const cachedTel = this.connectorTelemetry.get(inst.id);
       const fresh = !!cachedTel && now - cachedTel.at < intervalMs;
       if (!fresh) this.warmConnector(inst); // background refresh; doesn't block this response
 
-      if (cachedTel) {
+      if (down) {
+        // The connection test is failing: show it offline, but keep folding in its
+        // last-known numbers below so aggregate tiles don't jump.
+        sources.push({ ...base, ok: false, message: health!.message ?? 'unreachable' });
+      } else if (cachedTel) {
         ok++;
-        sources.push({ name: inst.name, ok: true });
+        sources.push({ ...base, ok: true });
+      }
+      if (cachedTel) {
         for (const m of cachedTel.metrics) {
           const e = metricMap.get(m.key) ?? { label: m.label, unit: m.unit, values: [], asOf: m.asOf };
           e.values.push(m.value);
@@ -649,9 +692,9 @@ export class ConnectorInstanceService implements OnModuleInit {
           metricMap.set(m.key, e);
         }
         for (const g of cachedTel.guests) guests.push({ ...g, connector: inst.name });
-      } else {
+      } else if (!down) {
         // No telemetry yet (never warmed, no snapshot) — it'll appear once the warm lands.
-        sources.push({ name: inst.name, ok: false, message: 'warming up…' });
+        sources.push({ ...base, ok: false, message: 'warming up…' });
       }
     }
     sources.sort((a, b) => Number(a.ok) - Number(b.ok) || a.name.localeCompare(b.name));
@@ -667,6 +710,7 @@ export class ConnectorInstanceService implements OnModuleInit {
     // Forget telemetry for connectors that no longer exist.
     const liveIds = new Set(instances.map((i) => i.id));
     for (const id of this.connectorTelemetry.keys()) if (!liveIds.has(id)) this.connectorTelemetry.delete(id);
+    for (const id of this.health.keys()) if (!liveIds.has(id)) this.health.delete(id);
 
     const data: DashboardOverview = { connectors: { total: instances.length, ok }, sources, metrics, guests: guests.slice(0, 60) };
     this.overviewCache = { at: now, data };

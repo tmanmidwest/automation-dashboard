@@ -106,9 +106,16 @@ export interface OverviewGuest {
 }
 
 export interface OverviewSource {
+  /** Connector instance id (matches the `source` of its alerts on the timeline). */
+  id?: string;
   name: string;
   ok: boolean;
   message?: string;
+  /**
+   * ISO time the connector entered its current up/down state, per the connection
+   * monitor (or when it was first checked after boot). Absent until first checked.
+   */
+  since?: string;
 }
 
 /** Aggregated dashboard telemetry across all connectors. */
