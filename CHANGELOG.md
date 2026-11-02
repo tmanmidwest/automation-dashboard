@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Outside-in posture checks** — the Architecture Map's posture findings now also use free
+  public data: Shodan InternetDB for the WAN address (ports open with no port forward behind
+  them, CVEs matched to public software, end-of-life software), CISA's Known Exploited
+  Vulnerabilities list, and endoflife.date for container releases past or near end of life.
+  Cached, on by default, with a switch in the Posture findings row. See
+  `docs/architecture-map.md#posture-findings`.
 - **Security posture findings on the Architecture Map** — a Posture findings tile in
   Needs attention opens a ranked list (High / Medium / Low; Exposure, Encryption, Backups,
   Patching, Hygiene) built from connector data: proxy hosts on plain HTTP, port forwards

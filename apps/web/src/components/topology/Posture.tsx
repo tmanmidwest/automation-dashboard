@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { BellOff, Bell, ChevronDown, ChevronRight, Crosshair, ShieldCheck, X } from 'lucide-react';
-import type { PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
+import type { OutsideInSummary, PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/auth/AuthContext';
@@ -131,8 +131,9 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
 }
 
 /** The open row for Needs attention → Posture findings. */
-export function PostureRow({ findings, onShow, onChanged, onClose }: {
+export function PostureRow({ findings, outsideIn, onShow, onChanged, onClose }: {
   findings: PostureFinding[];
+  outsideIn?: OutsideInSummary;
   onShow: (nodeId: string) => void;
   onChanged: () => void;
   onClose: () => void;
@@ -154,6 +155,7 @@ export function PostureRow({ findings, onShow, onChanged, onClose }: {
         <span className="text-sm text-muted-foreground">Worked out from what your connectors report, worst first. Open one for why it matters and how to fix it.</span>
         <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
       </div>
+      <OutsideInLine info={outsideIn} onChanged={onChanged} />
       <div className="flex flex-wrap gap-1.5" role="tablist">
         {tabs.map((t) => (
           <button key={t.key} role="tab" aria-selected={cat === t.key} onClick={() => setCat(t.key)}
@@ -168,6 +170,38 @@ export function PostureRow({ findings, onShow, onChanged, onClose }: {
         <div className="flex flex-col gap-2">
           {shown.map((f, i) => <FindingCard key={f.id} f={f} onShow={onShow} onChanged={onChanged} open={i === 0 && cat === 'all' && f.severity === 'high'} />)}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** What the outside-in checks saw, with the on/off switch. */
+function OutsideInLine({ info, onChanged }: { info?: OutsideInSummary; onChanged: () => void }) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  if (!info) return null;
+  const toggle = async () => {
+    const on = !info.enabled;
+    if (on === false || window.confirm('Turn on outside-in checks?\n\nCerebro will send your WAN address to Shodan InternetDB and software names (e.g. "postgresql") to endoflife.date, and download the CISA Known Exploited Vulnerabilities list.')) {
+      setBusy(true);
+      try {
+        await api.put('/api/topology/outside-in', { enabled: on });
+        onChanged();
+      } finally {
+        setBusy(false);
+      }
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted-foreground">
+      <span className="font-medium text-foreground/80">Outside-in checks {info.enabled ? 'on' : 'off'}</span>
+      {info.enabled && info.wan.map((w) => (
+        <span key={w.ip}>Shodan sees {w.ports.length ? `port${w.ports.length === 1 ? '' : 's'} ${w.ports.join(', ')}` : 'nothing open'} on {w.ip} · checked {new Date(w.checkedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+      ))}
+      {info.enabled && !info.wan.length && !info.errors.length && <span>No public WAN address found on the UniFi gateway</span>}
+      {info.errors.length > 0 && <span className="text-amber-600 dark:text-amber-300">Couldn't reach {info.errors.join(', ')} (using the last data Cerebro has)</span>}
+      {can('connectors:write') && (
+        <button className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={toggle}>{info.enabled ? 'Turn off' : 'Turn on'}</button>
       )}
     </div>
   );

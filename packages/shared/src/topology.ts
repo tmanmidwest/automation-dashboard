@@ -98,6 +98,17 @@ export interface TopologyGraph {
   feeds: TopoFeed[];
   /** Security posture findings, worst first (see docs/architecture-map.md#posture-findings). */
   findings?: PostureFinding[];
+  /** What the outside-in checks saw (absent when they're switched off). */
+  outsideIn?: OutsideInSummary;
+}
+
+/** Outside-in checks: public data about your WAN address and software versions. */
+export interface OutsideInSummary {
+  enabled: boolean;
+  /** Per WAN address: what Shodan's InternetDB last saw. */
+  wan: { ip: string; ports: number[]; hostnames: string[]; vulns: string[]; tags: string[]; checkedAt: string }[];
+  /** Sources that couldn't be reached this time (last good data is still used). */
+  errors: string[];
 }
 
 export type PostureSeverity = 'high' | 'medium' | 'low';
