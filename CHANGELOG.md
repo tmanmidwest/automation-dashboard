@@ -8,14 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-- **Architecture Map** (`/map`) — one interactive graph across connectors. Network view:
-  Internet → gateway → switches/APs → each VLAN as a box with its machines, port-forward
-  exposure and UniFi firewall rules. Compute view: Proxmox → VMs → Docker hosts → stacks →
-  containers. Apps & ingress view: NPM / Cloudflare tunnel / Technitium hostnames → proxy →
-  container. Machines seen by several connectors are merged by MAC, then LAN IP, then a
-  unique hostname. Click for details and connections, double-click to drill in, search by
-  name/IP/MAC. Read-only; `GET /api/topology`. Proxmox guests now also report their NIC
-  MAC and VLAN tag. See `docs/architecture-map.md`.
+- **Architecture Map** (`/map`) — everything the connectors see, joined into one model.
+  The page is a scrolling overview of tiles in four lanes (Edge, Networks, Compute, Apps)
+  under a "needs attention" strip (down, warnings, exposed to the internet, unknown
+  addresses). Clicking a tile opens a full-width row right under it with what reaches it
+  (port forwards, public hostnames, firewall rules) and what's inside it; clicking inside
+  drills deeper in the same row (VLAN → machine → stack → container) with a breadcrumb.
+  "Show as map" draws one item and its connections left to right at a readable size.
+  Searchable by name/IP/MAC; machines seen by several connectors are merged by MAC, then
+  LAN IP, then a unique hostname. Read-only; `GET /api/topology`. Proxmox guests now also
+  report their NIC MAC and VLAN tag. See `docs/architecture-map.md`.
 - **UniFi firewall rules (read-only)** — new Firewall rules, Firewall groups and
   Firewall zones tabs on the UniFi connector. Pulls whatever the console has: classic
   rules (Internet/LAN/Guest In/Out/Local, IPv4 + IPv6), zone-based policies (custom and

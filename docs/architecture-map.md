@@ -1,29 +1,48 @@
 # Architecture Map
 
-**Architecture Map** (sidebar, `/map`) joins what every connector sees into one
-interactive graph: the network (Internet → gateway → switches/APs → VLANs → machines),
-the compute stack (Proxmox → VMs → Docker hosts → stacks → containers), and how
-hostnames reach your apps (DNS / reverse proxy / tunnel / port forward → container).
+**Architecture Map** (sidebar, `/map`) joins what every connector sees into one model of
+your environment: the network (Internet → gateway → switches/APs → VLANs → machines), the
+compute stack (Proxmox → VMs → Docker hosts → stacks → containers), and how hostnames
+reach your apps (reverse proxy / tunnel / port forward / internal DNS → container).
 
-It is read-only. Click anything for its details, connections and the connector pages
-that know about it; actions stay on those pages.
+It is read-only. Actions stay on the connector pages it links to.
 
-## Views
+## The overview
 
-| View | Shows | Links drawn |
-| --- | --- | --- |
-| Network | Internet, gateway, switches, APs, each UniFi network as a box with its machines | physical uplinks, gateway → VLAN, Internet → port-forward targets, firewall rules (toggle) |
-| Compute | Proxmox nodes, VMs/LXCs, Docker hosts with their stacks (stacks start collapsed) | VM → hypervisor |
-| Apps & ingress | Hostnames from NPM, Cloudflare tunnels and Technitium A records, the proxy, and the target container/host | name → proxy/host, traffic forwarded |
+The page is a normal scrolling page of tiles, so it stays readable however many things
+you have. Nothing is shrunk to fit one screen.
 
-- **Clients & IoT** (Network view) adds phones, TVs and other plain clients. By default only
-  "infrastructure" shows: anything another connector knows about, or anything a proxy,
-  port forward, DNS record or firewall rule points at.
-- **Firewall rules** draws every UniFi allow/block rule between VLANs and hosts. With it
-  off, selecting a node still draws that node's own rules.
-- **Drill in**: double-click a box (or *Drill in* in the drawer) to show only that VLAN /
-  host / stack plus, faded, what it connects to. The breadcrumb goes back.
-- **Search** finds any node by name, IP, MAC or role and jumps to the right view.
+- **Needs attention**: counts of things down, warnings, what's exposed to the internet
+  (public hostnames plus port forwards) and *unknown addresses* (IPs a firewall rule,
+  proxy host or port forward names that no connector reports). Click one to list them.
+- **Lanes**:
+
+  | Lane | Tiles | A tile opens to |
+  | --- | --- | --- |
+  | Edge | Internet, gateway, switches, access points | port-forward targets and tunnel names / networks / what's plugged in |
+  | Networks | one per UniFi network (VLAN) | its machines, with unknown addresses rolled into one tile |
+  | Compute | Proxmox nodes, Docker hosts, DNS / proxy servers | VMs, stacks, then containers |
+  | Apps | hostnames grouped by how they come in: via Nginx Proxy Manager, Cloudflare tunnel, direct port forward, internal DNS only | the hostnames and where each one lands |
+
+- **Open in place**: clicking a tile opens a full-width row right under it, showing its
+  counts, what reaches it ("Reached from": port forwards, public and internal hostnames,
+  firewall allow/block rules, what it runs on or is plugged into) and its contents.
+  Clicking something inside drills one level deeper in the same row; the breadcrumb goes
+  back. Something with nothing inside shows its full details (addresses, connections,
+  each connector's fields, links to the connector pages). **Details** shows the same for
+  a group. The open row is kept in the URL (`?open=`), so it can be linked.
+- **Browse** (left) lists every tile by lane and the open path.
+- **Search** finds any node by name, IP, MAC or role and opens the row that holds it.
+- **Phones & IoT clients** adds plain clients. By default only "infrastructure" counts:
+  anything another connector knows about, or anything a proxy, port forward, DNS record
+  or firewall rule points at.
+
+## Show as map
+
+**Show as map** on an open row (`?focus=`) draws that one thing and its links, left to
+right: what reaches it, it (with what's inside it), and what it reaches (runs on, plugged
+into, forwards to). Long tails fold into a "+ N more" card. Firewall rules are a toggle.
+Click a card for its details, double-click to map it instead.
 
 ## How machines are matched
 
@@ -40,7 +59,7 @@ live) is built by `apps/server/src/topology/`:
    so a VM matches its switch port even without the QEMU guest agent.
 3. Each machine goes in the UniFi network whose subnet holds its IP.
 4. Addresses that a proxy, port forward or firewall rule names but no connector knows
-   show as *Not seen by any connector* — worth a look.
+   become *unknown addresses*, worth a look.
 
 Sources read: UniFi (devices, clients, networks, port forwards, firewall rules), Proxmox
 (qemu, lxc), Docker (host, containers), Nginx Proxy Manager (proxy hosts), Technitium
@@ -49,6 +68,9 @@ Fabric agents. Lists come from the same last-good cache the connector pages use,
 opening the map doesn't hit the devices; the built graph is cached for 2 minutes.
 
 A source that fails shows as a "partial data" banner; the rest of the map still builds.
+
+The page's code is in `apps/web/src/components/topology/`: `model.ts` (lanes, contents,
+counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 
 ## Not yet
 
