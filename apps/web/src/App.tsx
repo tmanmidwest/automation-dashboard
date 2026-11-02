@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import type { Permission } from '@cerebro/shared';
 import { AuthProvider, useAuth } from '@/auth/AuthContext';
@@ -43,6 +44,9 @@ import { Agents } from '@/pages/settings/Agents';
 import { AgentEditor } from '@/pages/settings/AgentEditor';
 import { McpServers } from '@/pages/settings/McpServers';
 import { ZumaSettings } from '@/pages/settings/ZumaSettings';
+
+// The map pulls in React Flow + ELK; load it only when someone opens it.
+const ArchitectureMap = lazy(() => import('@/pages/ArchitectureMap'));
 
 function FullscreenBrand() {
   return (
@@ -110,6 +114,7 @@ function Router() {
       <Route path="/users" element={<Protected><RequirePerm perm="users:read"><Users /></RequirePerm></Protected>} />
       <Route path="/timeline" element={<Protected><RequirePerm perm="logs:read"><Timeline /></RequirePerm></Protected>} />
       <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
+      <Route path="/map" element={<Protected><RequirePerm perm="connectors:read"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading map…</p>}><ArchitectureMap /></Suspense></RequirePerm></Protected>} />
       <Route path="/docker-fleet" element={<Protected><RequirePerm perm="connectors:read"><DockerFleet /></RequirePerm></Protected>} />
       <Route path="/replicator" element={<Protected><RequirePerm perm="replicator:read"><Replicator /></RequirePerm></Protected>} />
       <Route path="/backups" element={<Protected><RequirePerm perm="backup:read"><StackBackups /></RequirePerm></Protected>} />

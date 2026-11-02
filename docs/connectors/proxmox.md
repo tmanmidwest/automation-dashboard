@@ -31,6 +31,11 @@ VM.Backup, Datastore.AllocateSpace, and so on). For **Build template from image*
 
 Actions only appear for the states they apply to (for example, Start only on a stopped guest).
 
+Each guest row also carries its IP (from the guest agent or LXC interfaces, when running) and
+the MAC + VLAN tag of its first network card (read from the VM config, so it works for
+stopped guests and VMs without the guest agent). The [Architecture Map](../architecture-map.md)
+uses the MAC to match a VM to its UniFi client and switch port.
+
 ## Operations
 
 | Operation | Scope | What it does |

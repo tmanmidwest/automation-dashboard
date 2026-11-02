@@ -18,6 +18,12 @@ function hostOf(v: unknown): string | null {
   return m ? m[1] : null;
 }
 
+/** Explicit port of a URL-ish config value, if any. */
+function portOf(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  return /^(?:[a-z]+:\/\/)?[^/]*?:(\d+)(?:\/|$)/i.exec(v.trim())?.[1] ?? null;
+}
+
 /**
  * Builds the architecture map: reads each enabled connector's resource lists (from
  * the same last-good cache the connector pages use, so opening the map doesn't hammer
@@ -100,7 +106,7 @@ export class TopologyService {
             break;
           }
           case 'nginx-proxy-manager': {
-            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), proxyHosts: await list(i.id, 'proxy_host', errs) });
+            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts: await list(i.id, 'proxy_host', errs) });
             break;
           }
           case 'technitium': {

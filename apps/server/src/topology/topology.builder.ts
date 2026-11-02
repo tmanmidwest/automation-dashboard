@@ -41,7 +41,7 @@ export interface BuildInput {
   }[];
   proxmox: { inst: InstRef; baseHost: string | null; guests: ConnectorResource[] }[];
   docker: { inst: InstRef; endpointHost: string | null; hosts: ConnectorResource[]; containers: ConnectorResource[] }[];
-  npm: { inst: InstRef; baseHost: string | null; proxyHosts: ConnectorResource[] }[];
+  npm: { inst: InstRef; baseHost: string | null; basePort?: string | null; proxyHosts: ConnectorResource[] }[];
   technitium: { inst: InstRef; baseHost: string | null; records: { zone: string; record: ConnectorResource }[]; leases: ConnectorResource[] }[];
   cloudflare: { inst: InstRef; tunnels: { tunnel: ConnectorResource; routes: ConnectorResource[] }[] }[];
   replicator: { name: string; appName: string; project: string; dockerInstanceId: string; status: string }[];
@@ -546,7 +546,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
       id,
       type: 'host',
       label: ip,
-      sublabel: hint,
+      sublabel: hint ?? 'Not seen by any connector',
       status: 'unknown',
       parent: networkForIp(ip)?.id,
       roles: [],
@@ -647,7 +647,8 @@ export function buildTopology(input: BuildInput): TopologyGraph {
 
   // 5. Reverse proxy hosts (NPM): name → proxy host → target.
   for (const n of input.npm) {
-    const proxyHost = n.baseHost && ipToInt(n.baseHost) != null ? hostForIp(n.baseHost) : null;
+    // The proxy itself: the container publishing NPM's admin port on that host, else the host.
+    const proxyHost = n.baseHost && ipToInt(n.baseHost) != null ? targetFor(n.baseHost, n.basePort ?? null) : null;
     for (const p of n.proxyHosts) {
       const fwd = str(p.details?.forward);
       const m = fwd ? /^\w+:\/\/([^/:]+)(?::(\d+))?/.exec(fwd) : null;
