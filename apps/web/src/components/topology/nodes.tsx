@@ -78,41 +78,53 @@ const handles = (
   </>
 );
 
-/** A single machine / device / name, or a collapsed group with its count. */
+/** A single machine / device / name, or a collapsed group shown as a summary tile. */
 export const TopoCard = memo(function TopoCard({ data }: NodeProps<TopoFlowNode>) {
   const { v, selected, dimmed, title, onToggle } = data;
   const n = v.node;
   const Icon = iconFor(n);
+  const sum = v.summary;
+  const unit = n.type === 'network' ? 'machine' : 'container';
   return (
     <div
       className={cn(
-        'h-full w-full rounded-lg border bg-card px-2.5 py-2 flex items-center gap-2.5 shadow-sm transition-opacity',
+        'h-full w-full rounded-lg border bg-card px-3 py-2 flex flex-col justify-center gap-1.5 shadow-sm transition-opacity',
         STATUS_BORDER[n.status],
+        sum && 'border-secondary/70 bg-secondary/10 cursor-pointer hover:border-primary/70',
         selected && 'ring-2 ring-primary border-primary',
-        (dimmed || v.context) && 'opacity-40',
+        (dimmed || v.context) && 'opacity-35',
         n.type === 'internet' && 'bg-secondary/40',
       )}
-      title={`${TYPE_LABEL[n.type]} · ${n.label}`}
+      title={sum ? 'Click to open' : `${TYPE_LABEL[n.type]} · ${n.label}`}
     >
       {handles}
-      <div className="relative shrink-0">
-        <div className="h-8 w-8 rounded-md bg-muted grid place-items-center"><Icon className="h-4 w-4 text-foreground/80" /></div>
-        <span className={cn('absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card', STATUS_DOT[n.status])} />
+      <div className="flex items-center gap-2.5 min-w-0">
+        <div className="relative shrink-0">
+          <div className="h-8 w-8 rounded-md bg-muted grid place-items-center"><Icon className="h-4 w-4 text-foreground/80" /></div>
+          <span className={cn('absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card', STATUS_DOT[n.status])} />
+        </div>
+        <div className="min-w-0 flex-1 leading-tight">
+          <p className="text-[14px] font-medium truncate">{title}</p>
+          <p className="text-[12px] text-muted-foreground truncate">{n.sublabel ?? (n.roles.join(' · ') || TYPE_LABEL[n.type])}</p>
+        </div>
+        {v.collapsed && (
+          <button
+            className="nodrag shrink-0 rounded p-1 hover:bg-primary/20 text-muted-foreground"
+            onClick={(e) => { e.stopPropagation(); onToggle(n.id); }}
+            title="Open"
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        )}
       </div>
-      <div className="min-w-0 flex-1 leading-tight">
-        <p className="text-[13px] font-medium truncate">{title}</p>
-        <p className="text-[11px] text-muted-foreground truncate">
-          {v.collapsed ? `${v.childCount} inside · ${n.sublabel ?? TYPE_LABEL[n.type]}` : n.sublabel ?? (n.roles.join(' · ') || TYPE_LABEL[n.type])}
-        </p>
-      </div>
-      {v.collapsed && (
-        <button
-          className="nodrag shrink-0 rounded px-1.5 py-0.5 text-[11px] bg-muted hover:bg-primary/20 tabular-nums"
-          onClick={(e) => { e.stopPropagation(); onToggle(n.id); }}
-          title="Expand"
-        >
-          <ChevronRight className="h-3 w-3 inline" />{v.childCount}
-        </button>
+      {sum && (
+        <div className="flex flex-wrap gap-1 text-[11px] leading-none">
+          <span className="rounded bg-muted px-1.5 py-1 tabular-nums">{sum.machines} {unit}{sum.machines === 1 ? '' : 's'}</span>
+          {sum.down > 0 && <span className="rounded bg-red-500/20 text-red-300 px-1.5 py-1 tabular-nums">{sum.down} down</span>}
+          {sum.warn > 0 && <span className="rounded bg-amber-400/20 text-amber-300 px-1.5 py-1 tabular-nums">{sum.warn} warning</span>}
+          {sum.exposed > 0 && <span className="rounded bg-accent/20 text-accent px-1.5 py-1 tabular-nums">{sum.exposed} exposed</span>}
+          {sum.unknown > 0 && <span className="rounded border border-dashed border-muted-foreground/50 text-muted-foreground px-1.5 py-1 tabular-nums">{sum.unknown} unknown</span>}
+        </div>
       )}
     </div>
   );

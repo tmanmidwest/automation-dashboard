@@ -6,6 +6,9 @@ import type { MapView, ViewResult } from './views';
 /** Card sizes the node components render at; ELK needs them up front. */
 export const CARD_W = 232;
 export const CARD_H = 60;
+/** Summary tiles (a collapsed VLAN / host / stack) carry a second row of counts. */
+export const TILE_W = 264;
+export const TILE_H = 84;
 export const GROUP_PAD_TOP = 44;
 
 export interface Placed {
@@ -65,7 +68,7 @@ export async function layout(view: MapView, v: ViewResult): Promise<Map<string, 
           },
           children: [],
         }
-      : { id: n.node.id, width: CARD_W, height: CARD_H };
+      : n.summary ? { id: n.node.id, width: TILE_W, height: TILE_H } : { id: n.node.id, width: CARD_W, height: CARD_H };
     elkNodes.set(n.node.id, e);
   }
   for (const n of v.nodes) {

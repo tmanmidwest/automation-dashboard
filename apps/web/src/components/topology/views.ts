@@ -13,6 +13,8 @@ export interface ViewOptions {
   showClients: boolean;
   /** Draw firewall allow / block links (network view). */
   showFirewall: boolean;
+  /** Show addresses no connector knows (network view); otherwise they're only counted. */
+  showUnknown: boolean;
   /** Group ids the user collapsed (or, for default-collapsed groups, expanded). */
   toggled: Set<string>;
   /** Drill-in: only this group, its contents and what links to them. */
@@ -28,6 +30,25 @@ export interface VNode {
   childCount: number;
   /** Faded context node around a drill-in. */
   context?: boolean;
+  /** Roll-up for a collapsed group's tile. */
+  summary?: GroupSummary;
+}
+
+export interface GroupSummary {
+  machines: number;
+  down: number;
+  warn: number;
+  /** Reachable from the Internet (port forward / tunnel / proxy target). */
+  exposed: number;
+  /** Addresses inside it that no connector knows. */
+  unknown: number;
+}
+
+/** One row of the side tree: every member of the view, collapsed or not. */
+export interface TreeItem {
+  node: TopoNode;
+  parent?: string;
+  depth: number;
 }
 
 export interface VEdge {
@@ -44,14 +65,24 @@ export interface ViewResult {
   edges: VEdge[];
   /** Links not drawn by default (firewall layer off): shown only for the selected node. */
   extraEdges: VEdge[];
+  /** Everything in the view as a tree (parents before children), for the side panel. */
+  tree: TreeItem[];
 }
 
 export const VIEW_LABEL: Record<MapView, string> = { network: 'Network', compute: 'Compute', apps: 'Apps & ingress' };
 
-/** Groups that start collapsed until the user opens them. */
-function collapsedByDefault(view: MapView, n: TopoNode): boolean {
-  return view === 'compute' && n.type === 'stack';
+/**
+ * Groups that start collapsed until the user opens them: the overview shows each VLAN /
+ * Docker host / stack as one summary tile, and you open the one you care about.
+ */
+export function collapsedByDefault(view: MapView, n: TopoNode): boolean {
+  if (view === 'network') return n.type === 'network';
+  if (view === 'compute') return n.type === 'stack' || n.type === 'host';
+  return false;
 }
+
+/** No connector reported it: only a proxy, port forward or firewall rule named the address. */
+export const isUnknown = (n: TopoNode) => n.type === 'host' && n.sources.length === 0;
 
 const isVm = (n: TopoNode) => n.roles.includes('VM') || n.roles.includes('LXC');
 const isDockerHost = (n: TopoNode) => n.roles.includes('Docker host');
@@ -63,7 +94,7 @@ function membership(view: MapView, g: TopologyGraph, opts: ViewOptions): Map<str
   if (view === 'network') {
     for (const n of g.nodes) {
       if (['internet', 'gateway', 'switch', 'ap', 'network'].includes(n.type)) out.set(n.id, undefined);
-      else if ((n.type === 'host' || n.type === 'pve_node') && (n.infra || opts.showClients)) {
+      else if ((n.type === 'host' || n.type === 'pve_node') && (n.infra || opts.showClients) && (opts.showUnknown || !isUnknown(n))) {
         out.set(n.id, n.parent && byId.get(n.parent)?.type === 'network' ? n.parent : undefined);
       }
     }
@@ -203,6 +234,36 @@ export function buildView(view: MapView, g: TopologyGraph, opts: ViewOptions): V
       context: context.has(id) || undefined,
     };
   });
+  // Tile roll-ups: count from the full graph so hidden clients / unknowns still show up.
+  const exposedIds = new Set<string>();
+  for (const e of g.edges) {
+    if ((e.type === 'forwards' || e.type === 'resolves') && (e.source === 'internet' || byId.get(e.source)?.type === 'dns_name')) {
+      let t: string | undefined = e.target;
+      while (t) { exposedIds.add(t); t = byId.get(t)?.parent; }
+    }
+  }
+  const graphKids = new Map<string, TopoNode[]>();
+  for (const n of g.nodes) if (n.parent) { if (!graphKids.has(n.parent)) graphKids.set(n.parent, []); graphKids.get(n.parent)!.push(n); }
+  const summarize = (id: string): GroupSummary => {
+    const sum: GroupSummary = { machines: 0, down: 0, warn: 0, exposed: 0, unknown: 0 };
+    const walk = (pid: string) => {
+      for (const c of graphKids.get(pid) ?? []) {
+        if (c.type === 'host' || c.type === 'pve_node' || c.type === 'container') {
+          if (isUnknown(c)) sum.unknown++;
+          else if (c.infra || opts.showClients || view !== 'network') sum.machines++;
+          else continue;
+          if (c.status === 'down') sum.down++;
+          if (c.status === 'warn') sum.warn++;
+          if (exposedIds.has(c.id) && (c.type !== 'container' || view !== 'network')) sum.exposed++;
+        }
+        walk(c.id);
+      }
+    };
+    walk(id);
+    return sum;
+  };
+  for (const v of nodes) if (v.collapsed || v.node.type === 'network') v.summary = summarize(v.node.id);
+
   // Empty network boxes (no hosts shown) read as clutter: show them as plain nodes.
   for (const v of nodes) if (v.isGroup && !nodes.some((c) => c.parent === v.node.id)) v.isGroup = false;
 
@@ -210,8 +271,29 @@ export function buildView(view: MapView, g: TopologyGraph, opts: ViewOptions): V
     nodes,
     edges: [...edges.values()].filter((e) => visibleSet.has(e.source) && visibleSet.has(e.target)),
     extraEdges: [...extra.values()].filter((e) => visibleSet.has(e.source) && visibleSet.has(e.target)),
+    tree: buildTree(),
   };
+
+  function buildTree(): TreeItem[] {
+    const out: TreeItem[] = [];
+    const roots = [...member.keys()].filter((id) => !parentOf(id));
+    const order = (ids: string[]) => ids
+      .map((id) => byId.get(id)!)
+      .sort((a, b) => TREE_RANK[a.type] - TREE_RANK[b.type] || a.label.localeCompare(b.label, undefined, { numeric: true }));
+    const walk = (ids: string[], depth: number, parent?: string) => {
+      for (const n of order(ids)) {
+        out.push({ node: n, parent, depth });
+        walk(children.get(n.id) ?? [], depth + 1, n.id);
+      }
+    };
+    walk(roots, 0);
+    return out;
+  }
 }
+
+const TREE_RANK: Record<TopoNode['type'], number> = {
+  internet: 0, gateway: 1, switch: 2, ap: 3, pve_node: 4, network: 5, host: 6, stack: 7, container: 8, dns_name: 9, proxy: 10, port_forward: 11,
+};
 
 /** Which view to jump to so a search hit is on screen. */
 export function viewFor(n: TopoNode): MapView {
