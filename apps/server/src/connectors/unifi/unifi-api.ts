@@ -360,6 +360,107 @@ export interface UniDdns {
   interface?: string;
 }
 
+/** Classic firewall rule (`rest/firewallrule`) — pre-zone-based firewall. */
+export interface UniFirewallRule {
+  _id: string;
+  name?: string;
+  enabled?: boolean;
+  action?: string; // accept | drop | reject
+  ruleset?: string; // WAN_IN | WAN_OUT | WAN_LOCAL | LAN_IN | LAN_OUT | LAN_LOCAL | GUEST_* | *V6_*
+  rule_index?: number;
+  protocol?: string;
+  protocol_match_excepted?: boolean;
+  logging?: boolean;
+  state_established?: boolean;
+  state_related?: boolean;
+  state_new?: boolean;
+  state_invalid?: boolean;
+  src_firewallgroup_ids?: string[];
+  src_address?: string;
+  src_mac_address?: string;
+  src_networkconf_id?: string;
+  src_networkconf_type?: string;
+  src_port?: string;
+  dst_firewallgroup_ids?: string[];
+  dst_address?: string;
+  dst_networkconf_id?: string;
+  dst_networkconf_type?: string;
+  dst_port?: string;
+  ipsec?: string;
+}
+
+/** Address / port group referenced by firewall rules (`rest/firewallgroup`). */
+export interface UniFirewallGroup {
+  _id: string;
+  name?: string;
+  group_type?: string; // address-group | port-group | ipv6-address-group
+  group_members?: string[];
+}
+
+/** Traffic rule (v2 `trafficrules`) — the "Traffic & Firewall Rules → Traffic rules" list. */
+export interface UniTrafficRule {
+  _id: string;
+  description?: string;
+  enabled?: boolean;
+  action?: string; // BLOCK | ALLOW
+  matching_target?: string; // INTERNET | IP | DOMAIN | APP | APP_CATEGORY | REGION
+  target_devices?: { type?: string; client_mac?: string; network_id?: string }[];
+  domains?: { domain?: string }[];
+  ip_addresses?: { ip_or_subnet?: string; port_ranges?: unknown[]; ports?: unknown[] }[];
+  ip_ranges?: { ip_start?: string; ip_stop?: string }[];
+  regions?: string[];
+  app_ids?: number[];
+  app_category_ids?: number[];
+  network_ids?: string[];
+  bandwidth_limit?: { enabled?: boolean; download_limit_kbps?: number; upload_limit_kbps?: number };
+  schedule?: { mode?: string; time_range_start?: string; time_range_end?: string; repeat_on_days?: string[] };
+}
+
+/** One side (source/destination) of a zone-based firewall policy. */
+export interface UniPolicyEndpoint {
+  zone_id?: string;
+  matching_target?: string; // ANY | IP | NETWORK | CLIENT | REGION | DOMAIN | APP …
+  matching_target_type?: string;
+  ips?: string[];
+  network_ids?: string[];
+  client_macs?: string[];
+  regions?: string[];
+  web_domains?: string[];
+  port?: string | number;
+  port_matching_type?: string; // ANY | SPECIFIC | OBJECT
+  match_opposite_ips?: boolean;
+  match_opposite_ports?: boolean;
+  ip_group_id?: string;
+  port_group_id?: string;
+}
+
+/** Zone-based firewall policy (v2 `firewall-policies`). */
+export interface UniFirewallPolicy {
+  _id: string;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  action?: string; // ALLOW | BLOCK | REJECT
+  index?: number;
+  predefined?: boolean;
+  protocol?: string;
+  ip_version?: string;
+  logging?: boolean;
+  connection_state_type?: string;
+  connection_states?: string[];
+  source?: UniPolicyEndpoint;
+  destination?: UniPolicyEndpoint;
+  schedule?: { mode?: string };
+}
+
+/** Firewall zone (v2 `firewall/zone`). */
+export interface UniFirewallZone {
+  _id: string;
+  name?: string;
+  zone_key?: string;
+  network_ids?: string[];
+}
+
 interface Session {
   cookie: string;
   /** The password this session logged in with — a changed (or wrong) password never rides on it. */
@@ -696,6 +797,58 @@ export class UniFiApi {
       })
       .sort((a, b) => (b.time ?? 0) - (a.time ?? 0))
       .slice(0, limit);
+  }
+
+  // ── Firewall (read-only) ──────────────────────────────────────────────────
+
+  /** GET a v2 site endpoint; `null` when this firmware doesn't have it (400/404). */
+  private async v2Get<T>(path: string): Promise<T[] | null> {
+    try {
+      const r = await this.request<unknown>('GET', `/proxy/network/v2/api/site/${encodeURIComponent(this.auth.site || 'default')}/${path}`);
+      if (Array.isArray(r)) return r as T[];
+      const data = (r as { data?: unknown }).data;
+      return Array.isArray(data) ? (data as T[]) : [];
+    } catch (err) {
+      if (err instanceof UniApiError && (err.status === 400 || err.status === 404 || err.status === 405)) return null;
+      throw err;
+    }
+  }
+
+  /** Classic GET that yields `null` instead of failing when the endpoint is gone. */
+  private async siteGetOptional<T>(path: string): Promise<T[] | null> {
+    try {
+      return await this.siteGet<T>(path);
+    } catch (err) {
+      if (err instanceof UniApiError && (err.status === 400 || err.status === 404)) return null;
+      throw err;
+    }
+  }
+
+  /** Classic (pre-zone) firewall rules; `null` if the firmware no longer serves them. */
+  async firewallRules(): Promise<UniFirewallRule[] | null> {
+    if (this.integrationOnly) return null;
+    return this.siteGetOptional<UniFirewallRule>('rest/firewallrule');
+  }
+
+  async firewallGroups(): Promise<UniFirewallGroup[] | null> {
+    if (this.integrationOnly) return null;
+    return this.siteGetOptional<UniFirewallGroup>('rest/firewallgroup');
+  }
+
+  async trafficRules(): Promise<UniTrafficRule[] | null> {
+    if (this.integrationOnly) return null;
+    return this.v2Get<UniTrafficRule>('trafficrules');
+  }
+
+  /** Zone-based firewall policies (Network 9+); `null` when the firmware has none. */
+  async firewallPolicies(): Promise<UniFirewallPolicy[] | null> {
+    if (this.integrationOnly) return null;
+    return this.v2Get<UniFirewallPolicy>('firewall-policies');
+  }
+
+  async firewallZones(): Promise<UniFirewallZone[] | null> {
+    if (this.integrationOnly) return null;
+    return this.v2Get<UniFirewallZone>('firewall/zone');
   }
 
   async dynamicDns(): Promise<UniDdns[]> {
