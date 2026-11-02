@@ -57,8 +57,8 @@ The connection test reports which mode is active.
 | Connected clients | `GET stat/sta` |
 | Known clients (blocked list) | `GET rest/user` |
 | Networks / Wi-Fi / port forwards | `GET rest/networkconf`, `rest/wlanconf`, `rest/portforward` |
-| Alarms | `GET rest/alarm?archived=false` |
-| Events (24h) | `GET stat/event?within=24` (best-effort; newer firmware may move these) |
+| Alarms | `GET list/alarm` (archived filtered client-side; `rest/alarm?archived=false` returns 400 on current UDM SE firmware) |
+| Events (24h) | `POST /proxy/network/v2/api/site/<site>/system-log/all` `{timestampFrom, timestampTo, pageNumber, pageSize}`; message templates filled from `parameters`. Falls back to `GET stat/event?within=24` on older firmware (current firmware returns nothing there). |
 | Device restart / locate / upgrade / PoE power-cycle / speed test | `POST cmd/devmgr` |
 | Client reconnect / block / unblock | `POST cmd/stamgr` |
 | Archive alarm(s) | `POST cmd/evtmgr` |
@@ -112,8 +112,7 @@ The whole console going unreachable is covered by the baseline connection monito
 
 Field names come from the community-documented classic API and are read defensively (all
 optional), so a mismatch blanks a value rather than breaking a list. Check against the real
-UDM SE: WAN slot names and `uptime_stats` keys (`WAN`/`WAN2`), `speedtest-status`, the
-`storage` array, and whether `stat/event` still returns data on current firmware.
+UDM SE: `speedtest-status` after a run, WAN2's ISP/latency (empty in `uptime_stats` on the live console), and the system-log severity values.
 
 Possible follow-ups: live updates over the console's WebSocket event stream (`subscribeLive`),
 throughput history from `stat/report/*`, DPI/traffic by app, and UniFi Protect / UNAS (separate

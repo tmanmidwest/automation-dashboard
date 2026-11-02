@@ -15,6 +15,7 @@ const STATUS_BAD = new Set([
   'down', 'degraded', 'expired', 'deactivated', // Cloudflare tunnel/zone/cert failures
   'failure', // Cloudflare Pages deploy failed
   'heartbeat_missed', 'adopt_failed', 'isolated', // UniFi device states
+  'critical', 'high', 'very_high', // UniFi event severities
 ]);
 const STATUS_GOOD = new Set([
   'running', 'active', 'enabled', 'on', 'online', 'available', 'connected', 'ok',
@@ -29,7 +30,7 @@ const STATUS_IDLE = new Set([
   'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
   'inactive', 'dns_only', 'deleted', // Cloudflare inactive tunnel / unproxied DNS record / revoked device
   'canceled', // Cloudflare Pages deploy canceled
-  'no_link', // UniFi switch port with nothing plugged in
+  'no_link', 'info', 'low', // UniFi idle switch port / informational event severities
   'blocked', 'dynamic', 'reserved', 'cached', // Technitium blocked domain / DHCP lease types / cached entry (informational, not alarming)
 ]);
 

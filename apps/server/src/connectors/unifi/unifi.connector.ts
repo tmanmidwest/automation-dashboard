@@ -639,9 +639,17 @@ export class UniFiConnector implements Connector {
             id: e._id,
             kind,
             name: e.msg || e.key || e._id,
-            status: e.subsystem ?? undefined,
-            details: { type: e.key ?? null, when: rel(e.time) ?? e.datetime ?? null },
-            tags: e.subsystem ? { subsystem: e.subsystem } : undefined,
+            status: e.severity ? e.severity.toLowerCase() : e.subsystem ?? undefined,
+            details: {
+              category: [e.subsystem, e.subcategory].filter(Boolean).join(' / ') || null,
+              type: e.key ?? null,
+              when: rel(e.time) ?? e.datetime ?? null,
+              at: fmtEpoch(e.time),
+            },
+            tags: {
+              ...(e.subsystem ? { category: e.subsystem } : {}),
+              ...(e.severity ? { severity: e.severity.toLowerCase() } : {}),
+            },
           }));
       }
       default:
