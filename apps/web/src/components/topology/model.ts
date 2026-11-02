@@ -336,7 +336,9 @@ export class TopoModel {
         return nodesOf((this.out.get(id) ?? []).filter((e) => e.type === 'routes').map((e) => this.byId.get(e.target))).sort(networkOrder).map((k) => this.asItem(k));
       case 'switch':
       case 'ap': {
-        const down = nodesOf((this.inc.get(id) ?? []).filter((e) => e.type === 'uplink').map((e) => this.byId.get(e.source))).filter((k) => this.visible(k));
+        // Everything plugged in or associated, phones and IoT included: that's what an AP or switch is for,
+        // so the "Phones & IoT clients" toggle doesn't hide them here.
+        const down = nodesOf((this.inc.get(id) ?? []).filter((e) => e.type === 'uplink').map((e) => this.byId.get(e.source)));
         return down.sort((a, b) => (RANK[a.type] ?? 9) - (RANK[b.type] ?? 9) || byLabel(a, b)).map((k) => this.asItem(k, (this.inc.get(id) ?? []).find((e) => e.source === k.id)?.label ?? undefined));
       }
       case 'network': {
@@ -396,7 +398,7 @@ export class TopoModel {
       }
       case 'switch':
       case 'ap': {
-        const c = (this.inc.get(id) ?? []).filter((e) => e.type === 'uplink' && this.byId.get(e.source) && this.visible(this.byId.get(e.source)!)).length;
+        const c = (this.inc.get(id) ?? []).filter((e) => e.type === 'uplink' && this.byId.get(e.source)).length;
         chips.push({ text: `${c} connected`, tone: 'plain' });
         break;
       }

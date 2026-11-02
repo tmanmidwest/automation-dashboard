@@ -93,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for 6h) is now refreshed as soon as a backup or retention prune finishes, instead of
   showing the pre-prune size until the cache expires.
 ### Fixed
+- **Architecture Map: access points and switches showed 0 connected** when every client on them
+  was a phone or IoT device: the count and the open row skipped clients hidden by the
+  "Phones & IoT clients" toggle. They now always count and list everything connected.
 - **Backblaze retention never pruned old snapshots** — `restic forget --keep-within`
   ran per host+paths group and always kept each group's newest snapshot. Cerebro's
   snapshots were recorded under the container id as hostname (new on every rebuild),
