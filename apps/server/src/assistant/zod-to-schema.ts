@@ -24,7 +24,7 @@ function convert(schema: z.ZodTypeAny): { node: Record<string, unknown>; optiona
   let description = current.description;
   while (current instanceof z.ZodOptional || current instanceof z.ZodDefault) {
     if (current instanceof z.ZodOptional) optional = true;
-    current = (current._def as { innerType: z.ZodTypeAny }).innerType;
+    current = current.unwrap() as z.ZodTypeAny;
     description = description ?? current.description;
   }
 
@@ -37,14 +37,14 @@ function mapType(schema: z.ZodTypeAny): Record<string, unknown> {
   if (schema instanceof z.ZodNumber) return { type: 'number' };
   if (schema instanceof z.ZodBoolean) return { type: 'boolean' };
   if (schema instanceof z.ZodArray) {
-    const el = convert((schema._def as { type: z.ZodTypeAny }).type);
+    const el = convert(schema.element as z.ZodTypeAny);
     return { type: 'array', items: el.node };
   }
   if (schema instanceof z.ZodRecord) {
     return { type: 'object', additionalProperties: true };
   }
   if (schema instanceof z.ZodEnum) {
-    return { type: 'string', enum: (schema._def as { values: string[] }).values };
+    return { type: 'string', enum: schema.options };
   }
   // Fallback: accept anything.
   return {};

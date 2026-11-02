@@ -200,7 +200,7 @@ export class ToolCatalogService {
           instanceId: z.string().describe('Connector instance id'),
           operationId: z.string().describe('Operation id from list_actions'),
           resourceId: z.string().optional().describe('Target resource id, for resource-scoped operations'),
-          values: z.record(z.unknown()).optional().describe('Operation field values (see list_actions fields)'),
+          values: z.record(z.string(), z.unknown()).optional().describe('Operation field values (see list_actions fields)'),
         },
         run: async ({ instanceId, operationId, resourceId, values }) => {
           const jobId = await this.instances.startOperation(
@@ -694,9 +694,9 @@ export class ToolCatalogService {
           appId: z.string().describe('Registered app id'),
           dockerInstanceId: z.string().describe('Target connector instance id (Docker host, or AWS for an ECS deploy)'),
           name: z.string().describe('Operator-chosen instance name (sanitized into the compose project name)'),
-          values: z.record(z.string()).optional().describe('Non-secret variable values keyed by name (omit → repo default)'),
-          secrets: z.record(z.string()).optional().describe('Secret variable values keyed by name (plaintext, one-time; stored encrypted in the vault)'),
-          ports: z.record(z.number()).optional().describe('Chosen host port per host_port variable name'),
+          values: z.record(z.string(), z.string()).optional().describe('Non-secret variable values keyed by name (omit → repo default)'),
+          secrets: z.record(z.string(), z.string()).optional().describe('Secret variable values keyed by name (plaintext, one-time; stored encrypted in the vault)'),
+          ports: z.record(z.string(), z.number()).optional().describe('Chosen host port per host_port variable name'),
           forceRebuild: z.boolean().optional().describe('docker compose build --no-cache (for repos that build their own image)'),
           targetKind: z.enum(['docker', 'ecs']).optional().describe("Deploy backend (default 'docker')"),
           taskCpu: z.string().optional().describe('ECS only: Fargate task CPU units (default 256)'),
@@ -730,9 +730,9 @@ export class ToolCatalogService {
           deploymentId: z.string().describe('Deployment id'),
           forceRebuild: z.boolean().optional().describe('docker compose build --no-cache'),
           edit: z.boolean().optional().describe('Apply the maps below before redeploying (an edit), rather than reusing the stored config'),
-          values: z.record(z.string()).optional().describe('Edited non-secret values (name→value); omit a key to keep the stored value'),
-          secrets: z.record(z.string()).optional().describe('Rotated secrets (name→value); omit or blank a key to keep the stored secret'),
-          ports: z.record(z.number()).optional().describe('Edited host ports (host_port var name→port); omit a key to keep the stored port'),
+          values: z.record(z.string(), z.string()).optional().describe('Edited non-secret values (name→value); omit a key to keep the stored value'),
+          secrets: z.record(z.string(), z.string()).optional().describe('Rotated secrets (name→value); omit or blank a key to keep the stored secret'),
+          ports: z.record(z.string(), z.number()).optional().describe('Edited host ports (host_port var name→port); omit a key to keep the stored port'),
         },
         run: (a) =>
           this.deployments.redeploy(
@@ -888,7 +888,7 @@ function monitorInputShape(): z.ZodRawShape {
   return {
     name: z.string().describe('Display name'),
     type: z.string().describe('Probe type id from list_monitor_types, e.g. "http", "ping", "tcp", "dns"'),
-    config: z.record(z.unknown()).describe('Probe config — the fields that probe type declares (see list_monitor_types)'),
+    config: z.record(z.string(), z.unknown()).describe('Probe config — the fields that probe type declares (see list_monitor_types)'),
     enabled: z.boolean().optional().describe('Start enabled (default true)'),
     intervalSec: z.number().optional().describe('Seconds between checks (default 60)'),
     retries: z.number().optional().describe('Retries before marking down (default 1)'),
@@ -925,14 +925,14 @@ function automationInputShape(opts?: { partial?: boolean }): z.ZodRawShape {
   const partial = opts?.partial ?? false;
   const name = z.string().describe('Rule name');
   const trigger = z
-    .record(z.unknown())
+    .record(z.string(), z.unknown())
     .describe("When to fire: {type:'event', kinds?, severities?, source?, textContains?} or {type:'schedule', cron}");
   return {
     name: partial ? name.optional() : name,
     enabled: z.boolean().optional().describe('Whether the rule is active (default true)'),
     trigger: partial ? trigger.optional() : trigger,
-    conditions: z.array(z.record(z.unknown())).optional().describe("Conditions (AND'd). See create_automation for shapes."),
-    actions: z.array(z.record(z.unknown())).optional().describe('Actions to run in order. See create_automation for shapes.'),
+    conditions: z.array(z.record(z.string(), z.unknown())).optional().describe("Conditions (AND'd). See create_automation for shapes."),
+    actions: z.array(z.record(z.string(), z.unknown())).optional().describe('Actions to run in order. See create_automation for shapes.'),
     cooldownSec: z.number().optional().describe("Don't re-fire within this many seconds (default 60)"),
   };
 }
