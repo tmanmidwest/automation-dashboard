@@ -603,7 +603,9 @@ export class UniFiApi {
   /** Active (un-archived) alarms. */
   async alarms(): Promise<UniAlarm[]> {
     if (this.integrationOnly) return [];
-    const all = await this.siteGet<UniAlarm>('rest/alarm?archived=false');
+    // `list/alarm` works across firmware; `rest/alarm?archived=false` returns
+    // api.err.InvalidObject on current UDM SE releases. Filter archived ones here.
+    const all = await this.siteGet<UniAlarm>('list/alarm');
     return all.filter((a) => !a.archived);
   }
 
