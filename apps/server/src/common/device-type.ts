@@ -19,6 +19,11 @@ export interface DeviceTypeGuess {
 
 /** Names people give devices / devices give themselves. Checked before the maker. */
 const NAME_RULES: [RegExp, string][] = [
+  [/fellow|aiden|coffee|espresso|brew|kettle|keurig|nespresso/i, 'Coffee maker'],
+  [/garage/i, 'Garage door controller'],
+  [/net_ac_|\bac[-_ ]?unit|mini-?split|hvac|air-?con/i, 'Air conditioner / HVAC'],
+  [/wled|led-?strip|govee/i, 'LED lighting controller'],
+  [/unas|\bnas\b|synology|diskstation|qnap|truenas/i, 'NAS / storage'],
   [/roku/i, 'Streaming player / Roku TV'],
   [/apple-?tv|appletv/i, 'Streaming player (Apple TV)'],
   [/fire-?tv|firestick|aft[a-z]{2,}/i, 'Streaming player (Fire TV)'],
@@ -38,10 +43,10 @@ const NAME_RULES: [RegExp, string][] = [
   [/xbox|playstation|\bps[345]\b|nintendo|switch-?console/i, 'Game console'],
   [/thermostat|ecobee|nest-?(learning|thermostat)/i, 'Thermostat'],
   [/\bhue\b|bulb|light|lamp|lutron|caseta/i, 'Smart lighting'],
-  [/plug|outlet|kasa|wemo|shelly|tasmota|\besp[-_]/i, 'Smart plug / IoT'],
+  [/plug|outlet|kasa|wemo|shelly|tasmota/i, 'Smart plug'],
+  [/\besp(32|8266)?[a-z0-9]*[-_]/i, 'Smart home device (ESP32 board)'],
   [/vacuum|roomba|roborock|ecovacs/i, 'Robot vacuum'],
   [/washer|dryer|fridge|oven|dishwasher|\brange\b/i, 'Appliance'],
-  [/\bnas\b|synology|diskstation|qnap|truenas/i, 'NAS / storage'],
   [/raspberry|\bpi\d?\b|-pi\b/i, 'Raspberry Pi'],
 ];
 
@@ -52,7 +57,11 @@ const MAKER_RULES: [RegExp, string][] = [
   [/\btcl\b|tcl king/i, 'Smart TV (TCL)'],
   [/vizio/i, 'Smart TV (Vizio)'],
   [/sonos/i, 'Speaker (Sonos)'],
-  [/espressif|tuya|beken|shenzhen bilian|hui zhou gaoshengda|realtek semiconductor.*iot/i, 'Smart plug / IoT'],
+  // Wi-Fi chip / module makers: they're inside everything from plugs to coffee makers,
+  // so the maker alone only says "some smart home gadget".
+  [/espressif|beken|shenzhen bilian|hui zhou gaoshengda|realtek semiconductor.*iot/i, 'Smart home device (Wi-Fi module)'],
+  [/tuya/i, 'Smart home device (Tuya)'],
+  [/midea|gree electric|daikin|carrier|lennox|fujitsu general/i, 'Air conditioner / HVAC'],
   [/\bring\b|ring llc/i, 'Camera (Ring)'],
   [/wyze|reolink|hikvision|dahua|amcrest|arlo/i, 'Camera'],
   [/ecobee/i, 'Thermostat'],

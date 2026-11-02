@@ -42,7 +42,9 @@ you have. Nothing is shrunk to fit one screen.
 
 Cerebro remembers every client MAC each UniFi connector reports (table `NetworkDevice`,
 checked every 2 minutes). The first scan after a UniFi connector is added records what's
-already there as known, quietly. After that, a MAC never seen before is saved as *new* and
+already there as known, quietly. A device UniFi first saw before that scan (one that was
+simply offline at the time, like an AC unit that wakes up now and then) is also recorded as
+known without an alert. After that, a MAC never seen before is saved as *new* and
 raises the **New device on the network** alert (UniFi Network category; email by default,
 change it under Settings → Notifications). Devices with a private (randomized) MAC, usually
 phones and tablets, are listed but don't alert unless you tick "Also send an alert for
@@ -73,7 +75,7 @@ with where it came from:
    isn't a documented API; if it's missing, Cerebro falls back to 2.
 2. **Guess from name / Guess from maker**: rules in `apps/server/src/common/device-type.ts`
    on the device's name or hostname (e.g. "roku", "iphone", "printer") and then its maker
-   (Hisense → Smart TV, Espressif → smart plug / IoT, Fellow → coffee maker).
+   (Hisense → Smart TV, Reolink → camera). Wi-Fi chip makers like Espressif or Tuya are inside all kinds of gadgets, so they only give "Smart home device"; the name usually says more ("Fellow-Aiden" → coffee maker, "wled-…" → LED controller).
 3. **Set by you**: **Change / Set type** saves your answer per MAC (`PUT /api/devices/:mac/type`,
    `connectors:action`, audited). It beats both guesses; "Use the guess" clears it.
 
