@@ -160,3 +160,25 @@ export function fingerprintType(db: FingerprintDb | null | undefined, c: Fingerp
     source: 'UniFi fingerprint',
   };
 }
+
+/** MAC makers that hand out addresses to virtual machines. */
+const HYPERVISOR_MAKERS = /proxmox|vmware|qemu|xensource|parallels|virtualbox|oracle|microsoft|red hat|nutanix|citrix/i;
+
+/**
+ * The type to show: UniFi's fingerprint first, else the name/maker guess. One exception:
+ * UniFi fingerprints from network behaviour, so a Raspberry Pi or mini PC running
+ * containers can come back as "Virtual Machine". When the MAC belongs to a hardware
+ * maker (not a hypervisor) the maker wins, with UniFi's answer kept as a note.
+ */
+export function resolveDeviceType(
+  fp: DeviceTypeGuess | null,
+  d: { name?: string | null; hostname?: string | null; vendor?: string | null },
+): DeviceTypeGuess | null {
+  const guess = guessDeviceType(d);
+  if (fp && /virtual/i.test(fp.type) && d.vendor && !HYPERVISOR_MAKERS.test(d.vendor)) {
+    const byMaker = guessDeviceType({ vendor: d.vendor });
+    const hw = guess && !/virtual/i.test(guess.type) ? guess : byMaker && !/virtual/i.test(byMaker.type) ? byMaker : null;
+    if (hw) return { ...hw, model: `UniFi says ${[fp.type, fp.model].filter(Boolean).join(' · ')}` };
+  }
+  return fp ?? guess;
+}

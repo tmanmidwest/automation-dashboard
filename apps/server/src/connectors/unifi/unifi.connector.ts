@@ -1,5 +1,5 @@
 import { isPrivateMac, ouiVendor } from '../../common/oui';
-import { fingerprintType, guessDeviceType, parseFingerprintDb, type FingerprintDb } from '../../common/device-type';
+import { fingerprintType, parseFingerprintDb, resolveDeviceType, type FingerprintDb } from '../../common/device-type';
 import type {
   Connector,
   ConnectorContext,
@@ -1133,7 +1133,7 @@ export class UniFiConnector implements Connector {
 
   private toClientResource(c: UniClient, byMac: Map<string, UniDevice>, fp: FingerprintDb | null): ConnectorResource {
     const via = this.clientVia(c, byMac);
-    const kind = fingerprintType(fp, c) ?? guessDeviceType({ name: clientName(c), hostname: c.hostname, vendor: clientVendor(c) });
+    const kind = resolveDeviceType(fingerprintType(fp, c), { name: clientName(c), hostname: c.hostname, vendor: clientVendor(c) });
     const tags: Record<string, string> = { connection: c.is_wired ? 'wired' : 'wireless' };
     if (c.network) tags.network = c.network;
     if (c.essid) tags.ssid = c.essid;
