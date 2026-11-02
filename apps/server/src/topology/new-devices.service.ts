@@ -57,7 +57,7 @@ export class NewDevicesService {
   /** Read one connector's clients, record them, and alert on any never seen before. */
   async scan(inst: { id: string; name: string }): Promise<number> {
     const clients = await this.instances.listResources(inst.id, 'client');
-    const baselined = !!(await this.settings.get<string>(baselineKey(inst.id)));
+    const baselined = (await this.settings.get<string>(baselineKey(inst.id))) || null;
     const alertPrivate = !!(await this.settings.get<boolean>(ALERT_PRIVATE_KEY));
     const seen = new Map<string, ConnectorResource>();
     for (const c of clients) {
@@ -78,26 +78,32 @@ export class NewDevicesService {
       deviceType: str(c.details?.deviceType),
     });
 
+    // UniFi remembers clients that were offline during the first scan (an AC unit that only
+    // wakes up now and then): anything it first saw before Cerebro started watching isn't new.
+    const watchingSince = baselined ? new Date(baselined) : now;
     const fresh: NetworkDevice[] = [];
     for (const [mac, c] of seen) {
       if (existing.has(mac)) {
         await this.prisma.networkDevice.update({ where: { mac }, data: { ...fields(c), lastSeenAt: now } });
         continue;
       }
+      const unifiFirst = str(c.details?.firstSeenAt);
+      const seenBefore = !!unifiFirst && new Date(unifiFirst).getTime() < watchingSince.getTime();
+      const isNew = !!baselined && !seenBefore;
       const row = await this.prisma.networkDevice.create({
         data: {
           mac,
           instanceId: inst.id,
           ...fields(c),
           privateMac: isPrivateMac(mac),
-          status: baselined ? 'new' : 'known',
-          reviewedAt: baselined ? null : now,
-          reviewedBy: baselined ? null : 'first scan',
+          status: isNew ? 'new' : 'known',
+          reviewedAt: isNew ? null : now,
+          reviewedBy: isNew ? null : baselined ? 'known to UniFi before Cerebro started watching' : 'first scan',
           firstSeenAt: now,
           lastSeenAt: now,
         },
       });
-      if (baselined) fresh.push(row);
+      if (isNew) fresh.push(row);
     }
     if (!baselined) {
       await this.settings.set(baselineKey(inst.id), now.toISOString());

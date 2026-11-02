@@ -42,7 +42,9 @@ you have. Nothing is shrunk to fit one screen.
 
 Cerebro remembers every client MAC each UniFi connector reports (table `NetworkDevice`,
 checked every 2 minutes). The first scan after a UniFi connector is added records what's
-already there as known, quietly. After that, a MAC never seen before is saved as *new* and
+already there as known, quietly. A device UniFi first saw before that scan (one that was
+simply offline at the time, like an AC unit that wakes up now and then) is also recorded as
+known without an alert. After that, a MAC never seen before is saved as *new* and
 raises the **New device on the network** alert (UniFi Network category; email by default,
 change it under Settings → Notifications). Devices with a private (randomized) MAC, usually
 phones and tablets, are listed but don't alert unless you tick "Also send an alert for

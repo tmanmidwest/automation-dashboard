@@ -21,6 +21,7 @@ export interface DeviceTypeGuess {
 const NAME_RULES: [RegExp, string][] = [
   [/fellow|aiden|coffee|espresso|brew|kettle|keurig|nespresso/i, 'Coffee maker'],
   [/garage/i, 'Garage door controller'],
+  [/net_ac_|\bac[-_ ]?unit|mini-?split|hvac|air-?con/i, 'Air conditioner / HVAC'],
   [/wled|led-?strip|govee/i, 'LED lighting controller'],
   [/unas|\bnas\b|synology|diskstation|qnap|truenas/i, 'NAS / storage'],
   [/roku/i, 'Streaming player / Roku TV'],
@@ -60,6 +61,7 @@ const MAKER_RULES: [RegExp, string][] = [
   // so the maker alone only says "some smart home gadget".
   [/espressif|beken|shenzhen bilian|hui zhou gaoshengda|realtek semiconductor.*iot/i, 'Smart home device (Wi-Fi module)'],
   [/tuya/i, 'Smart home device (Tuya)'],
+  [/midea|gree electric|daikin|carrier|lennox|fujitsu general/i, 'Air conditioner / HVAC'],
   [/\bring\b|ring llc/i, 'Camera (Ring)'],
   [/wyze|reolink|hikvision|dahua|amcrest|arlo/i, 'Camera'],
   [/ecobee/i, 'Thermostat'],

@@ -322,7 +322,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
         status: statusOf(c.status),
         statusText: c.status,
         networkName: c.tags?.network,
-        details: { source: u.inst.name, items: detailItems(c.details, ['up', 'down', 'deviceType', 'deviceModel', 'typeFrom']) },
+        details: { source: u.inst.name, items: detailItems(c.details, ['up', 'down', 'deviceType', 'deviceModel', 'typeFrom', 'firstSeenAt']) },
         source: { instanceId: u.inst.id, connectorId: 'unifi', name: u.inst.name, kind: 'client', resourceId: c.id },
         deviceType: str(c.details?.deviceType)
           ? { name: str(c.details?.deviceType)!, model: str(c.details?.deviceModel) ?? undefined, source: str(c.details?.typeFrom) ?? 'Guess' }

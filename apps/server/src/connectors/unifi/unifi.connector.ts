@@ -1169,6 +1169,8 @@ export class UniFiConnector implements Connector {
         firstSeen: fmtEpoch(c.first_seen),
         lastSeen: fmtEpoch(c.last_seen),
         guest: c.is_guest ? 'yes' : null,
+        /** Machine-readable first sighting, for new-device detection (not shown on the map). */
+        firstSeenAt: c.first_seen ? new Date(c.first_seen * 1000).toISOString() : null,
       },
       tags,
     };
