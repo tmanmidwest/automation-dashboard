@@ -324,6 +324,24 @@ export interface UniEvent {
   time?: number;
   datetime?: string;
   subsystem?: string;
+  severity?: string;
+  subcategory?: string;
+}
+
+/** One entry from the v2 system log (`system-log/all`). */
+export interface UniSystemLogEntry {
+  id?: string;
+  key?: string;
+  event?: string;
+  category?: string;
+  subcategory?: string;
+  severity?: string;
+  timestamp?: number;
+  title?: string;
+  title_raw?: string;
+  message?: string;
+  message_raw?: string;
+  parameters?: Record<string, { id?: string; name?: string } | undefined>;
 }
 
 export interface UniDdns {
@@ -609,10 +627,54 @@ export class UniFiApi {
     return all.filter((a) => !a.archived);
   }
 
-  /** Recent events (last `hours`). Newer firmware moved events to a v2 system log; best-effort. */
+  /**
+   * Recent events (last `hours`), newest first. Current Network releases dropped the
+   * classic `stat/event` (it returns nothing) in favour of the v2 system log
+   * (`POST /proxy/network/v2/api/site/<site>/system-log/all`); try that first and fall
+   * back to `stat/event` on older firmware.
+   */
   async events(hours = 24, limit = 200): Promise<UniEvent[]> {
     if (this.integrationOnly) return [];
-    return this.siteGet<UniEvent>(`stat/event?within=${hours}&_limit=${limit}&_sort=-time`);
+    try {
+      return await this.systemLog(hours, limit);
+    } catch (err) {
+      if (err instanceof UniApiError && err.status && err.status !== 404 && err.status !== 400) throw err;
+      return this.siteGet<UniEvent>(`stat/event?within=${hours}&_limit=${limit}&_sort=-time`);
+    }
+  }
+
+  private async systemLog(hours: number, limit: number): Promise<UniEvent[]> {
+    const to = Date.now();
+    const from = to - hours * 3_600_000;
+    const pageSize = 500;
+    const raw: UniSystemLogEntry[] = [];
+    for (let page = 0; page < 4; page++) {
+      const r = await this.request<{ data?: UniSystemLogEntry[]; total_page_count?: number }>(
+        'POST',
+        `/proxy/network/v2/api/site/${encodeURIComponent(this.auth.site || 'default')}/system-log/all`,
+        { timestampFrom: from, timestampTo: to, pageNumber: page, pageSize },
+      );
+      if (!Array.isArray(r.data)) throw new UniApiError('system-log: no data array in response', 404);
+      raw.push(...r.data);
+      if (page + 1 >= (r.total_page_count ?? 0)) break;
+    }
+    return raw
+      .map((e) => {
+        // Messages are templates like "{CLIENT} connected to {WLAN}"; fill them from `parameters`.
+        const template = e.message ?? e.message_raw ?? e.title ?? e.title_raw ?? e.key ?? '';
+        const msg = template.replace(/\{([A-Z0-9_]+)\}/g, (whole, k: string) => e.parameters?.[k]?.name ?? e.parameters?.[k]?.id ?? whole);
+        return {
+          _id: e.id ?? `${e.key}:${e.timestamp}`,
+          key: e.key ?? e.event,
+          msg,
+          time: e.timestamp,
+          subsystem: e.category,
+          severity: e.severity,
+          subcategory: e.subcategory,
+        } satisfies UniEvent;
+      })
+      .sort((a, b) => (b.time ?? 0) - (a.time ?? 0))
+      .slice(0, limit);
   }
 
   async dynamicDns(): Promise<UniDdns[]> {
