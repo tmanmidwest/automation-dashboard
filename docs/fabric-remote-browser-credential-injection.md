@@ -1,6 +1,6 @@
 # Cerebro Fabric — Remote Browser credential injection (web autofill)
 
-> **Status: P1 BUILT (2026-10-01) — green, NOT committed / not live-tested.** This is the
+> **Status: P1 BUILT (2026-10-01) and merged to `main`.** This is the
 > buildable spec for adding **web credential injection** to the Fabric **Remote Browser**
 > (the ephemeral Chromium-in-a-container jump, formerly "Web Jump"). It extends the existing
 > Remote Browser broker (`remote-browser.service.ts`) and reuses the vault,

@@ -1,6 +1,6 @@
 # The Computer — an in-app LLM assistant
 
-Status: **Phases 1–4 BUILT — the full arc is code-complete. All three builds green; not committed / not live-tested.** Last updated 2026-09-10.
+Status: **Shipped and in `main`.** Phases 1–4 are built, and the later additions below (agent profiles, MCP client, per-agent MCP tool controls, Saviynt Zuma registry) are merged too. Last updated 2026-11-02.
 
 > **External agent catalog.** Inventories such as Saviynt read every agent's metadata (owners,
 > labels, status, model, revision) from `GET /api/v1/agents` with an `agents:read` token or a

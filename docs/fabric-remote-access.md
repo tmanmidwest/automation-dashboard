@@ -176,6 +176,17 @@ pre-build design record; where they differ, this section wins.
   density toggle (persisted). Each machine shows OS, hostname, **local IP**, agent version, status,
   connect chips, **tags + a free-form note**, and an **edit** button (`PATCH /api/fabric/agents/:id`).
 
+### Session tabs (header + browser title)
+- Each session tab leads with the **endpoint**, not the agent: `SSH · web-server-01 10.0.0.5:22`,
+  with the Waypoint the session rides through shown as a separate **"via pi-gateway01"** chip.
+  A route with no label shows its host as the name plus `:port`; endpoint-mode agents show the
+  agent's name and `127.0.0.1:<port>`. Remote Browser sessions are labelled **Web**.
+- The browser tab is titled after the endpoint too: `web-server-01 · SSH — Cerebro`.
+- On a Waypoint card, routes are grouped SSH → RDP → VNC → Web and natural-sorted by name
+  (`docker02` before `docker10`), shown as compact tiles. The Routes panel and each type group
+  collapse (remembered per browser in `fabric.routes.collapsed`), and search narrows a Waypoint to
+  the matching routes ("5 of 19"). See [fabric-waypoints.md](fabric-waypoints.md).
+
 ### Data model + versions
 - Migrations: `0022_fabric` (Agent/AgentTarget/FabricSession) · `0023_fabric_hostkey`
   (`AgentTarget.hostKey`) · `0024_fabric_ca_trust` (`Agent.caTrustedAt`) · `0025_fabric_agent_meta`

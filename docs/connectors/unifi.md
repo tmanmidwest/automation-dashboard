@@ -1,15 +1,24 @@
 # UniFi Network connector
 
-**Status:** built (connector `v0.1.0`), tested against a mocked UniFi API only. Not yet
-live-tested against the real UDM SE.
+**Status:** built (connector `v0.1.0`) and **live** against the home UDM SE (UniFi OS 5.1,
+Network 9.x) since 2026-11-02. Devices, WAN, networks, Wi-Fi with client counts, port forwards,
+blocked clients, Events and the system-log-based Alarms are verified on the real console.
+
+## Network path (read this first)
+
+The Cerebro host must reach the console's web UI on **TCP 443**. Use the gateway address on
+Cerebro's own VLAN (live: `https://192.168.44.1`), not a cross-VLAN address.
+
+If the connection test times out, the cause is almost always the UniFi firewall. Traffic
+addressed **to the UDM itself** is not covered by a "LAN In" rule. Add a **LAN Local** rule:
+source = the Cerebro host (live: `192.168.44.85`), destination = the gateway IP, TCP 443, Accept.
+Check from the Cerebro host with `curl -k -m 5 https://192.168.44.1/` (an HTML response means the
+path is open).
 
 > **History.** A first Integration-API-only version was built and shelved on 2026-09-06
-> because the Cerebro host could not reach the UDM's management interface
-> (`192.168.10.1:443`). A `curl` from the host timed out too, so the cause was the network
-> path (cross-VLAN access to the gateway blocked), not the code. **That path still has to be
-> open** for this connector to work: allow the Cerebro host → console on TCP 443 in the
-> UniFi firewall, or run Cerebro on a subnet that can reach it. Until then the connector
-> shows "Console unreachable".
+> because the host couldn't reach `192.168.10.1:443` across VLANs. The connector that shipped
+> (PRs #26, #27, #28) is a rewrite on the classic Network API; the path was fixed with the LAN
+> Local rule above.
 
 Monitors and manages a UniFi OS console (built for the **UDM SE**; works with UDM / UDM Pro /
 UCG / UDR / UXG running the Network application).
@@ -35,9 +44,9 @@ events, config, and commands.
 
 | Field | Secret | Notes |
 | --- | --- | --- |
-| `baseUrl` | no | `https://192.168.10.1`, the console's web UI address |
+| `baseUrl` | no | The console's web UI address, e.g. `https://192.168.44.1` (gateway IP on Cerebro's VLAN) |
 | `apiKey` | yes | Recommended. Network → Settings → Control Plane → Integrations. Sent as `X-API-KEY`. |
-| `username` / `password` | password yes | Alternative: a **local-only** admin. `POST /api/auth/login` → `TOKEN` cookie + `X-CSRF-Token`; session cached 30 min (keyed by console + user + password hash), refreshed on 401. |
+| `username` / `password` | password yes | Alternative: a **local-only** admin. `POST /api/auth/login` → `TOKEN` cookie + `X-CSRF-Token`; session cached 30 min in memory, refreshed on 401. |
 | `site` | no | Site short name, default `default` |
 | `verifyTls` | no | Default **off** (consoles ship a self-signed cert) |
 
@@ -110,11 +119,17 @@ The overview's guest list is every device, offline ones first.
 
 The whole console going unreachable is covered by the baseline connection monitor.
 
-## To verify live
+## Known gaps on the live console
 
 Field names come from the community-documented classic API and are read defensively (all
-optional), so a mismatch blanks a value rather than breaking a list. Check against the real
-UDM SE: `speedtest-status` after a run, WAN2's ISP/latency (empty in `uptime_stats` on the live console), and the system-log severity values.
+optional), so a mismatch blanks a value rather than breaking a list.
+
+- Classic alarms (`list/alarm`, `rest/alarm`) return 400 on this firmware, so Alarms are the
+  system log's high-severity entries and can't be archived. `unifiAlarms` stays empty.
+- WAN2 reports no ISP or latency in `uptime_stats`.
+- Speed-test tiles appear only after a test has run (Internet/WAN tab → Run speed test).
+- Clients behind unmanaged switches show their last recorded uplink and last-known IP.
+- Still to check in the UI: the switch Ports panel, a device detail drawer, and Locate on an AP.
 
 Possible follow-ups: live updates over the console's WebSocket event stream (`subscribeLive`),
 throughput history from `stat/report/*`, DPI/traffic by app, and UniFi Protect / UNAS (separate
