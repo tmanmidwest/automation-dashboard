@@ -240,6 +240,13 @@ export interface UniClient {
   use_fixedip?: boolean;
   fixed_ip?: string;
   uplink_mac?: string;
+  /** Newer firmware: the last device/port a wired client was seen behind (also set behind unmanaged switches). */
+  last_uplink_mac?: string;
+  last_uplink_name?: string;
+  last_uplink_remote_port?: number;
+  /** Last known IP when `ip` is empty (e.g. a client that hasn't renewed recently). */
+  last_ip?: string;
+  display_name?: string;
 }
 
 /** A known (historic) client from rest/user — used for the blocked list. */
@@ -394,6 +401,8 @@ export class UniFiApi {
   /** Set once the classic API refused the API key and we've switched to the Integration API. */
   private integrationOnly = false;
   private integrationSiteId?: string;
+  /** Set once the console answers the classic alarm list with HTTP 400 (alarms live in the system log). */
+  private noClassicAlarms = false;
 
   constructor(private readonly auth: UniAuth) {}
 
@@ -619,12 +628,24 @@ export class UniFiApi {
   }
 
   /** Active (un-archived) alarms. */
-  async alarms(): Promise<UniAlarm[]> {
+  /**
+   * Active (un-archived) alarms, or `null` when this firmware has no classic alarm list.
+   * Current UDM SE releases answer both `list/alarm` and `rest/alarm` with HTTP 400
+   * api.err.InvalidObject: alarms were folded into the v2 system log there.
+   */
+  async alarms(): Promise<UniAlarm[] | null> {
     if (this.integrationOnly) return [];
-    // `list/alarm` works across firmware; `rest/alarm?archived=false` returns
-    // api.err.InvalidObject on current UDM SE releases. Filter archived ones here.
-    const all = await this.siteGet<UniAlarm>('list/alarm');
-    return all.filter((a) => !a.archived);
+    if (this.noClassicAlarms) return null;
+    try {
+      const all = await this.siteGet<UniAlarm>('list/alarm');
+      return all.filter((a) => !a.archived);
+    } catch (err) {
+      if (err instanceof UniApiError && err.status === 400) {
+        this.noClassicAlarms = true;
+        return null;
+      }
+      throw err;
+    }
   }
 
   /**

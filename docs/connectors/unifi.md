@@ -57,7 +57,7 @@ The connection test reports which mode is active.
 | Connected clients | `GET stat/sta` |
 | Known clients (blocked list) | `GET rest/user` |
 | Networks / Wi-Fi / port forwards | `GET rest/networkconf`, `rest/wlanconf`, `rest/portforward` |
-| Alarms | `GET list/alarm` (archived filtered client-side; `rest/alarm?archived=false` returns 400 on current UDM SE firmware) |
+| Alarms | `GET list/alarm` (archived filtered client-side). Current UDM SE firmware (UniFi OS 5.x) answers both alarm endpoints with 400 `api.err.InvalidObject`; then the Alarms tab shows the system log's high/very_high/critical entries (not archivable). |
 | Events (24h) | `POST /proxy/network/v2/api/site/<site>/system-log/all` `{timestampFrom, timestampTo, pageNumber, pageSize}`; message templates filled from `parameters`. Falls back to `GET stat/event?within=24` on older firmware (current firmware returns nothing there). |
 | Device restart / locate / upgrade / PoE power-cycle / speed test | `POST cmd/devmgr` |
 | Client reconnect / block / unblock | `POST cmd/stamgr` |
@@ -75,7 +75,7 @@ The connection test reports which mode is active.
 | `network` | — | Purpose, subnet, VLAN, DHCP range. |
 | `wlan` | enable, disable | Clients per SSID, security, bands, network. |
 | `port_forward` | enable, disable | |
-| `alarm` | archive | Create-scope op **Archive all alarms**. |
+| `alarm` | archive | Create-scope op **Archive all alarms**. On firmware without classic alarms: high-severity system-log entries, read-only. |
 | `event` | — | Last 24h. |
 
 `listNodes` returns the gateway (CPU, memory, uptime).
@@ -90,7 +90,7 @@ Keys are prefixed `unifi` so they never merge into another connector's dashboard
 `unifiWanLatencyMs`, `unifiWanDownMbps`, `unifiWanUpMbps`, `unifiWanAvailabilityPct`,
 `unifiSpeedtestDownMbps`, `unifiSpeedtestUpMbps`, `unifiWanDrops`, `unifiGatewayCpuPct`,
 `unifiGatewayMemPct`, `unifiGatewayTempC`, `unifiStoragePct`, `unifiPoeWatts`, `unifiVpnUsers`,
-`unifiAlarms`. A metric is omitted when the console doesn't report it.
+`unifiAlarms` (classic alarms only), `unifiHighEvents24h`, `unifiThreats24h` (IPS blocks), `unifiFirewallBlocks24h`. A metric is omitted when the console doesn't report it.
 
 The overview's guest list is every device, offline ones first.
 
@@ -105,6 +105,8 @@ The overview's guest list is every device, offline ones first.
 | `unifi.storage` | `unifiStoragePct` |
 | `unifi.alarms` | `unifiAlarms` |
 | `unifi.firmware_updates` | `unifiFirmwareUpdates` |
+| `unifi.high_events` | `unifiHighEvents24h` |
+| `unifi.threats` | `unifiThreats24h` |
 
 The whole console going unreachable is covered by the baseline connection monitor.
 
