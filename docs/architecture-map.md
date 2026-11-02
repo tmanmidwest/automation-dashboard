@@ -38,6 +38,31 @@ you have. Nothing is shrunk to fit one screen.
   anything another connector knows about, or anything a proxy, port forward, DNS record
   or firewall rule points at.
 
+## New devices and blocking
+
+Cerebro remembers every client MAC each UniFi connector reports (table `NetworkDevice`,
+checked every 2 minutes). The first scan after a UniFi connector is added records what's
+already there as known, quietly. After that, a MAC never seen before is saved as *new* and
+raises the **New device on the network** alert (UniFi Network category; email by default,
+change it under Settings → Notifications). Devices with a private (randomized) MAC, usually
+phones and tablets, are listed but don't alert unless you tick "Also send an alert for
+private-MAC devices" in the New devices row.
+
+**Needs attention → New devices** lists them with MAC, maker, IP, network, where they're
+connected and when they appeared:
+
+- **Show** opens the device on the overview (turn on Phones & IoT clients if it's a plain client).
+- **Mark as known** clears it (**Mark all as known** clears the lot).
+- **Block** asks you to confirm, then runs the UniFi connector's own Block client action:
+  the device is kicked off and can't rejoin. Undo it from the UniFi connector's Blocked
+  clients tab (Unblock).
+
+Any UniFi client's open row also has a **Block** button. Marking and blocking need the
+`connectors:action` permission; the private-MAC setting needs `connectors:write`. Each is
+recorded in the audit log. API: `GET /api/devices?status=new|known|blocked`,
+`POST /api/devices/:mac/review {status: known|blocked}`, `POST /api/devices/review-all`,
+`PUT /api/devices/settings {alertPrivateMacs}`.
+
 ## Show as map
 
 **Show as map** on an open row (`?focus=`) draws that one thing and its links, left to
@@ -76,5 +101,5 @@ counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 ## Not yet
 
 Planned next: saved views and manual links for what can't be inferred, a posture layer
-(exposure paths, firmware/image updates, backup coverage, unknown devices as findings),
+(exposure paths, firmware/image updates, backup coverage),
 and live status push.

@@ -13,6 +13,7 @@ import { iconFor, STATUS_DOT, TYPE_ICON, TYPE_LABEL } from '@/components/topolog
 import { matches, TopoModel, type Chip, type Item, type Lane, type Tone } from '@/components/topology/model';
 import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
+import { BlockButton, NewDevicesRow, type DeviceList } from '@/components/topology/NewDevices';
 
 /**
  * Architecture Map: a scrolling overview of tiles (Edge, Networks, Compute, Apps), where a
@@ -85,18 +86,23 @@ export function ArchitectureMap() {
   const [refreshing, setRefreshing] = useState(false);
   const [showClients, setShowClients] = useState(false);
   const [q, setQ] = useState('');
+  const [newDevices, setNewDevices] = useState<DeviceList | null>(null);
+  const loadDevices = useCallback(() => {
+    api.get<DeviceList>('/api/devices?status=new').then(setNewDevices).catch(() => setNewDevices(null));
+  }, []);
 
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
     try {
       setGraph(await api.get<TopologyGraph>(`/api/topology${manual ? '?refresh=1' : ''}`));
       setErr(null);
+      loadDevices();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not load the map.');
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [loadDevices]);
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, [load]);
 
   const model = useMemo(() => (graph ? new TopoModel(graph, showClients) : null), [graph, showClients]);
@@ -178,7 +184,10 @@ export function ArchitectureMap() {
             <main className="flex-[999_1_640px] min-w-0 flex flex-col gap-7">
               <section aria-label="Needs attention" className="flex flex-col gap-2.5">
                 <div className="grid gap-2.5 grid-cols-[repeat(auto-fill,minmax(210px,1fr))]">
-                  {model.attention().map((a) => (
+                  {[
+                    ...(newDevices ? [{ id: 'grp:attn:new', count: newDevices.devices.length, title: 'New devices', sub: newDevices.devices.length ? 'Not seen before. Review them' : 'Nothing new on the network', tone: 'warn' as Tone }] : []),
+                    ...model.attention(),
+                  ].map((a) => (
                     <button key={a.id} id={`tile-${a.id}`} onClick={() => setPath(path[0] === a.id ? [] : [a.id])} disabled={!a.count}
                       className={cn('rounded-lg border bg-card px-4 py-3 flex items-center gap-3 text-left transition-colors enabled:hover:border-primary/70 disabled:opacity-60',
                         path[0] === a.id ? 'border-primary ring-1 ring-primary' : a.count && a.tone === 'down' ? 'border-red-500/50' : a.count && a.tone === 'warn' ? 'border-amber-400/50' : 'border-border')}>
@@ -191,7 +200,11 @@ export function ArchitectureMap() {
                     </button>
                   ))}
                 </div>
-                {path[0]?.startsWith('grp:attn') && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} />}
+                {path[0] === 'grp:attn:new' && newDevices && (
+                  <NewDevicesRow list={newDevices} onChanged={loadDevices} onClose={() => setPath([])}
+                    onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
+                )}
+                {path[0]?.startsWith('grp:attn') && path[0] !== 'grp:attn:new' && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} />}
               </section>
 
               {model.lanes.map((lane) => lane.items.length > 0 && (
@@ -270,6 +283,7 @@ function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: stri
   const reach = item.node ? model.reach(current) : [];
   const via = item.node ? model.via(current) : [];
   const leaf = kids.length === 0;
+  const unifiClient = item.node?.sources.find((s) => s.connectorId === 'unifi' && s.kind === 'client' && s.instanceId && s.resourceId);
 
   return (
     <div ref={rowRef} className="rounded-xl border border-primary/50 bg-primary/[0.04] p-4 flex flex-col gap-3.5 scroll-mt-4">
@@ -300,6 +314,7 @@ function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: stri
             <Button size="sm" variant="outline" onClick={() => setDetails((d) => !d)} aria-pressed={details}><Info className="h-3.5 w-3.5" /> {details ? 'Hide details' : 'Details'}</Button>
           )}
           {item.node && <Button size="sm" variant="outline" onClick={() => onMap(current)}><Crosshair className="h-3.5 w-3.5" /> Show as map</Button>}
+          {unifiClient && <BlockButton key={unifiClient.resourceId} instanceId={unifiClient.instanceId!} mac={unifiClient.resourceId!} name={item.label} />}
           <Button size="sm" variant="ghost" onClick={() => setPath([])} aria-label="Close"><X className="h-4 w-4" /></Button>
         </span>
       </div>

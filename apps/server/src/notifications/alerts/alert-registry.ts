@@ -270,6 +270,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
   },
   // ── UniFi Network ────────────────────────────────────────
   {
+    key: 'unifi.new_device',
+    label: 'New device on the network',
+    description: 'A client Cerebro has never seen before joined the network (by MAC address). Review it on the Architecture Map: mark it as known or block it. Devices using a private (randomized) MAC only alert if that is turned on for the UniFi connector.',
+    category: 'UniFi Network',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
     key: 'unifi.devices_offline',
     label: 'Devices offline over threshold',
     description: 'The number of UniFi devices (APs, switches, gateway) that are offline or missing heartbeats crossed the limit set on its page.',
