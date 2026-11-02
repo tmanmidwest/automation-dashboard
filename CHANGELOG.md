@@ -96,6 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for 6h) is now refreshed as soon as a backup or retention prune finishes, instead of
   showing the pre-prune size until the cache expires.
 ### Fixed
+- **Device types: Raspberry Pi shown as "Virtual Machine"** — UniFi's fingerprint labels some
+  container hosts as VMs; when the MAC belongs to a hardware maker rather than a hypervisor,
+  the maker now wins and UniFi's answer is kept as a note.
 - **Architecture Map: access points and switches showed 0 connected** when every client on them
   was a phone or IoT device: the count and the open row skipped clients hidden by the
   "Phones & IoT clients" toggle. They now always count and list everything connected.
