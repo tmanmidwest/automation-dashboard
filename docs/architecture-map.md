@@ -128,7 +128,9 @@ internet can see, from free public sources with no keys:
 | Containers whose release loses support within 90 days | Low | endoflife.date + Docker |
 | Shodan tags on the WAN address (compromised / malware → High, end-of-life → Medium, self-signed → Low) | varies | Shodan InternetDB |
 
-The port-forward finding also says whether Shodan has already listed that port. The WAN
+The port-forward finding also says whether Shodan has already listed that port. Outside-in findings link to their evidence instead of the map: Shodan's page for the
+address, the NVD entry for each CVE, and (for end-of-life software on the WAN) the bare
+`http://` / `https://` WAN address, which is the page scanners actually see. The WAN
 address is the UniFi gateway's public IP. What leaves Cerebro: the WAN address (to
 `internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date`), and a
 download of the CISA KEV list. Answers are cached (Shodan 6 h, others 24 h); if a source

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BellOff, Bell, ChevronDown, ChevronRight, Crosshair, ShieldCheck, X } from 'lucide-react';
+import { BellOff, Bell, ExternalLink, ChevronDown, ChevronRight, Crosshair, ShieldCheck, X } from 'lucide-react';
 import type { OutsideInSummary, PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -100,7 +100,9 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
             <ul className="flex flex-col gap-1">
               {f.affected.map((a, i) => (
                 <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
-                  {a.nodeId
+                  {a.url && !a.nodeId
+                    ? <a className="text-accent hover:underline inline-flex items-center gap-1" href={a.url} target="_blank" rel="noopener noreferrer" title="Opens in a new tab"><ExternalLink className="h-3 w-3" />{a.label}</a>
+                    : a.nodeId
                     ? <button className="text-accent hover:underline inline-flex items-center gap-1" onClick={() => onShow(a.nodeId!)} title="Show on the map"><Crosshair className="h-3 w-3" />{a.label}</button>
                     : <span>{a.label}</span>}
                   {a.note && <span className="text-xs text-muted-foreground break-all">{a.note}</span>}

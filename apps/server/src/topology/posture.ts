@@ -446,7 +446,8 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
         title: `${plural(stray.length, 'port is', 'ports are')} open on your WAN address with no port forward behind ${stray.length === 1 ? 'it' : 'them'}`,
         why: `Shodan's scanners found ${stray.join(', ')} open on ${w.ip}, but no UniFi port forward uses ${stray.length === 1 ? 'that port' : 'those ports'}. That usually means the gateway itself is answering (remote management, VPN, a UPnP mapping a device opened), or a rule that isn't in the forward list.`,
         fix: 'Check UniFi → Settings → Security / Internet → UPnP, remote access and VPN servers. Close the port if you don\'t recognise it; Shodan updates its data every few days.',
-        affected: stray.map((p) => ({ label: `${w.ip}:${p}`, nodeId: 'internet', note: `seen by Shodan (checked ${w.checkedAt.slice(0, 10)})` })),
+        affected: stray.map((p) => ({ label: `${w.ip}:${p}`, url: shodanUrl(w.ip), note: `seen by Shodan (checked ${w.checkedAt.slice(0, 10)})` })),
+        alsoOn: ['internet'],
         source: 'Shodan InternetDB',
       });
 
@@ -466,7 +467,7 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
         fix: 'Update the internet-facing software (the proxy on 80/443, or whatever the port forward points at). Afterwards Shodan re-scans within a few days and the list should shrink.',
         affected: [...kev, ...w.vulns.filter((v) => !kev.includes(v))].map((v) => {
           const k = intel.kev.get(v.toUpperCase());
-          return { label: v, nodeId: 'internet', note: k ? `CISA KEV: ${k.vulnerabilityName ?? k.product ?? ''}${k.knownRansomwareCampaignUse === 'Known' ? ' · used by ransomware' : ''}`.trim() : undefined };
+          return { label: v, url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v)}`, note: k ? `CISA KEV: ${k.vulnerabilityName ?? k.product ?? ''}${k.knownRansomwareCampaignUse === 'Known' ? ' · used by ransomware' : ''}`.trim() : undefined };
         }),
         source: kev.length ? 'Shodan InternetDB + CISA KEV' : 'Shodan InternetDB',
       });
@@ -487,7 +488,8 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
             ? 'A public port serves a self-signed certificate, so browsers warn and people learn to click through.'
             : 'A public port announces software that is past its end of life.',
         fix: sev === 'high' ? 'Treat it as an incident: check what answers on the open ports and which machine they forward to.' : 'Find which forward serves it and update or close it.',
-        affected: [{ label: w.ip, nodeId: 'internet', note: `ports ${w.ports.join(', ') || 'none'}` }],
+        affected: [{ label: w.ip, url: shodanUrl(w.ip), note: `ports ${w.ports.join(', ') || 'none'}` }],
+        alsoOn: ['internet'],
         source: 'Shodan InternetDB',
       });
     }
@@ -515,8 +517,14 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
         why:
           `Shodan saw ${hits.map((h) => h.label).join(', ')} on ${w.ip} (ports ${w.ports.join(', ')}). These releases no longer get fixes.` +
           (hits.every((h) => h.clientSide) ? ' They are browser-side libraries, so the risk is mostly cross-site scripting in the page that loads them, often a default or error page.' : ''),
-        fix: 'Find which proxy host or default page serves it (open the site and view the source), then update it or replace the default page.',
-        affected: hits.map((h) => ({ label: h.label, nodeId: 'internet', note: h.note })),
+        fix:
+          'Scanners visit your bare WAN address, not your host names, so what they saw is the page served when no host name matches, usually the proxy\'s default site. ' +
+          'Open the links below to see it. In Nginx Proxy Manager, Settings → Default Site → "No Response (444)" or "404 Page" removes that page (and stops answering scanners with a page at all).',
+        affected: [
+          ...hits.map((h) => ({ label: h.label, note: h.note, url: shodanUrl(w.ip) })),
+          ...w.ports.filter((p) => p === 80 || p === 443).map((p) => ({ label: `Open ${p === 443 ? 'https' : 'http'}://${w.ip}/`, url: `${p === 443 ? 'https' : 'http'}://${w.ip}/`, note: 'the page scanners see' })),
+        ],
+        alsoOn: ['internet'],
         source: 'Shodan InternetDB + endoflife.date',
       });
   }
@@ -571,3 +579,4 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
 }
 
 const fmtDayUTC = (d: Date) => d.toISOString().slice(0, 10);
+const shodanUrl = (ip: string) => `https://www.shodan.io/host/${encodeURIComponent(ip)}`;
