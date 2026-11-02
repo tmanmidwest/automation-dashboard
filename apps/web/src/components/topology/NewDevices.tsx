@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Ban, Check, CheckCheck, Crosshair, X } from 'lucide-react';
+import { Ban, Check, CheckCheck, Crosshair, Undo2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/auth/AuthContext';
@@ -236,4 +236,82 @@ export function DeviceType({ type, model, source, mac, instanceId, onSaved }: {
       {canEdit && <button className="text-accent hover:underline text-sm" onClick={() => { setValue(type ?? ''); setEditing(true); }}>{type ? 'Change' : 'Set type'}</button>}
     </span>
   );
+}
+
+/** A client blocked on a UniFi gateway (the connector's blocked_client list). */
+export interface BlockedDevice {
+  instanceId: string;
+  instanceName: string;
+  mac: string;
+  name: string;
+  vendor: string | null;
+  lastSeen: string | null;
+  note: string | null;
+}
+
+/** The open row for Needs attention → Blocked devices. */
+export function BlockedDevicesRow({ list, onChanged, onClose }: { list: BlockedDevice[]; onChanged: () => void; onClose: () => void }) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const unblock = async (d: BlockedDevice) => {
+    if (!window.confirm(`Unblock ${d.name} (${d.mac})?\n\nIt will be allowed back on the network.`)) return;
+    setBusy(d.mac);
+    setErr(null);
+    try {
+      await api.post(`/api/connectors/instances/${encodeURIComponent(d.instanceId)}/resources/blocked_client/${encodeURIComponent(d.mac)}/actions/unblock`, {});
+      await api.post(`/api/devices/${encodeURIComponent(d.mac)}/review`, { status: 'known' }).catch(() => undefined);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Unblock failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-primary/50 bg-primary/[0.04] p-4 flex flex-col gap-3.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <h3 className="text-base font-semibold">Blocked devices</h3>
+        <span className="text-sm text-muted-foreground">Blocked on the UniFi gateway. They can't join the network until unblocked.</span>
+        <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
+      </div>
+      {err && <div className="text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
+      {list.length === 0 ? (
+        <div className="text-sm text-muted-foreground">Nothing is blocked.</div>
+      ) : (
+        <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
+          {list.map((d) => (
+            <div key={`${d.instanceId}:${d.mac}`} className="rounded-lg border border-red-500/50 bg-card px-3.5 py-3 flex flex-col gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Ban className="h-4 w-4 shrink-0 text-red-500" />
+                <span className="text-[15px] font-semibold truncate">{d.name}</span>
+              </div>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[13px]">
+                <dt className="text-muted-foreground">MAC</dt>
+                <dd className="font-mono truncate">{d.mac}{isPrivate(d.mac) && <span className="ml-1.5 font-sans text-xs text-muted-foreground">(private)</span>}</dd>
+                {d.vendor && <><dt className="text-muted-foreground">Maker</dt><dd className="truncate">{d.vendor}</dd></>}
+                {d.lastSeen && <><dt className="text-muted-foreground">Last seen</dt><dd className="truncate">{d.lastSeen}</dd></>}
+                {d.note && <><dt className="text-muted-foreground">Note</dt><dd className="truncate">{d.note}</dd></>}
+                <dt className="text-muted-foreground">Blocked on</dt><dd className="truncate">{d.instanceName}</dd>
+              </dl>
+              {can('connectors:action') && (
+                <div className="pt-1">
+                  <Button size="sm" variant="outline" disabled={!!busy} onClick={() => unblock(d)}>
+                    <Undo2 className="h-3.5 w-3.5" /> Unblock
+                  </Button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isPrivate(mac: string): boolean {
+  const first = parseInt(mac.slice(0, 2), 16);
+  return Number.isFinite(first) && (first & 0b10) !== 0;
 }

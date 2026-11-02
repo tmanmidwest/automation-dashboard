@@ -59,6 +59,10 @@ connected and when they appeared:
   the device is kicked off and can't rejoin. Undo it from the UniFi connector's Blocked
   clients tab (Unblock).
 
+**Needs attention → Blocked devices** lists every client blocked on each UniFi gateway
+(the connector's Blocked clients list: name, MAC, maker, last seen, note) with an **Unblock**
+button (confirms first, `connectors:action`).
+
 Any UniFi client's open row also has a **Block** button. Marking and blocking need the
 `connectors:action` permission; the private-MAC setting needs `connectors:write`. Each is
 recorded in the audit log. API: `GET /api/devices?status=new|known|blocked`,
