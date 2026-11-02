@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
-import { randomBytes } from 'crypto';
+import { randomInt } from 'crypto';
 import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
 import { PrismaService } from '../prisma/prisma.service';
@@ -195,9 +195,9 @@ export class TotpService {
 
   /** A 10-char code shown grouped as `XXXXX-XXXXX`; stored/compared without the dash. */
   private randomRecoveryCode(): string {
-    const bytes = randomBytes(10);
+    // randomInt, not randomBytes % n: the modulo skews toward the first letters.
     let out = '';
-    for (let i = 0; i < 10; i++) out += RECOVERY_ALPHABET[bytes[i] % RECOVERY_ALPHABET.length];
+    for (let i = 0; i < 10; i++) out += RECOVERY_ALPHABET[randomInt(RECOVERY_ALPHABET.length)];
     return `${out.slice(0, 5)}-${out.slice(5)}`;
   }
 }

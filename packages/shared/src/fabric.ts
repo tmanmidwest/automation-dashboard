@@ -343,7 +343,7 @@ export function fabricSlug(name: string): string {
   const out = (name || '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/^-|-$/g, '');
   return out || 'host';
 }
 export function fabricHostAlias(name: string): string {

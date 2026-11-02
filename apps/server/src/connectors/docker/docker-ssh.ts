@@ -42,6 +42,11 @@ export interface SshResult {
  * connection/auth failure. Pure transport — the caller decides what a non-zero
  * exit means. See docs/connectors/docker.md (Phase 5).
  */
+/** Single-quote a value for /bin/sh, so a path with a quote or `$` in it stays one argument. */
+export function shellQuote(v: string): string {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`;
+}
+
 export function runSsh(cfg: SshConfig, command: string, stdin?: string, timeoutMs = 120_000): Promise<SshResult> {
   return new Promise((resolve, reject) => {
     const conn = new Client();

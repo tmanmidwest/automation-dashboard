@@ -9,6 +9,7 @@ import { ProbeRegistry } from './probe-registry.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuditService } from '../logging/audit.service';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
+import { tempUploadPath } from '../common/upload';
 
 class MonitorDto {
   @IsString() @MaxLength(120) name!: string;
@@ -98,12 +99,13 @@ export class MonitorsController {
   @UseInterceptors(FileInterceptor('file', { dest: tmpdir(), limits: { fileSize: 4 * 1024 * 1024 * 1024 } }))
   async importKumaDb(@UploadedFile() file: UploadedTempFile | undefined, @CurrentUser() user: SessionUser) {
     if (!file?.path) throw new BadRequestException('Upload the kuma.db file in the "file" field.');
+    const path = tempUploadPath(file);
     try {
-      const r = await this.monitors.importKumaDb(file.path);
+      const r = await this.monitors.importKumaDb(path);
       await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'monitor.imported', meta: { source: 'kuma.db', imported: r.imported, skipped: r.skipped.length } });
       return r;
     } finally {
-      await unlink(file.path).catch(() => {});
+      await unlink(path).catch(() => {});
     }
   }
 

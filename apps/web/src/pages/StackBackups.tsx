@@ -641,7 +641,7 @@ function SnapshotContents({ targetId, snapshot, canRestore, onClose }: {
               {e.type !== 'dir' && canRestore && (
                 <a
                   className="shrink-0 text-muted-foreground hover:text-foreground"
-                  href={`/api/stack-backup/targets/${targetId}/snapshots/${snapshot.id}/file?path=${encodeURIComponent(e.path)}`}
+                  href={`/api/stack-backup/targets/${encodeURIComponent(targetId)}/snapshots/${encodeURIComponent(snapshot.id)}/file?path=${encodeURIComponent(e.path)}`}
                   title={`Download ${e.name}`}
                 >
                   <Download className="h-4 w-4" />

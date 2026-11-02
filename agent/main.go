@@ -376,6 +376,13 @@ func installHostCertFile(cert, keyType string) error {
 	if cert == "" {
 		return fmt.Errorf("empty certificate")
 	}
+	// keyType comes from the broker and becomes part of a path written as root,
+	// so only the key types readHostKey reports are accepted.
+	switch keyType {
+	case "ed25519", "ecdsa", "rsa":
+	default:
+		return fmt.Errorf("unsupported host key type %q", keyType)
+	}
 	certPath := sshHostKeyBase(keyType) + "-cert.pub"
 	if err := os.WriteFile(certPath, []byte(cert+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", certPath, err)

@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import type { Response } from 'express';
 import type { SessionUser } from '@cerebro/shared';
 import { SystemBackupService } from './system-backup.service';
+import { tempUploadPath } from '../common/upload';
 import { AuditService } from '../logging/audit.service';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
 
@@ -51,13 +52,14 @@ export class SystemBackupController {
     @CurrentUser() user: SessionUser,
   ) {
     if (!file?.path) throw new BadRequestException('Upload the backup file in the "file" field.');
+    const path = tempUploadPath(file);
     try {
-      const buf = await fs.readFile(file.path);
+      const buf = await fs.readFile(path);
       const r = await this.backup.restore(buf, passphrase);
       await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'system.restore', meta: { ok: r.ok } });
       return r;
     } finally {
-      await fs.rm(file.path, { force: true }).catch(() => {});
+      await fs.rm(path, { force: true }).catch(() => {});
     }
   }
 }

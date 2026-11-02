@@ -7,7 +7,7 @@ import { CryptoService } from '../common/crypto.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerStackService, gitStackComposePath, gitStackEnvPath } from '../connectors/docker/docker-stack.service';
-import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
+import { runSsh, shellQuote, type SshConfig } from '../connectors/docker/docker-ssh';
 import { hostAccess, NO_SSH_REASON } from './docker-host';
 import type { ConnectorContext } from '@cerebro/shared';
 import type {
@@ -869,10 +869,10 @@ export class StackBackupService {
     if (managed?.source === 'git' && stacksDir) {
       try {
         const composePath = gitStackComposePath(stacksDir, stackName, managed.gitPath);
-        const c = await runSsh(ssh, `cat '${composePath}' 2>/dev/null || true`).catch(() => null);
+        const c = await runSsh(ssh, `cat ${shellQuote(composePath)} 2>/dev/null || true`).catch(() => null);
         if (c?.code === 0 && c.stdout.trim()) {
           const envPath = gitStackEnvPath(stacksDir, stackName, managed.gitPath);
-          const e = await runSsh(ssh, `cat '${envPath}' 2>/dev/null || true`).catch(() => null);
+          const e = await runSsh(ssh, `cat ${shellQuote(envPath)} 2>/dev/null || true`).catch(() => null);
           return { compose: c.stdout, envFile: e?.stdout.trim() ? e.stdout : undefined, composeSource: composePath };
         }
         tried.push(`git repo path ${composePath} empty`);

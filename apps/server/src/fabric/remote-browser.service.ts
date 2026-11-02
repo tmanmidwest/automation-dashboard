@@ -6,7 +6,7 @@ import { readdir, readFile } from 'fs/promises';
 import { createHash } from 'crypto';
 import { join } from 'path';
 import { hostname } from 'os';
-import { randomUUID, randomBytes } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
 import type { Response } from 'express';
 import type { WebSocket } from 'ws';
 import type {
@@ -21,9 +21,9 @@ import type {
 // (~47 bits) so a co-resident container can't attach to the browser's VNC without it.
 const VNC_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 function makeVncPassword(): string {
-  const b = randomBytes(8);
+  // randomInt, not randomBytes % n: the modulo skews toward the first letters.
   let out = '';
-  for (let i = 0; i < 8; i++) out += VNC_PW_ALPHABET[b[i] % VNC_PW_ALPHABET.length];
+  for (let i = 0; i < 8; i++) out += VNC_PW_ALPHABET[randomInt(VNC_PW_ALPHABET.length)];
   return out;
 }
 import { PrismaService } from '../prisma/prisma.service';

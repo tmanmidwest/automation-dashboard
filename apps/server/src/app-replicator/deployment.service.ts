@@ -15,7 +15,7 @@ import { ecsProfileFrom } from './ecs-target';
 import { buildEnvMap, escapeEnvValue } from './deploy-target';
 import { sanitizeMounts } from './compose-override';
 import { parseDotenv } from './compose-introspect';
-import { runSsh } from '../connectors/docker/docker-ssh';
+import { runSsh, shellQuote } from '../connectors/docker/docker-ssh';
 import type { DeployTarget, DestroyContext } from './deploy-target';
 import type {
   DeployInput, RedeployInput, ReplicatorVariable, ReplicatorPort, ReplicatorDeployment, ReplicatorDeploymentStatus, DeployTargetInfo, PortSuggestion,
@@ -542,7 +542,7 @@ export class DeploymentService {
       return { available: false, message: err instanceof Error ? err.message : 'The Docker target is unavailable.', ...empty };
     }
 
-    const res = await runSsh(target.ssh, `cat '${path}' 2>/dev/null || true`).catch(() => null);
+    const res = await runSsh(target.ssh, `cat ${shellQuote(path)} 2>/dev/null || true`).catch(() => null);
     if (!res) return { available: false, message: 'Could not reach the host to read the file.', ...empty };
     if (!res.stdout.trim()) {
       return { available: false, message: `No .env at ${path} — the deployment may not have run yet.`, ...empty };

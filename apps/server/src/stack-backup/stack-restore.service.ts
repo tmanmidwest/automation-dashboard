@@ -6,7 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CryptoService } from '../common/crypto.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerStackService } from '../connectors/docker/docker-stack.service';
-import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
+import { runSsh, shellQuote, type SshConfig } from '../connectors/docker/docker-ssh';
 import { openBundle } from '../system-backup/bundle';
 import type {
   ExecuteRestoreInput, RestoreBindPlan, RestoreMode, RestorePlan, RestorePlanInput, RestorePortPlan,
@@ -29,6 +29,7 @@ import {
   decodeTags, dumpFile, listFiles, listSnapshots, resticEnv, runResticLocalTolerant,
   type ResticRepoAuth,
 } from './restic-cli';
+import { trimChar } from '../common/text';
 
 const DOCKER = 'docker';
 const META = '/data/meta';
@@ -110,7 +111,8 @@ export class StackRestoreService {
   /** Browse a snapshot's contents, so an operator can confirm the data is really in there. */
   async browse(targetId: string, snapshotId: string, subtree?: string): Promise<SnapshotEntry[]> {
     const auth = await this.targets.authFor(targetId);
-    const path = subtree && subtree.startsWith('/data') ? subtree : '/data';
+    // A query string can arrive as an array (?path=a&path=b), so check the type.
+    const path = typeof subtree === 'string' && subtree.startsWith('/data') ? subtree : '/data';
     const entries = await listFiles(auth, snapshotId, path);
     // One level below the requested subtree — a full recursive listing of a volume
     // is unreadable and can be enormous.
@@ -126,7 +128,7 @@ export class StackRestoreService {
    * is buffered to hand back over HTTP.
    */
   async readSnapshotFile(targetId: string, snapshotId: string, path: string): Promise<{ name: string; content: Buffer }> {
-    if (!path.startsWith('/data/')) throw new BadRequestException('That path is not inside this snapshot.');
+    if (typeof path !== 'string' || !path.startsWith('/data/')) throw new BadRequestException('That path is not inside this snapshot.');
     const auth = await this.targets.authFor(targetId);
     const entry = (await listFiles(auth, snapshotId, path.slice(0, path.lastIndexOf('/')) || '/data').catch(() => []))
       .find((e) => e.path === path);
@@ -710,7 +712,7 @@ export class StackRestoreService {
           for (const [path, content] of Object.entries(files)) {
             if (!writable.has(path)) continue;
             const dir = path.slice(0, path.lastIndexOf('/')) || '/';
-            const res = await runSsh(access.ssh!, `umask 077; mkdir -p '${dir}' && cat > '${path}'`, content);
+            const res = await runSsh(access.ssh!, `umask 077; mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(path)}`, content);
             if (res.code !== 0) throw new Error(`Could not write credential file ${path}: ${res.stderr.trim()}`);
             written += 1;
           }
@@ -1168,5 +1170,5 @@ function escapeRe(v: string): string {
 
 /** Compose's own project-name rules: lowercase, alphanumerics, dash and underscore. */
 function projectName(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return trimChar(name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-'), '-');
 }
