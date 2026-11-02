@@ -268,6 +268,7 @@ function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: stri
   const kids = model.children(current);
   const shown = all ? kids : kids.slice(0, 60);
   const reach = item.node ? model.reach(current) : [];
+  const via = item.node ? model.via(current) : [];
   const leaf = kids.length === 0;
 
   return (
@@ -308,6 +309,13 @@ function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: stri
           <span className="text-muted-foreground mr-1">Reached from</span>
           <Chips chips={reach.slice(0, 10)} />
           {reach.length > 10 && <span className="text-xs text-muted-foreground">+{reach.length - 10} more in details</span>}
+        </div>
+      )}
+
+      {via.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-sm">
+          <span className="text-muted-foreground mr-1">Connected via</span>
+          <Chips chips={via} />
         </div>
       )}
 

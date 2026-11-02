@@ -1,3 +1,4 @@
+import { isPrivateMac, ouiVendor } from '../../common/oui';
 import type {
   Connector,
   ConnectorContext,
@@ -266,6 +267,11 @@ function maxTemp(d: UniDevice): number | undefined {
 
 function clientName(c: UniClient): string {
   return c.name || c.display_name || c.hostname || c.oui || c.mac;
+}
+
+/** UniFi's vendor, else the IEEE registry; phones and tablets often use a private MAC. */
+function clientVendor(c: UniClient): string | null {
+  return c.oui || ouiVendor(c.mac) || (isPrivateMac(c.mac) ? 'Private (randomized) MAC' : null);
 }
 
 /** Wi-Fi standard from radio_proto (ng/na are 802.11n on 2.4/5 GHz, not "802.11na"). */
@@ -1132,7 +1138,18 @@ export class UniFiConnector implements Connector {
         down: fmtRate(c['tx_bytes-r']), // tx from the network's point of view = client download
         up: fmtRate(c['rx_bytes-r']),
         uptime: fmtDuration(c.uptime),
-        vendor: c.oui || null,
+        vendor: clientVendor(c),
+        hostname: c.hostname && c.hostname !== clientName(c) ? c.hostname : null,
+        network: c.network ?? null,
+        vlan: c.vlan ?? null,
+        fixedIp: c.use_fixedip ? c.fixed_ip ?? null : null,
+        linkRate: c.tx_rate ? `${round(c.tx_rate / 1000)} / ${round((c.rx_rate ?? 0) / 1000)} Mbps` : null,
+        experience: c.satisfaction != null && c.satisfaction >= 0 ? `${c.satisfaction}%` : null,
+        downloaded: fmtBytes(c.tx_bytes),
+        uploaded: fmtBytes(c.rx_bytes),
+        firstSeen: fmtEpoch(c.first_seen),
+        lastSeen: fmtEpoch(c.last_seen),
+        guest: c.is_guest ? 'yes' : null,
       },
       tags,
     };
@@ -1361,7 +1378,8 @@ export class UniFiConnector implements Connector {
           it('Hostname', c.hostname, 'mono'),
           it('IP address', c.ip || c.last_ip, 'mono'),
           it('MAC address', c.mac, 'mono'),
-          it('Vendor', c.oui || null),
+          it('Vendor', clientVendor(c)),
+          it('Last seen', fmtEpoch(c.last_seen)),
           it('Network', c.network),
           it('VLAN', c.vlan),
           it('Fixed IP', c.use_fixedip ? c.fixed_ip : null, 'mono'),

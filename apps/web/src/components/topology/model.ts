@@ -58,6 +58,12 @@ function networkOrder(a: TopoNode, b: TopoNode): number {
   return v(a) - v(b) || byLabel(a, b);
 }
 
+/** A detail value from any source, e.g. "Vendor". */
+export function detailOf(n: TopoNode, label: string): string | undefined {
+  for (const d of n.details) for (const i of d.items) if (i.label === label) return i.value;
+  return undefined;
+}
+
 export function matches(n: TopoNode, q: string): boolean {
   const s = q.trim().toLowerCase();
   if (!s) return false;
@@ -212,7 +218,9 @@ export class TopoModel {
         return plural((this.kids.get(n.id) ?? []).length, 'container');
       default: {
         if (isUnknownHost(n)) return 'Not seen by any connector';
-        const bits = [n.ips[0], n.roles.filter((r) => r !== 'Fabric agent').join(' · ') || TYPE_LABEL[n.type]].filter(Boolean);
+        // Roles say what a server is; for a plain client, who made it says more than "Host".
+        const what = n.roles.filter((r) => r !== 'Fabric agent').join(' · ') || detailOf(n, 'Vendor') || (n.type === 'host' ? '' : TYPE_LABEL[n.type]);
+        const bits = [n.ips[0], what].filter(Boolean);
         return n.sublabel && !n.ips[0] ? n.sublabel : bits.join(' · ');
       }
     }
@@ -463,11 +471,17 @@ export class TopoModel {
         push(`${e.type}:${s.id}`, { text: `${s.label}: ${e.type === 'fw_allow' ? 'allowed' : 'blocked'}`, tone: e.type === 'fw_allow' ? 'allow' : 'down' });
       }
     }
-    if (n.type === 'host' || n.type === 'pve_node') {
-      for (const e of this.out.get(id) ?? []) {
-        if (e.type === 'runs_on') push('runs', { text: `Runs on ${this.byId.get(e.target)?.label ?? e.target}`, tone: 'plain' });
-        if (e.type === 'uplink') push('up', { text: `Plugged into ${e.label ?? this.byId.get(e.target)?.label ?? e.target}`, tone: 'plain' });
-      }
+    return out;
+  }
+
+  /** What it hangs off: the switch port or AP it's connected through, the hypervisor it runs on. */
+  via(id: string): Chip[] {
+    const out: Chip[] = [];
+    for (const e of this.out.get(id) ?? []) {
+      const t = this.byId.get(e.target);
+      if (!t) continue;
+      if (e.type === 'runs_on') out.push({ text: `Runs on ${t.label}`, tone: 'plain' });
+      if (e.type === 'uplink') out.push({ text: e.label === 'Wi-Fi' ? `${t.label} (Wi-Fi)` : `${t.label}${e.label ? ` ${e.label}` : ''}`, tone: 'plain' });
     }
     return out;
   }
