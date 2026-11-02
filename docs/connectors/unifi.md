@@ -115,6 +115,7 @@ The overview's guest list is every device, offline ones first.
 
 | Alert | Metric |
 | --- | --- |
+| `unifi.new_device` | not a metric: a client MAC Cerebro has never seen joined (see [Architecture Map → New devices](../architecture-map.md#new-devices-and-blocking)) |
 | `unifi.devices_offline` | `unifiDevicesOffline` |
 | `unifi.wan_down` | `unifiWanDown` (set 1 to alert on any down link) |
 | `unifi.wan_latency` | `unifiWanLatencyMs` |

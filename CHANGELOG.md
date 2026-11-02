@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Searchable by name/IP/MAC; machines seen by several connectors are merged by MAC, then
   LAN IP, then a unique hostname. Read-only; `GET /api/topology`. Proxmox guests now also
   report their NIC MAC and VLAN tag. See `docs/architecture-map.md`.
+- **New-device alerts and Block from the map** — Cerebro now remembers every client MAC
+  the UniFi connector sees and raises a "New device on the network" alert (email by
+  default) when one it has never seen joins; the first scan records what's already there
+  without alerting, and private (randomized) MACs only alert if you turn that on. The
+  Architecture Map's Needs attention strip gets a New devices tile listing them with
+  Mark as known and Block; any UniFi client's row also gets Block. Block confirms first,
+  needs `connectors:action`, and uses the UniFi connector's existing Block client action.
+  New table `NetworkDevice` (migration 0049). See `docs/architecture-map.md`.
 - **More detail on UniFi clients** — client records (and so the Architecture Map's
   details) now include hostname, network/VLAN, fixed IP, link rate, Wi-Fi experience,
   data downloaded/uploaded, first and last seen, and guest. When UniFi doesn't name a

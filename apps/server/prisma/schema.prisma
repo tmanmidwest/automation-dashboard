@@ -1074,3 +1074,29 @@ model StackSecretBinding {
   @@index([connectorInstanceId, stackName])
   @@index([vaultKey])
 }
+
+/// Every network client (by MAC) a UniFi connector has reported, so Cerebro can tell
+/// when something new joins. The first scan of a connector records what's already there
+/// as known, silently. See docs/architecture-map.md (New devices).
+model NetworkDevice {
+  /// Lower-case MAC, e.g. "ec:c9:ff:7e:37:28".
+  mac          String    @id
+  /// Connector instance that first reported it.
+  instanceId   String
+  name         String?
+  vendor       String?
+  ip           String?
+  network      String?
+  /// Switch port or access point it was seen on.
+  via          String?
+  /// Randomized / locally administered MAC (phones, tablets).
+  privateMac   Boolean   @default(false)
+  /// "new" until someone reviews it, then "known".
+  status       String    @default("new")
+  firstSeenAt  DateTime  @default(now())
+  lastSeenAt   DateTime  @default(now())
+  reviewedAt   DateTime?
+  reviewedBy   String?
+
+  @@index([status])
+}
