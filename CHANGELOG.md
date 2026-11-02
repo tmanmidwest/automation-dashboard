@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Searchable by name/IP/MAC; machines seen by several connectors are merged by MAC, then
   LAN IP, then a unique hostname. Read-only; `GET /api/topology`. Proxmox guests now also
   report their NIC MAC and VLAN tag. See `docs/architecture-map.md`.
+- **More detail on UniFi clients** — client records (and so the Architecture Map's
+  details) now include hostname, network/VLAN, fixed IP, link rate, Wi-Fi experience,
+  data downloaded/uploaded, first and last seen, and guest. When UniFi doesn't name a
+  client's maker, Cerebro looks the MAC up in the IEEE OUI registry (downloaded once,
+  cached at `OUI_CACHE_PATH`, default `/data/oui/oui.csv`); private (randomized) MACs
+  are labelled as such. On the map, a machine's switch port / access point now shows
+  as "Connected via" instead of under "Reached from", and plain clients' subtitles show
+  their maker instead of repeating "Host".
 - **UniFi firewall rules (read-only)** — new Firewall rules, Firewall groups and
   Firewall zones tabs on the UniFi connector. Pulls whatever the console has: classic
   rules (Internet/LAN/Guest In/Out/Local, IPv4 + IPv6), zone-based policies (custom and

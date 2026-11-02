@@ -26,7 +26,8 @@ you have. Nothing is shrunk to fit one screen.
 
 - **Open in place**: clicking a tile opens a full-width row right under it, showing its
   counts, what reaches it ("Reached from": port forwards, public and internal hostnames,
-  firewall allow/block rules, what it runs on or is plugged into) and its contents.
+  firewall allow/block rules) and, on its own line, what it is connected via (switch port or
+  access point, the hypervisor it runs on), then its contents.
   Clicking something inside drills one level deeper in the same row; the breadcrumb goes
   back. Something with nothing inside shows its full details (addresses, connections,
   each connector's fields, links to the connector pages). **Details** shows the same for

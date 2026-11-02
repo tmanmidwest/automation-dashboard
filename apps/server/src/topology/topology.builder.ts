@@ -122,11 +122,20 @@ function statusOf(raw: string | null | undefined): TopoStatus {
 
 const STATUS_RANK: Record<TopoStatus, number> = { down: 4, warn: 3, ok: 2, off: 1, unknown: 0 };
 
+const ACRONYMS: Record<string, string> = { ip: 'IP', mac: 'MAC', vlan: 'VLAN', ssid: 'SSID', cpu: 'CPU', dns: 'DNS', id: 'ID' };
+
+/** "firstSeen" / "fixed_ip" → "First seen" / "Fixed IP". */
+function detailLabel(k: string): string {
+  const words = k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(' ');
+  const out = words.map((w) => ACRONYMS[w] ?? w).join(' ');
+  return out.charAt(0).toUpperCase() + out.slice(1);
+}
+
 function detailItems(d: ConnectorResource['details'], skip: string[] = []): { label: string; value: string }[] {
   const out: { label: string; value: string }[] = [];
   for (const [k, v] of Object.entries(d ?? {})) {
     if (v == null || v === '' || skip.includes(k)) continue;
-    out.push({ label: k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()), value: String(v) });
+    out.push({ label: detailLabel(k), value: String(v) });
   }
   return out;
 }
