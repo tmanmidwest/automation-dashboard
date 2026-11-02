@@ -1,75 +1,90 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, MarkerType, useReactFlow,
-  type Edge,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
-import { AlertTriangle, ChevronRight, Crosshair, ExternalLink, RefreshCw, Search, X } from 'lucide-react';
-import type { TopoEdgeType, TopoNode, TopologyGraph } from '@cerebro/shared';
+  AlertTriangle, ChevronRight, Crosshair, HelpCircle, Info, RefreshCw, Search, Share2, X,
+} from 'lucide-react';
+import type { TopologyGraph } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { PageHeader } from '@/components/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { buildView, matches, viewFor, VIEW_LABEL, type MapView } from '@/components/topology/views';
-import { layout } from '@/components/topology/layout';
-import { nodeTypes, iconFor, STATUS_DOT, TYPE_LABEL, type TopoFlowNode } from '@/components/topology/nodes';
+import { iconFor, STATUS_DOT, TYPE_ICON, TYPE_LABEL } from '@/components/topology/meta';
+import { matches, TopoModel, type Chip, type Item, type Lane, type Tone } from '@/components/topology/model';
+import { NodeDetails } from '@/components/topology/NodeDetails';
+import { FocusMap } from '@/components/topology/FocusMap';
+
+/**
+ * Architecture Map: a scrolling overview of tiles (Edge, Networks, Compute, Apps), where a
+ * tile opens a full-width row right under itself, drilling deeper in place. "Show as map"
+ * draws one thing and its connections. See docs/architecture-map.md.
+ */
 
 const REFRESH_MS = 2 * 60_000;
-const VIEWS: MapView[] = ['network', 'compute', 'apps'];
+const TILE_MIN = 230;
+const GRID_GAP = 10;
+const SEP = '|';
 
-const EDGE_STYLE: Record<TopoEdgeType, { stroke: string; dash?: string; animated?: boolean; name: string }> = {
-  uplink: { stroke: 'hsl(var(--muted-foreground))', name: 'Physical link' },
-  routes: { stroke: 'hsl(var(--secondary))', dash: '6 4', name: 'Gateway routes VLAN' },
-  runs_on: { stroke: 'hsl(var(--secondary))', name: 'Runs on' },
-  hosts: { stroke: 'hsl(var(--muted-foreground))', name: 'Hosts' },
-  resolves: { stroke: 'hsl(var(--muted-foreground))', dash: '2 4', name: 'Name points to' },
-  forwards: { stroke: 'hsl(var(--accent))', animated: true, name: 'Traffic forwarded' },
-  fw_allow: { stroke: 'rgb(52 211 153)', dash: '5 4', name: 'Firewall allows' },
-  fw_block: { stroke: 'rgb(239 68 68)', dash: '5 4', name: 'Firewall blocks' },
+const TONE: Record<Tone, string> = {
+  plain: 'bg-muted text-foreground/80',
+  down: 'bg-red-500/15 text-red-500 dark:text-red-400',
+  warn: 'bg-amber-400/15 text-amber-600 dark:text-amber-300',
+  exposed: 'bg-accent/15 text-accent',
+  unknown: 'border border-dashed border-muted-foreground/50 text-muted-foreground',
+  allow: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
 };
 
-const EDGE_LEGEND: Record<MapView, TopoEdgeType[]> = {
-  network: ['uplink', 'routes', 'forwards', 'fw_allow', 'fw_block'],
-  compute: ['runs_on'],
-  apps: ['resolves', 'forwards'],
-};
-
-function sourceHref(s: TopoNode['sources'][number]): string | null {
-  if (s.instanceId) return `/connectors/${s.instanceId}`;
-  if (s.connectorId === 'fabric') return '/fabric';
-  if (s.connectorId === 'replicator') return '/replicator';
-  return null;
+function ItemIcon({ item, className }: { item: Item; className?: string }) {
+  let Icon: React.ComponentType<{ className?: string }>;
+  if (item.node) Icon = iconFor(item.node);
+  else if (item.id.startsWith('grp:attn')) Icon = AlertTriangle;
+  else if (item.id.startsWith('grp:unknown')) Icon = HelpCircle;
+  else if (item.id.startsWith('grp:apps')) Icon = Share2;
+  else Icon = TYPE_ICON.network;
+  return <Icon className={className} />;
 }
 
-export function ArchitectureMap() {
+function Chips({ chips, className }: { chips: Chip[]; className?: string }) {
+  if (!chips.length) return null;
   return (
-    <ReactFlowProvider>
-      <MapInner />
-    </ReactFlowProvider>
+    <span className={cn('flex flex-wrap gap-1.5', className)}>
+      {chips.map((c, i) => <span key={i} className={cn('rounded px-1.5 py-1 text-[12px] leading-none whitespace-nowrap', TONE[c.tone])}>{c.text}</span>)}
+    </span>
   );
 }
 
-function MapInner() {
+/** How many equal columns of at least TILE_MIN fit, so the open row can go after the right one. */
+function useColumns<T extends HTMLElement>(): [React.RefObject<T>, number] {
+  const ref = useRef<T>(null);
+  const [cols, setCols] = useState(4);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setCols(Math.max(1, Math.floor((el.clientWidth + GRID_GAP) / (TILE_MIN + GRID_GAP))));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, cols];
+}
+
+export function ArchitectureMap() {
   const [params, setParams] = useSearchParams();
-  const view = (VIEWS.includes(params.get('view') as MapView) ? params.get('view') : 'network') as MapView;
   const focus = params.get('focus');
-  const setView = (v: MapView) => setParams((p) => { p.set('view', v); p.delete('focus'); return p; });
-  const setFocus = (id: string | null) => setParams((p) => { if (id) p.set('focus', id); else p.delete('focus'); return p; });
+  const path = useMemo(() => (params.get('open') ? params.get('open')!.split(SEP) : []), [params]);
+  const setPath = useCallback((p: string[]) => setParams((pp) => {
+    if (p.length) pp.set('open', p.join(SEP)); else pp.delete('open');
+    pp.delete('focus');
+    return pp;
+  }, { replace: true }), [setParams]);
+  const setFocus = useCallback((id: string | null) => setParams((pp) => { if (id) pp.set('focus', id); else pp.delete('focus'); return pp; }), [setParams]);
 
   const [graph, setGraph] = useState<TopologyGraph | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showClients, setShowClients] = useState(false);
-  const [showFirewall, setShowFirewall] = useState(false);
-  const [toggled, setToggled] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<string | null>(null);
   const [q, setQ] = useState('');
-  const [flowNodes, setFlowNodes] = useState<TopoFlowNode[]>([]);
-  const [laying, setLaying] = useState(false);
-  const pendingCenter = useRef<string | null>(null);
-  const rf = useReactFlow();
 
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
@@ -84,129 +99,26 @@ function MapInner() {
   }, []);
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, [load]);
 
-  const byId = useMemo(() => new Map((graph?.nodes ?? []).map((n) => [n.id, n])), [graph]);
-  const onToggle = useCallback((id: string) => setToggled((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; }), []);
-
-  const v = useMemo(
-    () => (graph ? buildView(view, graph, { showClients, showFirewall, toggled, focus }) : null),
-    [graph, view, showClients, showFirewall, toggled, focus],
-  );
-
-  // Lay out whenever the visible structure changes (not on selection).
-  useEffect(() => {
-    if (!v) return;
-    let cancelled = false;
-    setLaying(true);
-    layout(view, v)
-      .then((pos) => {
-        if (cancelled) return;
-        const nodes: TopoFlowNode[] = [];
-        // Parents must precede their children for React Flow.
-        const depth = (id: string): number => { const p = pos.get(id)?.parent; return p ? 1 + depth(p) : 0; };
-        const ordered = [...v.nodes].sort((a, b) => depth(a.node.id) - depth(b.node.id));
-        for (const vn of ordered) {
-          const p = pos.get(vn.node.id);
-          if (!p) continue;
-          nodes.push({
-            id: vn.node.id,
-            type: vn.isGroup ? 'group' : 'card',
-            position: { x: p.x, y: p.y },
-            parentId: p.parent,
-            width: p.width,
-            height: p.height,
-            style: { width: p.width, height: p.height },
-            zIndex: vn.isGroup ? 0 : 1,
-            draggable: true,
-            data: { v: vn, title: titleFor(vn.node, view, byId), selected: false, dimmed: false, onToggle },
-          });
-        }
-        setFlowNodes(nodes);
-        requestAnimationFrame(() => {
-          const c = pendingCenter.current;
-          pendingCenter.current = null;
-          if (c && nodes.some((n) => n.id === c)) rf.fitView({ nodes: [{ id: c }], maxZoom: 1.1, duration: 400 });
-          else rf.fitView({ padding: 0.12, duration: 300 });
-        });
-      })
-      .catch((e) => !cancelled && setErr(`Layout failed: ${e instanceof Error ? e.message : e}`))
-      .finally(() => !cancelled && setLaying(false));
-    return () => { cancelled = true; };
-  }, [v, view, byId, onToggle, rf]);
-
-  // Neighbourhood of the selection, for highlighting.
-  const neighbours = useMemo(() => {
-    if (!selected || !v) return null;
-    const s = new Set<string>([selected]);
-    for (const e of [...v.edges, ...v.extraEdges]) {
-      if (e.source === selected) s.add(e.target);
-      if (e.target === selected) s.add(e.source);
-    }
-    return s;
-  }, [selected, v]);
-
-  const nodes = useMemo(
-    () => flowNodes.map((n) => ({
-      ...n,
-      data: { ...n.data, selected: n.id === selected, dimmed: !!neighbours && !neighbours.has(n.id) && n.type !== 'group' },
-    })),
-    [flowNodes, selected, neighbours],
-  );
-
-  const edges: Edge[] = useMemo(() => {
-    if (!v) return [];
-    const shown = new Set(flowNodes.map((n) => n.id));
-    const extra = selected ? v.extraEdges.filter((e) => e.source === selected || e.target === selected) : [];
-    return [...v.edges, ...extra].filter((e) => shown.has(e.source) && shown.has(e.target)).map((e) => {
-      const st = EDGE_STYLE[e.type];
-      const touches = !!selected && (e.source === selected || e.target === selected);
-      const faded = !!selected && !touches;
-      return {
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        sourceHandle: view === 'apps' ? 'r' : undefined,
-        targetHandle: view === 'apps' ? 'l' : undefined,
-        type: e.type === 'uplink' || e.type === 'routes' || e.type === 'runs_on' ? 'smoothstep' : 'default',
-        animated: st.animated && !faded,
-        // Short labels only (ports, "served by NPM"); firewall rule names live in the drawer.
-        label: touches && e.label ? e.label : undefined,
-        labelStyle: { fill: 'hsl(var(--foreground))', fontSize: 11 },
-        labelBgStyle: { fill: 'hsl(var(--card))' },
-        style: { stroke: st.stroke, strokeDasharray: st.dash, strokeWidth: touches ? 2.2 : 1.4, opacity: faded ? 0.15 : 0.85 },
-        markerEnd: e.type === 'uplink' || e.type === 'routes' ? undefined : { type: MarkerType.ArrowClosed, color: st.stroke, width: 14, height: 14 },
-        zIndex: 2,
-      };
-    });
-  }, [v, flowNodes, selected, view]);
-
+  const model = useMemo(() => (graph ? new TopoModel(graph, showClients) : null), [graph, showClients]);
   const hits = useMemo(() => (graph && q.trim() ? graph.nodes.filter((n) => matches(n, q)).slice(0, 12) : []), [graph, q]);
 
-  /** Jump to any node: switch view, open its collapsed ancestors, select and centre it. */
-  const goTo = (n: TopoNode) => {
-    const target = viewFor(n);
-    if (n.type === 'host' && !n.infra) setShowClients(true);
-    const open = new Set(toggled);
-    let p = n.parent;
-    while (p) {
-      const pn = byId.get(p);
-      if (pn?.type === 'stack' && !open.has(p)) open.add(p); // stacks default collapsed
-      p = pn?.parent;
-    }
-    setToggled(open);
-    setSelected(n.id);
+  const scrollTo = (id: string) => requestAnimationFrame(() => document.getElementById(`tile-${id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+  const openPath = (p: string[]) => { setPath(p); if (p[0]) scrollTo(p[0]); };
+  const goTo = (id: string) => {
+    if (!model) return;
+    const n = model.byId.get(id);
+    if (n && !n.infra && !showClients) setShowClients(true);
+    openPath(model.pathTo(id));
     setQ('');
-    pendingCenter.current = n.id;
-    if (target !== view || focus) setParams((pp) => { pp.set('view', target); pp.delete('focus'); return pp; });
   };
 
-  const sel = selected ? byId.get(selected) : undefined;
   const badFeeds = graph?.feeds.filter((f) => !f.ok) ?? [];
 
   return (
     <>
       <PageHeader
         title="Architecture Map"
-        description="Everything Cerebro can see, joined into one map: network, compute, and how names reach your apps."
+        description="Everything Cerebro can see. Open a tile to see what's inside and what reaches it."
         actions={
           <div className="flex items-center gap-2">
             {graph && <span className="text-xs text-muted-foreground hidden sm:inline">Built {new Date(graph.generatedAt).toLocaleTimeString()}</span>}
@@ -224,250 +136,253 @@ function MapInner() {
           <span>Partial data from {badFeeds.map((f) => f.name).join(', ')}. {badFeeds[0].message}</span>
         </div>
       )}
+      {!graph && !err && <div className="py-16 text-center text-sm text-muted-foreground">Building the map from your connectors…</div>}
 
-      {/* Control bar */}
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <div className="inline-flex rounded-md border border-border overflow-hidden text-sm">
-          {VIEWS.map((vw) => (
-            <button key={vw} onClick={() => setView(vw)}
-              className={cn('px-3 py-1.5', view === vw ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}>
-              {VIEW_LABEL[vw]}
+      {model && focus && (
+        <FocusMap model={model} focusId={focus} onBack={() => setFocus(null)} onFocus={(id) => setFocus(id)} onOpen={(id) => goTo(id)} />
+      )}
+
+      {model && !focus && (
+        <>
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <div className="relative flex-1 min-w-[220px] max-w-md">
+              <Search className="h-4 w-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input className="pl-8" placeholder="Find a host, IP, MAC, container, hostname…" value={q} onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && hits[0]) goTo(hits[0].id); if (e.key === 'Escape') setQ(''); }} />
+              {q && <button onClick={() => setQ('')} aria-label="Clear search" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X className="h-4 w-4" /></button>}
+              {hits.length > 0 && (
+                <div className="absolute z-30 mt-1 w-full rounded-md border border-border bg-card shadow-xl max-h-80 overflow-y-auto">
+                  {hits.map((n) => {
+                    const Icon = iconFor(n);
+                    return (
+                      <button key={n.id} onClick={() => goTo(n.id)} className="w-full text-left px-3 py-2 hover:bg-muted flex items-center gap-2">
+                        <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <span className={cn('h-2 w-2 rounded-full shrink-0', STATUS_DOT[n.status])} />
+                        <span className="text-sm truncate">{n.label}</span>
+                        <span className="text-xs text-muted-foreground truncate ml-auto">{TYPE_LABEL[n.type]}{n.ips[0] ? ` · ${n.ips[0]}` : ''}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setShowClients((x) => !x)} aria-pressed={showClients}
+              className={cn('rounded-md border px-3 py-2 text-sm', showClients ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:text-foreground')}>
+              <span className={cn('inline-block h-2 w-2 rounded-full mr-1.5', showClients ? 'bg-primary' : 'bg-muted-foreground/40')} />
+              Phones &amp; IoT clients
             </button>
-          ))}
-        </div>
-        <div className="relative flex-1 min-w-[220px] max-w-md">
-          <Search className="h-4 w-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <Input className="pl-8" placeholder="Find a host, IP, MAC, container, hostname…" value={q} onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && hits[0]) goTo(hits[0]); if (e.key === 'Escape') setQ(''); }} />
-          {q && <button onClick={() => setQ('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X className="h-4 w-4" /></button>}
-          {hits.length > 0 && (
-            <div className="absolute z-30 mt-1 w-full rounded-md border border-border bg-card shadow-xl max-h-80 overflow-y-auto">
-              {hits.map((n) => {
-                const Icon = iconFor(n);
-                return (
-                  <button key={n.id} onClick={() => goTo(n)} className="w-full text-left px-3 py-2 hover:bg-muted flex items-center gap-2">
-                    <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className={cn('h-2 w-2 rounded-full shrink-0', STATUS_DOT[n.status])} />
-                    <span className="text-sm truncate">{n.label}</span>
-                    <span className="text-xs text-muted-foreground truncate ml-auto">{TYPE_LABEL[n.type]}{n.ips[0] ? ` · ${n.ips[0]}` : ''}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        {view === 'network' && (
-          <>
-            <Toggle on={showClients} onClick={() => setShowClients((x) => !x)}>Clients &amp; IoT</Toggle>
-            <Toggle on={showFirewall} onClick={() => setShowFirewall((x) => !x)}>Firewall rules</Toggle>
-          </>
-        )}
-        {laying && <span className="text-xs text-muted-foreground">Laying out…</span>}
-      </div>
+          </div>
 
+          <div className="flex flex-wrap gap-5 items-start">
+            <Tree model={model} path={path} onPick={(id) => openPath([id])} />
+            <main className="flex-[999_1_640px] min-w-0 flex flex-col gap-7">
+              <section aria-label="Needs attention" className="flex flex-col gap-2.5">
+                <div className="grid gap-2.5 grid-cols-[repeat(auto-fill,minmax(210px,1fr))]">
+                  {model.attention().map((a) => (
+                    <button key={a.id} id={`tile-${a.id}`} onClick={() => setPath(path[0] === a.id ? [] : [a.id])} disabled={!a.count}
+                      className={cn('rounded-lg border bg-card px-4 py-3 flex items-center gap-3 text-left transition-colors enabled:hover:border-primary/70 disabled:opacity-60',
+                        path[0] === a.id ? 'border-primary ring-1 ring-primary' : a.count && a.tone === 'down' ? 'border-red-500/50' : a.count && a.tone === 'warn' ? 'border-amber-400/50' : 'border-border')}>
+                      <span className={cn('text-[26px] font-bold tabular-nums leading-none',
+                        !a.count ? 'text-muted-foreground' : a.tone === 'down' ? 'text-red-500' : a.tone === 'warn' ? 'text-amber-500' : a.tone === 'exposed' ? 'text-accent' : 'text-foreground')}>{a.count}</span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold">{a.title}</span>
+                        <span className="block text-xs text-muted-foreground truncate">{a.sub}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {path[0]?.startsWith('grp:attn') && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} />}
+              </section>
 
-      <div className="relative flex gap-3 h-[calc(100dvh-15rem)] min-h-[480px]">
-        <div className="relative flex-1 min-w-0 rounded-xl border border-border bg-background overflow-hidden">
-          {!graph && !err && <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground">Building the map from your connectors…</div>}
-          {focus && (
-            <div className="absolute left-3 top-3 z-10 flex items-center gap-1 text-sm rounded-md border border-border bg-card/90 px-3 py-1.5">
-              <button className="text-accent hover:underline" onClick={() => setFocus(null)}>{VIEW_LABEL[view]}</button>
-              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="font-medium">{byId.get(focus)?.label ?? focus}</span>
-              <span className="text-xs text-muted-foreground ml-2">Faded cards are what it connects to.</span>
-            </div>
-          )}
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onNodeClick={(_, n) => setSelected(n.id)}
-            onNodeDoubleClick={(_, n) => { if ((n as TopoFlowNode).data.v.isGroup || (n as TopoFlowNode).data.v.collapsed) setFocus(n.id); }}
-            onPaneClick={() => setSelected(null)}
-            nodesConnectable={false}
-            minZoom={0.05}
-            maxZoom={2}
-            proOptions={{ hideAttribution: true }}
-            colorMode={document.documentElement.classList.contains('light') ? 'light' : 'dark'}
-            style={{ background: 'hsl(var(--background))' }}
-          >
-            <Background gap={24} size={1} color="hsl(var(--border))" />
-            <Controls showInteractive={false} />
-            <MiniMap position="top-right" pannable zoomable nodeColor={(n) => ((n as TopoFlowNode).data?.v?.isGroup ? 'hsl(var(--muted))' : 'hsl(var(--muted-foreground))')} maskColor="rgba(0,0,0,0.5)" style={{ background: 'hsl(var(--card))' }} />
-          </ReactFlow>
-          <Legend view={view} />
-        </div>
-
-        {sel && graph && (
-          <Drawer node={sel} graph={graph} byId={byId} onClose={() => setSelected(null)} onGo={goTo}
-            onFocus={v?.nodes.some((x) => x.node.id === sel.id && (x.isGroup || x.collapsed)) ? () => setFocus(sel.id) : undefined} />
-        )}
-      </div>
+              {model.lanes.map((lane) => lane.items.length > 0 && (
+                <LaneGrid key={lane.key} lane={lane} model={model} path={path} setPath={setPath} onMap={setFocus} />
+              ))}
+            </main>
+          </div>
+        </>
+      )}
     </>
   );
 }
 
-function titleFor(n: TopoNode, view: MapView, byId: Map<string, TopoNode>): string {
-  if (n.type === 'container' && view !== 'compute') {
-    const stack = n.parent ? byId.get(n.parent)?.label : undefined;
-    return stack ? `${stack} / ${n.label}` : n.label;
-  }
-  return n.label;
-}
-
-function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
+function Tile({ item, model, active, onClick }: { item: Item; model: TopoModel; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick}
-      className={cn('rounded-md border px-2.5 py-1.5 text-sm', on ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:text-foreground')}>
-      <span className={cn('inline-block h-2 w-2 rounded-full mr-1.5', on ? 'bg-primary' : 'bg-muted-foreground/40')} />
-      {children}
+    <button id={`tile-${item.id}`} onClick={onClick} aria-expanded={active}
+      className={cn('rounded-lg border bg-card px-3.5 py-3 flex flex-col gap-2 text-left min-w-0 transition-colors hover:border-primary/70',
+        active ? 'border-primary ring-1 ring-primary bg-primary/5' : item.status === 'down' ? 'border-red-500/60' : item.status === 'warn' ? 'border-amber-400/60' : 'border-border')}>
+      <span className="flex items-center gap-2 min-w-0 w-full">
+        <ItemIcon item={item} className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className={cn('h-2 w-2 rounded-full shrink-0', STATUS_DOT[item.status])} />
+        <span className="text-[15px] font-semibold truncate">{item.label}</span>
+        <ChevronRight className={cn('h-4 w-4 ml-auto shrink-0 text-muted-foreground transition-transform', active && 'rotate-90')} />
+      </span>
+      <span className="text-[12px] text-muted-foreground truncate w-full">{item.sub}</span>
+      <Chips chips={model.summary(item.id)} />
     </button>
   );
 }
 
-function Legend({ view }: { view: MapView }) {
+/** A lane's tiles, with the open row slotted in after the grid row that holds the open tile. */
+function LaneGrid({ lane, model, path, setPath, onMap }: { lane: Lane; model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void }) {
+  const [ref, cols] = useColumns<HTMLDivElement>();
+  const openIdx = lane.items.findIndex((i) => i.id === path[0]);
+  const rowEnd = openIdx >= 0 ? Math.min(lane.items.length - 1, Math.floor(openIdx / cols) * cols + cols - 1) : -1;
   return (
-    <div className="absolute left-14 bottom-2 z-10 rounded-md border border-border bg-card/90 px-3 py-2 text-[11px] flex flex-wrap gap-x-4 gap-y-1 max-w-[70%]">
-      {EDGE_LEGEND[view].map((t) => (
-        <span key={t} className="flex items-center gap-1.5">
-          <svg width="22" height="6" aria-hidden><line x1="0" y1="3" x2="22" y2="3" stroke={EDGE_STYLE[t].stroke} strokeWidth="2" strokeDasharray={EDGE_STYLE[t].dash} /></svg>
-          {EDGE_STYLE[t].name}
+    <section aria-label={lane.title} className="flex flex-col gap-2.5">
+      <div className="flex items-baseline gap-3">
+        <h2 className="text-base font-semibold">{lane.title}</h2>
+        <span className="text-sm text-muted-foreground">{lane.sub}</span>
+      </div>
+      <div ref={ref} className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: GRID_GAP }}>
+        {lane.items.map((it, i) => (
+          <FragmentWithRow key={it.id} after={i === rowEnd ? <div className="col-span-full"><OpenRow model={model} path={path} setPath={setPath} onMap={onMap} /></div> : null}>
+            <Tile item={it} model={model} active={path[0] === it.id} onClick={() => setPath(path[0] === it.id ? [] : [it.id])} />
+          </FragmentWithRow>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FragmentWithRow({ children, after }: { children: React.ReactNode; after: React.ReactNode }) {
+  return <>{children}{after}</>;
+}
+
+/** The full-width row under an open tile: breadcrumb, counts, what reaches it, and its contents. */
+function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void }) {
+  const current = path[path.length - 1];
+  const item = model.item(current);
+  const [details, setDetails] = useState(false);
+  const [all, setAll] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setDetails(false); setAll(false); }, [current]);
+  useEffect(() => { rowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, [current]);
+
+  if (!item) {
+    return (
+      <div className="rounded-xl border border-border p-4 text-sm">
+        That item isn't in the latest map. <button className="text-accent hover:underline" onClick={() => setPath([])}>Close</button>
+      </div>
+    );
+  }
+  const kids = model.children(current);
+  const shown = all ? kids : kids.slice(0, 60);
+  const reach = item.node ? model.reach(current) : [];
+  const leaf = kids.length === 0;
+
+  return (
+    <div ref={rowRef} className="rounded-xl border border-primary/50 bg-primary/[0.04] p-4 flex flex-col gap-3.5 scroll-mt-4">
+      {path.length > 1 && (
+        <nav aria-label="Path" className="flex flex-wrap items-center gap-1 text-sm">
+          {path.map((id, i) => {
+            const it = model.item(id);
+            const last = i === path.length - 1;
+            return (
+              <span key={id} className="flex items-center gap-1">
+                {i > 0 && <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+                {last ? <span className="font-medium">{it?.label ?? id}</span>
+                  : <button className="text-accent hover:underline" onClick={() => setPath(path.slice(0, i + 1))}>{it?.label ?? id}</button>}
+              </span>
+            );
+          })}
+        </nav>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <ItemIcon item={item} className="h-5 w-5 text-muted-foreground" />
+        <span className={cn('h-2.5 w-2.5 rounded-full', STATUS_DOT[item.status])} />
+        <h3 className="text-base font-semibold">{item.label}</h3>
+        <span className="text-sm text-muted-foreground">{item.node ? `${TYPE_LABEL[item.node.type]} · ` : ''}{item.sub}</span>
+        <Chips chips={model.summary(current)} />
+        <span className="ml-auto flex flex-wrap gap-2">
+          {item.node && !leaf && (
+            <Button size="sm" variant="outline" onClick={() => setDetails((d) => !d)} aria-pressed={details}><Info className="h-3.5 w-3.5" /> {details ? 'Hide details' : 'Details'}</Button>
+          )}
+          {item.node && <Button size="sm" variant="outline" onClick={() => onMap(current)}><Crosshair className="h-3.5 w-3.5" /> Show as map</Button>}
+          <Button size="sm" variant="ghost" onClick={() => setPath([])} aria-label="Close"><X className="h-4 w-4" /></Button>
         </span>
-      ))}
-      <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-400" />up</span>
-      <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400" />warning</span>
-      <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-red-500" />down</span>
-      <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-muted-foreground/50" />off</span>
+      </div>
+
+      {reach.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-sm">
+          <span className="text-muted-foreground mr-1">Reached from</span>
+          <Chips chips={reach.slice(0, 10)} />
+          {reach.length > 10 && <span className="text-xs text-muted-foreground">+{reach.length - 10} more in details</span>}
+        </div>
+      )}
+
+      {item.node && (leaf || details) && (
+        <div className="rounded-lg border border-border bg-card p-4">
+          <NodeDetails node={item.node} graph={model.graph} byId={model.byId} columns={3} onGo={(id) => setPath(model.pathTo(id))} />
+        </div>
+      )}
+
+      {!leaf && (
+        <>
+          <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(210px,1fr))]">
+            {shown.map((k) => (
+              <button key={k.id} onClick={() => setPath([...path, k.id])}
+                className={cn('rounded-lg border bg-card px-3 py-2.5 flex flex-col gap-1.5 text-left min-w-0 hover:border-primary/70',
+                  k.status === 'down' ? 'border-red-500/60' : k.status === 'warn' ? 'border-amber-400/60' : k.type === 'group' && k.status === 'unknown' ? 'border-dashed border-muted-foreground/50' : 'border-border')}>
+                <span className="flex items-center gap-2 min-w-0 w-full">
+                  <ItemIcon item={k} className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className={cn('h-2 w-2 rounded-full shrink-0', STATUS_DOT[k.status])} />
+                  <span className="text-sm font-medium truncate">{k.label}</span>
+                </span>
+                <span className="text-[12px] text-muted-foreground truncate w-full">{k.sub}</span>
+                <Chips chips={model.summary(k.id).filter((c) => c.tone !== 'plain' || k.node?.type === 'host' || k.node?.type === 'stack' || k.node?.type === 'pve_node')} />
+              </button>
+            ))}
+          </div>
+          {kids.length > shown.length && (
+            <button className="self-start text-sm text-accent hover:underline" onClick={() => setAll(true)}>Show all {kids.length}</button>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-const EDGE_PHRASE: Record<TopoEdgeType, [string, string]> = {
-  // [this node is the source, this node is the target]
-  uplink: ['Connected to', 'Connected from'],
-  routes: ['Routes', 'Routed by'],
-  runs_on: ['Runs on', 'Runs'],
-  hosts: ['Hosts', 'Hosted on'],
-  resolves: ['Points to', 'Named by'],
-  forwards: ['Forwards to', 'Receives from'],
-  fw_allow: ['Firewall allows to', 'Firewall allows from'],
-  fw_block: ['Firewall blocks to', 'Firewall blocks from'],
-};
-
-function Drawer({ node, graph, byId, onClose, onGo, onFocus }: {
-  node: TopoNode;
-  graph: TopologyGraph;
-  byId: Map<string, TopoNode>;
-  onClose: () => void;
-  onGo: (n: TopoNode) => void;
-  onFocus?: () => void;
-}) {
-  const Icon = iconFor(node);
-  const links = useMemo(() => {
-    const out: { phrase: string; other: TopoNode; label?: string; notes?: string[] }[] = [];
-    for (const e of graph.edges) {
-      const mine = e.source === node.id ? 0 : e.target === node.id ? 1 : -1;
-      if (mine < 0) continue;
-      const other = byId.get(mine === 0 ? e.target : e.source);
-      if (other) out.push({ phrase: EDGE_PHRASE[e.type][mine as 0 | 1], other, label: e.label, notes: e.notes });
-    }
-    const kids = graph.nodes.filter((n) => n.parent === node.id);
-    for (const k of kids.slice(0, 60)) out.push({ phrase: 'Contains', other: k });
-    const parent = node.parent ? byId.get(node.parent) : undefined;
-    if (parent) out.unshift({ phrase: 'Inside', other: parent });
-    return out;
-  }, [node, graph, byId]);
-
-  const grouped = useMemo(() => {
-    const m = new Map<string, typeof links>();
-    for (const l of links) { if (!m.has(l.phrase)) m.set(l.phrase, []); m.get(l.phrase)!.push(l); }
-    return [...m.entries()];
-  }, [links]);
-
+/** Left-hand index: every tile by lane, plus the open path. */
+function Tree({ model, path, onPick }: { model: TopoModel; path: string[]; onPick: (id: string) => void }) {
+  const [closed, setClosed] = useState<Set<string>>(new Set());
   return (
-    <aside className="w-[360px] shrink-0 rounded-xl border border-border bg-card flex flex-col overflow-hidden max-md:absolute max-md:inset-y-0 max-md:right-0 max-md:z-20 max-md:w-[92%]">
-      <div className="flex items-start gap-3 p-4 border-b border-border">
-        <div className="h-9 w-9 rounded-md bg-muted grid place-items-center shrink-0"><Icon className="h-5 w-5" /></div>
-        <div className="min-w-0 flex-1">
-          <h2 className="font-semibold leading-tight break-words">{node.label}</h2>
-          <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
-            <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[node.status])} />
-            {TYPE_LABEL[node.type]}{node.statusText ? ` · ${node.statusText}` : ''}
-          </p>
-        </div>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
-        {(node.roles.length > 0 || onFocus) && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {node.roles.map((r) => <span key={r} className="rounded-full bg-muted px-2 py-0.5 text-xs">{r}</span>)}
-            {onFocus && <Button size="sm" variant="outline" className="ml-auto h-7" onClick={onFocus}><Crosshair className="h-3.5 w-3.5" /> Drill in</Button>}
-          </div>
-        )}
-        {(node.ips.length > 0 || node.macs.length > 0) && (
-          <dl className="grid grid-cols-[72px_1fr] gap-x-2 gap-y-1 text-xs">
-            {node.ips.length > 0 && <><dt className="text-muted-foreground">IP</dt><dd className="font-mono break-all">{node.ips.join(', ')}</dd></>}
-            {node.macs.length > 0 && <><dt className="text-muted-foreground">MAC</dt><dd className="font-mono break-all">{node.macs.join(', ')}</dd></>}
-          </dl>
-        )}
-
-        {grouped.length > 0 && (
-          <section>
-            <h3 className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1.5">Connections</h3>
-            <div className="space-y-2">
-              {grouped.map(([phrase, items]) => (
-                <div key={phrase}>
-                  <p className="text-xs text-muted-foreground">{phrase}</p>
-                  <ul className="mt-0.5 space-y-0.5">
-                    {items.map((l, i) => (
-                      <li key={i}>
-                        <button onClick={() => onGo(l.other)} className="text-left hover:text-accent flex items-center gap-1.5 w-full">
-                          <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', STATUS_DOT[l.other.status])} />
-                          <span className="truncate">{l.other.label}</span>
-                          {l.label && <span className="text-xs text-muted-foreground truncate">{l.label}</span>}
-                        </button>
-                        {l.notes?.map((n) => <p key={n} className="text-[11px] text-muted-foreground ml-3 break-words">{n}</p>)}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {node.details.map((d, i) => (
-          <section key={i}>
-            <h3 className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1.5">{d.source}</h3>
-            <dl className="grid grid-cols-[110px_1fr] gap-x-2 gap-y-1 text-xs">
-              {d.items.map((it) => (
-                <div key={it.label} className="contents">
-                  <dt className="text-muted-foreground truncate">{it.label}</dt>
-                  <dd className="break-words">{it.value}</dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-        ))}
-
-        {node.sources.length > 0 && (
-          <section>
-            <h3 className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1.5">Seen by</h3>
-            <ul className="space-y-1">
-              {node.sources.map((s, i) => {
-                const href = sourceHref(s);
+    <nav aria-label="Browse" className="flex-[0_1_250px] min-w-[220px] rounded-xl border border-border bg-card p-3 text-sm lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      {model.lanes.map((lane) => lane.items.length > 0 && (
+        <div key={lane.key} className="mb-2">
+          <button className="w-full flex items-center gap-1.5 px-1 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+            onClick={() => setClosed((s) => { const n = new Set(s); if (n.has(lane.key)) n.delete(lane.key); else n.add(lane.key); return n; })}
+            aria-expanded={!closed.has(lane.key)}>
+            <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', !closed.has(lane.key) && 'rotate-90')} />
+            {lane.title}
+            <span className="ml-auto tabular-nums">{lane.items.length}</span>
+          </button>
+          {!closed.has(lane.key) && (
+            <ul>
+              {lane.items.map((it) => {
+                const open = path[0] === it.id;
                 return (
-                  <li key={i} className="text-xs">
-                    {href ? <Link to={href} className="text-accent hover:underline inline-flex items-center gap-1">{s.name}<ExternalLink className="h-3 w-3" /></Link> : s.name}
-                    {s.kind && <span className="text-muted-foreground"> · {s.kind}</span>}
+                  <li key={it.id}>
+                    <button onClick={() => onPick(it.id)}
+                      className={cn('w-full flex items-center gap-2 rounded-md px-2 py-1.5 pl-6 text-left hover:bg-muted', open && 'bg-muted font-medium')}>
+                      <span className={cn('h-2 w-2 rounded-full shrink-0', STATUS_DOT[it.status])} />
+                      <span className="truncate">{it.label}</span>
+                    </button>
+                    {open && path.length > 1 && (
+                      <ul>
+                        {path.slice(1).map((id, i) => (
+                          <li key={id} className="text-muted-foreground truncate py-1" style={{ paddingLeft: 32 + i * 12 }}>{model.item(id)?.label ?? id}</li>
+                        ))}
+                      </ul>
+                    )}
                   </li>
                 );
               })}
             </ul>
-          </section>
-        )}
-      </div>
-    </aside>
+          )}
+        </div>
+      ))}
+    </nav>
   );
 }
 
