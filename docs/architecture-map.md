@@ -73,7 +73,7 @@ with where it came from:
    isn't a documented API; if it's missing, Cerebro falls back to 2.
 2. **Guess from name / Guess from maker**: rules in `apps/server/src/common/device-type.ts`
    on the device's name or hostname (e.g. "roku", "iphone", "printer") and then its maker
-   (Hisense → Smart TV, Espressif → smart plug / IoT, Fellow → coffee maker).
+   (Hisense → Smart TV, Reolink → camera). Wi-Fi chip makers like Espressif or Tuya are inside all kinds of gadgets, so they only give "Smart home device"; the name usually says more ("Fellow-Aiden" → coffee maker, "wled-…" → LED controller).
 3. **Set by you**: **Change / Set type** saves your answer per MAC (`PUT /api/devices/:mac/type`,
    `connectors:action`, audited). It beats both guesses; "Use the guess" clears it.
 
