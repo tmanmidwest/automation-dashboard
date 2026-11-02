@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import type { ConnectorResource, TopoFeed, TopologyGraph } from '@cerebro/shared';
+import type { ConnectorResource, PostureFinding, TopoFeed, TopologyGraph } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoggingService } from '../logging/logging.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { effectiveSshHost } from '../connectors/docker/docker-ssh';
+import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
+import { applySnoozes, buildFindings, type Snooze } from './posture';
+
+const SNOOZE_KEY = 'posture.snoozes';
 
 /** Serve a built graph this long before rebuilding in the background. */
 const SERVE_MAX_MS = 2 * 60_000;
@@ -36,15 +40,46 @@ export class TopologyService {
     private readonly instances: ConnectorInstanceService,
     private readonly prisma: PrismaService,
     private readonly logging: LoggingService,
+    private readonly settings: SettingsService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
   private inflight: Promise<TopologyGraph> | null = null;
 
   async graph(force = false): Promise<TopologyGraph> {
-    if (force || !this.cache) return this.rebuild(force);
-    if (Date.now() - this.cache.at >= SERVE_MAX_MS) void this.rebuild(false).catch(() => { /* keep last good */ });
-    return this.cache.graph;
+    let g: TopologyGraph;
+    if (force || !this.cache) g = await this.rebuild(force);
+    else {
+      if (Date.now() - this.cache.at >= SERVE_MAX_MS) void this.rebuild(false).catch(() => { /* keep last good */ });
+      g = this.cache.graph;
+    }
+    // Snoozes are applied per request, so snoozing shows up without a rebuild.
+    return { ...g, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
+  }
+
+  private async snoozes(): Promise<Record<string, Snooze>> {
+    return ((await this.settings.get<Record<string, Snooze>>(SNOOZE_KEY)) ?? {}) as Record<string, Snooze>;
+  }
+
+  /** Hide a finding for `days`, or until it gains an item it didn't have. Returns the finding as now shown. */
+  async snooze(id: string, days: number): Promise<PostureFinding | null> {
+    const f = (await this.graph()).findings?.find((x) => x.id === id);
+    if (!f) return null;
+    const all = await this.snoozes();
+    const now = Date.now();
+    // Drop lapsed entries while we're here, so the setting doesn't grow forever.
+    for (const [k, v] of Object.entries(all)) if (new Date(v.until).getTime() <= now) delete all[k];
+    all[id] = { until: new Date(now + days * 86_400_000).toISOString(), labels: f.affected.map((a) => a.label) };
+    await this.settings.set(SNOOZE_KEY, all);
+    return { ...f, snoozedUntil: all[id].until };
+  }
+
+  async unsnooze(id: string): Promise<boolean> {
+    const all = await this.snoozes();
+    if (!all[id]) return false;
+    delete all[id];
+    await this.settings.set(SNOOZE_KEY, all);
+    return true;
   }
 
   private rebuild(refresh: boolean): Promise<TopologyGraph> {
@@ -52,6 +87,12 @@ export class TopologyService {
     this.inflight = this.gather(refresh)
       .then(async (input) => {
         const graph = buildTopology(input);
+        try {
+          graph.findings = buildFindings(input, graph);
+        } catch (err) {
+          void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
+          graph.findings = [];
+        }
         try {
           const rows = await this.prisma.networkDevice.findMany({ where: { typeOverride: { not: null } }, select: { mac: true, typeOverride: true } });
           for (const r of rows) this.applyType(graph, r.mac, r.typeOverride);
@@ -126,7 +167,15 @@ export class TopologyService {
             break;
           }
           case 'nginx-proxy-manager': {
-            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts: await list(i.id, 'proxy_host', errs) });
+            const [proxyHosts, certificates] = await Promise.all([list(i.id, 'proxy_host', errs), list(i.id, 'certificate', errs)]);
+            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts, certificates });
+            break;
+          }
+          case 'backblaze': {
+            // Only the Proxmox dump folder, for backup findings; not drawn on the map.
+            // A Backblaze setup without a dump folder just has no backup findings.
+            const files = await list(i.id, 'local', []);
+            if (files.length) (input.backups ??= []).push({ inst, files });
             break;
           }
           case 'technitium': {

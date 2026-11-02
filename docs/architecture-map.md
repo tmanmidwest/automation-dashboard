@@ -90,6 +90,45 @@ with where it came from:
 The type also replaces the maker in a client's tile subtitle, and new-device alerts say
 "Looks like: …".
 
+## Posture findings
+
+Security findings worked out from what the connectors already report (no outside
+lookups). The **Posture findings** tile in Needs attention shows how many are open
+("2 high · 3 medium · 4 low") and opens a ranked list with category filters. Each finding
+says why it matters, how to fix it, and what it affects; affected items link to the map.
+
+| Check | Severity | Source |
+|---|---|---|
+| Proxy hosts with SSL off (one finding per NPM) | High if WAN port 80 is forwarded to the proxy, else Medium | Nginx Proxy Manager + UniFi port forwards |
+| Port forward from any source that doesn't go to the proxy's 80/443 | High if the target is on the network your switches/APs are managed on, else Medium | UniFi |
+| Running Proxmox guests with no vzdump backup, or a last backup older than 14 days | Medium | Proxmox + Backblaze dump folder |
+| Backups of guests that no longer exist | Low | Backblaze dump folder |
+| Certificate expired but still serving a host with SSL on | High | Nginx Proxy Manager |
+| Certificate expiring within 14 days | Medium (High within 3 days) | Nginx Proxy Manager |
+| Expired certificates nothing uses | Low | Nginx Proxy Manager |
+| UniFi devices with a firmware update | Medium | UniFi |
+| Containers with a newer image for their tag | Low | Docker |
+| Addresses in firewall rules / links that no connector has seen | Low | UniFi |
+| Running VMs that report no IP (QEMU guest agent missing) | Low | Proxmox |
+
+Backup checks only run when a Backblaze connector has a dump folder; without one there
+are no backup findings rather than false "never backed up" ones.
+
+**Badges and Posture view.** Every tile carries a badge with its worst finding (e.g.
+"1 HIGH"), rolled up from what's inside it, so a VLAN shows the findings of its machines.
+**Posture view** (next to *Phones & IoT clients*, remembered per browser) tints each tile
+by its worst finding, shows the top finding on the tile, and marks clean ones. An open row
+starts with a **Findings (n)** section.
+
+**Snooze.** Snooze 7 or 30 days (`POST /api/topology/findings/:id/snooze {days}`,
+`DELETE` to undo; `connectors:action`, audited). Snoozes are stored in settings
+(`posture.snoozes`) and a snoozed finding comes back early if it picks up an item it
+didn't have when you snoozed it (say, a new VM without a backup). Snoozed findings sit
+under the **Snoozed** filter.
+
+Findings are computed in `apps/server/src/topology/posture.ts` each time the map is
+rebuilt and returned as `findings` on `GET /api/topology`.
+
 ## Show as map
 
 **Show as map** on an open row (`?focus=`) draws that one thing and its links, left to
@@ -127,6 +166,6 @@ counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 
 ## Not yet
 
-Planned next: saved views and manual links for what can't be inferred, a posture layer
-(exposure paths, firmware/image updates, backup coverage),
-and live status push.
+Planned next: exposure paths (internet → proxy → machine, hop by hop, as "Show as map"),
+outside-in checks (what the internet actually sees on the WAN address), saved views and
+manual links for what can't be inferred, and live status push.
