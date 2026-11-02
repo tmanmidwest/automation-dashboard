@@ -14,6 +14,7 @@ const STATUS_BAD = new Set([
   'setup_error', 'migration_error', 'failed_unload', // Home Assistant integration failures
   'down', 'degraded', 'expired', 'deactivated', // Cloudflare tunnel/zone/cert failures
   'failure', // Cloudflare Pages deploy failed
+  'heartbeat_missed', 'adopt_failed', 'isolated', // UniFi device states
 ]);
 const STATUS_GOOD = new Set([
   'running', 'active', 'enabled', 'on', 'online', 'available', 'connected', 'ok',
@@ -21,12 +22,14 @@ const STATUS_GOOD = new Set([
   'healthy', 'proxied', // Cloudflare tunnel healthy / proxied DNS record
   'deployed', 'success', // Cloudflare Workers deployed / Pages deploy succeeded
   'allowed', // Technitium manually-allowed domain
+  'up', // UniFi WAN link / switch port up
 ]);
 const STATUS_IDLE = new Set([
   'stopped', 'disabled', 'off', 'idle', 'standby', 'paused', 'closed',
   'not_home', 'away', 'docked', 'unlocked', 'not_loaded',
   'inactive', 'dns_only', 'deleted', // Cloudflare inactive tunnel / unproxied DNS record / revoked device
   'canceled', // Cloudflare Pages deploy canceled
+  'no_link', // UniFi switch port with nothing plugged in
   'blocked', 'dynamic', 'reserved', 'cached', // Technitium blocked domain / DHCP lease types / cached entry (informational, not alarming)
 ]);
 

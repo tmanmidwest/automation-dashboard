@@ -1,4 +1,4 @@
-import { Server, Cloud, Cloudy, Building2, House, Puzzle, Container, LayoutGrid, Route, Flame, Network } from 'lucide-react';
+import { Server, Cloud, Cloudy, Building2, House, Puzzle, Container, LayoutGrid, Route, Flame, Network, Wifi } from 'lucide-react';
 
 /**
  * Custom connector glyphs, authored in the lucide line style (24×24, fill none,
@@ -62,6 +62,8 @@ export function ConnectorIcon({ icon, className = 'h-5 w-5' }: { icon?: string; 
       return <Route className={className} />;
     case 'technitium':
       return <Network className={className} />;
+    case 'unifi':
+      return <Wifi className={className} />;
     default:
       return <Puzzle className={className} />;
   }

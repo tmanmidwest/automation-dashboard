@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **UniFi Network connector** (built for the UDM SE) — reads the console's local
+  Network API with an API key or a local admin login: WAN links, ISP, live throughput,
+  latency and speed tests; gateway CPU, memory, temperatures and storage; every AP and
+  switch with state, firmware, radios, and per-port speed, PoE draw and what's plugged
+  in; connected and blocked clients; networks, Wi-Fi, port forwards, alarms and events.
+  Actions: restart, locate, firmware upgrade, PoE power-cycle, speed test, client
+  reconnect/block/unblock, Wi-Fi and port-forward toggles, archive alarms. New threshold
+  alerts for offline devices, WAN down, latency, gateway CPU/memory/temperature, storage,
+  alarms and firmware updates. The Cerebro host must be able to reach the console on
+  TCP 443. See `docs/connectors/unifi.md`.
 - **App Replicator deploys repos without a docker-compose.yml** — a repo with only a
   Dockerfile, or a recognizable WordPress, Node, PHP or static-site layout, gets a
   generated compose (shown at register time) and now deploys to Docker hosts. A
@@ -23,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
 ### Changed
+- **Fabric session header names the endpoint** — a session tab now leads with the
+  endpoint's label (a Waypoint route's label, or its host when it has none), then the
+  address, with the Waypoint shown as a separate "via pi-gateway01" chip instead of
+  reading like the destination. The browser tab is titled after the endpoint too
+  ("web-server-01 · SSH — Cerebro") instead of just "Cerebro".
 - **Fabric Waypoint routes are easier to scan** — routes are grouped by type
   (SSH → RDP → VNC → Web) and sorted by name within each group using a natural sort
   (`docker02` before `docker10`). Routes render as compact tiles in a grid that fits
