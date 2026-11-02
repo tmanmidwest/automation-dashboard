@@ -4,7 +4,8 @@ Two connectors that share **one authentication foundation**: a Microsoft Entra I
 (Azure AD) app registration and the OAuth2 **client-credentials** grant. Azure talks
 to Azure Resource Manager (ARM); Microsoft 365 talks to Microsoft Graph.
 
-Status: **P1 (read-only) BUILT** — not yet live-tested against a real tenant.
+Status: **P1 (read-only) BUILT.** The Microsoft 365 connector is in live use against a real
+tenant (as of 2026-11-02). The Azure connector has not been connected to a subscription yet.
 
 ## Why a pair
 

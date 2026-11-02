@@ -87,6 +87,21 @@ snapshot automatically.
   freshness stamp on the system-readout block and stop silently swallowing the *first* post-login
   request (quick-retry once), so a transient auth race can't leave it blank.
 
+## Connector up/down on the dashboard (2026-11-01)
+
+The **Connectors** box and **Needs Attention** now agree on whether a connector is reachable.
+
+- Up/down comes from the same per-minute connection test that raises the
+  "Connector unreachable" alert (`ConnectionMonitorService`), not from whether the connector has
+  cached telemetry. A down connector shows **OFFLINE** and the online count drops; its last-known
+  numbers still feed the summary tiles, so totals don't jump.
+- While a connector is down, Needs Attention shows one **"Connector offline · <name>"** row for it
+  instead of separate unreachable alerts and log errors.
+- Once it recovers, alerts and errors from before the recovery stay hidden, including after a page
+  refresh. New problems after the recovery still show.
+- Health is kept in memory, so for about a minute after a server restart (until the first
+  connection test) the box falls back to the snapshot behaviour above.
+
 ## Trade-off
 
 A persisted snapshot means that immediately after a restart the dashboard can briefly show

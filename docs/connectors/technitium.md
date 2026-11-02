@@ -4,8 +4,8 @@ Monitor a self-hosted [Technitium DNS Server](https://technitium.com/dns/) — a
 combined authoritative/recursive DNS server **and** a Pi-hole-style ad-blocker,
 with a built-in DHCP server.
 
-**Status:** Phases 1–4 **BUILT & VERIFIED** (logic harnesses + green builds),
-**not git-committed** and not live-tested against a real server. Connector `v0.4.0`
+**Status:** Phases 1–4 **BUILT**, merged, and in live use against the home DNS server
+(as of 2026-11-02). Connector `v0.4.0`
 — **feature-complete** (P1 read, P2 record/zone writes, P3 alerts, P4 cache +
 block-list management + DHCP reservations).
 

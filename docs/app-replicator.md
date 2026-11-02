@@ -308,6 +308,31 @@ builder does a plain `docker build` of the repo and can't follow an inline Docke
 `master`, like WordPress) no longer triggers a full-history clone: introspection falls back to the
 remote's default branch with a warning, and the register form switches its ref to it.
 
+## Repos without a compose file (2026-10-30)
+
+A repo doesn't need its own `docker-compose.yml`. When none is found, `source-detect.ts` generates
+one and the register dialog shows it, with a note on what was assumed. Detection order:
+
+| Repo has | Generated service(s) |
+| --- | --- |
+| `Dockerfile` | Builds it; publishes the first `EXPOSE`d port (default 8080) |
+| `wp-includes/version.php` + `wp-config-sample.php` (WordPress core) | Repo copied over `wordpress:php8.3-apache` + a `mariadb:11` service; uploads and DB in named volumes. Set `WORDPRESS_DB_PASSWORD` per deployment. |
+| `package.json` with a `start` script | `node:22-alpine`, installs with npm/yarn/pnpm by lockfile, runs `build` if present, `PORT=3000` |
+| `index.php` | `php:8.3-apache` serving the repo root (Composer deps not installed) |
+| `index.html` | `nginx:alpine` serving the repo root |
+
+Anything else gets a clear error asking for a Dockerfile or compose file. At deploy time the
+generated file is written to `<stack>/docker-compose.cerebro.yml` beside `repo/`, so the `.env`
+stays out of the build context.
+
+Limits: generated-compose apps deploy to **Docker hosts only** (ECS refuses them), and the inline
+Dockerfiles need **Docker Compose 2.17+** on the host. Layout detection is a best guess; add a
+preset in `source-detect.ts` for new repo types.
+
+**Branch fallback.** If the requested branch doesn't exist (for example the form's `main` default
+on a repo whose branch is `master`), Cerebro falls back to the repo's default branch, warns, and
+fills it into the form, instead of attempting a full-history clone that times out.
+
 ## Deployment flow (the wizard)
 
 1. **Pick the app** from the catalog, and a **name** for this deployment (→ compose project name,

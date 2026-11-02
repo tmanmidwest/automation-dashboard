@@ -1,6 +1,6 @@
 # Cerebro Stack Migrator — move a Compose stack between Docker hosts
 
-> **Status: P1–P4 BUILT (2026-10-11) — green full build, NOT committed / not live-tested.** New
+> **Status: P1–P4 BUILT (2026-10-11) and merged to `main`.** New
 > module `apps/server/src/stack-migrate/` + shared `app-replicator/ingress-ops.service.ts` +
 > web `/migrate` page; Prisma migrations `0036`/`0037`; `DockerApi.exportImage`/`loadImages`.
 > P1 cold migrate + host-built image save/load + manual complete/rollback. P2 automated cutover
