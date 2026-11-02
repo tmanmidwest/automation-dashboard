@@ -13,7 +13,7 @@ import { iconFor, STATUS_DOT, TYPE_ICON, TYPE_LABEL } from '@/components/topolog
 import { matches, TopoModel, type Chip, type Item, type Lane, type Tone } from '@/components/topology/model';
 import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
-import { BlockButton, NewDevicesRow, type DeviceList } from '@/components/topology/NewDevices';
+import { BlockButton, DeviceType, NewDevicesRow, type DeviceList } from '@/components/topology/NewDevices';
 
 /**
  * Architecture Map: a scrolling overview of tiles (Edge, Networks, Compute, Apps), where a
@@ -204,11 +204,11 @@ export function ArchitectureMap() {
                   <NewDevicesRow list={newDevices} onChanged={loadDevices} onClose={() => setPath([])}
                     onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
                 )}
-                {path[0]?.startsWith('grp:attn') && path[0] !== 'grp:attn:new' && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} />}
+                {path[0]?.startsWith('grp:attn') && path[0] !== 'grp:attn:new' && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} />}
               </section>
 
               {model.lanes.map((lane) => lane.items.length > 0 && (
-                <LaneGrid key={lane.key} lane={lane} model={model} path={path} setPath={setPath} onMap={setFocus} />
+                <LaneGrid key={lane.key} lane={lane} model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} />
               ))}
             </main>
           </div>
@@ -236,7 +236,7 @@ function Tile({ item, model, active, onClick }: { item: Item; model: TopoModel; 
 }
 
 /** A lane's tiles, with the open row slotted in after the grid row that holds the open tile. */
-function LaneGrid({ lane, model, path, setPath, onMap }: { lane: Lane; model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void }) {
+function LaneGrid({ lane, model, path, setPath, onMap, onChanged }: { lane: Lane; model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void }) {
   const [ref, cols] = useColumns<HTMLDivElement>();
   const openIdx = lane.items.findIndex((i) => i.id === path[0]);
   const rowEnd = openIdx >= 0 ? Math.min(lane.items.length - 1, Math.floor(openIdx / cols) * cols + cols - 1) : -1;
@@ -248,7 +248,7 @@ function LaneGrid({ lane, model, path, setPath, onMap }: { lane: Lane; model: To
       </div>
       <div ref={ref} className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: GRID_GAP }}>
         {lane.items.map((it, i) => (
-          <FragmentWithRow key={it.id} after={i === rowEnd ? <div className="col-span-full"><OpenRow model={model} path={path} setPath={setPath} onMap={onMap} /></div> : null}>
+          <FragmentWithRow key={it.id} after={i === rowEnd ? <div className="col-span-full"><OpenRow model={model} path={path} setPath={setPath} onMap={onMap} onChanged={onChanged} /></div> : null}>
             <Tile item={it} model={model} active={path[0] === it.id} onClick={() => setPath(path[0] === it.id ? [] : [it.id])} />
           </FragmentWithRow>
         ))}
@@ -262,7 +262,7 @@ function FragmentWithRow({ children, after }: { children: React.ReactNode; after
 }
 
 /** The full-width row under an open tile: breadcrumb, counts, what reaches it, and its contents. */
-function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void }) {
+function OpenRow({ model, path, setPath, onMap, onChanged }: { model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void }) {
   const current = path[path.length - 1];
   const item = model.item(current);
   const [details, setDetails] = useState(false);
@@ -318,6 +318,11 @@ function OpenRow({ model, path, setPath, onMap }: { model: TopoModel; path: stri
           <Button size="sm" variant="ghost" onClick={() => setPath([])} aria-label="Close"><X className="h-4 w-4" /></Button>
         </span>
       </div>
+
+      {item.node && (unifiClient || item.node.deviceType) && (
+        <DeviceType key={item.node.id} type={item.node.deviceType?.name} model={item.node.deviceType?.model} source={item.node.deviceType?.source}
+          mac={unifiClient?.resourceId ?? item.node.macs[0] ?? ''} instanceId={unifiClient?.instanceId} onSaved={onChanged} />
+      )}
 
       {reach.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 text-sm">

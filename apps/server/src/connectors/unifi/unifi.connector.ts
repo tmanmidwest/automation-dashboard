@@ -1,4 +1,5 @@
 import { isPrivateMac, ouiVendor } from '../../common/oui';
+import { fingerprintType, guessDeviceType, parseFingerprintDb, type FingerprintDb } from '../../common/device-type';
 import type {
   Connector,
   ConnectorContext,
@@ -49,6 +50,7 @@ const FW_ZONE_KIND = 'firewall_zone';
 
 /** Firewall config changes rarely; reuse it for a minute across list/describe/overview. */
 const FIREWALL_TTL_MS = 60_000;
+const FINGERPRINT_TTL_MS = 24 * 3600_000;
 const PORT_SUB = 'port';
 
 /** How long a fetched snapshot (sysinfo/health/devices/clients) is reused across calls. */
@@ -496,6 +498,7 @@ interface Snapshot {
   devices: UniDevice[];
   clients: UniClient[];
   limited: boolean;
+  fingerprints: FingerprintDb | null;
 }
 
 /**
@@ -511,6 +514,7 @@ export class UniFiConnector implements Connector {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly eventCache = new Map<string, { at: number; events: UniEvent[] }>();
   private readonly firewallCache = new Map<string, FirewallData>();
+  private readonly fingerprintCache = new Map<string, { at: number; db: FingerprintDb | null }>();
   /** One API client per instance, so the cached auth mode / Integration-API fallback sticks. */
   private readonly clients = new Map<string, { sig: string; api: UniFiApi }>();
 
@@ -662,9 +666,20 @@ export class UniFiConnector implements Connector {
       }),
       api.limited ? Promise.resolve(undefined) : api.sysinfo().catch(() => undefined),
     ]);
-    const snap: Snapshot = { at: Date.now(), devices, clients, health, sysinfo, limited: api.limited };
+    const snap: Snapshot = { at: Date.now(), devices, clients, health, sysinfo, limited: api.limited, fingerprints: await this.fingerprints(ctx, api) };
     this.snapshots.set(key, snap);
     return snap;
+  }
+
+  /** The console's fingerprint table, fetched at most once a day (it's large and rarely changes). */
+  private async fingerprints(ctx: ConnectorContext, api: UniFiApi): Promise<FingerprintDb | null> {
+    const key = this.cacheKey(ctx);
+    const c = this.fingerprintCache.get(key);
+    if (c && Date.now() - c.at < FINGERPRINT_TTL_MS) return c.db;
+    const db = parseFingerprintDb(await api.fingerprintTable());
+    if (!db) ctx.log('debug', 'UniFi fingerprint table unavailable; device types are guessed from name and maker.');
+    this.fingerprintCache.set(key, { at: Date.now(), db });
+    return db;
   }
 
   invalidateCache(ctx: ConnectorContext): void {
@@ -872,7 +887,7 @@ export class UniFiConnector implements Connector {
         return snap.clients
           .slice()
           .sort((a, b) => clientName(a).localeCompare(clientName(b), undefined, { numeric: true }))
-          .map((c) => this.toClientResource(c, byMac));
+          .map((c) => this.toClientResource(c, byMac, snap.fingerprints));
       }
       case BLOCKED_KIND: {
         const known = await api.knownClients();
@@ -1116,8 +1131,9 @@ export class UniFiConnector implements Connector {
     return up ? deviceName(up) : null;
   }
 
-  private toClientResource(c: UniClient, byMac: Map<string, UniDevice>): ConnectorResource {
+  private toClientResource(c: UniClient, byMac: Map<string, UniDevice>, fp: FingerprintDb | null): ConnectorResource {
     const via = this.clientVia(c, byMac);
+    const kind = fingerprintType(fp, c) ?? guessDeviceType({ name: clientName(c), hostname: c.hostname, vendor: clientVendor(c) });
     const tags: Record<string, string> = { connection: c.is_wired ? 'wired' : 'wireless' };
     if (c.network) tags.network = c.network;
     if (c.essid) tags.ssid = c.essid;
@@ -1139,6 +1155,9 @@ export class UniFiConnector implements Connector {
         up: fmtRate(c['rx_bytes-r']),
         uptime: fmtDuration(c.uptime),
         vendor: clientVendor(c),
+        deviceType: kind?.type ?? null,
+        deviceModel: kind?.model ?? null,
+        typeFrom: kind?.source ?? null,
         hostname: c.hostname && c.hostname !== clientName(c) ? c.hostname : null,
         network: c.network ?? null,
         vlan: c.vlan ?? null,
@@ -1364,7 +1383,7 @@ export class UniFiConnector implements Connector {
     const c = snap.clients.find((x) => x.mac.toLowerCase() === mac.toLowerCase());
     if (!c) throw new Error(`Client ${mac} is not connected.`);
     const byMac = new Map(snap.devices.map((x) => [x.mac.toLowerCase(), x]));
-    const r = this.toClientResource(c, byMac);
+    const r = this.toClientResource(c, byMac, snap.fingerprints);
     const ap = c.ap_mac ? byMac.get(c.ap_mac.toLowerCase()) : undefined;
     const sw = c.sw_mac ? byMac.get(c.sw_mac.toLowerCase()) : undefined;
     const it = (label: string, value: unknown, variant?: ConnectorDetailItem['variant']): ConnectorDetailItem | null =>
@@ -1379,6 +1398,7 @@ export class UniFiConnector implements Connector {
           it('IP address', c.ip || c.last_ip, 'mono'),
           it('MAC address', c.mac, 'mono'),
           it('Vendor', clientVendor(c)),
+          it('Device type', r.details?.deviceType ? `${r.details.deviceType}${r.details.deviceModel ? ` · ${r.details.deviceModel}` : ''} (${r.details.typeFrom})` : null),
           it('Last seen', fmtEpoch(c.last_seen)),
           it('Network', c.network),
           it('VLAN', c.vlan),

@@ -63,6 +63,23 @@ recorded in the audit log. API: `GET /api/devices?status=new|known|blocked`,
 `POST /api/devices/:mac/review {status: known|blocked}`, `POST /api/devices/review-all`,
 `PUT /api/devices/settings {alertPrivateMacs}`.
 
+## Device types
+
+A client's open row (and its New devices card) shows **Type**, e.g. "Smart TV (Hisense)",
+with where it came from:
+
+1. **UniFi fingerprint**: the names the UniFi app shows, when the console serves its
+   fingerprint table (`/proxy/network/v2/api/fingerprint_devices/0`, read once a day). This
+   isn't a documented API; if it's missing, Cerebro falls back to 2.
+2. **Guess from name / Guess from maker**: rules in `apps/server/src/common/device-type.ts`
+   on the device's name or hostname (e.g. "roku", "iphone", "printer") and then its maker
+   (Hisense → Smart TV, Espressif → smart plug / IoT, Fellow → coffee maker).
+3. **Set by you**: **Change / Set type** saves your answer per MAC (`PUT /api/devices/:mac/type`,
+   `connectors:action`, audited). It beats both guesses; "Use the guess" clears it.
+
+The type also replaces the maker in a client's tile subtitle, and new-device alerts say
+"Looks like: …".
+
 ## Show as map
 
 **Show as map** on an open row (`?focus=`) draws that one thing and its links, left to

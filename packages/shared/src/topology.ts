@@ -52,6 +52,11 @@ export interface TopoNode {
   macs: string[];
   /** True for servers / infrastructure; false for phones, IoT and other plain clients. */
   infra: boolean;
+  /**
+   * What kind of device a client is ("Smart TV"), and where that came from: "You" (set in
+   * Cerebro), "UniFi fingerprint", or a guess from its name or maker.
+   */
+  deviceType?: { name: string; model?: string; source: string };
   /** Merged key/value details from every source, grouped by source name. */
   details: { source: string; items: { label: string; value: string }[] }[];
   sources: TopoSource[];

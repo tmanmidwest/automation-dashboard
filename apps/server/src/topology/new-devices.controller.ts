@@ -1,13 +1,25 @@
 import { Body, Controller, Get, NotFoundException, Param, Post, Put, Query } from '@nestjs/common';
-import { IsBoolean, IsIn } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import type { SessionUser } from '@cerebro/shared';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
 import { AuditService } from '../logging/audit.service';
 import { NewDevicesService, type DeviceReview } from './new-devices.service';
+import { TopologyService } from './topology.service';
 
 class ReviewDto {
   @IsIn(['known', 'blocked'])
   status!: DeviceReview;
+}
+
+class DeviceTypeDto {
+  @IsString()
+  instanceId!: string;
+
+  /** Empty or null clears it, going back to UniFi's / Cerebro's guess. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  type?: string | null;
 }
 
 class DeviceSettingsDto {
@@ -21,6 +33,7 @@ export class NewDevicesController {
   constructor(
     private readonly devices: NewDevicesService,
     private readonly audit: AuditService,
+    private readonly topology: TopologyService,
   ) {}
 
   @Get()
@@ -47,6 +60,16 @@ export class NewDevicesController {
     } catch {
       throw new NotFoundException('That device is not in the list.');
     }
+  }
+
+  @Put(':mac/type')
+  @RequirePermissions('connectors:action')
+  async setType(@Param('mac') mac: string, @Body() dto: DeviceTypeDto, @CurrentUser() user: SessionUser) {
+    if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(mac)) throw new NotFoundException('Not a MAC address.');
+    const d = await this.devices.setType(mac, dto.instanceId, dto.type ?? null, user.email);
+    this.topology.setDeviceType(d.mac, d.typeOverride);
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'devices.type_set', target: `${d.name ?? d.mac} (${d.mac})`, meta: { type: d.typeOverride } });
+    return d;
   }
 
   @Put('settings')
