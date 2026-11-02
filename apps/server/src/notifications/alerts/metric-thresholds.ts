@@ -61,6 +61,8 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'unifiStorage', metricKey: 'unifiStoragePct', alertKey: 'unifi.storage', label: 'Console storage used (%)' },
   { id: 'unifiAlarms', metricKey: 'unifiAlarms', alertKey: 'unifi.alarms', label: 'Active alarms' },
   { id: 'unifiFirmware', metricKey: 'unifiFirmwareUpdates', alertKey: 'unifi.firmware_updates', label: 'Firmware updates' },
+  { id: 'unifiHighEvents', metricKey: 'unifiHighEvents24h', alertKey: 'unifi.high_events', label: 'High-severity events (24h)' },
+  { id: 'unifiThreats', metricKey: 'unifiThreats24h', alertKey: 'unifi.threats', label: 'Threats blocked (24h)' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {

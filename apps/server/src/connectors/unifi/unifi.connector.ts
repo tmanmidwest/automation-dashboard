@@ -20,6 +20,7 @@ import {
   UniAuth,
   UniClient,
   UniDevice,
+  UniEvent,
   UniHealthSubsystem,
   UniPort,
   UniSysinfo,
@@ -69,6 +70,12 @@ const DEVICE_TYPE_LABEL: Record<string, string> = {
 };
 
 const GATEWAY_TYPES = new Set(['udm', 'ugw', 'uxg']);
+
+/** System-log severities that count as an alarm (the log uses low / medium / high / very_high / critical). */
+const HIGH_SEVERITY = new Set(['high', 'very_high', 'critical']);
+
+/** How long the 24h system-log pull is reused by the overview and Alarms tab. */
+const EVENTS_TTL_MS = 60_000;
 
 const KINDS: ConnectorResourceKind[] = [
   {
@@ -242,7 +249,46 @@ function maxTemp(d: UniDevice): number | undefined {
 }
 
 function clientName(c: UniClient): string {
-  return c.name || c.hostname || c.oui || c.mac;
+  return c.name || c.display_name || c.hostname || c.oui || c.mac;
+}
+
+/** Wi-Fi standard from radio_proto (ng/na are 802.11n on 2.4/5 GHz, not "802.11na"). */
+const WIFI_STD: Record<string, string> = { be: 'Wi-Fi 7', ax: 'Wi-Fi 6', ac: 'Wi-Fi 5', na: 'Wi-Fi 4', ng: 'Wi-Fi 4', n: 'Wi-Fi 4', g: '802.11g', a: '802.11a', b: '802.11b' };
+const RADIO_BAND: Record<string, string> = { ng: '2.4 GHz', na: '5 GHz', '6e': '6 GHz' };
+
+function wifiStandard(c: UniClient): string | null {
+  return c.radio_proto ? WIFI_STD[c.radio_proto] ?? `802.11${c.radio_proto}` : null;
+}
+
+function wifiBand(c: UniClient): string | null {
+  return c.radio ? RADIO_BAND[c.radio] ?? null : null;
+}
+
+/** Friendly names for model codes the API returns without a model_name. */
+const MODEL_NAMES: Record<string, string> = {
+  UDMPROSE: 'Dream Machine SE',
+  UDMPRO: 'Dream Machine Pro',
+  UDMPROMAX: 'Dream Machine Pro Max',
+  UDM: 'Dream Machine',
+  UDR: 'Dream Router',
+  UCGULTRA: 'Cloud Gateway Ultra',
+  UCGMAX: 'Cloud Gateway Max',
+  U7PRO: 'U7 Pro',
+  U7PROMAX: 'U7 Pro Max',
+  U7PG2: 'UAP AC Pro',
+  U6LR: 'U6 Long-Range',
+  U6PRO: 'U6 Pro',
+  U6LITE: 'U6 Lite',
+  U6M: 'U6 Mesh',
+  USL24PB: 'USW 24 PoE',
+  USL16LP: 'USW Lite 16 PoE',
+  USL8LP: 'USW Lite 8 PoE',
+  US24PRO: 'USW Pro 24 PoE',
+  USF5P: 'USW Flex',
+};
+
+function modelName(d: UniDevice): string | null {
+  return d.model_name || (d.model ? MODEL_NAMES[d.model.toUpperCase()] ?? d.model : null);
 }
 
 function poeWatts(p: UniPort): number {
@@ -303,6 +349,7 @@ interface Snapshot {
  */
 export class UniFiConnector implements Connector {
   private readonly snapshots = new Map<string, Snapshot>();
+  private readonly eventCache = new Map<string, { at: number; events: UniEvent[] }>();
   /** One API client per instance, so the cached auth mode / Integration-API fallback sticks. */
   private readonly clients = new Map<string, { sig: string; api: UniFiApi }>();
 
@@ -461,6 +508,17 @@ export class UniFiConnector implements Connector {
 
   invalidateCache(ctx: ConnectorContext): void {
     this.snapshots.delete(this.cacheKey(ctx));
+    this.eventCache.delete(this.cacheKey(ctx));
+  }
+
+  /** The last 24h of events (up to 2000), cached briefly so the per-refresh overview stays cheap. */
+  private async eventsCached(ctx: ConnectorContext, fresh = false): Promise<UniEvent[]> {
+    const key = this.cacheKey(ctx);
+    const c = this.eventCache.get(key);
+    if (!fresh && c && Date.now() - c.at < EVENTS_TTL_MS) return c.events;
+    const events = await this.apiFor(ctx).events(24, 2000);
+    this.eventCache.set(key, { at: Date.now(), events });
+    return events;
   }
 
   private gatewayOf(snap: Snapshot): UniDevice | undefined {
@@ -615,6 +673,26 @@ export class UniFiConnector implements Connector {
       }
       case ALARM_KIND: {
         const alarms = await api.alarms();
+        if (alarms === null) {
+          // No classic alarms on this firmware: show the system log's high-severity entries instead.
+          const events = await this.eventsCached(ctx);
+          return events
+            .filter((e) => HIGH_SEVERITY.has((e.severity ?? '').toLowerCase()))
+            .slice(0, 200)
+            .map((e) => ({
+              id: `log:${e._id}`,
+              kind,
+              name: e.msg || e.key || e._id,
+              status: (e.severity ?? 'high').toLowerCase(),
+              details: {
+                category: [e.subsystem, e.subcategory].filter(Boolean).join(' / ') || null,
+                type: e.key ?? null,
+                when: rel(e.time),
+                at: fmtEpoch(e.time),
+              },
+              tags: e.subsystem ? { category: e.subsystem } : undefined,
+            }));
+        }
         return alarms
           .slice()
           .sort((a, b) => (b.time ?? 0) - (a.time ?? 0))
@@ -628,10 +706,10 @@ export class UniFiConnector implements Connector {
           }));
       }
       case EVENT_KIND: {
-        const events = await api.events(24, 200).catch((err) => {
-          ctx.log('debug', `UniFi events unavailable: ${err instanceof Error ? err.message : err}`);
-          return [];
-        });
+        const events = (await this.eventsCached(ctx, true).catch((err) => {
+          ctx.log('warn', `UniFi events unavailable: ${err instanceof Error ? err.message : err}`);
+          return [] as UniEvent[];
+        })).slice(0, 200);
         return events
           .slice()
           .sort((a, b) => (b.time ?? 0) - (a.time ?? 0))
@@ -671,7 +749,7 @@ export class UniFiConnector implements Connector {
       status: deviceStatus(d),
       details: {
         type: typeLabel,
-        model: d.model_name || d.model || null,
+        model: modelName(d),
         ip: d.ip ?? null,
         uptime: d.uptime ? fmtDuration(d.uptime) : null,
         firmware: d.version ? (d.upgradable ? `${d.version} → ${d.upgrade_to_firmware ?? 'update'}` : d.version) : null,
@@ -680,7 +758,7 @@ export class UniFiConnector implements Connector {
         memory: mem != null ? `${round(mem)}%` : null,
         temp: temp != null ? `${round(temp)}°C` : null,
         poe: poe ? `${round(poe, 1)} W` : null,
-        uplink: uplink ? `${deviceName(uplink)}${d.uplink?.uplink_remote_port ? ` port ${d.uplink.uplink_remote_port}` : ''}` : d.uplink?.type ?? null,
+        uplink: uplink ? `${deviceName(uplink)}${d.uplink?.uplink_remote_port ? ` port ${d.uplink.uplink_remote_port}` : ''}` : isGateway(d) ? null : d.uplink?.type ?? null,
       },
       tags: {
         type: typeLabel,
@@ -689,34 +767,43 @@ export class UniFiConnector implements Connector {
     };
   }
 
-  private toClientResource(c: UniClient, byMac: Map<string, UniDevice>): ConnectorResource {
+  /** Where a client is attached: AP for Wi-Fi; switch + port for wired, falling back to the
+   *  "last uplink" newer firmware reports (also set for clients behind unmanaged switches). */
+  private clientVia(c: UniClient, byMac: Map<string, UniDevice>): string | null {
     const ap = c.ap_mac ? byMac.get(c.ap_mac.toLowerCase()) : undefined;
     const sw = c.sw_mac ? byMac.get(c.sw_mac.toLowerCase()) : undefined;
     const up = c.uplink_mac ? byMac.get(c.uplink_mac.toLowerCase()) : undefined;
-    const via = c.is_wired
-      ? sw
-        ? `${deviceName(sw)}${c.sw_port ? ` port ${c.sw_port}` : ''}`
-        : up ? deviceName(up) : null
-      : ap ? deviceName(ap) : up ? deviceName(up) : null;
+    const last = c.last_uplink_mac ? byMac.get(c.last_uplink_mac.toLowerCase()) : undefined;
+    const lastName = last ? deviceName(last) : c.last_uplink_name;
+    if (!c.is_wired) return ap ? deviceName(ap) : up ? deviceName(up) : lastName ?? null;
+    if (sw) return `${deviceName(sw)}${c.sw_port ? ` port ${c.sw_port}` : ''}`;
+    if (lastName) return `${lastName}${c.last_uplink_remote_port ? ` port ${c.last_uplink_remote_port}` : ''}`;
+    return up ? deviceName(up) : null;
+  }
+
+  private toClientResource(c: UniClient, byMac: Map<string, UniDevice>): ConnectorResource {
+    const via = this.clientVia(c, byMac);
     const tags: Record<string, string> = { connection: c.is_wired ? 'wired' : 'wireless' };
     if (c.network) tags.network = c.network;
     if (c.essid) tags.ssid = c.essid;
     if (c.is_guest) tags.guest = 'yes';
+    const band = wifiBand(c);
+    if (!c.is_wired && band) tags.band = band;
     return {
       id: c.mac,
       kind: CLIENT_KIND,
       name: clientName(c),
       status: c.blocked ? 'blocked' : 'online',
       details: {
-        ip: c.ip ?? null,
+        ip: c.ip || c.last_ip || null,
         mac: c.mac,
-        connection: c.is_wired ? 'Wired' : [c.essid, c.radio_proto ? `802.11${c.radio_proto}` : null].filter(Boolean).join(' · ') || 'Wireless',
+        connection: c.is_wired ? 'Wired' : [c.essid, wifiStandard(c), band].filter(Boolean).join(' · ') || 'Wireless',
         via,
         signal: !c.is_wired && c.signal != null ? `${c.signal} dBm` : null,
         down: fmtRate(c['tx_bytes-r']), // tx from the network's point of view = client download
         up: fmtRate(c['rx_bytes-r']),
         uptime: fmtDuration(c.uptime),
-        vendor: c.oui ?? null,
+        vendor: c.oui || null,
       },
       tags,
     };
@@ -804,7 +891,7 @@ export class UniFiConnector implements Connector {
 
     push('General', [
       item('Type', DEVICE_TYPE_LABEL[d.type ?? ''] ?? d.type),
-      item('Model', [d.model_name, d.model].filter(Boolean).join(' · ')),
+      item('Model', [modelName(d), d.model].filter((v, i, a) => v && a.indexOf(v) === i).join(' · ')),
       item('State', status, 'status'),
       item('IP address', d.ip, 'mono'),
       item('MAC address', d.mac, 'mono'),
@@ -943,9 +1030,9 @@ export class UniFiConnector implements Connector {
         items: clean([
           it('Name', c.name),
           it('Hostname', c.hostname, 'mono'),
-          it('IP address', c.ip, 'mono'),
+          it('IP address', c.ip || c.last_ip, 'mono'),
           it('MAC address', c.mac, 'mono'),
-          it('Vendor', c.oui),
+          it('Vendor', c.oui || null),
           it('Network', c.network),
           it('VLAN', c.vlan),
           it('Fixed IP', c.use_fixedip ? c.fixed_ip : null, 'mono'),
@@ -960,8 +1047,10 @@ export class UniFiConnector implements Connector {
           it('Type', c.is_wired ? 'Wired' : 'Wireless'),
           ap ? { label: 'Access point', value: deviceName(ap), to: { kind: DEVICE_KIND, id: ap.mac } } : null,
           sw ? { label: 'Switch', value: `${deviceName(sw)}${c.sw_port ? ` · port ${c.sw_port}` : ''}`, to: { kind: DEVICE_KIND, id: sw.mac } } : null,
+          !sw && c.is_wired ? it('Connected via', this.clientVia(c, byMac)) : null,
           it('SSID', c.essid),
-          it('Standard', c.radio_proto ? `802.11${c.radio_proto}` : null),
+          it('Standard', wifiStandard(c)),
+          it('Band', wifiBand(c)),
           it('Channel', c.channel),
           it('Signal', !c.is_wired && c.signal != null ? `${c.signal} dBm` : null),
           it('Link rate (down / up)', c.tx_rate ? `${round(c.tx_rate / 1000)} / ${round((c.rx_rate ?? 0) / 1000)} Mbps` : null),
@@ -1054,12 +1143,22 @@ export class UniFiConnector implements Connector {
     const vpn = this.sub(snap, 'vpn');
     if (vpn?.remote_user_enabled) m('unifiVpnUsers', 'VPN users connected', vpn.remote_user_num_active ?? 0);
 
-    // Alarms — best-effort (not every firmware/key exposes them).
+    // Alarms + the last 24h of the system log — best-effort (not every firmware/key exposes them).
     if (!snap.limited) {
       try {
-        m('unifiAlarms', 'Active alarms', (await api.alarms()).length);
+        const alarms = await api.alarms();
+        if (alarms !== null) m('unifiAlarms', 'Active alarms', alarms.length);
       } catch (err) {
         ctx.log('debug', `UniFi alarms unavailable: ${err instanceof Error ? err.message : err}`);
+      }
+      try {
+        const events = await this.eventsCached(ctx);
+        const cat = (e: UniEvent) => `${e.subsystem ?? ''}/${e.subcategory ?? ''}`.toUpperCase();
+        m('unifiHighEvents24h', 'High-severity events (24h)', events.filter((e) => HIGH_SEVERITY.has((e.severity ?? '').toLowerCase())).length);
+        m('unifiThreats24h', 'Threats blocked (24h)', events.filter((e) => cat(e).includes('INTRUSION') || (e.key ?? '').startsWith('THREAT_')).length);
+        m('unifiFirewallBlocks24h', 'Firewall blocks (24h)', events.filter((e) => cat(e).includes('SECURITY_FIREWALL')).length);
+      } catch (err) {
+        ctx.log('debug', `UniFi events unavailable: ${err instanceof Error ? err.message : err}`);
       }
     }
 
@@ -1134,6 +1233,9 @@ export class UniFiConnector implements Connector {
         await api.setPortForwardEnabled(resourceId, actionId === 'enable');
         message = `Port forward ${actionId === 'enable' ? 'enabled' : 'disabled'}.`;
       } else if (kind === ALARM_KIND && actionId === 'archive') {
+        if (resourceId.startsWith('log:')) {
+          return { ok: false, message: 'This entry comes from the UniFi system log, which this firmware uses instead of alarms; it can\'t be archived.' };
+        }
         await api.archiveAlarm(resourceId);
         message = 'Alarm archived.';
       } else {
@@ -1172,6 +1274,9 @@ export class UniFiConnector implements Connector {
         return { ok: true, message: `Power-cycled PoE on port ${port}${d ? ` of ${deviceName(d)}` : ''}.` };
       }
       if (operationId === 'archive-all-alarms') {
+        if ((await api.alarms()) === null) {
+          return { ok: false, message: 'This firmware has no archivable alarms: the Alarms tab shows high-severity system-log entries instead.' };
+        }
         await api.archiveAllAlarms();
         this.invalidateCache(ctx);
         return { ok: true, message: 'All alarms archived.' };

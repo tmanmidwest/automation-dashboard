@@ -15,7 +15,7 @@ const STATUS_BAD = new Set([
   'down', 'degraded', 'expired', 'deactivated', // Cloudflare tunnel/zone/cert failures
   'failure', // Cloudflare Pages deploy failed
   'heartbeat_missed', 'adopt_failed', 'isolated', // UniFi device states
-  'critical', 'high', 'very_high', // UniFi event severities
+  'critical', 'high', 'very_high', // UniFi event severities (medium falls through to amber)
 ]);
 const STATUS_GOOD = new Set([
   'running', 'active', 'enabled', 'on', 'online', 'available', 'connected', 'ok',

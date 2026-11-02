@@ -359,6 +359,26 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: true,
   },
+  {
+    key: 'unifi.high_events',
+    label: 'High-severity events (24h) over threshold',
+    description: 'The number of high/critical entries in the UniFi system log over the last 24h crossed the limit set on its page.',
+    category: 'UniFi Network',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
+    key: 'unifi.threats',
+    label: 'Threats blocked (24h) over threshold',
+    description: 'The number of threats UniFi intrusion prevention blocked in the last 24h crossed the limit set on its page.',
+    category: 'UniFi Network',
+    defaultSeverity: 'info',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
   // ── Monitors ─────────────────────────────────────────────
   {
     key: 'monitor.down',
