@@ -89,7 +89,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
           ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so these are reachable from the internet without encryption. `
           : 'Traffic to these names is unencrypted on the network. ') +
         (withAuth.length
-          ? `${plural(withAuth.length, 'of them uses', 'of them use')} an access list, so the login is sent in clear text too.`
+          ? `${plural(withAuth.length, 'of them is', 'of them are')} behind an access list; if that list asks for a username and password, those travel in clear text too.`
           : 'Anyone on the path can read or change what is sent.'),
       fix: 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL".',
       affected: http.map((p) => ({ label: p.name, nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined, note: [str(p.details?.forward), withAuth.includes(p) ? `access list ${str(p.details?.access_list)}` : null].filter(Boolean).join(' · ') })),
@@ -251,7 +251,25 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   }
 
   // 6. Container images with updates waiting (from the Docker connector's update check).
-  const imgs = graph.nodes.filter((n) => n.type === 'container' && n.roles.includes('Image update'));
+  //    The ones the internet hits directly (port forward, or a tunnel hostname) get their own, higher finding.
+  const fromInternet = new Set(graph.edges.filter((e) => e.source === 'internet' && (e.type === 'forwards' || e.type === 'resolves')).map((e) => e.target));
+  const exposed = new Set(graph.edges.filter((e) => e.type === 'forwards' && fromInternet.has(e.source) && byId.get(e.source)?.type === 'dns_name').map((e) => e.target));
+  for (const id of fromInternet) exposed.add(id);
+  const outdated = graph.nodes.filter((n) => n.type === 'container' && n.roles.includes('Image update'));
+  const publicImgs = outdated.filter((n) => exposed.has(n.id));
+  const imgs = outdated.filter((n) => !exposed.has(n.id));
+  const hostOf = (n: TopoNode) => { const st = n.parent ? byId.get(n.parent) : undefined; return st?.parent ? byId.get(st.parent)?.label : undefined; };
+  if (publicImgs.length)
+    out.push({
+      id: 'image-updates-public',
+      severity: 'medium',
+      category: 'patching',
+      title: `${plural(publicImgs.length, 'internet-facing container runs', 'internet-facing containers run')} an outdated image`,
+      why: 'The internet reaches these directly, so a known bug in the old version is the easiest way in.',
+      fix: 'Update these first: pull and recreate the stack after checking the release notes.',
+      affected: publicImgs.map((n) => ({ label: n.label, nodeId: n.id, note: [n.sublabel, hostOf(n) ? `on ${hostOf(n)}` : null].filter(Boolean).join(' · ') })),
+      source: 'Docker',
+    });
   if (imgs.length)
     out.push({
       id: 'image-updates',
@@ -260,7 +278,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
       title: `${plural(imgs.length, 'container is', 'containers are')} running an outdated image`,
       why: 'A newer image is published for the same tag; it may include security fixes.',
       fix: 'Pull and recreate the stack (or use the container\'s update action) after checking the release notes.',
-      affected: imgs.map((n) => ({ label: n.label, nodeId: n.id, note: n.sublabel })),
+      affected: imgs.map((n) => ({ label: n.label, nodeId: n.id, note: [n.sublabel, hostOf(n) ? `on ${hostOf(n)}` : null].filter(Boolean).join(' · ') })),
       source: 'Docker',
     });
 

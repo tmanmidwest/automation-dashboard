@@ -107,7 +107,8 @@ says why it matters, how to fix it, and what it affects; affected items link to 
 | Certificate expiring within 14 days | Medium (High within 3 days) | Nginx Proxy Manager |
 | Expired certificates nothing uses | Low | Nginx Proxy Manager |
 | UniFi devices with a firmware update | Medium | UniFi |
-| Containers with a newer image for their tag | Low | Docker |
+| Internet-facing containers (port forward or tunnel target) with a newer image | Medium | Docker |
+| Other containers with a newer image for their tag | Low | Docker |
 | Addresses in firewall rules / links that no connector has seen | Low | UniFi |
 | Running VMs that report no IP (QEMU guest agent missing) | Low | Proxmox |
 
