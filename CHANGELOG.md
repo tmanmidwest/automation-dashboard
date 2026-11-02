@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **UniFi Network connector** (built for the UDM SE) — reads the console's local
+  Network API with an API key or a local admin login: WAN links, ISP, live throughput,
+  latency and speed tests; gateway CPU, memory, temperatures and storage; every AP and
+  switch with state, firmware, radios, and per-port speed, PoE draw and what's plugged
+  in; connected and blocked clients; networks, Wi-Fi, port forwards, alarms and events.
+  Actions: restart, locate, firmware upgrade, PoE power-cycle, speed test, client
+  reconnect/block/unblock, Wi-Fi and port-forward toggles, archive alarms. New threshold
+  alerts for offline devices, WAN down, latency, gateway CPU/memory/temperature, storage,
+  alarms and firmware updates. The Cerebro host must be able to reach the console on
+  TCP 443. See `docs/connectors/unifi.md`.
 - **App Replicator deploys repos without a docker-compose.yml** — a repo with only a
   Dockerfile, or a recognizable WordPress, Node, PHP or static-site layout, gets a
   generated compose (shown at register time) and now deploys to Docker hosts. A

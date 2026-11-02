@@ -1,153 +1,120 @@
-# UniFi connector
+# UniFi Network connector
 
-> **Status: SHELVED (2026-09-06).** Phase 1 was built and deployed, but **the Cerebro host cannot
-> reach the UDM's management interface** (`192.168.10.1:443`) — a `curl` from the host times out
-> too, so it's a network-path issue (cross-VLAN access to the gateway management interface is
-> blocked, or Cerebro sits on a subnet with no route to it), not a code problem. The connector code
-> was **removed** to keep the build clean; this design + the client are the starting point when the
-> networking is sorted (allow the Cerebro host → `192.168.10.1:443` in UniFi, or run Cerebro on the
-> UDM's subnet). The Integration-API approach below is sound; field names still need live
-> verification. Original plan follows.
+**Status:** built (connector `v0.1.0`), tested against a mocked UniFi API only. Not yet
+live-tested against the real UDM SE.
 
-A connector for a UniFi network (UDM / Cloud Gateway / UNAS-hosting controller): see every
-**device** (gateway, switches, APs) with its status, uptime, and firmware; **clients** on the
-network; **WAN/ISP** health; and roll it up into an at-a-glance overview — then restart a device
-and get alerted when one drops or a WAN link fails. Leans directly into hardware the operator
-already runs (including the UNAS Pro).
+> **History.** A first Integration-API-only version was built and shelved on 2026-09-06
+> because the Cerebro host could not reach the UDM's management interface
+> (`192.168.10.1:443`). A `curl` from the host timed out too, so the cause was the network
+> path (cross-VLAN access to the gateway blocked), not the code. **That path still has to be
+> open** for this connector to work: allow the Cerebro host → console on TCP 443 in the
+> UniFi firewall, or run Cerebro on a subnet that can reach it. Until then the connector
+> shows "Console unreachable".
 
-```
-  ┌───────────────┐   GET /proxy/network/integration/v1/sites, /.../devices, /.../clients  ┌──────────┐
-  │ UniFi OS       │◀──────────────────────────────────────────────────────────────────────│  Cerebro │
-  │ gateway (UDM,  │   POST /.../devices/{id}/actions {"action":"RESTART"}                   │  UniFi   │
-  │ Cloud Gateway) │   X-API-KEY: <key>   (local, self-signed TLS)                           │ connector│
-  └───────────────┘                                                                          └──────────┘
-```
+Monitors and manages a UniFi OS console (built for the **UDM SE**; works with UDM / UDM Pro /
+UCG / UDR / UXG running the Network application).
 
-## Transport & auth — the Integration API with an API key
+## Files
 
-Ubiquiti now ships an official, documented **UniFi Network Integration API** (UniFi Network 9+ /
-UniFi OS 4+) authenticated with an **API key** (`X-API-KEY` header) — no username/password, no
-CSRF-cookie dance. That's what this connector targets:
+| File | What |
+| --- | --- |
+| `apps/server/src/connectors/unifi/unifi-api.ts` | Dependency-free HTTP client: API key or local login, CSRF, self-signed TLS, Integration-API fallback |
+| `apps/server/src/connectors/unifi/unifi.connector.ts` | Manifest + `Connector` implementation |
+| `apps/server/src/connectors/connectors.module.ts` | Registration |
+| `apps/server/src/notifications/alerts/metric-thresholds.ts` + `alert-registry.ts` | UniFi threshold alerts |
+| `apps/web/src/pages/connectors/ConnectorAlerts.tsx` | Mirror of the threshold defs |
+| `apps/web/src/components/ConnectorIcon.tsx` | `unifi` → lucide `Wifi` |
+| `apps/web/src/lib/utils.ts` | Status colors: `up` good; `heartbeat_missed`/`adopt_failed`/`isolated` bad; `no_link` idle |
 
-- **Base URL:** `https://<gateway-host>/proxy/network/integration/v1`
-- **Auth header:** `X-API-KEY: <key>` — the key is minted in UniFi OS (Settings → Control Plane →
-  Integrations / Admins → API Keys) and stored in the **secrets vault**.
-- **TLS:** the local gateway serves a **self-signed** certificate, so the connector defaults to
-  **not verifying** TLS (a `verifyTls` toggle re-enables it for operators who install the CA).
-  Same trade-off Proxmox makes for a local appliance.
-- **Responses** use a pagination envelope: `{ offset, limit, count, totalCount, data: [...] }`.
-  The client follows pages until `count == 0` or the total is reached.
+## Transport and auth
 
-> **Why not the legacy controller API?** The old `/proxy/network/api/s/<site>/stat/*` endpoints
-> expose more data but need username/password + a login cookie + CSRF token, are undocumented, and
-> change between releases. Start on the supported Integration API; if a needed datum is only in the
-> legacy API, add it as an optional secondary path later (an explicit decision, like Cloudflare's
-> GraphQL-for-analytics split).
+The connector talks to the Network application's **classic controller API** through the
+console's reverse proxy: `https://<console>/proxy/network/api/s/<site>/…`. That surface has
+far more than the official Integration API: health, WAN/ISP, per-port PoE, radios, alarms,
+events, config, and commands.
 
-### Config fields (`manifest.configFields`)
-
-| Field | Secret? | Notes |
+| Field | Secret | Notes |
 | --- | --- | --- |
-| `host` | no | Gateway host/IP, e.g. `192.168.1.1` or `unifi.lan` (https assumed; `:port` optional) |
-| `apiKey` | **yes** | UniFi OS API key — vault-encrypted |
-| `siteId` | no | Optional; auto-resolved when the key sees exactly one site (usually "default") |
-| `verifyTls` | no | Verify the controller's TLS cert (default **false** — local self-signed) |
+| `baseUrl` | no | `https://192.168.10.1`, the console's web UI address |
+| `apiKey` | yes | Recommended. Network → Settings → Control Plane → Integrations. Sent as `X-API-KEY`. |
+| `username` / `password` | password yes | Alternative: a **local-only** admin. `POST /api/auth/login` → `TOKEN` cookie + `X-CSRF-Token`; session cached 30 min (keyed by console + user + password hash), refreshed on 401. |
+| `site` | no | Site short name, default `default` |
+| `verifyTls` | no | Default **off** (consoles ship a self-signed cert) |
+
+**Integration-API fallback.** If the classic API rejects the API key with 401/403, the client
+switches to `/proxy/network/integration/v1` (sites → devices + `statistics/latest` → clients).
+Devices and clients still list, with CPU/mem/uptime, but WAN health, ports, alarms, config and all
+actions need the classic API, so they return empty or tell the user to use a username/password.
+The connection test reports which mode is active.
+
+## Endpoints used
+
+| Purpose | Endpoint |
+| --- | --- |
+| Console + app version | `GET stat/sysinfo` |
+| Subsystem health (wan, www, lan, wlan, vpn) | `GET stat/health` |
+| Devices (ports, radios, WAN, temps, storage, speed test) | `GET stat/device` |
+| Connected clients | `GET stat/sta` |
+| Known clients (blocked list) | `GET rest/user` |
+| Networks / Wi-Fi / port forwards | `GET rest/networkconf`, `rest/wlanconf`, `rest/portforward` |
+| Alarms | `GET rest/alarm?archived=false` |
+| Events (24h) | `GET stat/event?within=24` (best-effort; newer firmware may move these) |
+| Device restart / locate / upgrade / PoE power-cycle / speed test | `POST cmd/devmgr` |
+| Client reconnect / block / unblock | `POST cmd/stamgr` |
+| Archive alarm(s) | `POST cmd/evtmgr` |
+| Wi-Fi / port-forward enable/disable | `PUT rest/wlanconf/<id>`, `rest/portforward/<id>` |
 
 ## Resource kinds
 
-| Kind | `category` | Source | Notes |
-| --- | --- | --- | --- |
-| `device` | — | `/sites/{id}/devices` | Gateway, switches, APs. Status, model, uptime, firmware, IP/MAC. Restartable (Phase 2). |
-| `client` | — | `/sites/{id}/clients` | Connected clients (wired/wireless), name, IP/MAC, uplink device, connected-since. |
+| Kind | Actions | Notes |
+| --- | --- | --- |
+| `device` | locate, stop locating, restart, upgrade firmware | Detail: health (CPU, mem, every temp sensor, fan), traffic, uplink, each WAN link, speed test, console versions, radios, port summary, storage. **Ports** sub-collection with speed, PoE draw, who's plugged in (clients + LLDP + downstream devices), errors; item action **Power-cycle PoE**. |
+| `client` | reconnect, block | IP, MAC, wired/Wi-Fi, SSID + 802.11 standard, AP or switch port, signal, live rates, uptime, vendor. Tags: connection, network, ssid, guest. |
+| `blocked_client` | unblock | From `rest/user` where `blocked`. |
+| `wan` | — | Each enabled WAN slot (UDM SE: WAN1 RJ45, WAN2 SFP+). Up/down, IP, ISP, link, live rates, latency, availability, primary. Create-scope op **Run speed test** (background; polls ~2 min for the result). |
+| `network` | — | Purpose, subnet, VLAN, DHCP range. |
+| `wlan` | enable, disable | Clients per SSID, security, bands, network. |
+| `port_forward` | enable, disable | |
+| `alarm` | archive | Create-scope op **Archive all alarms**. |
+| `event` | — | Last 24h. |
 
-Sites map to **`listNodes`** (each site is a node on the infrastructure map). WAN/ISP status comes
-off the gateway device (and, where exposed, a dedicated stats call).
+`listNodes` returns the gateway (CPU, memory, uptime).
 
-Relevant endpoints:
-- `GET /sites` — sites the key can see (auto-resolve `siteId`).
-- `GET /sites/{siteId}/devices` — every adopted device + `state` (ONLINE/OFFLINE/…), `model`,
-  `name`, `macAddress`, `ipAddress`, `firmwareVersion`, `firmwareUpdatable`.
-- `GET /sites/{siteId}/devices/{deviceId}` — device detail (uptime, load, port/radio detail).
-- `GET /sites/{siteId}/clients` — connected clients.
-- `POST /sites/{siteId}/devices/{deviceId}/actions` body `{ "action": "RESTART" }` — device
-  actions (Phase 2).
-- `GET /info` — controller/application version (used by `testConnection`).
+## Overview metrics
 
-> The exact JSON field names (e.g. `firmwareUpdatable` vs `upgradable`, the WAN stats shape) are
-> the thing to confirm against the live controller while building Phase 1; the client types are
-> written defensively (all optional) so a mismatch degrades a tile rather than breaking a list.
+Keys are prefixed `unifi` so they never merge into another connector's dashboard tile
+(`cpuPct`, `nodes`, … are Proxmox's).
 
----
+`unifiDevices`, `unifiDevicesOffline`, `unifiFirmwareUpdates`, `unifiAps`, `unifiSwitches`,
+`unifiClients`, `unifiClientsWireless`, `unifiClientsWired`, `unifiGuests`, `unifiWanDown`,
+`unifiWanLatencyMs`, `unifiWanDownMbps`, `unifiWanUpMbps`, `unifiWanAvailabilityPct`,
+`unifiSpeedtestDownMbps`, `unifiSpeedtestUpMbps`, `unifiWanDrops`, `unifiGatewayCpuPct`,
+`unifiGatewayMemPct`, `unifiGatewayTempC`, `unifiStoragePct`, `unifiPoeWatts`, `unifiVpnUsers`,
+`unifiAlarms`. A metric is omitted when the console doesn't report it.
 
-## Phase 1 — Monitor (Integration API, read-only)
+The overview's guest list is every device, offline ones first.
 
-The whole read surface. Nothing mutates the network, so it's safe against a production gateway.
+## Alerts (metric thresholds, category "UniFi Network")
 
-- **`testConnection`** = `GET /info` (cheap) → controller version; `GET /sites` to resolve the site.
-- **`listResources('device')`** — normalize each device: name, `status` from `state`
-  (online/offline/updating), model, IP, uptime, firmware (+ "update available" flag).
-- **`listResources('client')`** — connected clients: name/hostname, IP, MAC, wired vs wireless,
-  the device/port or AP/SSID they're on, connected-since.
-- **`describeResource('device')`** — full device detail: model, firmware (+ updatable), uptime,
-  CPU/memory load, per-port (switch) or per-radio (AP) summary, uplink.
-- **`listNodes`** — one node per site.
-- **`overview`** tiles:
-  - devices **total / offline**, **firmware updates available**
-  - clients **total** (wired vs wireless)
-  - **WAN status** (up/down) + ISP latency, when the gateway exposes it
-  - guests list sorted offline-first so a downed AP/switch surfaces at the top.
-
-**Deliverable:** a live UniFi dashboard — every device and client, and the quietly-important
-things (an AP offline, a WAN flap, three switches with a firmware update).
-
-## Phase 2 — Manage (device actions)
-
-- **Device action:** `restart` on the `device` kind → `POST /devices/{id}/actions {action:RESTART}`.
-  Gated by `connectors:action` and audited (flows through the connector action path → timeline).
-- Possible follow-ups the API supports: **locate** (blink the LED), **adopt/forget**. Add as the
-  API surface is confirmed. Client-level actions (block/reconnect) are legacy-API-only — deferred.
-
-## Phase 3 — Health alerts (metric-threshold monitor)
-
-A new **UniFi** alert category wired into the generic threshold monitor (same pattern as
-Cloudflare/HA/Docker):
-- `unifi.devices_offline` — offline device count over a threshold.
-- `unifi.firmware_updates` — devices with a firmware update over a threshold.
-- `unifi.wan_down` — WAN/ISP link down (a 0/1 metric, threshold 1).
-
-Per-connector thresholds; alerts land in the timeline via `NotificationLog`. (Device-unreachable
-of the *whole controller* is already covered by the baseline connection monitor.)
-
-## Phase 4 — Bonus (optional)
-
-- **UNAS Pro storage** — if the controller/site exposes NAS disk usage + SMART, surface it as a
-  tile + a `unifi.disk_high` alert. Otherwise a separate UNAS connector is the cleaner home.
-- **Per-client / per-port traffic** and **WAN throughput** graphs — richer stats calls, cached
-  like Cloudflare's analytics.
-- **Live updates** via the controller's websocket event stream (`subscribeLive`, reusing the HA
-  contract) so a device going offline updates the row instantly.
-
----
-
-## Files touched (when built)
-
-| File | Change |
+| Alert | Metric |
 | --- | --- |
-| `apps/server/src/connectors/unifi/unifi.connector.ts` (new) | manifest + `Connector` impl |
-| `apps/server/src/connectors/unifi/unifi-api.ts` (new) | typed Integration API client (X-API-KEY, self-signed TLS, pagination) |
-| `apps/server/src/connectors/connectors.module.ts` | register the connector |
-| `apps/server/src/notifications/alerts/alert-registry.ts` + `metric-thresholds.ts` | UniFi alert category + threshold defs (Phase 3) |
-| web `ConnectorAlerts.tsx` | mirror the UniFi threshold defs (Phase 3) |
-| web `ConnectorIcon.tsx` | a `unifi` icon (lucide `Wifi` / `Network`) |
+| `unifi.devices_offline` | `unifiDevicesOffline` |
+| `unifi.wan_down` | `unifiWanDown` (set 1 to alert on any down link) |
+| `unifi.wan_latency` | `unifiWanLatencyMs` |
+| `unifi.gateway_cpu` / `gateway_mem` / `gateway_temp` | gateway CPU %, memory %, hottest sensor °C |
+| `unifi.storage` | `unifiStoragePct` |
+| `unifi.alarms` | `unifiAlarms` |
+| `unifi.firmware_updates` | `unifiFirmwareUpdates` |
 
-## Open questions
+The whole console going unreachable is covered by the baseline connection monitor.
 
-1. **API version floor** — the Integration API needs a recent UniFi Network/OS. Confirm the
-   operator's controller version; if it predates the API-key API, fall back to the legacy
-   login+CSRF path (bigger, deferred).
-2. **Multi-site** — most home setups are single-site ("default"); auto-resolve when one, require
-   `siteId` when many (mirror Cloudflare's account-id resolution).
-3. **WAN health shape** — where exactly WAN up/down + ISP latency live in the Integration API is
-   the main field to pin down for the overview + `unifi.wan_down` alert.
-4. **UNAS Pro** — is it reachable through this controller's API, or does it want its own connector?
-   Decide once Phase 1 shows what the API exposes.
+## To verify live
+
+Field names come from the community-documented classic API and are read defensively (all
+optional), so a mismatch blanks a value rather than breaking a list. Check against the real
+UDM SE: WAN slot names and `uptime_stats` keys (`WAN`/`WAN2`), `speedtest-status`, the
+`storage` array, and whether `stat/event` still returns data on current firmware.
+
+Possible follow-ups: live updates over the console's WebSocket event stream (`subscribeLive`),
+throughput history from `stat/report/*`, DPI/traffic by app, and UniFi Protect / UNAS (separate
+applications on the console).
