@@ -243,7 +243,7 @@ export function ArchitectureMap() {
                     onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
                 )}
                 {path[0] === 'grp:attn:posture' && graph?.findings && (
-                  <PostureRow findings={graph.findings} onShow={goTo} onChanged={() => load()} onClose={() => setPath([])} />
+                  <PostureRow findings={graph.findings} outsideIn={graph.outsideIn} onShow={goTo} onChanged={() => load()} onClose={() => setPath([])} />
                 )}
                 {path[0] === 'grp:attn:blocked' && blocked && (
                   <BlockedDevicesRow list={blocked} onChanged={afterBlock} onClose={() => setPath([])} />

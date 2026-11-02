@@ -115,6 +115,27 @@ says why it matters, how to fix it, and what it affects; affected items link to 
 Backup checks only run when a Backblaze connector has a dump folder; without one there
 are no backup findings rather than false "never backed up" ones.
 
+**Outside-in checks** (on by default; *Turn off* in the Posture findings row,
+`PUT /api/topology/outside-in {enabled}`, `connectors:write`, audited) add what the
+internet can see, from free public sources with no keys:
+
+| Check | Severity | Source |
+|---|---|---|
+| Port open on the WAN address with no port forward behind it (gateway service, UPnP, forgotten rule) | High | Shodan InternetDB |
+| CVEs Shodan matched to your public software; High if any is on CISA's Known Exploited list | Medium / High | Shodan InternetDB + CISA KEV |
+| Software your public ports announce that is past end of life (e.g. Bootstrap 3) | Medium (Low for browser-side libraries) | Shodan InternetDB + endoflife.date |
+| Containers running a release past end of life (postgres, mariadb, redis, node, python, nginx, php…) | Medium, High if internet-facing | endoflife.date + Docker |
+| Containers whose release loses support within 90 days | Low | endoflife.date + Docker |
+| Shodan tags on the WAN address (compromised / malware → High, end-of-life → Medium, self-signed → Low) | varies | Shodan InternetDB |
+
+The port-forward finding also says whether Shodan has already listed that port. The WAN
+address is the UniFi gateway's public IP. What leaves Cerebro: the WAN address (to
+`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date`), and a
+download of the CISA KEV list. Answers are cached (Shodan 6 h, others 24 h); if a source
+is down the last good answer is used and the row says so. Shodan refreshes its scan data
+every few days, so a port you just closed can linger. Image versions come from the tag
+(`postgres:15-alpine` → 15); `latest` and untagged images are skipped.
+
 **Badges and Posture view.** Every tile carries a badge with its worst finding (e.g.
 "1 HIGH"), rolled up from what's inside it, so a VLAN shows the findings of its machines.
 **Posture view** (next to *Phones & IoT clients*, remembered per browser) tints each tile
@@ -168,5 +189,5 @@ counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 ## Not yet
 
 Planned next: exposure paths (internet → proxy → machine, hop by hop, as "Show as map"),
-outside-in checks (what the internet actually sees on the WAN address), saved views and
+saved views and
 manual links for what can't be inferred, and live status push.

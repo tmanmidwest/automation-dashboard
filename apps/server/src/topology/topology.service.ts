@@ -6,7 +6,8 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
-import { applySnoozes, buildFindings, type Snooze } from './posture';
+import { applySnoozes, buildFindings, eolProducts, wanIps, type Snooze } from './posture';
+import { OutsideInService } from './outside-in.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
 
@@ -41,6 +42,7 @@ export class TopologyService {
     private readonly prisma: PrismaService,
     private readonly logging: LoggingService,
     private readonly settings: SettingsService,
+    private readonly outsideIn: OutsideInService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -74,6 +76,12 @@ export class TopologyService {
     return { ...f, snoozedUntil: all[id].until };
   }
 
+  /** Switch the outside-in checks on or off; the next map build picks it up. */
+  async setOutsideIn(on: boolean): Promise<void> {
+    await this.outsideIn.setEnabled(on);
+    this.cache = null;
+  }
+
   async unsnooze(id: string): Promise<boolean> {
     const all = await this.snoozes();
     if (!all[id]) return false;
@@ -87,8 +95,19 @@ export class TopologyService {
     this.inflight = this.gather(refresh)
       .then(async (input) => {
         const graph = buildTopology(input);
+        let intel = null;
         try {
-          graph.findings = buildFindings(input, graph);
+          if (await this.outsideIn.enabled()) {
+            intel = await this.outsideIn.gather(wanIps(input), eolProducts(input));
+            graph.outsideIn = { enabled: true, wan: intel.wan.map(({ ip, ports, hostnames, vulns, tags, checkedAt }) => ({ ip, ports, hostnames, vulns, tags, checkedAt })), errors: intel.errors };
+          } else {
+            graph.outsideIn = { enabled: false, wan: [], errors: [] };
+          }
+        } catch (err) {
+          void this.logging.warn('topology', `Outside-in checks failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        try {
+          graph.findings = buildFindings(input, graph, new Date(), intel);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];

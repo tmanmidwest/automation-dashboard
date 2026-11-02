@@ -1,5 +1,6 @@
 import type { ConnectorResource, PostureFinding, PostureSeverity, TopologyGraph, TopoNode } from '@cerebro/shared';
 import type { BuildInput } from './topology.builder';
+import type { OutsideInData } from './outside-in.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -44,7 +45,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date()): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -114,7 +115,13 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
       why:
         `WAN port ${f.wanPort ?? '?'} goes straight to ${f.ip}:${f.toPort ?? f.wanPort ?? '?'} from any source, past the reverse proxy.` +
         (mgmt ? ` That machine sits on ${net!.label}, the network your switches and access points are managed on, so a compromise lands next to your network gear.` : '') +
-        (f.iface === 'all' ? ' It listens on every WAN interface.' : ''),
+        (f.iface === 'all' ? ' It listens on every WAN interface.' : '') +
+        (() => {
+          const seen = intel?.wan.filter((w) => f.wanPort && w.ports.includes(Number(f.wanPort))) ?? [];
+          if (seen.length) return ` Shodan's scanners have already found it open on ${seen.map((w) => w.ip).join(', ')}.`;
+          if (intel?.wan.length) return ` Shodan hasn't listed this port yet, but scanners sweep every port, so assume it's known.`;
+          return '';
+        })(),
       fix: mgmt
         ? 'Move the service to the DMZ VLAN, or limit the forward to known source addresses. If it is only for remote streaming, publish it through the proxy or a tunnel instead.'
         : 'Limit the forward to known source addresses, or publish the service through the reverse proxy or a tunnel instead.',
@@ -312,6 +319,8 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
     });
   }
 
+  if (intel) out.push(...outsideInFindings(input, graph, intel, now));
+
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
 
@@ -334,3 +343,231 @@ export function applySnoozes(findings: PostureFinding[], snoozes: Record<string,
     return isSnoozed(f, s, now) ? { ...f, snoozedUntil: s!.until } : { ...f, snoozedUntil: undefined };
   });
 }
+
+
+// ── outside-in (Shodan InternetDB, CISA KEV, endoflife.date) ───────────────
+
+/** Docker image repo (last path part) → endoflife.date product. Only products whose tags carry the release. */
+const EOL_PRODUCTS: Record<string, string> = {
+  postgres: 'postgresql', mysql: 'mysql', mariadb: 'mariadb', redis: 'redis', mongo: 'mongodb', node: 'nodejs',
+  python: 'python', nginx: 'nginx', php: 'php', ubuntu: 'ubuntu', debian: 'debian', alpine: 'alpine', golang: 'go',
+  rabbitmq: 'rabbitmq', elasticsearch: 'elasticsearch', traefik: 'traefik', haproxy: 'haproxy', memcached: 'memcached',
+  influxdb: 'influxdb', grafana: 'grafana', 'eclipse-mosquitto': 'mosquitto', wordpress: 'wordpress', nextcloud: 'nextcloud',
+  'home-assistant': 'home-assistant', homeassistant: 'home-assistant', gitea: 'gitea', keycloak: 'keycloak', tomcat: 'tomcat',
+  httpd: 'apache', valkey: 'valkey',
+};
+
+/** "lscr.io/linuxserver/nginx:1.25-alpine" → { product: "nginx", version: "1.25" }; null when untagged / "latest" / unknown. */
+export function imageRelease(image: string): { product: string; version: string } | null {
+  const noDigest = image.split('@')[0];
+  const slash = noDigest.lastIndexOf('/');
+  const colon = noDigest.lastIndexOf(':');
+  if (colon <= slash) return null;
+  const repo = noDigest.slice(slash + 1, colon).toLowerCase();
+  const tag = noDigest.slice(colon + 1);
+  const product = EOL_PRODUCTS[repo];
+  const version = /^v?(\d+(?:\.\d+)*)/.exec(tag)?.[1];
+  return product && version ? { product, version } : null;
+}
+
+/** The release cycle a version belongs to: exact match, else the longest cycle it starts with. */
+export function cycleFor(version: string, cycles: { cycle: string }[]): string | null {
+  let best: string | null = null;
+  for (const { cycle } of cycles) {
+    if (version === cycle || version.startsWith(`${cycle}.`)) if (!best || cycle.length > best.length) best = cycle;
+  }
+  return best;
+}
+
+/** Shodan CPE "vendor:product" → endoflife.date product, and whether it's a browser-side library. */
+const CPE_PRODUCTS: Record<string, { product: string; clientSide?: boolean }> = {
+  'getbootstrap:bootstrap': { product: 'bootstrap', clientSide: true },
+  'jquery:jquery': { product: 'jquery', clientSide: true },
+  'angularjs:angular.js': { product: 'angularjs', clientSide: true },
+  'f5:nginx': { product: 'nginx' }, 'nginx:nginx': { product: 'nginx' },
+  'apache:http_server': { product: 'apache' }, 'apache:tomcat': { product: 'tomcat' },
+  'php:php': { product: 'php' }, 'openssl:openssl': { product: 'openssl' }, 'openbsd:openssh': { product: 'openssh' },
+  'wordpress:wordpress': { product: 'wordpress' }, 'microsoft:internet_information_services': { product: 'iis' },
+  'drupal:drupal': { product: 'drupal' }, 'nodejs:node.js': { product: 'nodejs' },
+};
+
+/** "cpe:/a:getbootstrap:bootstrap:3.4.1" → { product: "bootstrap", version: "3.4.1" }; null without a version. */
+export function cpeRelease(cpe: string): { product: string; version: string; clientSide: boolean; name: string } | null {
+  const parts = cpe.replace(/^cpe:(2\.3:|\/)/, '').split(':');
+  // 2.3 form: a:vendor:product:version…; 2.2 form: a:vendor:product:version
+  const [, vendor, prod, ver] = parts;
+  const hit = vendor && prod ? CPE_PRODUCTS[`${vendor.toLowerCase()}:${prod.toLowerCase()}`] : undefined;
+  const version = ver && /^\d+(\.\d+)*/.exec(ver)?.[0];
+  return hit && version ? { product: hit.product, version, clientSide: !!hit.clientSide, name: prod } : null;
+}
+
+/** endoflife.date products the running images map to (for the service to fetch). */
+export function eolProducts(input: BuildInput): string[] {
+  const out = new Set<string>();
+  for (const d of input.docker) for (const c of d.containers) {
+    const r = imageRelease(String(c.details?.image ?? ''));
+    if (r) out.add(r.product);
+  }
+  return [...out].sort();
+}
+
+/** Public WAN addresses: the UniFi gateways' reported IPs. */
+export function wanIps(input: BuildInput): string[] {
+  const out = new Set<string>();
+  for (const u of input.unifi) for (const d of u.devices) {
+    const t = String(d.details?.type ?? d.tags?.type ?? '').toLowerCase();
+    const ip = str(d.details?.ip);
+    if (t.includes('gateway') && isIp(ip) && !isPrivateIp(ip)) out.add(ip);
+  }
+  return [...out];
+}
+
+function isPrivateIp(ip: string): boolean {
+  const [a, b] = ip.split('.').map(Number);
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+}
+
+const BAD_TAGS: Record<string, PostureSeverity> = { compromised: 'high', malware: 'high', c2: 'high', botnet: 'high', 'eol-os': 'medium', 'eol-product': 'medium', 'self-signed': 'low' };
+
+function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: OutsideInData, now: Date): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  const forwarded = new Set(
+    input.unifi.flatMap((u) => u.portForwards.filter((pf) => String(pf.status ?? '').toLowerCase() !== 'disabled').map((pf) => Number(str(pf.details?.port)))),
+  );
+
+  for (const w of intel.wan) {
+    // 1. Ports Shodan sees open that no port forward explains (the gateway itself, UPnP, a forgotten rule…).
+    const stray = w.ports.filter((p) => !forwarded.has(p));
+    if (stray.length)
+      out.push({
+        id: `wan-stray-ports:${w.ip}`,
+        severity: 'high',
+        category: 'exposure',
+        title: `${plural(stray.length, 'port is', 'ports are')} open on your WAN address with no port forward behind ${stray.length === 1 ? 'it' : 'them'}`,
+        why: `Shodan's scanners found ${stray.join(', ')} open on ${w.ip}, but no UniFi port forward uses ${stray.length === 1 ? 'that port' : 'those ports'}. That usually means the gateway itself is answering (remote management, VPN, a UPnP mapping a device opened), or a rule that isn't in the forward list.`,
+        fix: 'Check UniFi → Settings → Security / Internet → UPnP, remote access and VPN servers. Close the port if you don\'t recognise it; Shodan updates its data every few days.',
+        affected: stray.map((p) => ({ label: `${w.ip}:${p}`, nodeId: 'internet', note: `seen by Shodan (checked ${w.checkedAt.slice(0, 10)})` })),
+        source: 'Shodan InternetDB',
+      });
+
+    // 2. CVEs Shodan matched to the software it saw; CISA KEV marks the ones exploited in the wild.
+    if (w.vulns.length) {
+      const kev = w.vulns.filter((v) => intel.kev.has(v.toUpperCase()));
+      out.push({
+        id: `wan-vulns:${w.ip}`,
+        severity: kev.length ? 'high' : 'medium',
+        category: 'patching',
+        title: kev.length
+          ? `Your WAN address shows ${plural(kev.length, 'vulnerability', 'vulnerabilities')} known to be exploited`
+          : `Shodan lists ${plural(w.vulns.length, 'known vulnerability', 'known vulnerabilities')} for your WAN address`,
+        why:
+          'Shodan matched these CVEs to the software versions your public ports announce. It goes by version banners, so some may not apply (a patched build can keep the old version string).' +
+          (kev.length ? ` ${kev.length === 1 ? 'One is' : `${kev.length} are`} on CISA's Known Exploited Vulnerabilities list: attackers are using ${kev.length === 1 ? 'it' : 'them'} now.` : ''),
+        fix: 'Update the internet-facing software (the proxy on 80/443, or whatever the port forward points at). Afterwards Shodan re-scans within a few days and the list should shrink.',
+        affected: [...kev, ...w.vulns.filter((v) => !kev.includes(v))].map((v) => {
+          const k = intel.kev.get(v.toUpperCase());
+          return { label: v, nodeId: 'internet', note: k ? `CISA KEV: ${k.vulnerabilityName ?? k.product ?? ''}${k.knownRansomwareCampaignUse === 'Known' ? ' · used by ransomware' : ''}`.trim() : undefined };
+        }),
+        source: kev.length ? 'Shodan InternetDB + CISA KEV' : 'Shodan InternetDB',
+      });
+    }
+
+    // 3. Tags Shodan puts on the IP.
+    for (const tag of w.tags) {
+      const sev = BAD_TAGS[tag];
+      if (!sev) continue;
+      out.push({
+        id: `wan-tag:${w.ip}:${tag}`,
+        severity: sev,
+        category: sev === 'high' ? 'exposure' : 'hygiene',
+        title: `Shodan tags your WAN address "${tag}"`,
+        why: sev === 'high'
+          ? 'Shodan saw behaviour on this address that matches compromised or malware-controlled machines.'
+          : tag === 'self-signed'
+            ? 'A public port serves a self-signed certificate, so browsers warn and people learn to click through.'
+            : 'A public port announces software that is past its end of life.',
+        fix: sev === 'high' ? 'Treat it as an incident: check what answers on the open ports and which machine they forward to.' : 'Find which forward serves it and update or close it.',
+        affected: [{ label: w.ip, nodeId: 'internet', note: `ports ${w.ports.join(', ') || 'none'}` }],
+        source: 'Shodan InternetDB',
+      });
+    }
+  }
+
+  // 4. Software your public ports announce that is past its end of life (Shodan CPEs + endoflife.date).
+  for (const w of intel.wan) {
+    const hits: { label: string; note: string; clientSide: boolean }[] = [];
+    for (const cpe of w.cpes) {
+      const r = cpeRelease(cpe);
+      const cycles = r ? intel.eol.get(r.product) : undefined;
+      if (!r || !cycles?.length) continue;
+      const cyc = cycleFor(r.version, cycles);
+      const info = cyc ? cycles.find((x) => x.cycle === cyc) : undefined;
+      const end = info && info.eol !== true && info.eol !== false ? parseDay(info.eol) : null;
+      if (!info || !(info.eol === true || (end && end <= now))) continue;
+      hits.push({ label: `${r.name} ${r.version}`, clientSide: r.clientSide, note: `${r.product} ${cyc} support ended${end ? ` ${fmtDayUTC(end)}` : ''}${cycles[0]?.cycle && cycles[0].cycle !== cyc ? ` · current ${cycles[0].cycle}` : ''}` });
+    }
+    if (hits.length)
+      out.push({
+        id: `wan-eol:${w.ip}`,
+        severity: hits.every((h) => h.clientSide) ? 'low' : 'medium',
+        category: 'patching',
+        title: `Your public website${w.ports.length > 1 ? 's' : ''} announce${w.ports.length > 1 ? '' : 's'} software past its end of life`,
+        why:
+          `Shodan saw ${hits.map((h) => h.label).join(', ')} on ${w.ip} (ports ${w.ports.join(', ')}). These releases no longer get fixes.` +
+          (hits.every((h) => h.clientSide) ? ' They are browser-side libraries, so the risk is mostly cross-site scripting in the page that loads them, often a default or error page.' : ''),
+        fix: 'Find which proxy host or default page serves it (open the site and view the source), then update it or replace the default page.',
+        affected: hits.map((h) => ({ label: h.label, nodeId: 'internet', note: h.note })),
+        source: 'Shodan InternetDB + endoflife.date',
+      });
+  }
+
+  // 5. Containers running a release that is past its end of life (endoflife.date).
+  const fromInternet = new Set(graph.edges.filter((e) => e.source === 'internet' && (e.type === 'forwards' || e.type === 'resolves')).map((e) => e.target));
+  const ctrNode = (instId: string, id: string) => graph.nodes.find((n) => n.id === `ctr:${instId}:${id.slice(0, 12)}`);
+  const eolHits: { label: string; nodeId?: string; note: string; exposed: boolean }[] = [];
+  const soonHits: { label: string; nodeId?: string; note: string }[] = [];
+  for (const d of input.docker) for (const c of d.containers) {
+    const image = String(c.details?.image ?? '');
+    const r = imageRelease(image);
+    const cycles = r ? intel.eol.get(r.product) : undefined;
+    if (!r || !cycles?.length) continue;
+    const cyc = cycleFor(r.version, cycles);
+    const info = cyc ? cycles.find((x) => x.cycle === cyc) : undefined;
+    if (!info || info.eol === false) continue;
+    const end = info.eol === true ? null : parseDay(info.eol);
+    const node = ctrNode(d.inst.id, c.id);
+    const newest = cycles[0]?.cycle;
+    const label = node?.label ?? c.name;
+    if (info.eol === true || (end && end <= now)) {
+      eolHits.push({ label, nodeId: node?.id, exposed: !!node && fromInternet.has(node.id), note: `${image} · ${r.product} ${cyc} ended${end ? ` ${fmtDayUTC(end)}` : ''}${newest && newest !== cyc ? ` · current ${newest}` : ''} · on ${d.inst.name}` });
+    } else if (end && end.getTime() - now.getTime() <= 90 * DAY) {
+      soonHits.push({ label, nodeId: node?.id, note: `${image} · ${r.product} ${cyc} support ends ${fmtDayUTC(end)} · on ${d.inst.name}` });
+    }
+  }
+  if (eolHits.length)
+    out.push({
+      id: 'image-eol',
+      severity: eolHits.some((h) => h.exposed) ? 'high' : 'medium',
+      category: 'patching',
+      title: `${plural(eolHits.length, 'container runs', 'containers run')} a release past its end of life`,
+      why: 'These releases no longer get security fixes, so any bug found from now on stays open.' + (eolHits.some((h) => h.exposed) ? ' At least one of them is reachable from the internet.' : ''),
+      fix: 'Move the image tag to a supported release (check the app\'s upgrade notes; databases usually need a dump and restore between major versions).',
+      affected: eolHits.map(({ label, nodeId, note }) => ({ label, nodeId, note })),
+      source: 'endoflife.date + Docker',
+    });
+  if (soonHits.length)
+    out.push({
+      id: 'image-eol-soon',
+      severity: 'low',
+      category: 'patching',
+      title: `${plural(soonHits.length, 'container runs', 'containers run')} a release whose support ends within 90 days`,
+      why: 'After that date the release stops getting security fixes.',
+      fix: 'Plan the move to a newer release before the date.',
+      affected: soonHits,
+      source: 'endoflife.date + Docker',
+    });
+
+  return out;
+}
+
+const fmtDayUTC = (d: Date) => d.toISOString().slice(0, 10);
