@@ -53,6 +53,7 @@ import { FabricApprovalService } from './fabric-approval.service';
 import { generateEnrollToken } from './fabric-credentials';
 import { baseUrl } from './fabric-enrollment.service';
 import { fabricConfig } from './fabric-config';
+import { trimChar } from '../common/text';
 
 const SESSION_WS_PATH = '/api/fabric/session/ws';
 
@@ -642,7 +643,7 @@ export class FabricService implements OnModuleInit {
     value: FabricCredValue,
     user: SessionUser,
   ): Promise<string> {
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'cred';
+    const slug = trimChar(name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), '-').slice(0, 60) || 'cred';
     const key = `fabric/cred/${slug}`;
     await this.secrets.set(
       key,

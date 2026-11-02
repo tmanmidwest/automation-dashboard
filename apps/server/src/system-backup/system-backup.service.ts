@@ -93,7 +93,7 @@ export class SystemBackupService {
   async createBackup(passphrase: string): Promise<{ filename: string; data: Buffer }> {
     // The .cbak holds every secret in the vault, so require a strong passphrase —
     // it's the only thing standing between a leaked backup file and full decryption.
-    if (!passphrase || passphrase.length < 16) throw new BadRequestException('A passphrase of at least 16 characters is required (this file contains all your secrets).');
+    if (typeof passphrase !== 'string' || passphrase.length < 16) throw new BadRequestException('A passphrase of at least 16 characters is required (this file contains all your secrets).');
     if (!(await this.pgToolsAvailable())) throw new BadRequestException('pg_dump is not available in this image — rebuild with postgresql-client.');
 
     const { stdout } = await execFileAsync(
@@ -121,7 +121,7 @@ export class SystemBackupService {
   }
 
   async restore(file: Buffer, passphrase: string): Promise<{ ok: boolean; message: string }> {
-    if (!passphrase) throw new BadRequestException('The passphrase is required.');
+    if (typeof passphrase !== 'string' || !passphrase) throw new BadRequestException('The passphrase is required.');
     if (!(await this.pgToolsAvailable())) throw new BadRequestException('psql is not available in this image — rebuild with postgresql-client.');
 
     let bundle: Bundle;

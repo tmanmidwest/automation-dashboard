@@ -6,6 +6,7 @@ import type { ConnectorContext } from '@cerebro/shared';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { DockerApi, type DockerAuth } from '../connectors/docker/docker-api';
 import { runSsh, type SshConfig } from '../connectors/docker/docker-ssh';
+import { trimEndChar } from '../common/text';
 
 const CONTAINER_NAME = 'cerebro-ollama';
 const VOLUME_NAME = 'cerebro-ollama';
@@ -254,7 +255,7 @@ export class OllamaProvisionService {
       }
 
       const override = opts.baseUrlOverride?.trim();
-      const baseUrl = override || deriveBaseUrl(endpoint, port);
+      const baseUrl = override ? normalizeBaseUrl(override) : deriveBaseUrl(endpoint, port);
       yield {
         type: 'log',
         text: override ? `Container is up. Using your Base URL: ${baseUrl}` : `Container is up. Base URL: ${baseUrl}`,
@@ -389,6 +390,20 @@ function gpuMessage(x: {
   return parts.join(' ');
 }
 
+/** A user-typed Base URL, accepted only as a plain http(s) origin (+ optional path), so the
+ *  readiness poll and model pull can't be pointed at file:, data: or other schemes. */
+function normalizeBaseUrl(raw: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`"${raw}" is not a valid Base URL. Use something like http://192.168.1.10:11434.`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('The Base URL must start with http:// or https://.');
+  if (u.username || u.password) throw new Error('The Base URL must not contain a username or password.');
+  return `${u.protocol}//${u.host}${trimEndChar(u.pathname, '/')}`;
+}
+
 /** Suggest a Base URL Cerebro can use to reach the container. Best-effort; user can edit. */
 function deriveBaseUrl(endpoint: string, port: number): string {
   if (endpoint.startsWith('tcp://')) {
@@ -406,7 +421,7 @@ function deriveBaseUrl(endpoint: string, port: number): string {
 
 /** Poll GET {baseUrl}/api/tags until it answers (or give up). */
 async function waitReady(baseUrl: string, attempts = 20, delayMs = 2000): Promise<boolean> {
-  const url = `${baseUrl.replace(/\/+$/, '')}/api/tags`;
+  const url = `${trimEndChar(baseUrl, '/')}/api/tags`;
   for (let i = 0; i < attempts; i++) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
@@ -426,7 +441,7 @@ async function waitReady(baseUrl: string, attempts = 20, delayMs = 2000): Promis
  * the user real feedback. The download is resumable, so a failed pull can just be re-run.
  */
 async function* pullModelStream(baseUrl: string, model: string): AsyncGenerator<string> {
-  const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/pull`, {
+  const res = await fetch(`${trimEndChar(baseUrl, '/')}/api/pull`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: model, stream: true }),

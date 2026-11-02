@@ -381,9 +381,13 @@ export function redactCompose(compose?: string): { redacted?: string; values: Re
 
   const out = compose.split('\n').map((line) => {
     // `- KEY=value` (list form) or `KEY: value` (map form) inside environment:.
-    const m = /^(\s*-?\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(=|:\s)\s*(.+?)\s*$/.exec(line);
+    // No lazy `(.+?)\s*$` here: that backtracks badly on long lines, so the value
+    // is taken whole and trimmed afterwards.
+    const m = /^(\s*(?:-\s*)?)([A-Za-z_][A-Za-z0-9_]*)[ \t]*(=|:\s)(.*)$/.exec(line);
     if (!m) return line;
-    const [, indent, name, sep, rawValue] = m;
+    const [, indent, name, sep] = m;
+    const rawValue = m[4].trim();
+    if (!rawValue) return line;
     if (!looksSecret(name)) return line;
 
     const value = rawValue.replace(/^["']|["']$/g, '');
@@ -430,8 +434,11 @@ export function detectFileSecrets(compose: string | undefined, variables: { name
   }
   if (compose) {
     // Top-level `secrets:`/`configs:` blocks with a `file:` source.
-    for (const m of compose.matchAll(/^\s*file:\s*(.+?)\s*$/gm)) {
-      const path = m[1].replace(/^["']|["']$/g, '');
+    for (const line of compose.split('\n')) {
+      const m = /^\s*file:(.*)$/.exec(line);
+      const raw = m?.[1].trim();
+      if (!raw) continue;
+      const path = raw.replace(/^["']|["']$/g, '');
       if (path.startsWith('/') || path.startsWith('./')) {
         out.set(path, { label: path, path, source: 'compose' });
       }

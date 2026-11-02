@@ -156,7 +156,9 @@ func startRealDesktop(id, user, uid, sessionType, username, password string) (de
 	}
 	for _, step := range steps {
 		if out, err := runAsUser(user, env, step[0], step[1:]...); err != nil {
-			return desktopResult{}, fmt.Errorf("gnome-remote-desktop setup failed at `%s`: %v: %s", strings.Join(step, " "), err, strings.TrimSpace(out))
+			// Name the step without its arguments: set-credentials carries the password,
+			// and this error is logged and sent back to the broker.
+			return desktopResult{}, fmt.Errorf("gnome-remote-desktop setup failed at `%s`: %v: %s", strings.Join(step[:3], " "), err, redact(strings.TrimSpace(out), password))
 		}
 	}
 	// Make sure the user service is actually running (on a fresh enable it may need a kick).
@@ -478,7 +480,7 @@ func (tc *toolchain) writePasswd(passFile, password, uid string) error {
 	} else {
 		// x11vnc -storepasswd writes the obfuscated file directly.
 		if out, err := exec.Command(tc.x11vnc, "-storepasswd", password, passFile).CombinedOutput(); err != nil {
-			return fmt.Errorf("x11vnc -storepasswd: %v: %s", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("x11vnc -storepasswd: %v: %s", err, redact(strings.TrimSpace(string(out)), password))
 		}
 	}
 	chownTo(passFile, uid)
@@ -649,4 +651,13 @@ func fileExists(p string) bool {
 
 func portListening(port int) bool {
 	return portOpen(port) // reuse main.go's loopback dial check
+}
+
+// redact blanks out a secret wherever it appears in command output before that output
+// goes into an error message (errors are logged and reported to the broker).
+func redact(s, secret string) string {
+	if secret == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "***")
 }

@@ -23,6 +23,7 @@ import { dockerTargetFrom } from '../app-replicator/docker-target';
 import { runSsh } from '../connectors/docker/docker-ssh';
 import type { PreflightCheck, MigrateIngressSuggestion } from '@cerebro/shared';
 import { ensureImagesOnTarget } from './image-transfer';
+import { trimChar } from '../common/text';
 
 const DOCKER = 'docker';
 const MAX_LOG_CHARS = 64 * 1024;
@@ -1434,7 +1435,7 @@ function fmtBytes(n: number): string {
 
 /** Compose's project-name rules: lowercase, alphanumerics, dash and underscore. */
 function projectName(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return trimChar(name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-'), '-');
 }
 
 /**

@@ -96,7 +96,7 @@ export class EcsBuilderService {
     const redact = (s: string) => (cred?.secret ? (s || '').split(cred.secret).join('***') : s);
 
     try {
-      await runSsh(ssh, `mkdir -p '${base}'`);
+      await runSsh(ssh, `mkdir -p '${sq(base)}'`);
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(input.source.gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
