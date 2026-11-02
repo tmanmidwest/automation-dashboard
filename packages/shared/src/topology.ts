@@ -126,7 +126,8 @@ export interface PostureFinding {
   /** What to do about it. */
   fix: string;
   /** What it's about; nodeId links to the map when the item is on it. */
-  affected: { label: string; nodeId?: string; note?: string }[];
+  /** nodeId links to the map; url (outside-in findings) opens the evidence, e.g. the page or Shodan's record. */
+  affected: { label: string; nodeId?: string; note?: string; url?: string }[];
   /** Other map items that should carry this finding's badge (e.g. the Internet tile for a port forward). */
   alsoOn?: string[];
   /** Where the data came from, e.g. "Nginx Proxy Manager", "UniFi". */
