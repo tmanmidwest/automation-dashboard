@@ -96,4 +96,30 @@ export interface TopologyGraph {
   nodes: TopoNode[];
   edges: TopoEdge[];
   feeds: TopoFeed[];
+  /** Security posture findings, worst first (see docs/architecture-map.md#posture-findings). */
+  findings?: PostureFinding[];
+}
+
+export type PostureSeverity = 'high' | 'medium' | 'low';
+export type PostureCategory = 'exposure' | 'encryption' | 'backups' | 'patching' | 'hygiene';
+
+/** One thing worth fixing, computed from what the connectors already report. */
+export interface PostureFinding {
+  /** Stable across rebuilds, e.g. "npm-http:<instanceId>"; snoozes key on it. */
+  id: string;
+  severity: PostureSeverity;
+  category: PostureCategory;
+  title: string;
+  /** Why it matters, one or two sentences. */
+  why: string;
+  /** What to do about it. */
+  fix: string;
+  /** What it's about; nodeId links to the map when the item is on it. */
+  affected: { label: string; nodeId?: string; note?: string }[];
+  /** Other map items that should carry this finding's badge (e.g. the Internet tile for a port forward). */
+  alsoOn?: string[];
+  /** Where the data came from, e.g. "Nginx Proxy Manager", "UniFi". */
+  source: string;
+  /** Set while snoozed: ISO time it wakes up again. */
+  snoozedUntil?: string;
 }

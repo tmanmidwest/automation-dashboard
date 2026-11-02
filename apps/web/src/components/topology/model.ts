@@ -1,4 +1,4 @@
-import type { TopoEdge, TopoNode, TopoNodeType, TopoStatus, TopologyGraph } from '@cerebro/shared';
+import type { PostureFinding, PostureSeverity, TopoEdge, TopoNode, TopoNodeType, TopoStatus, TopologyGraph } from '@cerebro/shared';
 import { isUnknownHost, TYPE_LABEL } from './meta';
 
 /**
@@ -504,6 +504,49 @@ export class TopoModel {
     const pve = (this.out.get(id) ?? []).find((e) => e.type === 'runs_on')?.target;
     if (pve && this.laneIds.has(pve)) return [pve, id];
     return [id];
+  }
+
+  // ---- posture findings ---------------------------------------------------
+
+  private findingsAt: Map<string, PostureFinding[]> | null = null;
+
+  /** Open (not snoozed) findings about an item, or anything inside it. Worst first. */
+  findingsFor(id: string): PostureFinding[] {
+    if (!this.findingsAt) {
+      const at = new Map<string, PostureFinding[]>();
+      for (const f of this.graph.findings ?? []) {
+        if (f.snoozedUntil) continue;
+        const on = new Set<string>();
+        for (const nid of [...f.affected.map((a) => a.nodeId), ...(f.alsoOn ?? [])]) {
+          if (!nid || !this.byId.has(nid)) continue;
+          const under = new Set([nid, ...this.pathTo(nid), ...this.ancestors(nid)]);
+          if (f.affected.some((a) => a.nodeId === nid)) for (const x of under) this.hereCount.set(`${x}\u0000${f.id}`, (this.hereCount.get(`${x}\u0000${f.id}`) ?? 0) + 1);
+          for (const x of under) on.add(x);
+        }
+        for (const x of on) {
+          if (!at.has(x)) at.set(x, []);
+          at.get(x)!.push(f);
+        }
+      }
+      this.findingsAt = at;
+    }
+    return this.findingsAt.get(id) ?? [];
+  }
+
+  private hereCount = new Map<string, number>();
+
+  /** How many of a finding's affected items sit in this item (0 when it is only badged via alsoOn). */
+  affectedIn(id: string, f: PostureFinding): number {
+    this.findingsFor(id);
+    return this.hereCount.get(`${id}\u0000${f.id}`) ?? 0;
+  }
+
+  /** The tile badge: worst severity and how many findings have it. */
+  worst(id: string): { severity: PostureSeverity; count: number; total: number } | null {
+    const fs = this.findingsFor(id);
+    if (!fs.length) return null;
+    const severity = (['high', 'medium', 'low'] as const).find((s) => fs.some((f) => f.severity === s))!;
+    return { severity, count: fs.filter((f) => f.severity === severity).length, total: fs.length };
   }
 
   /** The lane a top-level tile sits in (virtual attention groups have none). */

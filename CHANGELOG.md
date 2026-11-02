@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Security posture findings on the Architecture Map** — a Posture findings tile in
+  Needs attention opens a ranked list (High / Medium / Low; Exposure, Encryption, Backups,
+  Patching, Hygiene) built from connector data: proxy hosts on plain HTTP, port forwards
+  that bypass the proxy, guests with no or stale backups, expiring / expired certificates,
+  firmware and image updates, unknown addresses in rules, VMs without the guest agent.
+  Tiles get a worst-severity badge, a Posture view tints the map, and open rows start with
+  their findings. Findings can be snoozed for 7 or 30 days (they return early if new items
+  appear). See `docs/architecture-map.md#posture-findings`.
 - **Architecture Map** (`/map`) — everything the connectors see, joined into one model.
   The page is a scrolling overview of tiles in four lanes (Edge, Networks, Compute, Apps)
   under a "needs attention" strip (down, warnings, exposed to the internet, unknown
