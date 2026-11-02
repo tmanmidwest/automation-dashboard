@@ -247,6 +247,12 @@ export interface UniClient {
   /** Last known IP when `ip` is empty (e.g. a client that hasn't renewed recently). */
   last_ip?: string;
   display_name?: string;
+  /** Fingerprint ids, resolved to names through the console's fingerprint table. */
+  dev_id?: number;
+  dev_id_override?: number;
+  dev_cat?: number;
+  dev_family?: number;
+  dev_vendor?: number;
 }
 
 /** A known (historic) client from rest/user — used for the blocked list. */
@@ -849,6 +855,20 @@ export class UniFiApi {
   async firewallZones(): Promise<UniFirewallZone[] | null> {
     if (this.integrationOnly) return null;
     return this.v2Get<UniFirewallZone>('firewall/zone');
+  }
+
+  /**
+   * The fingerprint table the UniFi app uses to name client types (numeric dev_id /
+   * dev_cat → "Roku TV" / "Smart TV"). Not a documented API: `null` when the console
+   * doesn't serve it.
+   */
+  async fingerprintTable(): Promise<unknown | null> {
+    if (this.integrationOnly) return null;
+    try {
+      return await this.request<unknown>('GET', '/proxy/network/v2/api/fingerprint_devices/0');
+    } catch {
+      return null;
+    }
   }
 
   async dynamicDns(): Promise<UniDdns[]> {

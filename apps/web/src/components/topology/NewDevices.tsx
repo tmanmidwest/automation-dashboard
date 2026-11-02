@@ -14,6 +14,8 @@ export interface NetworkDevice {
   ip: string | null;
   network: string | null;
   via: string | null;
+  deviceType: string | null;
+  typeOverride: string | null;
   privateMac: boolean;
   status: 'new' | 'known' | 'blocked';
   firstSeenAt: string;
@@ -125,6 +127,8 @@ export function NewDevicesRow({ list, onChanged, onShow, onClose }: {
                   <span className="text-[15px] font-semibold truncate">{name}</span>
                   <span className="ml-auto text-xs text-muted-foreground shrink-0">{ago(d.firstSeenAt)}</span>
                 </div>
+                <DeviceType type={d.typeOverride ?? d.deviceType} source={d.typeOverride ? 'You' : d.deviceType ? 'Guess' : null}
+                  mac={d.mac} instanceId={d.instanceId} onSaved={() => onChanged()} />
                 <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[13px]">
                   <dt className="text-muted-foreground">MAC</dt>
                   <dd className="font-mono truncate">{d.mac}{d.privateMac && <span className="ml-1.5 font-sans text-xs text-muted-foreground">(private)</span>}</dd>
@@ -164,5 +168,72 @@ export function NewDevicesRow({ list, onChanged, onShow, onClose }: {
         </label>
       )}
     </div>
+  );
+}
+
+/** Common answers for "what is this?"; any text is allowed. */
+const TYPE_CHOICES = [
+  'Smart TV', 'Streaming player', 'Phone', 'Tablet', 'Laptop', 'Computer', 'Printer', 'Camera', 'Doorbell camera',
+  'Smart speaker', 'Speaker', 'Game console', 'Thermostat', 'Smart lighting', 'Smart plug / IoT', 'Appliance',
+  'Coffee maker', 'Robot vacuum', 'NAS / storage', 'Server', 'Virtual machine', 'Network gear', 'Car', 'Unknown',
+];
+
+/**
+ * "Type: Smart TV (guess from maker) · Set type": what a device is, with a small editor to
+ * say what it really is. The type the user sets wins over UniFi's and Cerebro's guesses.
+ */
+export function DeviceType({ type, model, source, mac, instanceId, onSaved }: {
+  type?: string | null;
+  model?: string | null;
+  source?: string | null;
+  mac: string;
+  instanceId?: string;
+  onSaved: (type: string | null) => void;
+}) {
+  const { can } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(type ?? '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const canEdit = !!instanceId && can('connectors:action');
+  const listId = `types-${mac}`;
+
+  const save = async (v: string | null) => {
+    if (!instanceId) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.put(`/api/devices/${encodeURIComponent(mac)}/type`, { instanceId, type: v });
+      setEditing(false);
+      onSaved(v);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not save.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <form className="flex flex-wrap items-center gap-2 text-sm" onSubmit={(e) => { e.preventDefault(); save(value.trim() || null); }}>
+        <span className="text-muted-foreground">Type</span>
+        <input autoFocus list={listId} value={value} onChange={(e) => setValue(e.target.value)} maxLength={60} placeholder="e.g. Smart TV"
+          className="h-8 w-56 rounded-md border border-border bg-background px-2 text-sm" />
+        <datalist id={listId}>{TYPE_CHOICES.map((t) => <option key={t} value={t} />)}</datalist>
+        <Button size="sm" type="submit" disabled={busy}>Save</Button>
+        {source === 'You' && <Button size="sm" type="button" variant="outline" disabled={busy} onClick={() => save(null)}>Use the guess</Button>}
+        <Button size="sm" type="button" variant="ghost" onClick={() => { setEditing(false); setValue(type ?? ''); }}>Cancel</Button>
+        {err && <span className="text-xs text-red-500">{err}</span>}
+      </form>
+    );
+  }
+  const from = source === 'You' ? 'set by you' : source ? source.charAt(0).toLowerCase() + source.slice(1) : null;
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+      <span className="text-muted-foreground">Type</span>
+      {type ? <span className="font-medium">{type}{model ? ` · ${model}` : ''}</span> : <span className="text-muted-foreground">Not known</span>}
+      {from && <span className={cn('rounded px-1.5 py-0.5 text-[11px] leading-none', source === 'You' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-muted text-muted-foreground')}>{from}</span>}
+      {canEdit && <button className="text-accent hover:underline text-sm" onClick={() => { setValue(type ?? ''); setEditing(true); }}>{type ? 'Change' : 'Set type'}</button>}
+    </span>
   );
 }

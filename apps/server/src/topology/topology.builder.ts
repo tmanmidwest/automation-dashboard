@@ -144,6 +144,7 @@ function detailItems(d: ConnectorResource['details'], skip: string[] = []): { la
 
 interface Obs {
   key: string;
+  deviceType?: TopoNode['deviceType'];
   names: string[];
   macs: string[];
   ips: string[];
@@ -321,8 +322,11 @@ export function buildTopology(input: BuildInput): TopologyGraph {
         status: statusOf(c.status),
         statusText: c.status,
         networkName: c.tags?.network,
-        details: { source: u.inst.name, items: detailItems(c.details, ['up', 'down']) },
+        details: { source: u.inst.name, items: detailItems(c.details, ['up', 'down', 'deviceType', 'deviceModel', 'typeFrom']) },
         source: { instanceId: u.inst.id, connectorId: 'unifi', name: u.inst.name, kind: 'client', resourceId: c.id },
+        deviceType: str(c.details?.deviceType)
+          ? { name: str(c.details?.deviceType)!, model: str(c.details?.deviceModel) ?? undefined, source: str(c.details?.typeFrom) ?? 'Guess' }
+          : undefined,
       });
       const up = deviceForVia(str(c.details?.via));
       if (up) uplinkOf.set(key, up);
@@ -537,6 +541,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
       ips,
       macs,
       infra: members.some((m) => m.infra && !m.attachOnly),
+      deviceType: members.find((m) => m.deviceType)?.deviceType,
       details: members.filter((m) => m.details).map((m) => m.details!),
       sources: members.filter((m) => m.source).map((m) => m.source!),
     });

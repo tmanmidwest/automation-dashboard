@@ -75,6 +75,7 @@ export class NewDevicesService {
       ip: str(c.details?.ip),
       network: str(c.details?.network) ?? str(c.tags?.network),
       via: str(c.details?.via),
+      deviceType: str(c.details?.deviceType),
     });
 
     const fresh: NetworkDevice[] = [];
@@ -112,6 +113,7 @@ export class NewDevicesService {
         body: [
           `${d.name ?? 'Unnamed device'} joined the network (seen by ${inst.name}).`,
           `MAC: ${d.mac}${d.privateMac ? ' (private / randomized)' : ''}`,
+          d.deviceType ? `Looks like: ${d.deviceType}` : null,
           d.vendor && !d.privateMac ? `Maker: ${d.vendor}` : null,
           d.ip ? `IP: ${d.ip}` : null,
           d.network ? `Network: ${d.network}` : null,
@@ -139,6 +141,23 @@ export class NewDevicesService {
       where: { mac: mac.toLowerCase() },
       data: { status, reviewedAt: new Date(), reviewedBy: by },
     });
+  }
+
+  /** Set (or clear, with null) what a device is. Creates the row if the scan hasn't yet. */
+  async setType(mac: string, instanceId: string, type: string | null, by: string) {
+    const m = mac.toLowerCase();
+    const typeOverride = type?.trim() || null;
+    return this.prisma.networkDevice.upsert({
+      where: { mac: m },
+      update: { typeOverride },
+      create: { mac: m, instanceId, typeOverride, privateMac: isPrivateMac(m), status: 'known', reviewedAt: new Date(), reviewedBy: by },
+    });
+  }
+
+  /** MAC → the type the user set, for the map. */
+  async overrides(): Promise<Map<string, string>> {
+    const rows = await this.prisma.networkDevice.findMany({ where: { typeOverride: { not: null } }, select: { mac: true, typeOverride: true } });
+    return new Map(rows.map((r) => [r.mac, r.typeOverride!]));
   }
 
   async reviewAllNew(by: string) {

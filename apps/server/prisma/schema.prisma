@@ -1089,6 +1089,10 @@ model NetworkDevice {
   network      String?
   /// Switch port or access point it was seen on.
   via          String?
+  /// What it looks like ("Smart TV"), from UniFi's fingerprint or Cerebro's guess.
+  deviceType   String?
+  /// What the user says it is; beats deviceType everywhere.
+  typeOverride String?
   /// Randomized / locally administered MAC (phones, tablets).
   privateMac   Boolean   @default(false)
   /// "new" until someone reviews it, then "known".

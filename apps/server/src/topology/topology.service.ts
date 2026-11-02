@@ -50,13 +50,33 @@ export class TopologyService {
   private rebuild(refresh: boolean): Promise<TopologyGraph> {
     if (this.inflight) return this.inflight;
     this.inflight = this.gather(refresh)
-      .then((input) => {
+      .then(async (input) => {
         const graph = buildTopology(input);
+        try {
+          const rows = await this.prisma.networkDevice.findMany({ where: { typeOverride: { not: null } }, select: { mac: true, typeOverride: true } });
+          for (const r of rows) this.applyType(graph, r.mac, r.typeOverride);
+        } catch {
+          /* table missing before migration: keep the guesses */
+        }
         this.cache = { at: Date.now(), graph };
         return graph;
       })
       .finally(() => { this.inflight = null; });
     return this.inflight;
+  }
+
+  /** A type the user set in Cerebro: patch the cached map now instead of rebuilding it. */
+  setDeviceType(mac: string, type: string | null): void {
+    if (this.cache) this.applyType(this.cache.graph, mac, type);
+    if (!type) this.cache = null; // the guess it falls back to lives in the next build
+  }
+
+  private applyType(graph: TopologyGraph, mac: string, type: string | null): void {
+    const m = mac.toLowerCase();
+    for (const n of graph.nodes) {
+      if (!n.macs.includes(m)) continue;
+      if (type) n.deviceType = { name: type, source: 'You' };
+    }
   }
 
   private async gather(refresh: boolean): Promise<BuildInput> {

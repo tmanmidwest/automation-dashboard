@@ -218,8 +218,8 @@ export class TopoModel {
         return plural((this.kids.get(n.id) ?? []).length, 'container');
       default: {
         if (isUnknownHost(n)) return 'Not seen by any connector';
-        // Roles say what a server is; for a plain client, who made it says more than "Host".
-        const what = n.roles.filter((r) => r !== 'Fabric agent').join(' · ') || detailOf(n, 'Vendor') || (n.type === 'host' ? '' : TYPE_LABEL[n.type]);
+        // Roles say what a server is; for a plain client, its type (or who made it) says more than "Host".
+        const what = n.roles.filter((r) => r !== 'Fabric agent').join(' · ') || n.deviceType?.name || detailOf(n, 'Vendor') || (n.type === 'host' ? '' : TYPE_LABEL[n.type]);
         const bits = [n.ips[0], what].filter(Boolean);
         return n.sublabel && !n.ips[0] ? n.sublabel : bits.join(' · ');
       }
