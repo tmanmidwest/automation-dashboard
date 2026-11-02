@@ -1,7 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
-import { createHash } from 'crypto';
 
 /** Cap a buffered HTTP response body so a hostile/compromised host can't OOM us. */
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -338,6 +337,8 @@ export interface UniDdns {
 
 interface Session {
   cookie: string;
+  /** The password this session logged in with — a changed (or wrong) password never rides on it. */
+  password: string;
   csrf?: string;
   at: number;
 }
@@ -382,11 +383,8 @@ export class UniFiApi {
     return !!this.auth.apiKey;
   }
 
-  /** Sessions are keyed by console + user + a hash of the password, so a changed (or wrong)
-   *  password never rides on a session another config logged in with. */
   private sessionKey(): string {
-    const pw = createHash('sha256').update(this.auth.password ?? '').digest('hex');
-    return `${this.auth.baseUrl}|${this.auth.username ?? ''}|${pw}`;
+    return `${this.auth.baseUrl}|${this.auth.username ?? ''}`;
   }
 
   private base(): string {
@@ -473,14 +471,14 @@ export class UniFiApi {
     const cookie = setCookie.map((c) => c.split(';')[0]).filter(Boolean).join('; ');
     if (!cookie) throw new UniApiError('Login succeeded but the console returned no session cookie.');
     const csrf = (res.headers['x-csrf-token'] as string | undefined) ?? (res.headers['x-updated-csrf-token'] as string | undefined);
-    const s: Session = { cookie, csrf, at: Date.now() };
+    const s: Session = { cookie, password: this.auth.password, csrf, at: Date.now() };
     sessions.set(this.sessionKey(), s);
     return s;
   }
 
   private async session(): Promise<Session> {
     const s = sessions.get(this.sessionKey());
-    if (s && Date.now() - s.at < SESSION_TTL_MS) return s;
+    if (s && s.password === this.auth.password && Date.now() - s.at < SESSION_TTL_MS) return s;
     return this.login();
   }
 
