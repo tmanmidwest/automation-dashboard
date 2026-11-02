@@ -407,6 +407,22 @@ export class ProxmoxConnector implements Connector {
       );
     }
 
+    // NIC MAC + VLAN tag from each guest's config (works for stopped guests and
+    // guests without an agent). Lets the architecture map tie a VM to its switch
+    // port / UniFi client by MAC. Best-effort, same short timeout as the IPs.
+    const nicByVmid = new Map<number, { mac: string; vlan: string | null }>();
+    await Promise.all(
+      rows.map(async (r) => {
+        try {
+          const cfg = await withTimeout(api.config(r.node, type, r.vmid), 3000);
+          const nic = firstNic(cfg);
+          if (nic) nicByVmid.set(r.vmid, nic);
+        } catch {
+          /* config unreadable — leave MAC blank */
+        }
+      }),
+    );
+
     return rows.map((r) => ({
       id: String(r.vmid),
       kind,
@@ -418,6 +434,8 @@ export class ProxmoxConnector implements Connector {
         cpu: r.maxcpu != null ? `${r.maxcpu} vCPU` : null,
         memory: bytes(r.maxmem) ?? null,
         ip: ipByVmid.get(r.vmid) ?? null,
+        mac: nicByVmid.get(r.vmid)?.mac ?? null,
+        vlan: nicByVmid.get(r.vmid)?.vlan ?? null,
         uptime: r.status === 'running' ? uptime(r.uptime) ?? null : null,
         tags: r.tags?.trim() || null,
         pool: r.pool || null,
@@ -1251,4 +1269,20 @@ export class ProxmoxConnector implements Connector {
       return { ok: false, message: err instanceof Error ? err.message : 'Delete failed.' };
     }
   }
+}
+
+/**
+ * First network card in a guest config: qemu `net0: virtio=BC:24:11:..,bridge=vmbr0,tag=44`,
+ * lxc `net0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:..,ip=dhcp,tag=44`.
+ */
+export function firstNic(cfg: Record<string, unknown>): { mac: string; vlan: string | null } | null {
+  const keys = Object.keys(cfg).filter((k) => /^net\d+$/.test(k)).sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+  for (const k of keys) {
+    const v = String(cfg[k] ?? '');
+    const mac = /(?:^|,)(?:hwaddr|virtio|e1000|e1000e|rtl8139|vmxnet3)=([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i.exec(v)?.[1];
+    if (!mac) continue;
+    const tag = /(?:^|,)tag=(\d+)/.exec(v)?.[1] ?? null;
+    return { mac: mac.toLowerCase(), vlan: tag };
+  }
+  return null;
 }

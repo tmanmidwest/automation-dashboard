@@ -33,6 +33,7 @@ import { AppReplicatorModule } from './app-replicator/app-replicator.module';
 import { FabricModule } from './fabric/fabric.module';
 import { ToolsModule } from './tools/tools.module';
 import { AssistantModule } from './assistant/assistant.module';
+import { TopologyModule } from './topology/topology.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -75,6 +76,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     FabricModule,
     ToolsModule,
     AssistantModule,
+    TopologyModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.
