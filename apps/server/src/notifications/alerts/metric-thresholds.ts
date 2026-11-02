@@ -51,6 +51,16 @@ export const METRIC_THRESHOLDS: MetricThresholdDef[] = [
   { id: 'technitiumZonesExpired', metricKey: 'zonesExpired', alertKey: 'technitium.zones_expired', label: 'Zones expired' },
   { id: 'technitiumServerFailures', metricKey: 'serverFailures1h', alertKey: 'technitium.server_failures', label: 'Server failures (1h)' },
   { id: 'technitiumBlockRate', metricKey: 'blockedPct', alertKey: 'technitium.block_rate', label: 'Block rate (%)' },
+  // UniFi Network health (from the connector's controller overview).
+  { id: 'unifiDevicesOffline', metricKey: 'unifiDevicesOffline', alertKey: 'unifi.devices_offline', label: 'Devices offline' },
+  { id: 'unifiWanDown', metricKey: 'unifiWanDown', alertKey: 'unifi.wan_down', label: 'WAN links down' },
+  { id: 'unifiWanLatency', metricKey: 'unifiWanLatencyMs', alertKey: 'unifi.wan_latency', label: 'Internet latency (ms)' },
+  { id: 'unifiGatewayCpu', metricKey: 'unifiGatewayCpuPct', alertKey: 'unifi.gateway_cpu', label: 'Gateway CPU (%)' },
+  { id: 'unifiGatewayMem', metricKey: 'unifiGatewayMemPct', alertKey: 'unifi.gateway_mem', label: 'Gateway memory (%)' },
+  { id: 'unifiGatewayTemp', metricKey: 'unifiGatewayTempC', alertKey: 'unifi.gateway_temp', label: 'Gateway temperature (°C)' },
+  { id: 'unifiStorage', metricKey: 'unifiStoragePct', alertKey: 'unifi.storage', label: 'Console storage used (%)' },
+  { id: 'unifiAlarms', metricKey: 'unifiAlarms', alertKey: 'unifi.alarms', label: 'Active alarms' },
+  { id: 'unifiFirmware', metricKey: 'unifiFirmwareUpdates', alertKey: 'unifi.firmware_updates', label: 'Firmware updates' },
 ];
 
 export function thresholdByAlertKey(alertKey: string): MetricThresholdDef | undefined {
