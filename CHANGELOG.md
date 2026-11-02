@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **UniFi firewall rules (read-only)** — new Firewall rules, Firewall groups and
+  Firewall zones tabs on the UniFi connector. Pulls whatever the console has: classic
+  rules (Internet/LAN/Guest In/Out/Local, IPv4 + IPv6), zone-based policies (custom and
+  built-in), and traffic rules, with source/destination resolved to network, group,
+  client and zone names. New `unifiFirewallRules` metric (custom, enabled rules).
 - **UniFi Network connector** (built for the UDM SE) — reads the console's local
   Network API with an API key or a local admin login: WAN links, ISP, live throughput,
   latency and speed tests; gateway CPU, memory, temperatures and storage; every AP and

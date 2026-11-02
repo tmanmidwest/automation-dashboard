@@ -24,6 +24,7 @@ const STATUS_GOOD = new Set([
   'deployed', 'success', // Cloudflare Workers deployed / Pages deploy succeeded
   'allowed', // Technitium manually-allowed domain
   'up', // UniFi WAN link / switch port up
+  'allow', // UniFi firewall rule that allows traffic
 ]);
 const STATUS_IDLE = new Set([
   'stopped', 'disabled', 'off', 'idle', 'standby', 'paused', 'closed',

@@ -21,7 +21,13 @@ import {
   UniClient,
   UniDevice,
   UniEvent,
+  UniFirewallGroup,
+  UniFirewallPolicy,
+  UniFirewallRule,
+  UniFirewallZone,
   UniHealthSubsystem,
+  UniPolicyEndpoint,
+  UniTrafficRule,
   UniPort,
   UniSysinfo,
   UniWan,
@@ -36,6 +42,12 @@ const WLAN_KIND = 'wlan';
 const PORT_FORWARD_KIND = 'port_forward';
 const ALARM_KIND = 'alarm';
 const EVENT_KIND = 'event';
+const FIREWALL_KIND = 'firewall_rule';
+const FW_GROUP_KIND = 'firewall_group';
+const FW_ZONE_KIND = 'firewall_zone';
+
+/** Firewall config changes rarely; reuse it for a minute across list/describe/overview. */
+const FIREWALL_TTL_MS = 60_000;
 const PORT_SUB = 'port';
 
 /** How long a fetched snapshot (sysinfo/health/devices/clients) is reused across calls. */
@@ -141,6 +153,10 @@ const KINDS: ConnectorResourceKind[] = [
     actions: [{ id: 'archive', label: 'Archive', mutating: true }],
   },
   { id: EVENT_KIND, label: 'Events (24h)', deletable: false, actions: [] },
+  // Firewall config is read-only on purpose: a bad toggle from here can cut Cerebro (or you) off the console.
+  { id: FIREWALL_KIND, label: 'Firewall rules', deletable: false, actions: [] },
+  { id: FW_GROUP_KIND, label: 'Firewall groups', deletable: false, actions: [] },
+  { id: FW_ZONE_KIND, label: 'Firewall zones', deletable: false, actions: [] },
 ];
 
 // ── Formatting helpers ────────────────────────────────────────────────────
@@ -329,6 +345,144 @@ function wanLinks(gw: UniDevice | undefined): WanLink[] {
   return out;
 }
 
+// ── Firewall formatting ───────────────────────────────────────────────────
+
+interface FirewallData {
+  at: number;
+  rules: UniFirewallRule[] | null;
+  groups: UniFirewallGroup[] | null;
+  traffic: UniTrafficRule[] | null;
+  policies: UniFirewallPolicy[] | null;
+  zones: UniFirewallZone[] | null;
+  netName: Map<string, string>;
+  clientName: Map<string, string>;
+}
+
+const RULESET_LABEL: Record<string, string> = {
+  WAN_IN: 'Internet In', WAN_OUT: 'Internet Out', WAN_LOCAL: 'Internet Local',
+  LAN_IN: 'LAN In', LAN_OUT: 'LAN Out', LAN_LOCAL: 'LAN Local',
+  GUEST_IN: 'Guest In', GUEST_OUT: 'Guest Out', GUEST_LOCAL: 'Guest Local',
+};
+const RULESET_ORDER = ['WAN_IN', 'WAN_OUT', 'WAN_LOCAL', 'LAN_IN', 'LAN_OUT', 'LAN_LOCAL', 'GUEST_IN', 'GUEST_OUT', 'GUEST_LOCAL'];
+
+function rulesetLabel(rs?: string): string | null {
+  if (!rs) return null;
+  const v6 = /V6/i.test(rs);
+  const base = rs.replace(/V6/i, '');
+  return `${RULESET_LABEL[base] ?? rs}${v6 ? ' (IPv6)' : ''}`;
+}
+
+function rulesetRank(rs?: string): number {
+  const v6 = /V6/i.test(rs ?? '') ? 100 : 0;
+  const i = RULESET_ORDER.indexOf((rs ?? '').replace(/V6/i, ''));
+  return v6 + (i < 0 ? 50 : i);
+}
+
+/** accept/ALLOW → allow, drop/BLOCK → block, reject → reject; disabled rules show as disabled. */
+function fwStatus(enabled: boolean | undefined, action: string | undefined): string {
+  if (enabled === false) return 'disabled';
+  const a = (action ?? '').toLowerCase();
+  if (a === 'accept' || a === 'allow') return 'allow';
+  if (a === 'drop' || a === 'block') return 'block';
+  return a || 'enabled';
+}
+
+function joinList(xs: (string | null | undefined)[], max = 12): string | null {
+  const v = xs.filter((x): x is string => !!x);
+  if (!v.length) return null;
+  return v.length > max ? `${v.slice(0, max).join(', ')} +${v.length - max} more` : v.join(', ');
+}
+
+function groupLabel(g: UniFirewallGroup | undefined, id: string): string {
+  if (!g) return id;
+  const members = g.group_members ?? [];
+  return `${g.name ?? id} [${joinList(members, 6) ?? 'empty'}]`;
+}
+
+/** One side of a classic rule: network / address group / IP / MAC → a readable string. */
+function classicSide(r: UniFirewallRule, side: 'src' | 'dst', fw: FirewallData, groups: Map<string, UniFirewallGroup>): { where: string; ports: string | null } {
+  const parts: string[] = [];
+  const ports: string[] = [];
+  const netId = r[`${side}_networkconf_id`];
+  if (netId) {
+    const t = r[`${side}_networkconf_type`];
+    parts.push(`${fw.netName.get(netId) ?? netId}${t === 'ADDRv4' ? ' (gateway IP)' : ' (subnet)'}`);
+  }
+  for (const id of r[`${side}_firewallgroup_ids`] ?? []) {
+    const g = groups.get(id);
+    if (g?.group_type === 'port-group') ports.push(groupLabel(g, id));
+    else parts.push(groupLabel(g, id));
+  }
+  const addr = r[`${side}_address`];
+  if (addr) parts.push(addr);
+  if (side === 'src' && r.src_mac_address) parts.push(r.src_mac_address);
+  const port = r[`${side}_port`];
+  if (port) ports.push(port);
+  return { where: parts.join(' + ') || 'any', ports: ports.join(', ') || null };
+}
+
+function classicStates(r: UniFirewallRule): string | null {
+  const s = [
+    r.state_new ? 'new' : null,
+    r.state_established ? 'established' : null,
+    r.state_related ? 'related' : null,
+    r.state_invalid ? 'invalid' : null,
+  ];
+  return joinList(s) ?? 'all';
+}
+
+/** One side of a zone-based policy → "Zone: target". */
+function policySide(e: UniPolicyEndpoint | undefined, fw: FirewallData, zoneName: Map<string, string>, groups: Map<string, UniFirewallGroup>): { where: string; ports: string | null; zone: string | null } {
+  if (!e) return { where: 'any', ports: null, zone: null };
+  const zone = e.zone_id ? zoneName.get(e.zone_id) ?? e.zone_id : null;
+  const t = (e.matching_target ?? 'ANY').toUpperCase();
+  let target: string | null = null;
+  if (t === 'NETWORK') target = joinList((e.network_ids ?? []).map((id) => fw.netName.get(id) ?? id));
+  else if (t === 'IP') target = e.ip_group_id ? groupLabel(groups.get(e.ip_group_id), e.ip_group_id) : joinList(e.ips ?? []);
+  else if (t === 'CLIENT') target = joinList((e.client_macs ?? []).map((m) => fw.clientName.get(m.toLowerCase()) ?? m));
+  else if (t === 'REGION') target = joinList(e.regions ?? []);
+  else if (t === 'DOMAIN' || t === 'WEB') target = joinList(e.web_domains ?? []);
+  else if (t !== 'ANY') target = t.toLowerCase();
+  if (target && e.match_opposite_ips) target = `not ${target}`;
+  let ports: string | null = null;
+  if (e.port_group_id) ports = groupLabel(groups.get(e.port_group_id), e.port_group_id);
+  else if (e.port != null && e.port !== '' && (e.port_matching_type ?? 'SPECIFIC').toUpperCase() !== 'ANY') ports = String(e.port);
+  if (ports && e.match_opposite_ports) ports = `not ${ports}`;
+  const where = [zone, target].filter(Boolean).join(': ') || 'any';
+  return { where, ports, zone };
+}
+
+function trafficTargets(t: UniTrafficRule, fw: FirewallData): string | null {
+  const xs = (t.target_devices ?? []).map((d) => {
+    const type = (d.type ?? '').toUpperCase();
+    if (type === 'ALL_CLIENTS') return 'All devices';
+    if (type === 'CLIENT' && d.client_mac) return fw.clientName.get(d.client_mac.toLowerCase()) ?? d.client_mac;
+    if (type === 'NETWORK' && d.network_id) return fw.netName.get(d.network_id) ?? d.network_id;
+    return type.toLowerCase() || null;
+  });
+  return joinList(xs);
+}
+
+function trafficMatch(t: UniTrafficRule): string | null {
+  const target = (t.matching_target ?? '').toUpperCase();
+  const what =
+    target === 'DOMAIN' ? joinList((t.domains ?? []).map((d) => d.domain)) :
+    target === 'IP' ? joinList([...(t.ip_addresses ?? []).map((a) => a.ip_or_subnet), ...(t.ip_ranges ?? []).map((r) => `${r.ip_start}–${r.ip_stop}`)]) :
+    target === 'REGION' ? joinList(t.regions ?? []) :
+    target === 'APP' ? `${(t.app_ids ?? []).length} app(s)` :
+    target === 'APP_CATEGORY' ? `${(t.app_category_ids ?? []).length} app categor${(t.app_category_ids ?? []).length === 1 ? 'y' : 'ies'}` :
+    target === 'INTERNET' ? 'all internet traffic' : null;
+  const label = target ? target.toLowerCase().replace(/_/g, ' ') : null;
+  return [label, what && what !== label ? what : null].filter(Boolean).join(': ') || null;
+}
+
+function scheduleLabel(s?: { mode?: string; time_range_start?: string; time_range_end?: string; repeat_on_days?: string[] }): string | null {
+  if (!s?.mode || s.mode.toUpperCase() === 'ALWAYS') return null;
+  const range = s.time_range_start && s.time_range_end ? ` ${s.time_range_start}–${s.time_range_end}` : '';
+  const days = s.repeat_on_days?.length ? ` (${s.repeat_on_days.join(', ')})` : '';
+  return `${s.mode.toLowerCase()}${range}${days}`;
+}
+
 interface Snapshot {
   at: number;
   sysinfo?: UniSysinfo;
@@ -350,6 +504,7 @@ interface Snapshot {
 export class UniFiConnector implements Connector {
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly eventCache = new Map<string, { at: number; events: UniEvent[] }>();
+  private readonly firewallCache = new Map<string, FirewallData>();
   /** One API client per instance, so the cached auth mode / Integration-API fallback sticks. */
   private readonly clients = new Map<string, { sig: string; api: UniFiApi }>();
 
@@ -509,6 +664,7 @@ export class UniFiConnector implements Connector {
   invalidateCache(ctx: ConnectorContext): void {
     this.snapshots.delete(this.cacheKey(ctx));
     this.eventCache.delete(this.cacheKey(ctx));
+    this.firewallCache.delete(this.cacheKey(ctx));
   }
 
   /** The last 24h of events (up to 2000), cached briefly so the per-refresh overview stays cheap. */
@@ -519,6 +675,137 @@ export class UniFiConnector implements Connector {
     const events = await this.apiFor(ctx).events(24, 2000);
     this.eventCache.set(key, { at: Date.now(), events });
     return events;
+  }
+
+  /**
+   * Every firewall source the console has, fetched together: classic rules + groups,
+   * traffic rules, and (Network 9+) zone-based policies + zones. Each is `null` when the
+   * firmware doesn't serve it, so whichever model is in use simply shows up.
+   */
+  private async firewallData(ctx: ConnectorContext, fresh = false): Promise<FirewallData> {
+    const key = this.cacheKey(ctx);
+    const c = this.firewallCache.get(key);
+    if (!fresh && c && Date.now() - c.at < FIREWALL_TTL_MS) return c;
+    const api = this.apiFor(ctx);
+    const soft = <T>(what: string, p: Promise<T | null>): Promise<T | null> =>
+      p.catch((err) => {
+        ctx.log('debug', `UniFi ${what} unavailable: ${err instanceof Error ? err.message : err}`);
+        return null;
+      });
+    const [rules, groups, traffic, policies, zones, nets, known] = await Promise.all([
+      soft('firewall rules', api.firewallRules()),
+      soft('firewall groups', api.firewallGroups()),
+      soft('traffic rules', api.trafficRules()),
+      soft('firewall policies', api.firewallPolicies()),
+      soft('firewall zones', api.firewallZones()),
+      api.networks().catch(() => []),
+      api.knownClients().catch(() => []),
+    ]);
+    const data: FirewallData = {
+      at: Date.now(),
+      rules,
+      groups,
+      traffic,
+      policies,
+      zones,
+      netName: new Map(nets.map((n) => [n._id, n.name ?? n._id])),
+      clientName: new Map(known.map((k) => [k.mac.toLowerCase(), k.name || k.hostname || k.mac])),
+    };
+    this.firewallCache.set(key, data);
+    return data;
+  }
+
+  private firewallResources(fw: FirewallData): ConnectorResource[] {
+    const groups = new Map((fw.groups ?? []).map((g) => [g._id, g]));
+    const zoneName = new Map((fw.zones ?? []).map((z) => [z._id, z.name ?? z.zone_key ?? z._id]));
+    const out: ConnectorResource[] = [];
+
+    // Zone-based policies: custom first, then built-in, each in evaluation order.
+    const policies = (fw.policies ?? []).slice().sort((a, b) => Number(!!a.predefined) - Number(!!b.predefined) || (a.index ?? 0) - (b.index ?? 0));
+    for (const p of policies) {
+      const src = policySide(p.source, fw, zoneName, groups);
+      const dst = policySide(p.destination, fw, zoneName, groups);
+      const states = p.connection_state_type && p.connection_state_type.toUpperCase() !== 'ALL' ? joinList((p.connection_states ?? []).map((x) => x.toLowerCase())) ?? p.connection_state_type.toLowerCase() : 'all';
+      out.push({
+        id: `policy:${p._id}`,
+        kind: FIREWALL_KIND,
+        name: p.name || p._id,
+        status: fwStatus(p.enabled, p.action),
+        details: {
+          type: p.predefined ? 'Zone policy (built-in)' : 'Zone policy',
+          order: p.index ?? null,
+          action: p.action?.toLowerCase() ?? null,
+          source: src.where,
+          sourcePort: src.ports,
+          destination: dst.where,
+          destinationPort: dst.ports,
+          protocol: p.protocol && p.protocol.toLowerCase() !== 'all' ? p.protocol : 'any',
+          ipVersion: p.ip_version ? p.ip_version.toLowerCase().replace('_', ' + ') : null,
+          states,
+          logging: p.logging ? true : null,
+          schedule: scheduleLabel(p.schedule),
+          description: p.description || null,
+        },
+        tags: {
+          type: 'zone policy',
+          origin: p.predefined ? 'built-in' : 'custom',
+          ...(src.zone ? { from: src.zone } : {}),
+          ...(dst.zone ? { to: dst.zone } : {}),
+        },
+      });
+    }
+
+    // Classic rules, grouped by ruleset (Internet In/Out/Local, LAN…, Guest…) in rule order.
+    const rules = (fw.rules ?? []).slice().sort((a, b) => rulesetRank(a.ruleset) - rulesetRank(b.ruleset) || (a.rule_index ?? 0) - (b.rule_index ?? 0));
+    for (const r of rules) {
+      const src = classicSide(r, 'src', fw, groups);
+      const dst = classicSide(r, 'dst', fw, groups);
+      const proto = r.protocol && r.protocol !== 'all' ? `${r.protocol_match_excepted ? 'not ' : ''}${r.protocol}` : 'any';
+      out.push({
+        id: `rule:${r._id}`,
+        kind: FIREWALL_KIND,
+        name: r.name || r._id,
+        status: fwStatus(r.enabled, r.action),
+        details: {
+          type: 'Firewall rule',
+          ruleset: rulesetLabel(r.ruleset),
+          order: r.rule_index ?? null,
+          action: r.action ?? null,
+          source: src.where,
+          sourcePort: src.ports,
+          destination: dst.where,
+          destinationPort: dst.ports,
+          protocol: proto,
+          states: classicStates(r),
+          ipsec: r.ipsec ? r.ipsec.replace(/-/g, ' ') : null,
+          logging: r.logging ? true : null,
+        },
+        tags: { type: 'firewall rule', origin: 'custom', ...(r.ruleset ? { ruleset: rulesetLabel(r.ruleset) ?? r.ruleset } : {}) },
+      });
+    }
+
+    // Traffic rules (block/allow by app, domain, region, IP; optional bandwidth limits).
+    for (const t of fw.traffic ?? []) {
+      const bw = t.bandwidth_limit?.enabled
+        ? `↓ ${t.bandwidth_limit.download_limit_kbps ?? '∞'} / ↑ ${t.bandwidth_limit.upload_limit_kbps ?? '∞'} kbps`
+        : null;
+      out.push({
+        id: `traffic:${t._id}`,
+        kind: FIREWALL_KIND,
+        name: t.description || trafficMatch(t) || t._id,
+        status: fwStatus(t.enabled, t.action),
+        details: {
+          type: 'Traffic rule',
+          action: t.action?.toLowerCase() ?? null,
+          appliesTo: trafficTargets(t, fw),
+          match: trafficMatch(t),
+          bandwidthLimit: bw,
+          schedule: scheduleLabel(t.schedule),
+        },
+        tags: { type: 'traffic rule', origin: 'custom' },
+      });
+    }
+    return out;
   }
 
   private gatewayOf(snap: Snapshot): UniDevice | undefined {
@@ -729,6 +1016,48 @@ export class UniFiConnector implements Connector {
               ...(e.severity ? { severity: e.severity.toLowerCase() } : {}),
             },
           }));
+      }
+      case FIREWALL_KIND:
+        return this.firewallResources(await this.firewallData(ctx, true));
+      case FW_GROUP_KIND: {
+        const fw = await this.firewallData(ctx, true);
+        const uses = new Map<string, number>();
+        const bump = (id?: string) => id && uses.set(id, (uses.get(id) ?? 0) + 1);
+        for (const r of fw.rules ?? []) [...(r.src_firewallgroup_ids ?? []), ...(r.dst_firewallgroup_ids ?? [])].forEach(bump);
+        for (const p of fw.policies ?? []) [p.source?.ip_group_id, p.source?.port_group_id, p.destination?.ip_group_id, p.destination?.port_group_id].forEach(bump);
+        return (fw.groups ?? [])
+          .slice()
+          .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '', undefined, { numeric: true }))
+          .map((g) => ({
+            id: g._id,
+            kind,
+            name: g.name || g._id,
+            details: {
+              type: (g.group_type ?? '').replace(/-/g, ' ') || null,
+              members: joinList(g.group_members ?? [], 50) ?? 'empty',
+              count: (g.group_members ?? []).length,
+              usedBy: uses.get(g._id) ?? 0,
+            },
+            tags: g.group_type ? { type: g.group_type } : undefined,
+          }));
+      }
+      case FW_ZONE_KIND: {
+        const fw = await this.firewallData(ctx, true);
+        return (fw.zones ?? []).map((z) => {
+          const from = (fw.policies ?? []).filter((p) => p.source?.zone_id === z._id && !p.predefined).length;
+          const to = (fw.policies ?? []).filter((p) => p.destination?.zone_id === z._id && !p.predefined).length;
+          return {
+            id: z._id,
+            kind,
+            name: z.name || z.zone_key || z._id,
+            details: {
+              key: z.zone_key ?? null,
+              networks: joinList((z.network_ids ?? []).map((id) => fw.netName.get(id) ?? id), 30) ?? 'none',
+              customPoliciesFrom: from,
+              customPoliciesTo: to,
+            },
+          };
+        });
       }
       default:
         return [];
@@ -1159,6 +1488,14 @@ export class UniFiConnector implements Connector {
         m('unifiFirewallBlocks24h', 'Firewall blocks (24h)', events.filter((e) => cat(e).includes('SECURITY_FIREWALL')).length);
       } catch (err) {
         ctx.log('debug', `UniFi events unavailable: ${err instanceof Error ? err.message : err}`);
+      }
+      const fw = await this.firewallData(ctx).catch(() => undefined);
+      if (fw && (fw.rules || fw.policies || fw.traffic)) {
+        const custom =
+          (fw.rules ?? []).filter((r) => r.enabled !== false).length +
+          (fw.policies ?? []).filter((p) => !p.predefined && p.enabled !== false).length +
+          (fw.traffic ?? []).filter((t) => t.enabled !== false).length;
+        m('unifiFirewallRules', 'Firewall rules (custom, enabled)', custom);
       }
     }
 

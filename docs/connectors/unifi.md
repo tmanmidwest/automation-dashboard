@@ -62,6 +62,9 @@ The connection test reports which mode is active.
 | Device restart / locate / upgrade / PoE power-cycle / speed test | `POST cmd/devmgr` |
 | Client reconnect / block / unblock | `POST cmd/stamgr` |
 | Archive alarm(s) | `POST cmd/evtmgr` |
+| Classic firewall rules + groups | `GET rest/firewallrule`, `rest/firewallgroup` |
+| Traffic rules | `GET /proxy/network/v2/api/site/<site>/trafficrules` |
+| Zone-based policies + zones (Network 9+) | `GET …/v2/api/site/<site>/firewall-policies`, `…/firewall/zone` |
 | Wi-Fi / port-forward enable/disable | `PUT rest/wlanconf/<id>`, `rest/portforward/<id>` |
 
 ## Resource kinds
@@ -77,6 +80,11 @@ The connection test reports which mode is active.
 | `port_forward` | enable, disable | |
 | `alarm` | archive | Create-scope op **Archive all alarms**. On firmware without classic alarms: high-severity system-log entries, read-only. |
 | `event` | — | Last 24h. |
+| `firewall_rule` | — (read-only) | Every rule the console has, whichever model is in use: zone policies (custom first, then built-in, in order), classic rules by ruleset and index, then traffic rules. Status `allow` / `block` / `reject` / `disabled`. Source/destination resolve networks, address/port groups (with members), clients and zones. Tags: type, origin (custom/built-in), ruleset or from/to zone. |
+| `firewall_group` | — | Address / port groups, members, and how many rules use each. |
+| `firewall_zone` | — | Zone-based firewall only: networks in each zone, custom policies from/to it. |
+
+Firewall data is deliberately read-only: a wrong toggle can cut Cerebro (or you) off the console. Each source is optional, so a missing endpoint (400/404) just leaves its rows out; it's cached 60s.
 
 `listNodes` returns the gateway (CPU, memory, uptime).
 
@@ -90,7 +98,7 @@ Keys are prefixed `unifi` so they never merge into another connector's dashboard
 `unifiWanLatencyMs`, `unifiWanDownMbps`, `unifiWanUpMbps`, `unifiWanAvailabilityPct`,
 `unifiSpeedtestDownMbps`, `unifiSpeedtestUpMbps`, `unifiWanDrops`, `unifiGatewayCpuPct`,
 `unifiGatewayMemPct`, `unifiGatewayTempC`, `unifiStoragePct`, `unifiPoeWatts`, `unifiVpnUsers`,
-`unifiAlarms` (classic alarms only), `unifiHighEvents24h`, `unifiThreats24h` (IPS blocks), `unifiFirewallBlocks24h`. A metric is omitted when the console doesn't report it.
+`unifiAlarms` (classic alarms only), `unifiHighEvents24h`, `unifiThreats24h` (IPS blocks), `unifiFirewallBlocks24h`, `unifiFirewallRules` (custom, enabled firewall rules + policies + traffic rules). A metric is omitted when the console doesn't report it.
 
 The overview's guest list is every device, offline ones first.
 
