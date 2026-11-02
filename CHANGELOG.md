@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Searchable by name/IP/MAC; machines seen by several connectors are merged by MAC, then
   LAN IP, then a unique hostname. Read-only; `GET /api/topology`. Proxmox guests now also
   report their NIC MAC and VLAN tag. See `docs/architecture-map.md`.
+- **Blocked devices on the Architecture Map** — a Blocked devices tile in Needs attention lists
+  every client blocked on the UniFi gateway, with Unblock (confirms first, needs
+  `connectors:action`). It refreshes right after you block something from the map.
 - **Device types for network clients** — the Architecture Map shows what a client is
   ("Smart TV (Hisense)", "Coffee maker (Fellow)") from UniFi's fingerprint table when the
   console serves it, otherwise a labelled guess from its name and maker, and you can set

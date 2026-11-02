@@ -13,7 +13,7 @@ import { iconFor, STATUS_DOT, TYPE_ICON, TYPE_LABEL } from '@/components/topolog
 import { matches, TopoModel, type Chip, type Item, type Lane, type Tone } from '@/components/topology/model';
 import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
-import { BlockButton, DeviceType, NewDevicesRow, type DeviceList } from '@/components/topology/NewDevices';
+import { BlockButton, BlockedDevicesRow, DeviceType, NewDevicesRow, type BlockedDevice, type DeviceList } from '@/components/topology/NewDevices';
 
 /**
  * Architecture Map: a scrolling overview of tiles (Edge, Networks, Compute, Apps), where a
@@ -87,14 +87,38 @@ export function ArchitectureMap() {
   const [showClients, setShowClients] = useState(false);
   const [q, setQ] = useState('');
   const [newDevices, setNewDevices] = useState<DeviceList | null>(null);
-  const loadDevices = useCallback(() => {
-    api.get<DeviceList>('/api/devices?status=new').then(setNewDevices).catch(() => setNewDevices(null));
+  const [blocked, setBlocked] = useState<BlockedDevice[] | null>(null);
+  const unifiFeeds = useRef<{ id: string; name: string }[]>([]);
+  const loadBlocked = useCallback(async (fresh = false) => {
+    const feeds = unifiFeeds.current;
+    if (!feeds.length) { setBlocked(null); return; }
+    const lists = await Promise.all(feeds.map(async (f) => {
+      try {
+        const r = await api.get<{ resources: { id: string; name: string; details?: Record<string, unknown> }[] }>(
+          `/api/connectors/instances/${encodeURIComponent(f.id)}/resources?kind=blocked_client${fresh ? '&refresh=1' : ''}`);
+        const str = (v: unknown) => (v == null || v === '' ? null : String(v));
+        return r.resources.map((x): BlockedDevice => ({
+          instanceId: f.id, instanceName: f.name, mac: x.id, name: x.name,
+          vendor: str(x.details?.vendor), lastSeen: str(x.details?.lastSeen), note: str(x.details?.note),
+        }));
+      } catch {
+        return null;
+      }
+    }));
+    setBlocked(lists.every((l) => l === null) ? null : lists.flatMap((l) => l ?? []));
   }, []);
+  const loadDevices = useCallback((fresh = false) => {
+    api.get<DeviceList>('/api/devices?status=new').then(setNewDevices).catch(() => setNewDevices(null));
+    void loadBlocked(fresh);
+  }, [loadBlocked]);
+  const afterBlock = useCallback(() => loadDevices(true), [loadDevices]);
 
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
     try {
-      setGraph(await api.get<TopologyGraph>(`/api/topology${manual ? '?refresh=1' : ''}`));
+      const g = await api.get<TopologyGraph>(`/api/topology${manual ? '?refresh=1' : ''}`);
+      unifiFeeds.current = g.feeds.filter((f) => f.connectorId === 'unifi' && f.instanceId).map((f) => ({ id: f.instanceId!, name: f.name }));
+      setGraph(g);
       setErr(null);
       loadDevices();
     } catch (e) {
@@ -187,6 +211,7 @@ export function ArchitectureMap() {
                   {[
                     ...(newDevices ? [{ id: 'grp:attn:new', count: newDevices.devices.length, title: 'New devices', sub: newDevices.devices.length ? 'Not seen before. Review them' : 'Nothing new on the network', tone: 'warn' as Tone }] : []),
                     ...model.attention(),
+                    ...(blocked ? [{ id: 'grp:attn:blocked', count: blocked.length, title: 'Blocked devices', sub: blocked.length ? 'Blocked on the UniFi gateway' : 'Nothing blocked', tone: 'plain' as Tone }] : []),
                   ].map((a) => (
                     <button key={a.id} id={`tile-${a.id}`} onClick={() => setPath(path[0] === a.id ? [] : [a.id])} disabled={!a.count}
                       className={cn('rounded-lg border bg-card px-4 py-3 flex items-center gap-3 text-left transition-colors enabled:hover:border-primary/70 disabled:opacity-60',
@@ -201,14 +226,17 @@ export function ArchitectureMap() {
                   ))}
                 </div>
                 {path[0] === 'grp:attn:new' && newDevices && (
-                  <NewDevicesRow list={newDevices} onChanged={loadDevices} onClose={() => setPath([])}
+                  <NewDevicesRow list={newDevices} onChanged={afterBlock} onClose={() => setPath([])}
                     onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
                 )}
-                {path[0]?.startsWith('grp:attn') && path[0] !== 'grp:attn:new' && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} />}
+                {path[0] === 'grp:attn:blocked' && blocked && (
+                  <BlockedDevicesRow list={blocked} onChanged={afterBlock} onClose={() => setPath([])} />
+                )}
+                {path[0]?.startsWith('grp:attn') && path[0] !== 'grp:attn:new' && path[0] !== 'grp:attn:blocked' && <OpenRow model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} onBlocked={afterBlock} />}
               </section>
 
               {model.lanes.map((lane) => lane.items.length > 0 && (
-                <LaneGrid key={lane.key} lane={lane} model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} />
+                <LaneGrid key={lane.key} lane={lane} model={model} path={path} setPath={setPath} onMap={setFocus} onChanged={() => load()} onBlocked={afterBlock} />
               ))}
             </main>
           </div>
@@ -236,7 +264,7 @@ function Tile({ item, model, active, onClick }: { item: Item; model: TopoModel; 
 }
 
 /** A lane's tiles, with the open row slotted in after the grid row that holds the open tile. */
-function LaneGrid({ lane, model, path, setPath, onMap, onChanged }: { lane: Lane; model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void }) {
+function LaneGrid({ lane, model, path, setPath, onMap, onChanged, onBlocked }: { lane: Lane; model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void; onBlocked: () => void }) {
   const [ref, cols] = useColumns<HTMLDivElement>();
   const openIdx = lane.items.findIndex((i) => i.id === path[0]);
   const rowEnd = openIdx >= 0 ? Math.min(lane.items.length - 1, Math.floor(openIdx / cols) * cols + cols - 1) : -1;
@@ -248,7 +276,7 @@ function LaneGrid({ lane, model, path, setPath, onMap, onChanged }: { lane: Lane
       </div>
       <div ref={ref} className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: GRID_GAP }}>
         {lane.items.map((it, i) => (
-          <FragmentWithRow key={it.id} after={i === rowEnd ? <div className="col-span-full"><OpenRow model={model} path={path} setPath={setPath} onMap={onMap} onChanged={onChanged} /></div> : null}>
+          <FragmentWithRow key={it.id} after={i === rowEnd ? <div className="col-span-full"><OpenRow model={model} path={path} setPath={setPath} onMap={onMap} onChanged={onChanged} onBlocked={onBlocked} /></div> : null}>
             <Tile item={it} model={model} active={path[0] === it.id} onClick={() => setPath(path[0] === it.id ? [] : [it.id])} />
           </FragmentWithRow>
         ))}
@@ -262,7 +290,7 @@ function FragmentWithRow({ children, after }: { children: React.ReactNode; after
 }
 
 /** The full-width row under an open tile: breadcrumb, counts, what reaches it, and its contents. */
-function OpenRow({ model, path, setPath, onMap, onChanged }: { model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void }) {
+function OpenRow({ model, path, setPath, onMap, onChanged, onBlocked }: { model: TopoModel; path: string[]; setPath: (p: string[]) => void; onMap: (id: string) => void; onChanged: () => void; onBlocked: () => void }) {
   const current = path[path.length - 1];
   const item = model.item(current);
   const [details, setDetails] = useState(false);
@@ -314,7 +342,7 @@ function OpenRow({ model, path, setPath, onMap, onChanged }: { model: TopoModel;
             <Button size="sm" variant="outline" onClick={() => setDetails((d) => !d)} aria-pressed={details}><Info className="h-3.5 w-3.5" /> {details ? 'Hide details' : 'Details'}</Button>
           )}
           {item.node && <Button size="sm" variant="outline" onClick={() => onMap(current)}><Crosshair className="h-3.5 w-3.5" /> Show as map</Button>}
-          {unifiClient && <BlockButton key={unifiClient.resourceId} instanceId={unifiClient.instanceId!} mac={unifiClient.resourceId!} name={item.label} />}
+          {unifiClient && <BlockButton key={unifiClient.resourceId} instanceId={unifiClient.instanceId!} mac={unifiClient.resourceId!} name={item.label} onDone={onBlocked} />}
           <Button size="sm" variant="ghost" onClick={() => setPath([])} aria-label="Close"><X className="h-4 w-4" /></Button>
         </span>
       </div>
