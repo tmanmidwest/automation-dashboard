@@ -1,13 +1,16 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix, resolve, sep } from 'node:path';
 import { SecretsService } from '../secrets/secrets.service';
 import { assertSafeGitUrl, assertSafeGitRef, gitSafeEnv } from '../common/git-safety';
-import type { GitCredential, IntrospectRepoInput, IntrospectResult, ReplicatorVariable } from '@cerebro/shared';
+import type { GitCredential, IntrospectRepoInput, IntrospectResult, ReplicatorVariable, ReplicatorStarter } from '@cerebro/shared';
 import { introspectCompose, parseDotenv, envFileVariables, mergeEnvFileVars } from './compose-introspect';
-import { detectGeneratedCompose, UNDETECTED_REPO_MESSAGE, type GeneratedCompose } from './source-detect';
+import {
+  detectGeneratedCompose, dockerfileStarterCompose, UNDETECTED_REPO_MESSAGE, STARTERS_FOUND_MESSAGE,
+  COMPOSE_LIKE_RE, DOCKERFILE_LIKE_RE, BUILD_ROOT_MARKERS, type GeneratedCompose,
+} from './source-detect';
 
 /** Standard compose filenames to auto-detect when no explicit path is given. */
 const COMPOSE_CANDIDATES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
@@ -24,6 +27,13 @@ const ENV_SAMPLE_SUFFIXES = ['', '.example', '.sample', '.template', '.dist'];
  * is describing variables the app expects just as much as an explicit declaration.
  */
 const ENV_FALLBACKS = ['.env.example', '.env.sample', '.env.template', '.env.dist', 'example.env', 'env.example'];
+
+/** Starter scan bounds: how deep, how many entries, how many suggestions. */
+const STARTER_MAX_DEPTH = 4;
+const STARTER_MAX_ENTRIES = 20_000;
+const STARTER_MAX_RESULTS = 12;
+/** Folders never worth descending into for a starter (dependencies, build output, VCS). */
+const STARTER_SKIP_DIRS = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', 'target', '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.tox', 'bower_components']);
 
 /** Guard rails on a repo-supplied env file: it's untrusted content. */
 const ENV_FILE_MAX_BYTES = 256 * 1024;
@@ -66,6 +76,18 @@ export class RepoIntrospectService {
       const refWarnings = cloned.warning ? [cloned.warning] : [];
       const resolvedRef = cloned.ref !== ref ? cloned.ref : undefined;
       const found = await this.locateCompose(repoDir, input.gitPath);
+
+      // Nothing runnable as-is: hand back what the repo does hold, so the operator
+      // can pick a starter instead of hitting a dead end.
+      if (found.starters) {
+        return {
+          variables: [], fixedPorts: [], services: [], composePath: '', usesGeneratedCompose: false, envFiles: [],
+          warnings: [...refWarnings, found.starters.length ? STARTERS_FOUND_MESSAGE : UNDETECTED_REPO_MESSAGE],
+          resolvedRef,
+          needsStarter: true,
+          starters: found.starters,
+        };
+      }
 
       if (found.composePath) {
         const text = await readFile(found.composeAbs, 'utf8');
@@ -222,6 +244,7 @@ export class RepoIntrospectService {
       }
       await this.cloneAt(helper, gitUrl, ref, repoDir, workdir, env);
       const found = await this.locateCompose(repoDir, input.gitPath);
+      if (found.starters) throw new BadRequestException(UNDETECTED_REPO_MESSAGE);
       if (found.composePath) {
         const text = await readFile(found.composeAbs, 'utf8');
         return { text, composePath: found.composePath, usesGeneratedCompose: false };
@@ -272,12 +295,17 @@ export class RepoIntrospectService {
 
   /**
    * Find the compose file in a clone: the explicit path when one is given (and
-   * must exist), else a standard filename at the root. With none, fall back to a
-   * generated compose; a repo Cerebro can't recognize at all is a clear error.
+   * must exist), else a standard filename at the root. An explicit path naming a
+   * Dockerfile gets a generated compose that builds it. With no compose at all,
+   * fall back to a generated one for a recognized layout; failing that, return
+   * the sample/nested compose files and Dockerfiles the repo does hold, as
+   * starters for the operator to pick from.
    */
-  private async locateCompose(
-    repoDir: string, gitPath?: string | null,
-  ): Promise<{ composePath: string; composeAbs: string; generated?: undefined } | { composePath: null; composeAbs?: undefined; generated: GeneratedCompose }> {
+  private async locateCompose(repoDir: string, gitPath?: string | null): Promise<
+    | { composePath: string; composeAbs: string; generated?: undefined; starters?: undefined }
+    | { composePath: null; composeAbs?: undefined; generated: GeneratedCompose; starters?: undefined }
+    | { composePath: null; composeAbs?: undefined; generated?: undefined; starters: ReplicatorStarter[] }
+  > {
     const explicit = gitPath?.trim().replace(/^\/+/, '');
     if (explicit) {
       // gitPath is operator input: resolve it and refuse anything outside the clone.
@@ -285,6 +313,11 @@ export class RepoIntrospectService {
       const abs = resolve(root, explicit);
       if (!abs.startsWith(root + sep) || !(await exists(abs))) {
         throw new BadRequestException(`No file at "${explicit}" in the repo.`);
+      }
+      const rel = abs.slice(root.length + 1).split(sep).join('/');
+      if (DOCKERFILE_LIKE_RE.test(posix.basename(rel))) {
+        const text = await readFile(abs, 'utf8');
+        return { composePath: null, generated: dockerfileStarterCompose(rel, await this.buildContextFor(root, rel), text) };
       }
       return { composePath: explicit, composeAbs: abs };
     }
@@ -295,8 +328,49 @@ export class RepoIntrospectService {
       has: (p) => exists(join(repoDir, p)),
       read: (p) => readFile(join(repoDir, p), 'utf8').catch(() => null),
     });
-    if (!generated) throw new BadRequestException(UNDETECTED_REPO_MESSAGE);
-    return { composePath: null, generated };
+    if (generated) return { composePath: null, generated };
+    return { composePath: null, starters: await this.findStarters(repoDir) };
+  }
+
+  /**
+   * Build context for a Dockerfile picked from a subfolder: that folder when it
+   * holds its own project manifest (a monorepo app), else the repo root.
+   */
+  private async buildContextFor(root: string, dockerfileRel: string): Promise<string> {
+    const dir = posix.dirname(dockerfileRel);
+    if (dir === '.') return '.';
+    const names = await readdir(join(root, ...dir.split('/'))).catch(() => [] as string[]);
+    const isRoot = BUILD_ROOT_MARKERS.some((m) => (m.startsWith('*') ? names.some((n) => n.endsWith(m.slice(1))) : names.includes(m)));
+    return isRoot ? dir : '.';
+  }
+
+  /**
+   * Walk the clone (bounded depth and size, skipping dependency/build folders and
+   * never following symlinks) for compose-like files and Dockerfiles. Compose
+   * files come first, then shallower paths.
+   */
+  private async findStarters(repoDir: string): Promise<ReplicatorStarter[]> {
+    const out: ReplicatorStarter[] = [];
+    let seen = 0;
+    const walk = async (rel: string, depth: number): Promise<void> => {
+      if (depth > STARTER_MAX_DEPTH || seen > STARTER_MAX_ENTRIES) return;
+      const entries = await readdir(rel ? join(repoDir, ...rel.split('/')) : repoDir, { withFileTypes: true }).catch(() => []);
+      for (const e of entries) {
+        if (++seen > STARTER_MAX_ENTRIES) return;
+        const path = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) {
+          if (!STARTER_SKIP_DIRS.has(e.name)) await walk(path, depth + 1);
+        } else if (e.isFile()) {
+          if (COMPOSE_LIKE_RE.test(e.name)) out.push({ kind: 'compose', path });
+          else if (DOCKERFILE_LIKE_RE.test(e.name)) out.push({ kind: 'dockerfile', path });
+        }
+      }
+    };
+    await walk('', 0);
+    const depthOf = (p: string) => p.split('/').length;
+    return out
+      .sort((x, y) => (x.kind === y.kind ? 0 : x.kind === 'compose' ? -1 : 1) || depthOf(x.path) - depthOf(y.path) || x.path.localeCompare(y.path))
+      .slice(0, STARTER_MAX_RESULTS);
   }
 
   /**

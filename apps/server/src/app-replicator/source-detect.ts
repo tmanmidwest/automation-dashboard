@@ -208,3 +208,49 @@ export async function detectGeneratedCompose(repo: RepoProbe): Promise<Generated
 /** The error for a repo Cerebro can't work out how to run. */
 export const UNDETECTED_REPO_MESSAGE =
   "Cerebro couldn't work out how to run this repo: it has no docker-compose.yml or Dockerfile, and doesn't look like a WordPress, Node, PHP or static site. Commit a Dockerfile or docker-compose.yml (or set the compose path if it lives in a subfolder) and introspect again.";
+
+/** The same situation, when the repo does hold sample/nested files to pick from. */
+export const STARTERS_FOUND_MESSAGE =
+  "This repo has no docker-compose.yml or Dockerfile at its root, but Cerebro found files it could start from — pick one below. Nothing is changed in the repo.";
+
+/** A compose file that isn't at the standard root path: nested, or a committed sample. */
+export const COMPOSE_LIKE_RE = /^(docker-)?compose([._-][A-Za-z0-9_-]+)*\.ya?ml([._-](example|sample|dist|template|tmpl))?$/i;
+/** `Dockerfile`, `Dockerfile.prod`, `prod.Dockerfile`, `Dockerfile-dev`. */
+export const DOCKERFILE_LIKE_RE = /^(Dockerfile([._-][A-Za-z0-9_-]+)?|[A-Za-z0-9_-]+\.Dockerfile)$/i;
+
+/** Manifests that mark a directory as its own build root (monorepo app folders). */
+export const BUILD_ROOT_MARKERS = [
+  'package.json', 'requirements.txt', 'pyproject.toml', 'go.mod', 'Gemfile', 'composer.json',
+  'pom.xml', 'build.gradle', 'Cargo.toml', 'mix.exs', '*.csproj',
+];
+
+/**
+ * Compose for an operator-picked Dockerfile anywhere in the repo (`gitPath`
+ * names it). `context` is the build context relative to the repo root: the
+ * Dockerfile's own folder when it is a build root, else the repo root — the
+ * common `docker build -f docker/Dockerfile .` convention.
+ */
+export function dockerfileStarterCompose(dockerfilePath: string, context: string, dockerfileText: string): GeneratedCompose {
+  const exposed = exposedPortOf(dockerfileText) ?? 8080;
+  const ctx = context === '.' ? GENERATED_CONTEXT : `${GENERATED_CONTEXT}/${context}`;
+  // The dockerfile path is relative to the context, as compose expects.
+  const rel = context === '.' ? dockerfilePath : dockerfilePath.slice(context.length + 1);
+  const compose = [
+    'services:',
+    '  app:',
+    '    build:',
+    `      context: ${ctx}`,
+    `      dockerfile: ${JSON.stringify(rel)}`,
+    '    image: ${APP_IMAGE:-app:local}',
+    '    container_name: ${APP_CONTAINER_NAME:-app}',
+    '    ports:',
+    `      - "\${APP_HOST_PORT:-${exposed}}:${exposed}"`,
+    '    restart: unless-stopped',
+    '',
+  ].join('\n');
+  return {
+    kind: 'dockerfile',
+    compose,
+    warning: `Generated a compose that builds "${dockerfilePath}" (build context: ${context === '.' ? 'the repo root' : `"${context}"`}) and publishes port ${exposed}${exposedPortOf(dockerfileText) == null ? ' — the Dockerfile has no EXPOSE, so check the port' : ''}.`,
+  };
+}

@@ -295,7 +295,17 @@ inline Dockerfile (`dockerfile_inline`, Docker Compose 2.17+) on a stock base im
 | PHP | `index.php` at the root | `php:8.3-apache` serving the repo root (no Composer install) |
 | Static | `index.html` at the root | `nginx:alpine` serving the repo root |
 
-Anything else fails introspection with a message asking for a Dockerfile or compose file. At deploy
+If none of those match, introspection doesn't dead-end: it walks the repo (up to 4 folders deep,
+skipping `node_modules`, `vendor`, build output and symlinks) for **starters** — compose files that
+aren't at the root or are committed samples (`docker/docker-compose.yml`, `docker-compose.example.yml`,
+`deploy/compose.prod.yaml`) and Dockerfiles anywhere (`docker/Dockerfile`, `Dockerfile.prod`,
+`app.Dockerfile`). The register dialog lists them; picking one sets it as the app's compose path and
+re-reads the repo. A picked compose file is used as-is. A picked Dockerfile gets a generated compose
+that builds it: the build context is the Dockerfile's own folder when that folder has a project
+manifest (`package.json`, `go.mod`, `requirements.txt`, …, i.e. a monorepo app), otherwise the repo
+root (the `docker build -f docker/Dockerfile .` convention), and the port comes from its `EXPOSE`
+(8080 if none). The same Dockerfile path can be typed straight into the compose path field. Only a
+repo with no starters at all fails, with a message asking for a Dockerfile or compose file. At deploy
 time the compose is regenerated from the current checkout and written to
 `<stacksDir>/<project>/docker-compose.cerebro.yml` — beside `repo/`, not inside it — with
 `build.context: ./repo`, so the `.env` (which holds the deployment's secrets) is outside the build
