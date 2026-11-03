@@ -138,6 +138,8 @@ export interface DeployOutcome {
   deployedCommit?: string | null;
   /** ECS teardown handles to persist on the row (undefined for Docker). */
   refs?: EcsDeploymentRefs | null;
+  /** Docker: the compose path found in the checkout when the app had none stored. */
+  gitPath?: string;
 }
 
 /** What a target needs to tear a deployment down. */

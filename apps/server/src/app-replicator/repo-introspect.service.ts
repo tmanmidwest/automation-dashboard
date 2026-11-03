@@ -93,6 +93,11 @@ export class RepoIntrospectService {
         const text = await readFile(found.composeAbs, 'utf8');
         const parsed = introspectCompose(text);
         const envs = await this.readEnvFiles(repoDir, found.composePath, parsed.envFiles);
+        // A compose that bind-mounts the source tree is a dev setup (hot reload against
+        // the checkout), not something to replicate. When the repo also ships a root
+        // Dockerfile, offer that as the production alternative.
+        const devCompose = looksLikeDevCompose(text);
+        const offerDockerfile = devCompose && !input.gitPath?.trim() && (await exists(join(repoDir, 'Dockerfile')));
         return {
           variables: mergeEnvFileVars(parsed.variables, envs.variables),
           fixedPorts: parsed.fixedPorts,
@@ -100,8 +105,13 @@ export class RepoIntrospectService {
           composePath: found.composePath,
           usesGeneratedCompose: false,
           envFiles: envs.files,
-          warnings: [...refWarnings, ...parsed.warnings, ...envs.warnings],
+          warnings: [
+            ...refWarnings,
+            ...(devCompose ? [`"${found.composePath}" looks like a development setup — it mounts the repo's source into the container${offerDockerfile ? '. The repo also has a Dockerfile; use it below to deploy a production build instead' : ''}.`] : []),
+            ...parsed.warnings, ...envs.warnings,
+          ],
           resolvedRef,
+          ...(offerDockerfile ? { starters: [{ kind: 'dockerfile' as const, path: 'Dockerfile' }] } : {}),
         };
       }
 
@@ -423,6 +433,15 @@ export class RepoIntrospectService {
       });
     });
   }
+}
+
+/**
+ * Does a compose file bind-mount the repo itself (`.:/app`, `./:/src`, `../:/x`)?
+ * That's the hallmark of a local dev compose — the container runs against the
+ * working tree — rather than one meant to run a built image.
+ */
+function looksLikeDevCompose(text: string): boolean {
+  return /^\s*-\s*["']?\.{1,2}\/?:\//m.test(text);
 }
 
 async function exists(p: string): Promise<boolean> {

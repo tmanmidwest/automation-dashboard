@@ -15,7 +15,12 @@ export interface StackDeployTarget {
 export interface StackRunResult {
   ok: boolean;
   message: string;
+  /** Git deploys: the compose path found in the checkout when none was configured. */
+  gitPath?: string;
 }
+
+/** Root compose filenames a git stack falls back to when no path is configured (compose's own order). */
+const ROOT_COMPOSE_NAMES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
 
 /** `docker compose up` options exposed on redeploy (mirror Portainer's toggles). */
 export interface StackDeployOpts {
@@ -261,8 +266,9 @@ export class DockerStackService {
     const base = `${trimSlash(target.stacksDir)}/${project}`;
     const dir = `${base}/repo`;
     const generated = !!src.generatedCompose?.trim();
-    const composeFile = generated ? `${base}/${GENERATED_COMPOSE_FILE}` : `${dir}/${relCompose}`;
-    const composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
+    let composeFile = generated ? `${base}/${GENERATED_COMPOSE_FILE}` : `${dir}/${relCompose}`;
+    let composeDir = composeFile.replace(/\/[^/]*$/, '') || dir;
+    let foundGitPath: string | undefined;
     const credFile = `${base}/.gitcred`;
     // Cerebro's generated compose override lives beside the repo (not inside it, so
     // a `git reset --hard` can't touch it) and is passed as an extra `-f`.
@@ -297,6 +303,24 @@ export class DockerStackService {
         const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
         await this.record(instanceId, project, 'error', detail);
         return { ok: false, message: `Git ${isRepo ? 'update' : 'clone'} failed: ${detail}` };
+      }
+
+      // No compose path configured: use whichever standard root name the repo
+      // actually has (e.g. `compose.yaml`) rather than assuming docker-compose.yml,
+      // and remember it on the stack so down/drift/backup find the same file.
+      if (!generated && !src.gitPath?.trim()) {
+        const probe = ROOT_COMPOSE_NAMES.map((f) => `[ -f '${dir}/${f}' ] && { echo '${f}'; exit 0; }`).join('; ');
+        const found = (await runSsh(target.ssh, `${probe}; true`).catch(() => null))?.stdout.trim();
+        if (found && ROOT_COMPOSE_NAMES.includes(found) && found !== relCompose) {
+          relCompose = found;
+          composeFile = `${dir}/${relCompose}`;
+          composeDir = dir;
+          foundGitPath = found;
+          await this.prisma.dockerStack.updateMany({
+            where: { connectorInstanceId: instanceId, name: project },
+            data: { gitPath: found },
+          }).catch(() => { /* best-effort */ });
+        }
       }
 
       // A generated compose is (re)written on every deploy, after the checkout is current.
@@ -355,9 +379,9 @@ export class DockerStackService {
       await this.record(instanceId, project, 'success', out);
       await this.recordRevision(instanceId, project, {
         compose: src.generatedCompose || '', env: src.env ?? '', source: 'git',
-        gitUrl: src.gitUrl, gitRef: src.gitRef ?? null, gitPath: src.gitPath ?? null, commit,
+        gitUrl: src.gitUrl, gitRef: src.gitRef ?? null, gitPath: foundGitPath ?? src.gitPath ?? null, commit,
       });
-      return { ok: true, message: `Deployed "${project}" from git${commit ? ` @ ${commit.slice(0, 7)}` : ''}.${out ? `\n${out}` : ''}` };
+      return { ok: true, gitPath: foundGitPath, message: `Deployed "${project}" from git${commit ? ` @ ${commit.slice(0, 7)}` : ''}.${out ? `\n${out}` : ''}` };
     } catch (err) {
       const message = redact(err instanceof Error ? err.message : 'Git deploy failed.', cred);
       await this.record(instanceId, project, 'error', message);

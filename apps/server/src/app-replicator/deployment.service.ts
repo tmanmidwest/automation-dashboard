@@ -447,6 +447,12 @@ export class DeploymentService {
           ...(outcome.ok ? { updateAvailable: false, availableCommit: null } : {}),
         },
       });
+      // An app registered without a compose path (e.g. before the register form
+      // saved the detected one) learns it from the checkout, so env/drift views
+      // and later deploys point at the real file.
+      if (outcome.gitPath && !app.gitPath && !app.usesGeneratedCompose) {
+        await this.prisma.replicatorApp.update({ where: { id: app.id }, data: { gitPath: outcome.gitPath } }).catch(() => {});
+      }
       await this.audit.record({ ...actor, action: finalAction(outcome.ok), target: `${app.name}/${project}`, meta: { ok: outcome.ok } });
       void this.logging[outcome.ok ? 'info' : 'warn']('replicator', `[${project}] ${kind} ${outcome.ok ? 'succeeded' : 'failed'}.`);
     } catch (err) {

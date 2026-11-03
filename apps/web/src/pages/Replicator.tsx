@@ -393,7 +393,10 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     setBusy(true); setErr(null);
     try {
       await api.post('/api/replicator/apps', {
-        name, gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined,
+        // Store the compose file actually read (e.g. compose.yaml), not just what was
+        // typed — deploys otherwise assume docker-compose.yml at the root.
+        name, gitUrl, gitRef, gitPath: gitPath || (!result?.usesGeneratedCompose && result?.composePath) || undefined,
+        gitCredKey: gitCredKey || undefined,
         variables: vars, fixedPorts, usesGeneratedCompose: result?.usesGeneratedCompose,
       });
       onRegistered();
@@ -450,6 +453,19 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
               {' '}· services: {result.services.join(', ') || '—'}.
               Image tag &amp; container name are set per deployment automatically.
             </p>
+            {!!result.starters?.length && (
+              <div className="space-y-1.5">
+                {result.starters.map((st) => (
+                  <div key={st.path} className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2 text-xs">
+                    <span className="min-w-0 truncate">
+                      <span className="text-muted-foreground">Alternative: {st.kind === 'compose' ? 'compose file' : 'Dockerfile'}</span>{' '}
+                      <code>{st.path}</code>
+                    </span>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => introspect(st.path)}>Use this</Button>
+                  </div>
+                ))}
+              </div>
+            )}
             {result.generatedCompose && (
               <details className="text-xs">
                 <summary className="cursor-pointer text-muted-foreground">Show the generated compose</summary>
