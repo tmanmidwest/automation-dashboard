@@ -74,7 +74,7 @@ export class DockerDeployTarget implements DeployTarget {
       onPhase,
     );
     const commit = await this.latestCommit(spec.targetInstanceId, spec.project);
-    return { ok: result.ok, message: result.message, deployedCommit: commit };
+    return { ok: result.ok, message: result.message, deployedCommit: commit, gitPath: result.gitPath };
   }
 
   async destroy(ctx: DestroyContext): Promise<{ problems: string[] }> {

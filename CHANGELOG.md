@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **App Replicator suggests starters for repos it can't run as-is** — when a repo
+  has no root compose file or Dockerfile and isn't a recognized layout, the register
+  dialog now lists the sample/nested compose files and Dockerfiles it found (e.g.
+  `docker/Dockerfile`, `docker-compose.example.yml`) to pick from instead of failing.
+  A picked Dockerfile, or one typed as the compose path, is built via a generated
+  compose. See `docs/app-replicator.md`.
+- **App Replicator deploys repos whose compose file is `compose.yaml`** — an app
+  registered without a compose path used to deploy against `docker-compose.yml` even
+  when the repo's file is `compose.yaml`/`compose.yml`, failing with "no such file".
+  Registration now stores the file it actually read, and a deploy of an existing app
+  finds the right one and remembers it. A compose that bind-mounts the source tree
+  (a dev setup) is flagged, with the repo's Dockerfile offered instead.
 - **Outside-in posture checks** — the Architecture Map's posture findings now also use free
   public data: Shodan InternetDB for the WAN address (ports open with no port forward behind
   them, CVEs matched to public software, end-of-life software), CISA's Known Exploited

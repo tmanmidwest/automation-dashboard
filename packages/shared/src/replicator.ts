@@ -303,6 +303,21 @@ export interface IntrospectResult {
   resolvedRef?: string;
   /** The compose Cerebro generated (usesGeneratedCompose only), for review at register time. */
   generatedCompose?: string;
+  /**
+   * Set when the repo couldn't be run as-is: nothing was detected, so the schema
+   * is empty and the app can't be registered until a starter is picked (or a path
+   * typed) and the repo introspected again.
+   */
+  needsStarter?: boolean;
+  /** Files in the repo Cerebro could start from — pass a starter's `path` back as `gitPath`. */
+  starters?: ReplicatorStarter[];
+}
+
+/** A sample/nested compose file or a Dockerfile found in a repo that has none at its root. */
+export interface ReplicatorStarter {
+  kind: 'compose' | 'dockerfile';
+  /** Repo-relative path; used as the app's compose path when picked. */
+  path: string;
 }
 
 /** What a schema refresh would change relative to the app's stored variables. */

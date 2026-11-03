@@ -97,6 +97,8 @@ export class ReplicatorService {
       gitPath: app.gitPath ?? undefined,
       gitCredKey: app.gitCredKey,
     });
+    // A refresh never registers anything, so a repo that no longer runs as-is is an error.
+    if (introspected.needsStarter) throw new BadRequestException(introspected.warnings[introspected.warnings.length - 1]);
     const existing = (app.variables as unknown as ReplicatorVariable[]) ?? [];
     const { variables, diff } = mergeSchema(existing, introspected.variables);
     const existingPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];

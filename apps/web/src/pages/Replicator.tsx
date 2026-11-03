@@ -375,10 +375,12 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
   const [fixedPorts, setFixedPorts] = useState<ReplicatorFixedPort[]>([]);
   const [busy, setBusy] = useState(false);
 
-  async function introspect() {
+  /** `path` re-reads the repo with a picked starter as the compose path. */
+  async function introspect(path = gitPath) {
     setBusy(true); setErr(null);
+    if (path !== gitPath) setGitPath(path);
     try {
-      const r = await api.post<IntrospectResult>('/api/replicator/introspect', { gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined });
+      const r = await api.post<IntrospectResult>('/api/replicator/introspect', { gitUrl, gitRef, gitPath: path || undefined, gitCredKey: gitCredKey || undefined });
       setResult(r); setVars(r.variables); setFixedPorts(r.fixedPorts ?? []);
       // The requested branch didn't exist (e.g. "main" on a "master" repo) — register the one actually read.
       if (r.resolvedRef) setGitRef(r.resolvedRef);
@@ -391,7 +393,10 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     setBusy(true); setErr(null);
     try {
       await api.post('/api/replicator/apps', {
-        name, gitUrl, gitRef, gitPath: gitPath || undefined, gitCredKey: gitCredKey || undefined,
+        // Store the compose file actually read (e.g. compose.yaml), not just what was
+        // typed — deploys otherwise assume docker-compose.yml at the root.
+        name, gitUrl, gitRef, gitPath: gitPath || (!result?.usesGeneratedCompose && result?.composePath) || undefined,
+        gitCredKey: gitCredKey || undefined,
         variables: vars, fixedPorts, usesGeneratedCompose: result?.usesGeneratedCompose,
       });
       onRegistered();
@@ -404,16 +409,16 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          {result
+          {result && !result.needsStarter
             ? <Button onClick={register} disabled={busy || !name.trim()}>{busy ? 'Registering…' : 'Register app'}</Button>
-            : <Button onClick={introspect} disabled={busy || !gitUrl.trim()}>{busy ? 'Reading repo…' : 'Introspect repo'}</Button>}
+            : <Button onClick={() => introspect()} disabled={busy || !gitUrl.trim()}>{busy ? 'Reading repo…' : 'Introspect repo'}</Button>}
         </>
       }>
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
           <div><Label>Git URL</Label><Input value={gitUrl} placeholder="https://github.com/you/app.git" onChange={(e) => setGitUrl(e.target.value)} /></div>
           <div><Label>Ref (branch/tag)</Label><Input value={gitRef} placeholder="main" onChange={(e) => setGitRef(e.target.value)} /></div>
-          <div><Label>Compose path <span className="text-muted-foreground font-normal">(optional)</span></Label><Input value={gitPath} placeholder="docker-compose.yml" onChange={(e) => setGitPath(e.target.value)} /></div>
+          <div><Label>Compose file or Dockerfile <span className="text-muted-foreground font-normal">(optional)</span></Label><Input value={gitPath} placeholder="docker-compose.yml" onChange={(e) => setGitPath(e.target.value)} /></div>
           <div>
             <Label>Git credential <span className="text-muted-foreground font-normal">(private repos)</span></Label>
             <select className={selectCls} value={gitCredKey} onChange={(e) => setGitCredKey(e.target.value)}>
@@ -423,7 +428,22 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
           </div>
         </div>
 
-        {result && (
+        {result?.needsStarter && (
+          <div className="space-y-2">
+            {result.warnings.map((w, i) => <p key={i} className="text-xs text-amber-400">⚠ {w}</p>)}
+            {result.starters?.map((st) => (
+              <div key={st.path} className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2 text-xs">
+                <span className="min-w-0 truncate">
+                  <span className="text-muted-foreground">{st.kind === 'compose' ? 'Compose file' : 'Dockerfile'}</span>{' '}
+                  <code>{st.path}</code>
+                </span>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => introspect(st.path)}>Use this</Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {result && !result.needsStarter && (
           <div className="space-y-3">
             <div><Label>App name</Label><Input value={name} onChange={(e) => setName(e.target.value)} /></div>
             {result.warnings.map((w, i) => <p key={i} className="text-xs text-amber-400">⚠ {w}</p>)}
@@ -433,6 +453,19 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
               {' '}· services: {result.services.join(', ') || '—'}.
               Image tag &amp; container name are set per deployment automatically.
             </p>
+            {!!result.starters?.length && (
+              <div className="space-y-1.5">
+                {result.starters.map((st) => (
+                  <div key={st.path} className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2 text-xs">
+                    <span className="min-w-0 truncate">
+                      <span className="text-muted-foreground">Alternative: {st.kind === 'compose' ? 'compose file' : 'Dockerfile'}</span>{' '}
+                      <code>{st.path}</code>
+                    </span>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => introspect(st.path)}>Use this</Button>
+                  </div>
+                ))}
+              </div>
+            )}
             {result.generatedCompose && (
               <details className="text-xs">
                 <summary className="cursor-pointer text-muted-foreground">Show the generated compose</summary>
