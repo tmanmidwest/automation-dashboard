@@ -314,6 +314,16 @@ the Docker connector's own redeploy/rollback rewrites it. If the repo later comm
 the next deploy uses that instead. Generated-compose apps deploy to Docker hosts only; the ECS
 builder does a plain `docker build` of the repo and can't follow an inline Dockerfile.
 
+**Pasted compose (no repo):** the register dialog's *Paste compose* tab takes a compose file
+directly, for apps that run prebuilt images. It is read by the same introspector (so
+`${APP_HOST_PORT:-5055}`-style variables become the per-deployment form), stored on the app
+(`ReplicatorApp.compose`, `gitUrl` null), and deployed as a plain compose stack: Cerebro writes it to
+`<stacksDir>/<project>/docker-compose.yml` with the `.env` and its mounts/extra-env override beside it,
+then runs `docker compose up -d --pull always`, so a redeploy pulls the newest image. A `build:` is
+refused (there's no source to build from), relative bind mounts resolve to the deployment's own folder
+on the host, and there's no commit to track, so "update available" never fires for these apps.
+The pencil on the app card edits the pasted compose, then opens the schema review. Docker hosts only.
+
 **A ref that doesn't exist** (most often the form's `main` default on a repo whose branch is
 `master`, like WordPress) no longer triggers a full-history clone: introspection falls back to the
 remote's default branch with a warning, and the register form switches its ref to it.

@@ -59,7 +59,8 @@ export class UpdateCheckService {
 
   /** Core: resolve remote tip, diff against the deployed commit, persist + emit on transition. */
   private async evaluate(d: DeploymentWithApp, tipCache: Map<string, string | null>): Promise<boolean> {
-    if (!d.deployedCommit) return false;
+    // No commit to compare against — including pasted-compose apps, which have no repo.
+    if (!d.deployedCommit || !d.app.gitUrl) return false;
     const key = `${d.app.gitUrl}#${d.app.gitRef}`;
     let tip = tipCache.get(key);
     if (tip === undefined) {

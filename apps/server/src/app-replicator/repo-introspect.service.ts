@@ -35,6 +35,9 @@ const STARTER_MAX_RESULTS = 12;
 /** Folders never worth descending into for a starter (dependencies, build output, VCS). */
 const STARTER_SKIP_DIRS = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', 'target', '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.tox', 'bower_components']);
 
+/** Cap on a pasted compose file. */
+const PASTED_COMPOSE_MAX_BYTES = 256 * 1024;
+
 /** Guard rails on a repo-supplied env file: it's untrusted content. */
 const ENV_FILE_MAX_BYTES = 256 * 1024;
 const ENV_FILE_MAX_VARS = 300;
@@ -50,8 +53,39 @@ const ENV_FILE_MAX_VARS = 300;
 export class RepoIntrospectService {
   constructor(private readonly secrets: SecretsService) {}
 
+  /**
+   * Read a pasted compose file (an app with no Git repo). There's no source tree to
+   * build from, so a `build:` is refused up front rather than failing at deploy.
+   */
+  introspectText(compose: string): IntrospectResult {
+    const text = String(compose ?? '').replace(/\r\n/g, '\n');
+    if (!text.trim()) throw new BadRequestException('Paste a compose file.');
+    if (Buffer.byteLength(text) > PASTED_COMPOSE_MAX_BYTES) {
+      throw new BadRequestException(`The compose file is larger than ${Math.round(PASTED_COMPOSE_MAX_BYTES / 1024)}KB.`);
+    }
+    if (/^\s+build\s*:/m.test(text)) {
+      throw new BadRequestException('This compose builds an image ("build:"), which needs the source code — register the app from its Git repo instead, or use a prebuilt "image:".');
+    }
+    const parsed = introspectCompose(text);
+    if (!parsed.services.length) throw new BadRequestException('No services found — the compose needs a top-level "services:" block.');
+    const warnings = [...parsed.warnings];
+    if (/^\s*-\s*["']?\.{1,2}\//m.test(text)) {
+      warnings.push('Relative bind mounts (./…) resolve to this deployment\'s folder on the Docker host, beside the compose file Cerebro writes there.');
+    }
+    return {
+      variables: parsed.variables,
+      fixedPorts: parsed.fixedPorts,
+      services: parsed.services,
+      composePath: 'pasted compose',
+      usesGeneratedCompose: false,
+      envFiles: [],
+      warnings,
+    };
+  }
+
   async introspect(input: IntrospectRepoInput): Promise<IntrospectResult> {
-    const gitUrl = assertSafeGitUrl(input.gitUrl);
+    if (input.compose != null) return this.introspectText(input.compose);
+    const gitUrl = assertSafeGitUrl(input.gitUrl ?? '');
     const ref = assertSafeGitRef(input.gitRef);
 
     const cred = await this.resolveCred(input.gitCredKey);
@@ -238,7 +272,7 @@ export class RepoIntrospectService {
    * docs/app-replicator-ecs-target.md.
    */
   async fetchComposeText(input: IntrospectRepoInput): Promise<{ text: string; composePath: string; usesGeneratedCompose: boolean }> {
-    const gitUrl = assertSafeGitUrl(input.gitUrl);
+    const gitUrl = assertSafeGitUrl(input.gitUrl ?? '');
     const ref = assertSafeGitRef(input.gitRef);
     const cred = await this.resolveCred(input.gitCredKey);
     const workdir = await mkdtemp(join(tmpdir(), 'cerebro-ecs-compose-'));

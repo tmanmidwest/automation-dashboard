@@ -40,6 +40,10 @@ export class EcsDeployTarget implements DeployTarget {
     if (!profile) return { ok: false, message: 'This AWS connector has no complete ECS deployment profile (it needs subnets and a task execution role ARN).' };
     if (!profile.builderInstanceId) return { ok: false, message: 'Set an image builder (a Docker connector instance) in the AWS connector’s ECS profile — the image is built there and pushed to ECR.' };
 
+    // ECS builds the app image from its repo; a pasted-compose app has none.
+    if (!spec.source.gitUrl) return { ok: false, message: 'Apps registered from a pasted compose deploy to Docker hosts only for now.' };
+    const gitUrl = spec.source.gitUrl;
+
     const project = spec.project;
     const ecrRepositoryName = `cerebro/${project}`;
     const logGroupName = `/cerebro/${project}`;
@@ -70,7 +74,7 @@ export class EcsDeployTarget implements DeployTarget {
         {
           builderInstanceId: profile.builderInstanceId,
           project,
-          source: { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath, credKey: spec.source.gitCredKey },
+          source: { gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath, credKey: spec.source.gitCredKey },
           imageRef,
           registryEndpoint: endpoint,
           username,
@@ -89,7 +93,7 @@ export class EcsDeployTarget implements DeployTarget {
     let taskDef, warnings: string[], primaryContainerPort: number | null, primaryContainerName: string | null;
     try {
       const composeInfo = await this.repo.fetchComposeText({
-        gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef ?? undefined, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
+        gitUrl, gitRef: spec.source.gitRef ?? undefined, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
       });
       const env = buildEnvMap(spec.variables, project, spec.portList, spec.values, spec.secrets, spec.extras);
       const result = composeToTaskDef({

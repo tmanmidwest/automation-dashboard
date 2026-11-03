@@ -418,7 +418,8 @@ model DockerStackRevision {
 model ReplicatorApp {
   id                   String                 @id @default(cuid())
   name                 String
-  gitUrl               String
+  /// Null for an app registered from a pasted compose (`compose` set).
+  gitUrl               String?
   gitRef               String                 @default("main")
   gitPath              String?
   /// Vault secret key (kind='git') to authenticate a private repo; null = public.
@@ -430,6 +431,8 @@ model ReplicatorApp {
   fixedPorts           Json                   @default("[]")
   /// True when the repo had only a Dockerfile and Cerebro generated a compose wrapper.
   usesGeneratedCompose Boolean                @default(false)
+  /// A pasted compose file the app runs as-is (no Git repo). See docs/app-replicator.md.
+  compose              String?
   createdAt            DateTime               @default(now())
   updatedAt            DateTime               @updatedAt
   deployments          ReplicatorDeployment[]
