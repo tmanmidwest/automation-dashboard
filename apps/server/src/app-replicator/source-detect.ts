@@ -214,7 +214,8 @@ export const STARTERS_FOUND_MESSAGE =
   "This repo has no docker-compose.yml or Dockerfile at its root, but Cerebro found files it could start from — pick one below. Nothing is changed in the repo.";
 
 /** A compose file that isn't at the standard root path: nested, or a committed sample. */
-export const COMPOSE_LIKE_RE = /^(docker-)?compose([._-][A-Za-z0-9_-]+)*\.ya?ml([._-](example|sample|dist|template|tmpl))?$/i;
+// Separators and segment bodies don't overlap, so matching stays linear (no backtracking blow-up).
+export const COMPOSE_LIKE_RE = /^(?:docker-)?compose(?:[._-][A-Za-z0-9]+)*\.ya?ml(?:[._-](?:example|sample|dist|template|tmpl))?$/i;
 /** `Dockerfile`, `Dockerfile.prod`, `prod.Dockerfile`, `Dockerfile-dev`. */
 export const DOCKERFILE_LIKE_RE = /^(Dockerfile([._-][A-Za-z0-9_-]+)?|[A-Za-z0-9_-]+\.Dockerfile)$/i;
 
