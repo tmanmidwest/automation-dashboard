@@ -188,6 +188,9 @@ export class DockerStackService {
     compose: string,
     env = '',
     opts: StackDeployOpts = {},
+    /** An extra compose merged over this one at `up` (see `StackGitSource.overrideCompose`); empty removes it. */
+    overrideCompose?: string,
+    onProgress?: (phase: string) => void,
   ): Promise<StackRunResult> {
     target = this.withHostPin(target);
     const project = projectName(name);
@@ -207,8 +210,20 @@ export class DockerStackService {
       const w2 = await runSsh(target.ssh, `cat > '${envFile}'`, env);
       if (w2.code !== 0) throw new Error(w2.stderr.trim() || 'Failed to write the .env file on the host.');
 
+      // Cerebro's override (mounts / extra env) beside the compose, or remove a stale one.
+      const overrideFile = `${dir}/cerebro.override.yml`;
+      let fileArgs = `-f '${file}'`;
+      if (overrideCompose != null && overrideCompose.trim() !== '') {
+        const wo = await runSsh(target.ssh, `cat > '${overrideFile}'`, overrideCompose);
+        if (wo.code !== 0) throw new Error('Failed to write the compose override file on the host.');
+        fileArgs += ` -f '${overrideFile}'`;
+      } else {
+        await runSsh(target.ssh, `rm -f '${overrideFile}'`).catch(() => { /* best-effort */ });
+      }
+
       // 2) validate before applying, so a YAML/compose error fails cleanly.
-      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' config -q`);
+      onProgress?.('Validating compose…');
+      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} config -q`);
       if (cfg.code !== 0) {
         const detail = tail(cfg.stderr || cfg.stdout, 2000);
         await this.record(instanceId, project, 'error', detail);
@@ -217,7 +232,7 @@ export class DockerStackService {
 
       // 3) optional forced rebuild of locally-built images, then docker compose up -d [flags]
       if (opts.forceRebuild) {
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
+        const b = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
@@ -225,7 +240,8 @@ export class DockerStackService {
         }
       }
       const flags = composeUpFlags(opts);
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' up -d ${flags}`.trim(), undefined, UP_TIMEOUT_MS);
+      onProgress?.('Pulling images and starting containers…');
+      const up = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} up -d ${flags}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);

@@ -68,6 +68,7 @@ export function Replicator() {
   const [registering, setRegistering] = useState(false);
   const [deployFor, setDeployFor] = useState<ReplicatorApp | null>(null);
   const [refreshFor, setRefreshFor] = useState<ReplicatorApp | null>(null);
+  const [composeFor, setComposeFor] = useState<ReplicatorApp | null>(null);
   const [editFor, setEditFor] = useState<{ app: ReplicatorApp; d: ReplicatorDeployment } | null>(null);
   const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
   const [envFor, setEnvFor] = useState<ReplicatorDeployment | null>(null);
@@ -159,6 +160,7 @@ export function Replicator() {
               hostIps={hostIps}
               onDeploy={() => setDeployFor(app)}
               onRefreshSchema={() => setRefreshFor(app)}
+              onEditCompose={() => setComposeFor(app)}
               onEdit={(d) => setEditFor({ app, d })}
               onIngress={setIngressFor}
               onEnv={setEnvFor}
@@ -183,6 +185,15 @@ export function Replicator() {
           targets={targets}
           onClose={() => setDeployFor(null)}
           onDeployed={() => { setDeployFor(null); void refresh(); }}
+          setErr={setErr}
+        />
+      )}
+      {composeFor && (
+        <EditComposeDialog
+          app={composeFor}
+          onClose={() => setComposeFor(null)}
+          // Saved → review what the new compose changes in the variable schema.
+          onSaved={() => { const a = composeFor; setComposeFor(null); setRefreshFor(a); void refresh(); }}
           setErr={setErr}
         />
       )}
@@ -221,11 +232,11 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, onRefreshSchema, onEdit, onIngress, onEnv, onChanged, setErr }: {
+function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, onRefreshSchema, onEditCompose, onEdit, onIngress, onEnv, onChanged, setErr }: {
   app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
   /** Docker connector instance id → host IP/name from its SSH config. */
   hostIps: Map<string, string>;
-  onDeploy: () => void; onRefreshSchema: () => void; onEdit: (d: ReplicatorDeployment) => void;
+  onDeploy: () => void; onRefreshSchema: () => void; onEditCompose: () => void; onEdit: (d: ReplicatorDeployment) => void;
   onIngress: (d: ReplicatorDeployment) => void; onEnv: (d: ReplicatorDeployment) => void;
   onChanged: () => void; setErr: (s: string | null) => void;
 }) {
@@ -249,7 +260,9 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
         <div className="min-w-0">
           <CardTitle className="flex items-center gap-2"><Boxes className="h-5 w-5" /> {app.name}</CardTitle>
           <CardDescription className="flex items-center gap-2 mt-1">
-            <GitBranch className="h-3.5 w-3.5" /> {app.gitUrl}<span className="opacity-60">@{app.gitRef}</span>
+            {app.compose
+              ? <><FileText className="h-3.5 w-3.5" /> Pasted compose <span className="opacity-60">· runs prebuilt images, Docker hosts only</span></>
+              : <><GitBranch className="h-3.5 w-3.5" /> {app.gitUrl}<span className="opacity-60">@{app.gitRef}</span></>}
           </CardDescription>
           <p className="text-xs text-muted-foreground mt-1">
             {app.variables.length} variables · {ports} port{ports === 1 ? '' : 's'} · {secrets} secret{secrets === 1 ? '' : 's'}
@@ -259,6 +272,11 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
         {canWrite && (
           <div className="flex items-center gap-2 shrink-0">
             <Button onClick={onDeploy}><Rocket className="h-4 w-4" /> Deploy</Button>
+            {app.compose && (
+              <Button variant="ghost" size="icon" aria-label="Edit compose" title="Edit the pasted compose" onClick={onEditCompose}>
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
             <Button variant="ghost" size="icon" aria-label="Refresh schema"
               title="Re-read the repo compose to pick up new variables"
               onClick={onRefreshSchema}>
@@ -370,6 +388,9 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
   const [gitRef, setGitRef] = useState('main');
   const [gitPath, setGitPath] = useState('');
   const [gitCredKey, setGitCredKey] = useState('');
+  /** Where the app comes from: a Git repo, or a compose file pasted here (prebuilt images). */
+  const [source, setSource] = useState<'git' | 'compose'>('git');
+  const [compose, setCompose] = useState('');
   const [result, setResult] = useState<IntrospectResult | null>(null);
   const [vars, setVars] = useState<ReplicatorVariable[]>([]);
   const [fixedPorts, setFixedPorts] = useState<ReplicatorFixedPort[]>([]);
@@ -380,7 +401,9 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
     setBusy(true); setErr(null);
     if (path !== gitPath) setGitPath(path);
     try {
-      const r = await api.post<IntrospectResult>('/api/replicator/introspect', { gitUrl, gitRef, gitPath: path || undefined, gitCredKey: gitCredKey || undefined });
+      const r = await api.post<IntrospectResult>('/api/replicator/introspect', source === 'compose'
+        ? { compose }
+        : { gitUrl, gitRef, gitPath: path || undefined, gitCredKey: gitCredKey || undefined });
       setResult(r); setVars(r.variables); setFixedPorts(r.fixedPorts ?? []);
       // The requested branch didn't exist (e.g. "main" on a "master" repo) — register the one actually read.
       if (r.resolvedRef) setGitRef(r.resolvedRef);
@@ -392,7 +415,9 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
   async function register() {
     setBusy(true); setErr(null);
     try {
-      await api.post('/api/replicator/apps', {
+      await api.post('/api/replicator/apps', source === 'compose' ? {
+        name, compose, variables: vars, fixedPorts,
+      } : {
         // Store the compose file actually read (e.g. compose.yaml), not just what was
         // typed — deploys otherwise assume docker-compose.yml at the root.
         name, gitUrl, gitRef, gitPath: gitPath || (!result?.usesGeneratedCompose && result?.composePath) || undefined,
@@ -405,16 +430,41 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
 
   return (
     <Dialog open onClose={onClose} size="lg" title="Register app"
-      description="Point Cerebro at a Git repo; it reads the compose file (and any committed env file) to detect variables and ports."
+      description="Point Cerebro at a Git repo, or paste a compose file that runs prebuilt images; it reads the compose to detect variables and ports."
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           {result && !result.needsStarter
             ? <Button onClick={register} disabled={busy || !name.trim()}>{busy ? 'Registering…' : 'Register app'}</Button>
-            : <Button onClick={() => introspect()} disabled={busy || !gitUrl.trim()}>{busy ? 'Reading repo…' : 'Introspect repo'}</Button>}
+            : <Button onClick={() => introspect()} disabled={busy || !(source === 'compose' ? compose.trim() : gitUrl.trim())}>
+                {busy ? 'Reading…' : source === 'compose' ? 'Read compose' : 'Introspect repo'}
+              </Button>}
         </>
       }>
       <div className="space-y-4">
+        <div className="flex gap-1 rounded-md border border-border/60 p-1 text-xs w-fit">
+          {(['git', 'compose'] as const).map((k) => (
+            <button key={k} type="button" disabled={busy}
+              className={`rounded px-3 py-1 ${source === k ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => { setSource(k); setResult(null); }}>
+              {k === 'git' ? 'Git repository' : 'Paste compose'}
+            </button>
+          ))}
+        </div>
+        {source === 'compose' ? (
+          <div className="space-y-1">
+            <Label>Compose file</Label>
+            <textarea
+              className="w-full h-56 rounded-md border border-input bg-background/60 p-2 font-mono text-xs"
+              value={compose} spellCheck={false}
+              placeholder={'services:\n  app:\n    image: ghcr.io/you/app:latest\n    container_name: ${APP_CONTAINER_NAME:-app}\n    ports:\n      - "${APP_HOST_PORT:-8080}:8080"'}
+              onChange={(e) => { setCompose(e.target.value); setResult(null); }} />
+            <p className="text-xs text-muted-foreground">
+              Uses prebuilt images only (no <code>build:</code>). Make the host port a <code>{'${VAR:-default}'}</code> so each
+              deployment gets its own; a redeploy pulls the latest image.
+            </p>
+          </div>
+        ) : (
         <div className="grid grid-cols-2 gap-3">
           <div><Label>Git URL</Label><Input value={gitUrl} placeholder="https://github.com/you/app.git" onChange={(e) => setGitUrl(e.target.value)} /></div>
           <div><Label>Ref (branch/tag)</Label><Input value={gitRef} placeholder="main" onChange={(e) => setGitRef(e.target.value)} /></div>
@@ -427,6 +477,7 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
             </select>
           </div>
         </div>
+        )}
 
         {result?.needsStarter && (
           <div className="space-y-2">
@@ -482,6 +533,36 @@ function RegisterDialog({ gitSecrets, onClose, onRegistered, setErr }: {
 }
 
 // ── Refresh-schema dialog (re-introspect → review diff → apply) ─────
+
+// ── Edit a pasted compose (then review the schema change) ───────────
+
+function EditComposeDialog({ app, onClose, onSaved, setErr }: {
+  app: ReplicatorApp; onClose: () => void; onSaved: () => void; setErr: (s: string | null) => void;
+}) {
+  const [text, setText] = useState(app.compose ?? '');
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try { await api.patch(`/api/replicator/apps/${app.id}`, { compose: text }); onSaved(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not save the compose.'); setBusy(false); }
+  }
+
+  return (
+    <Dialog open onClose={onClose} size="lg" title={`Edit compose · ${app.name}`}
+      description="Saved changes apply to each deployment on its next redeploy. You'll review any variable changes next."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={busy || !text.trim() || text === app.compose}>{busy ? 'Saving…' : 'Save'}</Button>
+        </>
+      }>
+      <textarea
+        className="w-full h-80 rounded-md border border-input bg-background/60 p-2 font-mono text-xs"
+        value={text} spellCheck={false} onChange={(e) => setText(e.target.value)} />
+    </Dialog>
+  );
+}
 
 function RefreshSchemaDialog({ app, onClose, onApplied, setErr }: {
   app: ReplicatorApp; onClose: () => void; onApplied: () => void; setErr: (s: string | null) => void;

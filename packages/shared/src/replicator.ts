@@ -52,7 +52,8 @@ export interface ReplicatorVariable {
 export interface ReplicatorApp {
   id: string;
   name: string;
-  gitUrl: string;
+  /** Null for an app registered from a pasted compose (see `compose`). */
+  gitUrl: string | null;
   gitRef: string;
   gitPath?: string | null;
   /** Vault secret key (kind='git') to authenticate a private repo; null = public. */
@@ -62,6 +63,8 @@ export interface ReplicatorApp {
   fixedPorts: ReplicatorFixedPort[];
   /** True when the repo has no compose file and Cerebro generates one (from its Dockerfile or a detected layout) at deploy time. */
   usesGeneratedCompose: boolean;
+  /** Set for an app registered from a pasted compose file; it has no Git repo. */
+  compose?: string | null;
   createdAt: string;
   updatedAt: string;
   /** How many deployments reference this app (list view). */
@@ -282,10 +285,13 @@ export interface ReplicatorDeployment {
 
 /** Introspect a repo's compose file into a variable/port schema (register step 1). */
 export interface IntrospectRepoInput {
-  gitUrl: string;
+  /** Omit when `compose` is given. */
+  gitUrl?: string;
   gitRef?: string;
   gitPath?: string;
   gitCredKey?: string | null;
+  /** A pasted compose file to read instead of a Git repo (it must not `build:`). */
+  compose?: string;
 }
 
 export interface IntrospectResult {
@@ -354,7 +360,8 @@ export interface RefreshSchemaResult {
 /** Register a reviewed app into the catalog. */
 export interface RegisterAppInput {
   name: string;
-  gitUrl: string;
+  /** Required unless `compose` is given. */
+  gitUrl?: string;
   gitRef?: string;
   gitPath?: string;
   gitCredKey?: string | null;
@@ -363,6 +370,8 @@ export interface RegisterAppInput {
   /** The reviewed fixed-port list (operator may have added or removed ports). */
   fixedPorts?: ReplicatorFixedPort[];
   usesGeneratedCompose?: boolean;
+  /** A pasted compose file: the app runs it as-is, with no Git repo. */
+  compose?: string;
 }
 
 /** Deploy an app as a new isolated instance. */

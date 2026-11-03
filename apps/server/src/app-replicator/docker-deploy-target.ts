@@ -51,6 +51,18 @@ export class DockerDeployTarget implements DeployTarget {
     )];
     const overrideCompose = renderComposeOverride(spec.project, spec.mounts ?? [], spec.extras ?? {}, envServices) ?? undefined;
 
+    // A pasted compose: no repo to clone — write it as a plain compose stack and
+    // `up` with `--pull always`, so a redeploy picks up a newer image.
+    if (spec.source.compose) {
+      const res = await this.stacks.deploy(
+        target, spec.targetInstanceId, spec.project, spec.source.compose, env,
+        { pull: true, forceRecreate: spec.forceRebuild }, overrideCompose, onPhase,
+      );
+      return { ok: res.ok, message: res.message, deployedCommit: null };
+    }
+    if (!spec.source.gitUrl) return { ok: false, message: 'This app has neither a Git repository nor a pasted compose file.' };
+    const gitUrl = spec.source.gitUrl;
+
     // A repo with no compose of its own: regenerate Cerebro's compose from the
     // current checkout (so it tracks the repo), written beside it on the host.
     // Should the repo have since committed a real compose, that one is used.
@@ -59,7 +71,7 @@ export class DockerDeployTarget implements DeployTarget {
     if (spec.source.generated) {
       onPhase('Generating compose…');
       const c = await this.repo.fetchComposeText({
-        gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
+        gitUrl, gitRef: spec.source.gitRef, gitPath: spec.source.gitPath ?? undefined, gitCredKey: spec.source.gitCredKey,
       });
       if (c.usesGeneratedCompose) generatedCompose = c.text;
       else gitPath = c.composePath;
@@ -69,7 +81,7 @@ export class DockerDeployTarget implements DeployTarget {
       target,
       spec.targetInstanceId,
       spec.project,
-      { gitUrl: spec.source.gitUrl, gitRef: spec.source.gitRef, gitPath, credKey: spec.source.gitCredKey, env, overrideCompose, generatedCompose },
+      { gitUrl, gitRef: spec.source.gitRef, gitPath, credKey: spec.source.gitCredKey, env, overrideCompose, generatedCompose },
       { pull: true, forceRebuild: spec.forceRebuild },
       onPhase,
     );

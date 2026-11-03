@@ -179,6 +179,9 @@ export class DeploymentService {
     if (app.usesGeneratedCompose && targetKind !== 'docker') {
       throw new BadRequestException('This app has no docker-compose.yml of its own, so it can only be deployed to a Docker host for now — commit a Dockerfile and compose file to deploy it to ECS.');
     }
+    if (app.compose && targetKind !== 'docker') {
+      throw new BadRequestException('Apps registered from a pasted compose deploy to Docker hosts only for now.');
+    }
 
     // Name must be unique per target instance.
     const clash = await this.prisma.replicatorDeployment.findFirst({ where: { dockerInstanceId: input.dockerInstanceId, project } });
@@ -432,7 +435,7 @@ export class DeploymentService {
       const outcome = await this.targetImpl(targetKind).deploy(
         {
           deploymentId, targetInstanceId, project,
-          source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey, generated: app.usesGeneratedCompose },
+          source: { gitUrl: app.gitUrl, gitRef: app.gitRef, gitPath: app.gitPath, gitCredKey: app.gitCredKey, generated: app.usesGeneratedCompose, compose: app.compose },
           variables, portList, values, secrets, extras, mounts, forceRebuild, taskCpu, taskMemory, existingEcs,
         },
         (phase) => setPhase(phase),
@@ -512,7 +515,7 @@ export class DeploymentService {
       // make the whole view unavailable.
       try {
         const target = await this.targetFor(row.dockerInstanceId);
-        path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose);
+        path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose || !!app.compose);
       } catch { path = null; }
     }
     return {
@@ -543,7 +546,7 @@ export class DeploymentService {
     let path: string;
     try {
       target = await this.targetFor(row.dockerInstanceId);
-      path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose);
+      path = gitStackEnvPath(target.stacksDir, row.project, app.gitPath, app.usesGeneratedCompose || !!app.compose);
     } catch (err) {
       return { available: false, message: err instanceof Error ? err.message : 'The Docker target is unavailable.', ...empty };
     }

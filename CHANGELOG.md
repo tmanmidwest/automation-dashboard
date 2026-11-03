@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **App Replicator apps from a pasted compose** — register an app by pasting a compose
+  file that runs prebuilt images instead of pointing at a Git repo. Variables and ports
+  are read from it as usual, each deployment runs it as its own compose stack, and a
+  redeploy pulls the latest image. The compose can be edited from the app card. Docker
+  hosts only. See `docs/app-replicator.md`.
 - **App Replicator suggests starters for repos it can't run as-is** — when a repo
   has no root compose file or Dockerfile and isn't a recognized layout, the register
   dialog now lists the sample/nested compose files and Dockerfiles it found (e.g.

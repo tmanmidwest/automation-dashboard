@@ -45,20 +45,28 @@ export class ReplicatorService {
 
   async registerApp(input: RegisterAppInput): Promise<ReplicatorApp> {
     if (!input.name?.trim()) throw new BadRequestException('A name is required.');
-    if (!input.gitUrl?.trim()) throw new BadRequestException('A git repository URL is required.');
+    // A pasted compose replaces the repo entirely; re-validate it (no `build:`).
+    const compose = input.compose?.trim() ? input.compose.replace(/\r\n/g, '\n') : null;
+    if (compose) this.repo.introspectText(compose);
+    else if (!input.gitUrl?.trim()) throw new BadRequestException('A git repository URL (or a pasted compose file) is required.');
     const variables = sanitizeVariables(input.variables);
     const fixedPorts = sanitizeFixedPorts(input.fixedPorts);
     const app = await this.prisma.replicatorApp.create({
-      data: {
-        name: input.name.trim(),
-        gitUrl: input.gitUrl.trim(),
-        gitRef: input.gitRef?.trim() || 'main',
-        gitPath: input.gitPath?.trim() || null,
-        gitCredKey: input.gitCredKey || null,
-        variables: variables as unknown as object,
-        fixedPorts: fixedPorts as unknown as object,
-        usesGeneratedCompose: !!input.usesGeneratedCompose,
-      },
+      data: compose
+        ? {
+          name: input.name.trim(), gitUrl: null, gitPath: null, gitCredKey: null, compose,
+          variables: variables as unknown as object, fixedPorts: fixedPorts as unknown as object, usesGeneratedCompose: false,
+        }
+        : {
+          name: input.name.trim(),
+          gitUrl: input.gitUrl!.trim(),
+          gitRef: input.gitRef?.trim() || 'main',
+          gitPath: input.gitPath?.trim() || null,
+          gitCredKey: input.gitCredKey || null,
+          variables: variables as unknown as object,
+          fixedPorts: fixedPorts as unknown as object,
+          usesGeneratedCompose: !!input.usesGeneratedCompose,
+        },
     });
     return this.map(app, 0);
   }
@@ -68,7 +76,14 @@ export class ReplicatorService {
     if (!existing) throw new NotFoundException('App not found.');
     const data: Record<string, unknown> = {};
     if (patch.name !== undefined) data.name = patch.name.trim();
-    if (patch.gitUrl !== undefined) data.gitUrl = patch.gitUrl.trim();
+    if (patch.gitUrl !== undefined) data.gitUrl = patch.gitUrl?.trim() || null;
+    if (patch.compose !== undefined) {
+      // Only a pasted-compose app can swap its compose; a repo app reads its own.
+      if (!existing.compose) throw new BadRequestException('This app runs from its Git repo; its compose file lives there.');
+      const compose = patch.compose.replace(/\r\n/g, '\n');
+      this.repo.introspectText(compose);
+      data.compose = compose;
+    }
     if (patch.gitRef !== undefined) data.gitRef = patch.gitRef.trim() || 'main';
     if (patch.gitPath !== undefined) data.gitPath = patch.gitPath?.trim() || null;
     if (patch.gitCredKey !== undefined) data.gitCredKey = patch.gitCredKey || null;
@@ -91,12 +106,14 @@ export class ReplicatorService {
   async refreshSchema(id: string): Promise<RefreshSchemaResult> {
     const app = await this.prisma.replicatorApp.findUnique({ where: { id } });
     if (!app) throw new NotFoundException('App not found.');
-    const introspected = await this.repo.introspect({
-      gitUrl: app.gitUrl,
-      gitRef: app.gitRef,
-      gitPath: app.gitPath ?? undefined,
-      gitCredKey: app.gitCredKey,
-    });
+    const introspected = app.compose
+      ? this.repo.introspectText(app.compose)
+      : await this.repo.introspect({
+        gitUrl: app.gitUrl ?? '',
+        gitRef: app.gitRef,
+        gitPath: app.gitPath ?? undefined,
+        gitCredKey: app.gitCredKey,
+      });
     // A refresh never registers anything, so a repo that no longer runs as-is is an error.
     if (introspected.needsStarter) throw new BadRequestException(introspected.warnings[introspected.warnings.length - 1]);
     const existing = (app.variables as unknown as ReplicatorVariable[]) ?? [];
@@ -160,6 +177,7 @@ export class ReplicatorService {
       variables: (row.variables as unknown as ReplicatorVariable[]) ?? [],
       fixedPorts: (row.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [],
       usesGeneratedCompose: row.usesGeneratedCompose,
+      compose: row.compose,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       deploymentCount,
