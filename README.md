@@ -2,13 +2,17 @@
 
 A self-hosted management platform with a modern web UI and pluggable connectors.
 Log in, configure everything from the UI, and manage your whole homelab or estate
-from one place — Proxmox, Docker, Cloudflare, and more — plus **agent-brokered
+from one place — Proxmox, Docker, UniFi, Cloudflare, and more. Cerebro joins what
+every connector sees into one **Architecture Map** of your network, compute and apps,
+flags **security posture** problems (including outside-in checks of what the internet
+can see), deploys and moves apps across Docker hosts, and gives you **agent-brokered
 remote access** to any box with no inbound firewall rules.
 
 > Cerebro is well past its skeleton phase: authentication + RBAC, an encrypted
 > secrets vault, a unified event timeline, monitors, automations, a public API +
-> MCP server, twelve first-class connectors, app deployment and stack backup /
-> migration tooling, and agent-brokered remote access are all in place.
+> MCP server, twelve first-class connectors, an architecture map with posture
+> findings, app deployment and stack backup / migration tooling, and agent-brokered
+> remote access are all in place.
 
 ## Architecture
 
@@ -33,6 +37,21 @@ docs/        Feature deep-dives (see the index below)
 ```
 
 ## What's inside
+
+**Architecture Map & security posture**
+- **Architecture Map** (`/map`) — one read-only model of your environment built from
+  every connector: Edge (internet, gateway, switches, APs), Networks (one per VLAN),
+  Compute (Proxmox, Docker hosts, DNS/proxy servers) and Apps (hostnames by how they come
+  in: NPM, Cloudflare tunnel, port forward, internal DNS). Tiles open in place and drill
+  down; **Show as map** draws any one thing with what reaches it and what it reaches.
+  Machines are matched across connectors by MAC / LAN IP.
+- **Posture findings** — exposure and hygiene checks with a badge on every tile and a
+  Posture view, plus **outside-in checks** of your WAN address (Shodan InternetDB open
+  ports and CVEs, CISA Known Exploited list, endoflife.date for public software and
+  container images). Findings can be snoozed.
+- **Network devices** — new-device alerts for any client MAC Cerebro hasn't seen before,
+  device-type guesses (phone, camera, IoT, …), Block / Unblock from the map, and a
+  Blocked devices list.
 
 **Dashboard**
 - **Bridge dashboard** — cross-connector summary tiles (VMs, containers, CPU/memory,
@@ -80,7 +99,8 @@ docs/        Feature deep-dives (see the index below)
   plus spend by service.
 - **UniFi Network** (UDM SE) — WAN/ISP health, throughput, latency and speed tests;
   gateway health; every AP and switch with per-port PoE; clients; networks, Wi-Fi, port
-  forwards; events, high-severity alarms, IPS threats and firewall blocks.
+  forwards; read-only firewall rules, groups and zones; events, high-severity alarms,
+  IPS threats and firewall blocks; new-device alerts.
 - **Cloudflare** — Tunnels, DNS, certificates, Zero Trust, WAF, and more.
 - **Home Assistant**, **Jellyfin**, **Nginx Proxy Manager**, **Technitium DNS**.
 - **Microsoft 365** and **Azure** — read-only, sharing one Entra ID app registration.
@@ -91,8 +111,10 @@ docs/        Feature deep-dives (see the index below)
   fleet-wide bulk actions, and update detection.
 - **App Replicator** — register a git repo and deploy copies of it to a Docker host or
   AWS ECS/Fargate, with generated config forms, port allocation, Cloudflare/NPM ingress,
-  and update checks. Repos without a compose file get one generated (Dockerfile,
-  WordPress, Node, PHP, static).
+  and update checks. Repos without a root compose file get starters suggested (compose
+  files in subfolders, sample files, Dockerfiles) or a generated compose (Dockerfile,
+  WordPress, Node, PHP, static), and apps that run prebuilt images can be registered by
+  **pasting a compose file**.
 - **Stack Backup** — scheduled restic backups of Compose stacks (volumes + config +
   vault secret bindings) with restore and sandbox test-restores.
 - **Stack Migrator** — move a Compose stack between Docker hosts with warm pre-copy,
@@ -117,6 +139,7 @@ docs/        Feature deep-dives (see the index below)
 | Area | Docs |
 | --- | --- |
 | Connectors | [Proxmox](docs/connectors/proxmox.md) · [Docker](docs/connectors/docker.md) · [AWS](docs/connectors/aws.md) · [UniFi](docs/connectors/unifi.md) · [Cloudflare](docs/connectors/cloudflare.md) · [Home Assistant](docs/connectors/home-assistant.md) · [Jellyfin](docs/connectors/jellyfin.md) · [Nginx Proxy Manager](docs/connectors/nginx-proxy-manager.md) · [Technitium](docs/connectors/technitium.md) · [Azure + Microsoft 365](docs/azure-o365-connectors.md) · [Backblaze](docs/connectors/backblaze-backup.md) · [Pi-hole (planned, not built)](docs/connectors/pihole.md) |
+| Map & posture | [Architecture Map, posture findings, new devices](docs/architecture-map.md) |
 | Dashboard & UI | [Telemetry snapshots + connector status](docs/dashboard-telemetry-snapshots.md) · [Command palette](docs/command-palette.md) · [LCARS theme](docs/lcars-ui.md) |
 | Apps & stacks | [Docker Fleet](docs/docker-fleet.md) · [App Replicator](docs/app-replicator.md) · [ECS target](docs/app-replicator-ecs-target.md) · [ECS live test](docs/app-replicator-ecs-live-test.md) · [Stack Backup](docs/stack-backup.md) · [Stack Migrator](docs/stack-migrator.md) |
 | Fabric | [Remote access](docs/fabric-remote-access.md) · [Waypoints](docs/fabric-waypoints.md) · [Remote desktop](docs/fabric-remote-desktop.md) · [Remote Browser autofill](docs/fabric-remote-browser-credential-injection.md) · [Agent signing](docs/fabric-agent-signing.md) |
