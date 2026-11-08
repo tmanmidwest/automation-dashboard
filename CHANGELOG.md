@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Certificate log check failing with "Couldn't reach crt.sh"** — crt.sh's JSON endpoint often
+  answers 502 when busy, and 404 for a domain with no certificates. A 404 now means "none", a
+  502 is retried once, and Cert Spotter answers when crt.sh is still down.
 ### Added
 - **Exposure paths** — the Architecture Map's "Exposed to the internet" row now lists every
   way in (WAN port forwards, Cloudflare tunnels) and each path to a machine, hop by hop, with

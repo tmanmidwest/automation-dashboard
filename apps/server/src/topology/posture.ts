@@ -857,7 +857,7 @@ function ctLogFindings(input: BuildInput, graph: TopologyGraph, ct: CtInput, now
     return false;
   };
   const t = (iso: string) => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`).getTime();
-  const crt = (id: number) => `https://crt.sh/?id=${id}`;
+  const crt = (id: number, name?: string) => (id > 0 ? `https://crt.sh/?id=${id}` : `https://crt.sh/?q=${encodeURIComponent(name ?? '')}`);
   const newCut = now.getTime() - NEW_DAYS * DAY;
 
   type Item = { label: string; url: string; note: string };
@@ -876,13 +876,13 @@ function ctLogFindings(input: BuildInput, graph: TopologyGraph, ct: CtInput, now
       if (isNew && (unknown.length || newIssuer)) {
         fresh.push({
           label: (unknown.length ? unknown : c.names).slice(0, 3).join(', ') + (Math.max(unknown.length, c.names.length) > 3 ? ' …' : ''),
-          url: crt(c.id),
+          url: crt(c.id, (unknown[0] ?? c.names[0])),
           note: [`issued ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}`, unknown.length ? 'name not in Cerebro' : null, newIssuer ? `a CA ${domain} hasn't used before` : null].filter(Boolean).join(' · '),
         });
       } else if (!isNew) {
         for (const n of unknown) {
           const prev = stale.get(n);
-          if (!prev || prev.at < t(c.notBefore)) stale.set(n, { label: n, url: crt(c.id), note: `certificate from ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}, valid to ${fmtDayUTC(new Date(t(c.notAfter)))}`, at: t(c.notBefore) });
+          if (!prev || prev.at < t(c.notBefore)) stale.set(n, { label: n, url: crt(c.id, n), note: `certificate from ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}, valid to ${fmtDayUTC(new Date(t(c.notAfter)))}`, at: t(c.notBefore) });
         }
       }
     }

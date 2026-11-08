@@ -150,8 +150,10 @@ Your domains are the Cloudflare zones plus the registrable part of every name on
 counts as known when it's an NPM proxy host or certificate, a tunnel route, a Cloudflare DNS
 record, the bare domain or `www.`; wildcard certificates are ignored, and so are CA changes on
 apex + wildcard certificates (Cloudflare's edge certificates switch CAs on their own).
-crt.sh is queried once a day per domain in the background (it's free and often slow, so a
-failed query is retried after 3 hours). Each item links to its crt.sh entry. The Have I Been Pwned check downloads
+crt.sh is queried once a day per domain in the background. Its JSON endpoint often answers
+502 when busy, so a failed query is retried once and then SSLMate's Cert Spotter API (free, no
+key) answers instead; only if both fail does the row say so, and the domain is tried again an
+hour later. A 404 from crt.sh means no certificates. Each item links to its crt.sh entry. The Have I Been Pwned check downloads
 HIBP's public breach catalogue once a day and matches it against the same domains inside
 Cerebro, so nothing about your domains is sent. Which of your *addresses* appear in breaches
 would need a paid HIBP API key and domain verification; that part isn't built.

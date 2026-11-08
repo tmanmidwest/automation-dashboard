@@ -191,7 +191,7 @@ export class TopologyService {
             const domains = ctDomains(graph, cf.zones, registrable);
             const store = await this.ctLog.cached();
             ct = { extraNames: cf.names, store: Object.fromEntries(Object.entries(store).filter(([d]) => domains.includes(d))) };
-            if (domains.some((d) => store[d]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'crt.sh'])];
+            if (domains.some((d) => store[d]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'the certificate logs (crt.sh and Cert Spotter)'])];
             void this.ctLog.refresh(domains).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
             // Have I Been Pwned (free catalogue, matched locally) for the same domains.
             const hs = await this.hibp.cached();
