@@ -14,6 +14,7 @@ import { matches, TopoModel, type Chip, type Item, type Lane, type Tone } from '
 import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
 import { BlockButton, BlockedDevicesRow, DeviceType, NewDevicesRow, type BlockedDevice, type DeviceList } from '@/components/topology/NewDevices';
+import { ExposureSection } from '@/components/topology/Exposure';
 import { FindingsSection, PostureRow, postureSummary, SEV_TINT, SevPill } from '@/components/topology/Posture';
 
 /**
@@ -243,7 +244,7 @@ export function ArchitectureMap() {
                     onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
                 )}
                 {path[0] === 'grp:attn:posture' && graph?.findings && (
-                  <PostureRow findings={graph.findings} outsideIn={graph.outsideIn} imageScan={graph.imageScan} onShow={goTo} onChanged={() => load()} onClose={() => setPath([])} />
+                  <PostureRow findings={graph.findings} outsideIn={graph.outsideIn} imageScan={graph.imageScan} resolver={graph.publicDnsResolver} onShow={goTo} onChanged={() => load()} onClose={() => setPath([])} />
                 )}
                 {path[0] === 'grp:attn:blocked' && blocked && (
                   <BlockedDevicesRow list={blocked} onChanged={afterBlock} onClose={() => setPath([])} />
@@ -373,6 +374,10 @@ function OpenRow({ model, path, setPath, onMap, onChanged, onBlocked }: { model:
       </div>
 
       <FindingsSection key={`f-${current}`} findings={model.findingsFor(current)} onShow={(id) => setPath(model.pathTo(id))} onChanged={onChanged} />
+
+      {(current === 'internet' || current === 'grp:attn:exposed') && model.graph.exposure && (
+        <ExposureSection entries={model.graph.exposure} onShow={(id) => setPath(model.pathTo(id))} onChanged={onChanged} />
+      )}
 
       {item.node && (unifiClient || item.node.deviceType) && (
         <DeviceType key={item.node.id} type={item.node.deviceType?.name} model={item.node.deviceType?.model} source={item.node.deviceType?.source}

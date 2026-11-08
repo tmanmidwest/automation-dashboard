@@ -13,6 +13,8 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
  */
 
 const STORE_KEY = 'posture.ctLog';
+export const RESOLVER_KEY = 'posture.publicDnsResolver';
+export const DEFAULT_RESOLVER = 'https://cloudflare-dns.com/dns-query';
 const TTL_MS = 24 * 3600_000;
 const RETRY_MS = 3 * 3600_000;
 /** crt.sh is a free shared service and often slow; be gentle. */
@@ -78,6 +80,63 @@ export class CtLogService {
       }
     }
     return { zones: [...zones], names: [...names] };
+  }
+
+  private resolveCache = new Map<string, { at: number; listed: boolean | null }>();
+
+  /** DNS-over-HTTPS resolver (JSON API) used for "is this name public?"; a setting, Cloudflare by default. */
+  async resolverUrl(): Promise<string> {
+    const v = await this.settings.get<string>(RESOLVER_KEY);
+    return typeof v === 'string' && /^https:\/\/[^\s/]+/.test(v) ? v : DEFAULT_RESOLVER;
+  }
+
+  async setResolverUrl(url: string | null): Promise<void> {
+    if (url && !/^https:\/\/[^\s/]+/.test(url)) throw new Error('The resolver must be an https:// DNS-over-HTTPS address.');
+    await this.settings.set(RESOLVER_KEY, url || null);
+    this.resolveCache.clear();
+  }
+
+  /**
+   * Is each name in public DNS? Asks a public DNS-over-HTTPS resolver, so split DNS at home
+   * (Technitium answering for the same names, or the gateway catching port 53) can't make an
+   * internal name look public. true = resolves publicly, false = doesn't exist publicly,
+   * missing = couldn't tell. Cached 6 h.
+   */
+  async publicResolve(names: string[]): Promise<Record<string, boolean>> {
+    const out: Record<string, boolean> = {};
+    const now = Date.now();
+    const todo: string[] = [];
+    for (const n of [...new Set(names.map((x) => x.toLowerCase()))]) {
+      const c = this.resolveCache.get(n);
+      if (c && now - c.at < 6 * 3600_000) { if (c.listed != null) out[n] = c.listed; } else todo.push(n);
+    }
+    if (!todo.length) return out;
+    const base = await this.resolverUrl();
+    const query = async (name: string, type: 'A' | 'AAAA'): Promise<boolean | null> => {
+      const u = new URL(base);
+      u.searchParams.set('name', name);
+      u.searchParams.set('type', type);
+      const res = await fetch(u, { signal: AbortSignal.timeout(5_000), headers: { accept: 'application/dns-json' } });
+      if (!res.ok) return null;
+      const j = (await res.json()) as { Status?: number; Answer?: unknown[] };
+      if (j.Status === 3) return false; // NXDOMAIN
+      if (j.Status !== 0) return null; // SERVFAIL etc.: can't tell
+      return Array.isArray(j.Answer) && j.Answer.length > 0;
+    };
+    await Promise.all(
+      todo.map(async (n) => {
+        let listed: boolean | null = null;
+        try {
+          const a = await query(n, 'A');
+          listed = a === true ? true : a === null ? null : (await query(n, 'AAAA')) ?? a;
+        } catch {
+          listed = null;
+        }
+        this.resolveCache.set(n, { at: now, listed });
+        if (listed != null) out[n] = listed;
+      }),
+    );
+    return out;
   }
 
   refresh(domains: string[]): Promise<boolean> {

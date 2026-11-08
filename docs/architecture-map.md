@@ -208,6 +208,47 @@ under the **Snoozed** filter.
 Findings are computed in `apps/server/src/topology/posture.ts` each time the map is
 rebuilt and returned as `findings` on `GET /api/topology`.
 
+## Exposure paths
+
+Open **Exposed to the internet** in Needs attention (or the Internet tile) to see every way in
+and what it reaches, hop by hop:
+
+- **WAN port forwards**, grouped by the machine they land on ("WAN :80, :443"). When that's
+  Nginx Proxy Manager, each proxy host becomes a path: proxy → public name → backend.
+- **Cloudflare tunnels**: tunnel → public name → backend.
+
+Each hop is outlined by its worst posture finding and lists them underneath (a finding on what
+the hop runs on, like the VM's backup, says "on ubuDocker02"). Click a hop to open it.
+
+**What counts as reachable.** NPM picks a host by the name in the request, so every proxy
+host behind a forwarded port is reachable unless something turns outsiders away:
+
+- An access list that allows only private ranges (10/8, 172.16/12, 192.168/16, 100.64/10,
+  link-local, IPv6 ULA) is **LAN only**: the host drops out of the paths and its plain-HTTP
+  finding drops to Low. ("Satisfy any" with a password login still lets the internet in.)
+- A name with **no public DNS record** stays on the path, noted "reachable if someone knows
+  the name". Names leak through certificate logs, and anyone can send any name to the WAN.
+  For Cloudflare zones Cerebro reads the zone's records; for other domains it asks a public
+  DNS-over-HTTPS resolver, so home DNS (Technitium, or the gateway catching port 53) can't
+  answer instead. The resolver is Cloudflare's by default; *Change* it in the Posture
+  findings row (`PUT /api/topology/public-dns-resolver {url}`, any DoH JSON endpoint such as
+  `https://dns.google/resolve`). Nothing about your domains is configured in code: they come
+  from the Cloudflare and NPM connectors.
+- **Treat as internal** on a path is for names only your network can use in a way Cerebro
+  can't see (a firewall rule on the backend, say). They leave the paths and the internet
+  findings and are listed under "Marked internal by you" with *Undo*
+  (`PUT /api/topology/internal-names {name, internal}`, settings `posture.internalNames`,
+  `connectors:write`, audited).
+
+**Combination findings.** Where two or more kinds of Medium-or-worse problem line up on one
+path (say plain HTTP + an outdated or vulnerable image + an old backup), a finding "N paths
+from the internet stack several kinds of problem" lists those paths: High when one of the
+problems is High or three kinds stack, else Medium. The proxy every path shares is left out
+of the count, since its problems are its own findings.
+
+Paths are built from the map's edges after the findings (`apps/server/src/topology/exposure.ts`)
+and returned as `exposure` on `GET /api/topology`.
+
 ## Show as map
 
 **Show as map** on an open row (`?focus=`) draws that one thing and its links, left to
@@ -245,6 +286,5 @@ counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 
 ## Not yet
 
-Planned next: exposure paths (internet → proxy → machine, hop by hop, as "Show as map"),
-saved views and
+Planned next: saved views and
 manual links for what can't be inferred, and live status push.

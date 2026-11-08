@@ -1,5 +1,5 @@
-import { Body, Controller, Delete, Get, NotFoundException, Param, Post, Put, Query } from '@nestjs/common';
-import { IsBoolean, IsInt, Max, Min } from 'class-validator';
+import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Post, Put, Query } from '@nestjs/common';
+import { IsBoolean, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import type { SessionUser } from '@cerebro/shared';
 import { CurrentUser, RequirePermissions } from '../auth/decorators';
 import { AuditService } from '../logging/audit.service';
@@ -15,6 +15,23 @@ class SnoozeDto {
 class OutsideInDto {
   @IsBoolean()
   enabled!: boolean;
+}
+
+class InternalDto {
+  @IsString()
+  @MaxLength(253)
+  @Matches(/^[a-z0-9*.-]+$/i)
+  name!: string;
+
+  @IsBoolean()
+  internal!: boolean;
+}
+
+class ResolverDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  url?: string | null;
 }
 
 /** Read-only architecture map. `?refresh=1` re-reads every source live instead of the cache. */
@@ -66,6 +83,28 @@ export class TopologyController {
     await this.topology.scanImagesNow();
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.image_scan_started' });
     return { started: true };
+  }
+
+  /** Mark a public name "Treat as internal" (or undo): it drops out of exposure paths and internet findings. */
+  @Put('internal-names')
+  @RequirePermissions('connectors:write')
+  async internal(@Body() dto: InternalDto, @CurrentUser() user: SessionUser) {
+    await this.topology.setInternal(dto.name, dto.internal);
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: dto.internal ? 'posture.marked_internal' : 'posture.unmarked_internal', target: dto.name });
+    return { ok: true };
+  }
+
+  /** DNS-over-HTTPS resolver used to check whether names are public (empty = Cloudflare's). */
+  @Put('public-dns-resolver')
+  @RequirePermissions('connectors:write')
+  async resolver(@Body() dto: ResolverDto, @CurrentUser() user: SessionUser) {
+    try {
+      await this.topology.setPublicDnsResolver(dto.url?.trim() || null);
+    } catch (err) {
+      throw new BadRequestException(err instanceof Error ? err.message : String(err));
+    }
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.public_dns_resolver_set', target: dto.url || 'default' });
+    return { ok: true };
   }
 
   @Delete('findings/:id/snooze')

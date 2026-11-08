@@ -83,43 +83,66 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
     if (!http.length) continue;
     const npmIp = isIp(n.baseHost) ? n.baseHost : null;
     const port80 = wanForwards.find((f) => f.wanPort === '80' && f.ip && (f.ip === npmIp || (!npmIp && npmIps.has(f.ip))));
-    const withAuth = http.filter((p) => { const a = str(p.details?.access_list); return !!a && !/^public$/i.test(a); });
-    // What each access list does, when NPM lets Cerebro read them: a login (users) or an IP allow-list.
-    const acl = (p: ConnectorResource) => {
-      const ref = str(p.details?.access_list)?.replace(/^#/, '');
-      const l = ref ? (n.accessLists ?? []).find((x) => x.id === ref) : undefined;
-      if (!l) return { name: ref ? `#${ref}` : null, kind: 'unknown' as const };
-      const users = Number(l.details?.auth_users ?? 0);
-      const ips = Number(l.details?.client_rules ?? 0);
-      return { name: l.name, kind: users > 0 ? ('login' as const) : ips > 0 ? ('ip' as const) : ('unknown' as const) };
+    const acl = (p: ConnectorResource) => npmAcl(n.accessLists, p);
+    // LAN-only hosts (access list allows only private ranges): the internet is turned away.
+    const marked = new Set((input.internalNames ?? []).map((x) => x.toLowerCase()));
+    const lan = http.filter((p) => acl(p).kind === 'lan' || marked.has(p.name.toLowerCase()));
+    const wan = http.filter((p) => !lan.includes(p));
+    const login = wan.filter((p) => acl(p).kind === 'login');
+    const ipOnly = wan.filter((p) => acl(p).kind === 'ip');
+    const unknownAcl = wan.filter((p) => acl(p).kind === 'unknown');
+    const open = wan.filter((p) => !ipOnly.includes(p));
+    // Names with no public DNS record still answer to anyone who sends that name to the WAN.
+    const unlisted = open.filter((p) => publicDnsState(input, p.name) === 'unlisted');
+    const listed = open.filter((p) => !unlisted.includes(p));
+    const severity: PostureSeverity = !wan.length ? 'low' : port80 && listed.length ? 'high' : 'medium';
+    const where = (p: ConnectorResource) => {
+      const a = acl(p);
+      if (marked.has(p.name.toLowerCase()) && a.kind !== 'lan') return 'marked internal';
+      if (a.kind === 'lan') return `access list ${a.name} (LAN only)`;
+      if (a.kind === 'login') return `access list ${a.name} (password)`;
+      if (a.kind === 'ip') return `access list ${a.name} (IP allow-list)`;
+      if (a.name) return `access list ${a.name}`;
+      return null;
     };
-    const login = withAuth.filter((p) => acl(p).kind === 'login');
-    const ipOnly = withAuth.filter((p) => acl(p).kind === 'ip');
-    const unknownAcl = withAuth.filter((p) => acl(p).kind === 'unknown');
-    // Every host limited to known IPs (and none with a login) → the internet can't actually use them.
-    const allIpLimited = ipOnly.length === http.length;
     out.push({
       id: `npm-http:${n.inst.id}`,
-      severity: port80 && !allIpLimited ? 'high' : 'medium',
+      severity,
       category: 'encryption',
-      title: login.length
-        ? `${plural(http.length, 'proxy host')} served over plain HTTP, ${login.length === http.length ? 'all' : login.length} with a password login`
-        : `${plural(http.length, 'proxy host')} served over plain HTTP`,
+      title: !wan.length
+        ? `${plural(http.length, 'LAN-only proxy host')} served over plain HTTP`
+        : login.length
+          ? `${plural(http.length, 'proxy host')} served over plain HTTP, ${login.length === http.length ? 'all' : login.length} with a password login`
+          : `${plural(http.length, 'proxy host')} served over plain HTTP`,
       why: (
-        (port80
-          ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so these are reachable from the internet without encryption. `
-          : 'Traffic to these names is unencrypted on the network. ') +
+        (wan.length && port80
+          ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so ${lan.length ? 'the hosts not limited to your LAN' : 'these'} are reachable from the internet without encryption. `
+          : wan.length
+            ? 'Traffic to these names is unencrypted on the network. '
+            : '') +
         (login.length
           ? `${plural(login.length, 'of them asks', 'of them ask')} for a username and password (access list "${acl(login[0]).name}"), and that login travels in clear text, readable by anyone on the path. `
           : '') +
         (ipOnly.length
-          ? `${plural(ipOnly.length, 'is', 'are')} limited to certain IP addresses (access list "${acl(ipOnly[0]).name}"), so ${allIpLimited ? 'outsiders are turned away, but the traffic itself is still unencrypted' : 'outsiders are turned away from those'}. `
+          ? `${plural(ipOnly.length, 'is', 'are')} limited to certain IP addresses (access list "${acl(ipOnly[0]).name}"), so outsiders are turned away from ${ipOnly.length === 1 ? 'it' : 'those'}. `
+          : '') +
+        (lan.length
+          ? `${plural(lan.length, 'is', 'are')} limited to your local network by ${lan.length === 1 ? 'its' : 'their'} access list, so internet requests are refused${wan.length ? '' : ', but the traffic inside your network is still unencrypted'}. `
+          : '') +
+        (unlisted.length && port80
+          ? `${plural(unlisted.length, 'has', 'have')} no public DNS record, which keeps ${unlisted.length === 1 ? 'it' : 'them'} out of sight but not closed: anyone who sends the name to your WAN address still reaches ${unlisted.length === 1 ? 'it' : 'them'}, and names leak through certificate logs. `
           : '') +
         (unknownAcl.length ? `${plural(unknownAcl.length, 'is', 'are')} behind an access list Cerebro couldn't read; if it asks for a password, that travels in clear text too. ` : '') +
-        (!withAuth.length ? 'Anyone on the path can read or change what is sent.' : '')).trim(),
-      fix: 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL".',
-      affected: http.map((p) => ({ label: p.name, nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined, note: [str(p.details?.forward), withAuth.includes(p) ? `access list ${acl(p).name}${acl(p).kind === 'login' ? ' (password)' : acl(p).kind === 'ip' ? ' (IP allow-list)' : ''}` : null].filter(Boolean).join(' · ') })),
-      alsoOn: port80?.ip ? [nodeByIp.get(port80.ip)?.id].filter((x): x is string => !!x) : undefined,
+        (!wan.some((p) => acl(p).name) && wan.length ? 'Anyone on the path can read or change what is sent.' : '')).trim(),
+      fix: wan.length
+        ? 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL". To keep a host internal, give it an access list that allows only your LAN ranges.'
+        : 'Low priority: add a certificate and "Force SSL" when convenient (a DNS-challenge certificate works for internal-only names).',
+      affected: http.map((p) => ({
+        label: p.name,
+        nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined,
+        note: [str(p.details?.forward), where(p), unlisted.includes(p) ? 'not in public DNS' : null].filter(Boolean).join(' · '),
+      })),
+      alsoOn: wan.length && port80?.ip ? [nodeByIp.get(port80.ip)?.id].filter((x): x is string => !!x) : undefined,
       source: n.inst.name,
     });
   }
@@ -350,6 +373,11 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   if (ct) out.push(...ctLogFindings(input, graph, ct, now));
   if (hibp) out.push(...hibpFindings(hibp.domains, hibp.breaches, now));
 
+  return sortFindings(out);
+}
+
+/** Worst first, then by category and title. */
+export function sortFindings(out: PostureFinding[]): PostureFinding[] {
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
 
@@ -910,4 +938,76 @@ function hibpFindings(domains: string[], breaches: HibpBreach[], now: Date): Pos
     })),
     source: 'Have I Been Pwned',
   }];
+}
+
+
+// ── NPM access lists and public DNS (shared with exposure paths) ───────────
+
+const PRIVATE_V4: [number, number][] = [[0x0a000000, 8], [0xac100000, 12], [0xc0a80000, 16], [0x7f000000, 8], [0x64400000, 10], [0xa9fe0000, 16]];
+/** Is this access-list address (IP or CIDR) inside private / local space? */
+export function isPrivateAddr(addr: string): boolean {
+  const a = addr.trim().toLowerCase();
+  if (/^(fd|fc|fe80|::1)/.test(a)) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(a);
+  if (!m) return false;
+  const ip = ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0;
+  const len = m[5] != null ? +m[5] : 32;
+  return PRIVATE_V4.some(([net, bits]) => len >= bits && ((ip >>> (32 - bits)) << (32 - bits)) >>> 0 === net);
+}
+
+/** What a proxy host's NPM access list does: LAN only, a password login, an IP allow-list, or unknown. */
+export function npmAcl(lists: ConnectorResource[] | undefined, p: ConnectorResource): { name: string | null; kind: 'lan' | 'login' | 'ip' | 'unknown' | 'none' } {
+  const raw = str(p.details?.access_list);
+  if (!raw || /^public$/i.test(raw)) return { name: null, kind: 'none' };
+  const ref = raw.replace(/^#/, '');
+  const l = (lists ?? []).find((x) => x.id === ref || x.name === raw);
+  if (!l) return { name: `#${ref}`, kind: 'unknown' };
+  const users = Number(l.details?.auth_users ?? 0);
+  const rules = (str(l.details?.clients) ?? '').split(',').map((r) => r.trim()).filter(Boolean).map((r) => { const [d, ...a] = r.split(/\s+/); return { allow: d.toLowerCase() === 'allow', addr: a.join(' ') }; });
+  const allows = rules.filter((r) => r.allow);
+  const satisfyAny = /^any$/i.test(str(l.details?.satisfy) ?? '');
+  // NPM denies everyone else once there's an allow rule. "Satisfy any" + a login lets a password in from anywhere.
+  if (allows.length && allows.every((r) => r.addr !== 'all' && isPrivateAddr(r.addr)) && !(satisfyAny && users > 0)) return { name: l.name, kind: 'lan' };
+  if (users > 0) return { name: l.name, kind: 'login' };
+  if (Number(l.details?.client_rules ?? 0) > 0) return { name: l.name, kind: 'ip' };
+  return { name: l.name, kind: 'unknown' };
+}
+
+/** Does this name have a public DNS record? "unknown" when its zone isn't in a Cloudflare connector. */
+export function publicDnsState(input: BuildInput, name: string): 'listed' | 'unlisted' | 'unknown' {
+  const pd = input.publicDns;
+  const n = name.trim().toLowerCase().replace(/\.$/, '');
+  if (!pd) return 'unknown';
+  const zone = pd.zones.find((z) => n === z || n.endsWith(`.${z}`));
+  // Not a Cloudflare zone: use what public resolvers said, if they answered.
+  if (!zone) return pd.resolved?.[n] === true ? 'listed' : pd.resolved?.[n] === false ? 'unlisted' : 'unknown';
+  const names = new Set(pd.names.map((x) => x.toLowerCase().replace(/\.$/, '')));
+  if (names.has(n)) return 'listed';
+  const parent = n.slice(n.indexOf('.') + 1);
+  if (n !== zone && names.has(`*.${parent}`)) return 'listed';
+  return 'unlisted';
+}
+
+
+/** Per public name served by NPM (dns node id): what guards it, for exposure paths. */
+export function npmNameGuards(input: BuildInput): Map<string, { lan: boolean; marked?: boolean; notes: string[] }> {
+  const out = new Map<string, { lan: boolean; marked?: boolean; notes: string[] }>();
+  const marked = new Set((input.internalNames ?? []).map((x) => x.toLowerCase()));
+  for (const n of input.npm)
+    for (const p of n.proxyHosts) {
+      const a = npmAcl(n.accessLists, p);
+      const ssl = !/^off$/i.test(str(p.details?.ssl) ?? '');
+      const notes = [
+        a.kind === 'login' ? `password login (${a.name})` : a.kind === 'ip' ? `IP allow-list (${a.name})` : a.kind === 'unknown' && a.name ? `access list ${a.name}` : a.kind === 'none' ? 'no access list' : null,
+        ssl ? null : 'plain HTTP',
+        publicDnsState(input, p.name) === 'unlisted' ? (a.kind === 'ip' ? 'not in public DNS' : 'not in public DNS (reachable if someone knows the name)') : null,
+      ].filter((x): x is string => !!x);
+      for (const name of (str(p.details?.domains) ?? p.name).split(/[,\s]+/).filter(Boolean)) {
+        const m = marked.has(name.toLowerCase());
+        out.set(`dns:${name.toLowerCase()}`, { lan: a.kind === 'lan' || m, marked: m && a.kind !== 'lan', notes });
+      }
+    }
+  // Tunnel names you marked internal.
+  for (const n of marked) if (!out.has(`dns:${n}`)) out.set(`dns:${n}`, { lan: true, marked: true, notes: [] });
+  return out;
 }

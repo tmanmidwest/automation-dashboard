@@ -7,11 +7,14 @@ import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
 import type { HibpBreach } from './hibp.service';
-import { applySnoozes, buildFindings, ctDomains, eolProducts, productVersions, wanIps, type CtInput, type Snooze, type VersionCveInput } from './posture';
+import { applySnoozes, buildFindings, ctDomains, npmNameGuards, sortFindings, eolProducts, productVersions, wanIps, type CtInput, type Snooze, type VersionCveInput } from './posture';
 import { OutsideInService } from './outside-in.service';
 import { ImageScanService } from './image-scan.service';
 import { VersionCveService } from './version-cve.service';
 import { CtLogService, registrable } from './ct-log.service';
+import { buildExposure, comboFindings } from './exposure';
+
+const INTERNAL_KEY = 'posture.internalNames';
 import { HibpService } from './hibp.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
@@ -93,6 +96,26 @@ export class TopologyService {
     this.cache = null;
   }
 
+  /** Public names you marked "Treat as internal" (they drop out of exposure paths and internet findings). */
+  async internalNames(): Promise<string[]> {
+    const v = await this.settings.get<string[]>(INTERNAL_KEY);
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  }
+
+  async setInternal(name: string, internal: boolean): Promise<void> {
+    const n = name.trim().toLowerCase();
+    const cur = new Set(await this.internalNames());
+    if (internal) cur.add(n);
+    else cur.delete(n);
+    await this.settings.set(INTERNAL_KEY, [...cur].sort());
+    this.cache = null;
+  }
+
+  async setPublicDnsResolver(url: string | null): Promise<void> {
+    await this.ctLog.setResolverUrl(url);
+    this.cache = null;
+  }
+
   /** Switch the nightly image CVE scan on or off. */
   async setImageScan(on: boolean): Promise<void> {
     await this.imageScan.setEnabled(on);
@@ -118,6 +141,20 @@ export class TopologyService {
     this.inflight = this.gather(refresh)
       .then(async (input) => {
         const graph = buildTopology(input);
+        input.internalNames = await this.internalNames();
+        // Public DNS (Cloudflare) tells internet-facing names from internal ones.
+        try {
+          const cf = await this.ctLog.cloudflareNames();
+          // Names NPM serves outside the Cloudflare zones: ask public resolvers.
+          const others = input.npm
+            .flatMap((n) => n.proxyHosts.flatMap((p) => String(p.details?.domains ?? p.name ?? '').split(/[,\s]+/)))
+            .map((x) => x.trim().toLowerCase())
+            .filter((x) => x.includes('.') && !cf.zones.some((z) => x === z || x.endsWith(`.${z}`)));
+          input.publicDns = { ...cf, resolved: others.length ? await this.ctLog.publicResolve(others) : {} };
+          graph.publicDnsResolver = await this.ctLog.resolverUrl();
+        } catch {
+          /* unknown: names are treated as public */
+        }
         let intel = null;
         try {
           if (await this.outsideIn.enabled()) {
@@ -174,6 +211,9 @@ export class TopologyService {
         }
         try {
           graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct, hibp);
+          // Exposure paths use the findings for their hops; path combos become a finding too.
+          graph.exposure = buildExposure(graph, graph.findings, npmNameGuards(input));
+          graph.findings = sortFindings([...graph.findings, ...comboFindings(graph.exposure, new Map(graph.nodes.map((n) => [n.id, n])))]);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];

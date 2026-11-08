@@ -133,10 +133,11 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
 }
 
 /** The open row for Needs attention → Posture findings. */
-export function PostureRow({ findings, outsideIn, imageScan, onShow, onChanged, onClose }: {
+export function PostureRow({ findings, outsideIn, imageScan, resolver, onShow, onChanged, onClose }: {
   findings: PostureFinding[];
   outsideIn?: OutsideInSummary;
   imageScan?: ImageScanSummary;
+  resolver?: string;
   onShow: (nodeId: string) => void;
   onChanged: () => void;
   onClose: () => void;
@@ -158,7 +159,7 @@ export function PostureRow({ findings, outsideIn, imageScan, onShow, onChanged, 
         <span className="text-sm text-muted-foreground">Worked out from what your connectors report, worst first. Open one for why it matters and how to fix it.</span>
         <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
       </div>
-      <OutsideInLine info={outsideIn} onChanged={onChanged} />
+      <OutsideInLine info={outsideIn} resolver={resolver} onChanged={onChanged} />
       <ImageScanLine info={imageScan} onChanged={onChanged} />
       <div className="flex flex-wrap gap-1.5" role="tablist">
         {tabs.map((t) => (
@@ -180,9 +181,11 @@ export function PostureRow({ findings, outsideIn, imageScan, onShow, onChanged, 
 }
 
 /** What the outside-in checks saw, with the on/off switch. */
-function OutsideInLine({ info, onChanged }: { info?: OutsideInSummary; onChanged: () => void }) {
+function OutsideInLine({ info, resolver, onChanged }: { info?: OutsideInSummary; resolver?: string; onChanged: () => void }) {
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   if (!info) return null;
   const toggle = async () => {
     const on = !info.enabled;
@@ -207,9 +210,43 @@ function OutsideInLine({ info, onChanged }: { info?: OutsideInSummary; onChanged
       {can('connectors:write') && (
         <button className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={toggle}>{info.enabled ? 'Turn off' : 'Turn on'}</button>
       )}
+      {info.enabled && resolver && editing == null && (
+        <span title="Used to check whether a name is in public DNS, over HTTPS so home DNS can't answer instead">
+          Public DNS via {hostOf(resolver)}
+          {can('connectors:write') && <button className="ml-1.5 text-accent hover:underline" onClick={() => { setEditing(resolver); setErr(null); }}>Change</button>}
+        </span>
+      )}
+      {editing != null && (
+        <form
+          className="flex flex-wrap items-center gap-1.5"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setErr(null);
+            try {
+              await api.put('/api/topology/public-dns-resolver', { url: editing.trim() || null });
+              setEditing(null);
+              onChanged();
+            } catch (x) {
+              setErr(x instanceof Error ? x.message : 'Could not save the resolver.');
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <label htmlFor="doh-url" className="sr-only">DNS-over-HTTPS resolver</label>
+          <input id="doh-url" className="h-7 w-72 max-w-full rounded border border-border bg-background px-2 text-[13px] text-foreground" value={editing} placeholder="https://cloudflare-dns.com/dns-query" onChange={(e) => setEditing(e.target.value)} />
+          <Button size="sm" type="submit" disabled={busy}>Save</Button>
+          <Button size="sm" type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+          <span className="w-full">Any DNS-over-HTTPS JSON endpoint, e.g. https://dns.google/resolve. Leave empty for Cloudflare's.</span>
+          {err && <span className="w-full text-red-600 dark:text-red-400">{err}</span>}
+        </form>
+      )}
     </div>
   );
 }
+
+const hostOf = (u: string) => { try { return new URL(u).host; } catch { return u; } };
 
 /** Status of the nightly container image CVE scan, with Scan now and the on/off switch. */
 function ImageScanLine({ info, onChanged }: { info?: ImageScanSummary; onChanged: () => void }) {

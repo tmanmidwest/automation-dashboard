@@ -498,6 +498,8 @@ function accessToResource(l: NpmAccessList): ConnectorResource {
     details: {
       auth_users: String((l.items ?? []).length),
       client_rules: String((l.clients ?? []).length),
+      // "allow 192.168.0.0/16, deny all": lets the map tell LAN-only hosts from internet-facing ones.
+      clients: (l.clients ?? []).filter((c) => c.address).map((c) => `${c.directive || 'allow'} ${c.address}`).join(', ') || null,
       satisfy: l.satisfy_any ? 'Any' : 'All',
       pass_auth: yesNo(l.pass_auth),
       used_by_hosts: String(l.proxy_host_count ?? 0),

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Exposure paths** — the Architecture Map's "Exposed to the internet" row now lists every
+  way in (WAN port forwards, Cloudflare tunnels) and each path to a machine, hop by hop, with
+  the posture findings on each hop. Paths where several kinds of problem stack up get their own
+  finding. NPM hosts whose access list allows only private ranges count as LAN-only; names with
+  no public DNS record (checked over DNS-over-HTTPS, resolver configurable) are flagged as
+  reachable if someone knows the name; and any name can be marked "Treat as internal".
 - **Have I Been Pwned check (free)** — posture findings flag any website on your domains
   that HIBP lists as breached. The public breach catalogue is downloaded once a day and
   matched inside Cerebro; no API key, and nothing about your domains is sent.

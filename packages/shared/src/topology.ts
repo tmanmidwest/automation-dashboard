@@ -102,6 +102,57 @@ export interface TopologyGraph {
   outsideIn?: OutsideInSummary;
   /** Container image CVE scan status. */
   imageScan?: ImageScanSummary;
+  /** DNS-over-HTTPS resolver used to check whether names are public. */
+  publicDnsResolver?: string;
+  /** Every way in from the internet and what it reaches (see docs/architecture-map.md#exposure-paths). */
+  exposure?: ExposureEntry[];
+}
+
+/** A finding as it shows on one hop of an exposure path. */
+export interface ExposureFlag {
+  findingId: string;
+  severity: PostureSeverity;
+  category: PostureCategory;
+  title: string;
+  /** Set when the finding is on what the hop runs on (its VM, say), not the hop itself. */
+  on?: string;
+}
+
+/** One step on the way in: a proxy, a public name, a container or host. */
+export interface ExposureHop {
+  nodeId: string;
+  label: string;
+  /** e.g. "→ :6789" for the proxy's forward. */
+  via?: string;
+  flags: ExposureFlag[];
+}
+
+/** One way in → one destination. */
+export interface ExposurePath {
+  id: string;
+  hops: ExposureHop[];
+  /** Worst flag on the path; "none" when nothing is flagged. */
+  severity: PostureSeverity | 'none';
+  /** e.g. "password login (access list Staff)", "not in public DNS". */
+  notes?: string[];
+  /** The public name on this path (for "Treat as internal"). */
+  name?: string;
+}
+
+/** A way in from the internet: a set of forwarded WAN ports to one machine, or a Cloudflare tunnel. */
+export interface ExposureEntry {
+  id: string;
+  kind: 'port_forward' | 'tunnel';
+  /** "WAN :80, :443" or "Cloudflare tunnel home". */
+  label: string;
+  /** What the entry lands on first (the proxy, or the forwarded machine). */
+  nodeId?: string;
+  /** e.g. 'from any source', the port forward names. */
+  notes: string[];
+  paths: ExposurePath[];
+  severity: PostureSeverity | 'none';
+  /** Names left out because they're LAN-only or you marked them internal (the latter can be undone). */
+  hidden?: { name: string; reason: 'lan' | 'marked' }[];
 }
 
 /** Status of the container image CVE scan (Trivy). */
