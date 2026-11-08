@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Certificate Transparency check** — posture findings now read crt.sh once a day for your
+  domains and flag certificates issued in the last 14 days for names nothing in Cerebro
+  serves (or from a CA the domain hasn't used), plus hostnames that still have a valid public
+  certificate but no longer point at anything Cerebro knows. Part of the outside-in checks.
 - **Known CVEs for your infrastructure versions** — posture findings now look up the
   Proxmox VE, Nginx Proxy Manager, UniFi Network, UniFi OS and UniFi switch firmware
   versions you run in NVD (once a day, in the background) and raise a finding with each

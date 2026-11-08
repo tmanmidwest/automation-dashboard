@@ -3,6 +3,7 @@ import type { BuildInput } from './topology.builder';
 import type { OutsideInData } from './outside-in.service';
 import type { ImageScanResult } from './image-scan.service';
 import { affects, cmpVersion, type NvdCve } from './version-cve.service';
+import type { CtStore } from './ct-log.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -47,7 +48,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null, ct?: CtInput | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -345,6 +346,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   if (intel) out.push(...outsideInFindings(input, graph, intel, now));
   if (scans) out.push(...imageCveFindings(input, graph, scans, intel ?? null));
   if (versionCves) out.push(...versionCveFindings(versionCves, intel ?? null));
+  if (ct) out.push(...ctLogFindings(input, graph, ct, now));
 
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
@@ -789,3 +791,95 @@ function versionCveFindings(vc: VersionCveInput, intel: OutsideInData | null): P
   return out;
 }
 
+
+
+// ── certificate transparency (crt.sh) ─────────────────────────────────────
+
+export interface CtInput {
+  /** Cloudflare DNS record names (the map doesn't carry these). */
+  extraNames: string[];
+  store: CtStore;
+}
+
+/** Your public domains: Cloudflare zones plus the registrable part of every proxied/tunnelled name. */
+export function ctDomains(graph: TopologyGraph, zones: string[], registrable: (n: string) => string | null): string[] {
+  const out = new Set(zones.map((z) => z.toLowerCase()));
+  for (const n of graph.nodes) if (n.type === 'dns_name') { const r = registrable(n.label); if (r) out.add(r); }
+  return [...out].sort();
+}
+
+const NEW_DAYS = 14;
+
+function ctLogFindings(input: BuildInput, graph: TopologyGraph, ct: CtInput, now: Date): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  const known = new Set<string>(ct.extraNames.map((n) => n.toLowerCase().replace(/\.$/, '')));
+  for (const n of graph.nodes) if (n.type === 'dns_name') known.add(n.label.toLowerCase());
+  for (const n of input.npm) {
+    for (const h of n.proxyHosts) for (const d of String(h.details?.domains ?? h.name ?? '').split(/[\s,]+/)) if (d) known.add(d.toLowerCase());
+    for (const c of n.certificates ?? []) for (const d of String(c.details?.domains ?? c.name ?? '').split(/[\s,]+/)) if (d) known.add(d.toLowerCase());
+  }
+  const domains = Object.keys(ct.store);
+  const isKnown = (name: string) => {
+    if (name.startsWith('*.')) return true; // a wildcard says nothing about which names you use
+    if (known.has(name) || domains.includes(name) || domains.some((d) => name === `www.${d}`)) return true;
+    // Covered by one of your own wildcard records/hosts.
+    for (const k of known) if (k.startsWith('*.') && name.endsWith(k.slice(1)) && !name.slice(0, -k.length + 1).includes('.')) return true;
+    return false;
+  };
+  const t = (iso: string) => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`).getTime();
+  const crt = (id: number) => `https://crt.sh/?id=${id}`;
+  const newCut = now.getTime() - NEW_DAYS * DAY;
+
+  type Item = { label: string; url: string; note: string };
+  const fresh: Item[] = [];
+  const stale = new Map<string, Item & { at: number }>();
+  for (const [domain, e] of Object.entries(ct.store)) {
+    const certs = e.certs.filter((c) => t(c.notAfter) > now.getTime());
+    const issuersBefore = new Set(e.certs.filter((c) => t(c.notBefore) < newCut).map((c) => c.issuer.replace(/\s*\(.*\)$/, '')));
+    for (const c of certs) {
+      const unknown = c.names.filter((n) => (n === domain || n.endsWith(`.${domain}`)) && !isKnown(n));
+      const isNew = t(c.notBefore) >= newCut;
+      const org = c.issuer.replace(/\s*\(.*\)$/, '');
+      // Cloudflare's edge certificates (apex + wildcard only) switch CAs on their own; not a signal.
+      const edgeOnly = c.names.every((n) => n === domain || n === `*.${domain}`);
+      const newIssuer = isNew && !edgeOnly && issuersBefore.size > 0 && !issuersBefore.has(org);
+      if (isNew && (unknown.length || newIssuer)) {
+        fresh.push({
+          label: (unknown.length ? unknown : c.names).slice(0, 3).join(', ') + (Math.max(unknown.length, c.names.length) > 3 ? ' …' : ''),
+          url: crt(c.id),
+          note: [`issued ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}`, unknown.length ? 'name not in Cerebro' : null, newIssuer ? `a CA ${domain} hasn't used before` : null].filter(Boolean).join(' · '),
+        });
+      } else if (!isNew) {
+        for (const n of unknown) {
+          const prev = stale.get(n);
+          if (!prev || prev.at < t(c.notBefore)) stale.set(n, { label: n, url: crt(c.id), note: `certificate from ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}, valid to ${fmtDayUTC(new Date(t(c.notAfter)))}`, at: t(c.notBefore) });
+        }
+      }
+    }
+  }
+  // A name already flagged as new isn't listed again as stale.
+  if (fresh.length)
+    out.push({
+      id: 'ct-new-certs',
+      severity: 'medium',
+      category: 'exposure',
+      title: `${plural(fresh.length, 'certificate was', 'certificates were')} issued for your domains in the last ${NEW_DAYS} days that ${fresh.length === 1 ? "doesn't" : "don't"} match what Cerebro knows`,
+      why: "Every public certificate is logged in Certificate Transparency. One for a name you don't serve, or from a CA you don't use, can mean someone else got a certificate for your domain (a hijacked DNS record or account), or a service you set up outside what Cerebro sees.",
+      fix: 'Open each one on crt.sh. If you recognise it (a new service, Microsoft 365, a hosted app), add it to Cloudflare/NPM or snooze this. If not, check who controls that DNS name and revoke the certificate through the issuing CA.',
+      affected: fresh.slice(0, 25),
+      source: 'crt.sh',
+    });
+  const staleItems = [...stale.values()].sort((a, b) => b.at - a.at).map(({ at: _at, ...i }) => i);
+  if (staleItems.length)
+    out.push({
+      id: 'ct-unknown-names',
+      severity: 'low',
+      category: 'exposure',
+      title: `${plural(staleItems.length, 'hostname has', 'hostnames have')} a valid public certificate but nothing in Cerebro serves ${staleItems.length === 1 ? 'it' : 'them'}`,
+      why: "Anyone can list these names from the public certificate logs. If one is left over from a service you removed, its DNS record may still point somewhere you don't control any more (a subdomain takeover).",
+      fix: 'Remove DNS records for names you no longer use. Names served by something Cerebro doesn\'t watch (a hosted service) are fine; snooze this.',
+      affected: staleItems.slice(0, 30),
+      source: 'crt.sh',
+    });
+  return out;
+}
