@@ -6,11 +6,13 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
+import type { HibpBreach } from './hibp.service';
 import { applySnoozes, buildFindings, ctDomains, eolProducts, productVersions, wanIps, type CtInput, type Snooze, type VersionCveInput } from './posture';
 import { OutsideInService } from './outside-in.service';
 import { ImageScanService } from './image-scan.service';
 import { VersionCveService } from './version-cve.service';
 import { CtLogService, registrable } from './ct-log.service';
+import { HibpService } from './hibp.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
 
@@ -49,6 +51,7 @@ export class TopologyService {
     private readonly imageScan: ImageScanService,
     private readonly versionCve: VersionCveService,
     private readonly ctLog: CtLogService,
+    private readonly hibp: HibpService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -144,6 +147,7 @@ export class TopologyService {
         }
         // Certificate Transparency (crt.sh) for your public domains; also part of outside-in.
         let ct: CtInput | null = null;
+        let hibp: { domains: string[]; breaches: HibpBreach[] } | null = null;
         if (graph.outsideIn?.enabled) {
           try {
             const cf = await this.ctLog.cloudflareNames();
@@ -152,6 +156,11 @@ export class TopologyService {
             ct = { extraNames: cf.names, store: Object.fromEntries(Object.entries(store).filter(([d]) => domains.includes(d))) };
             if (domains.some((d) => store[d]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'crt.sh'])];
             void this.ctLog.refresh(domains).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+            // Have I Been Pwned (free catalogue, matched locally) for the same domains.
+            const hs = await this.hibp.cached();
+            hibp = { domains, breaches: hs.breaches };
+            if (hs.error && !hs.at) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'Have I Been Pwned'])];
+            void this.hibp.refresh().then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
           } catch (err) {
             void this.logging.warn('topology', `Certificate log check failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -164,7 +173,7 @@ export class TopologyService {
           void this.logging.warn('topology', `Image CVE results unavailable: ${err instanceof Error ? err.message : String(err)}`);
         }
         try {
-          graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct);
+          graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct, hibp);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];

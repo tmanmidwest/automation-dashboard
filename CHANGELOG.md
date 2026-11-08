@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Have I Been Pwned check (free)** — posture findings flag any website on your domains
+  that HIBP lists as breached. The public breach catalogue is downloaded once a day and
+  matched inside Cerebro; no API key, and nothing about your domains is sent.
 - **Certificate Transparency check** — posture findings now read crt.sh once a day for your
   domains and flag certificates issued in the last 14 days for names nothing in Cerebro
   serves (or from a CA the domain hasn't used), plus hostnames that still have a valid public

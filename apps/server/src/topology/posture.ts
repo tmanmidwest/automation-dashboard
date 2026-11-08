@@ -4,6 +4,7 @@ import type { OutsideInData } from './outside-in.service';
 import type { ImageScanResult } from './image-scan.service';
 import { affects, cmpVersion, type NvdCve } from './version-cve.service';
 import type { CtStore } from './ct-log.service';
+import type { HibpBreach } from './hibp.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -48,7 +49,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null, ct?: CtInput | null): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null, ct?: CtInput | null, hibp?: { domains: string[]; breaches: HibpBreach[] } | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -347,6 +348,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   if (scans) out.push(...imageCveFindings(input, graph, scans, intel ?? null));
   if (versionCves) out.push(...versionCveFindings(versionCves, intel ?? null));
   if (ct) out.push(...ctLogFindings(input, graph, ct, now));
+  if (hibp) out.push(...hibpFindings(hibp.domains, hibp.breaches, now));
 
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
@@ -882,4 +884,30 @@ function ctLogFindings(input: BuildInput, graph: TopologyGraph, ct: CtInput, now
       source: 'crt.sh',
     });
   return out;
+}
+
+
+// ── Have I Been Pwned (free catalogue: was a site on your domains breached?) ─
+
+function hibpFindings(domains: string[], breaches: HibpBreach[], now: Date): PostureFinding[] {
+  const hits = breaches.filter((b) => domains.some((d) => b.domain === d || b.domain.endsWith(`.${d}`)));
+  if (!hits.length) return [];
+  const recent = (b: HibpBreach) => !!b.breachDate && now.getTime() - new Date(b.breachDate).getTime() < 2 * 365 * DAY;
+  const sev = (b: HibpBreach): PostureSeverity => (recent(b) ? (b.dataClasses.some((c) => /password/i.test(c)) ? 'high' : 'medium') : 'low');
+  const worst = hits.map(sev).sort((a, b) => SEV_RANK[b] - SEV_RANK[a])[0];
+  hits.sort((a, b) => String(b.breachDate).localeCompare(String(a.breachDate)));
+  return [{
+    id: 'hibp-site-breach',
+    severity: worst,
+    category: 'exposure',
+    title: `Have I Been Pwned lists ${plural(hits.length, 'breach', 'breaches')} of a site on your domains`,
+    why: "The site's user data was taken and is circulating. Anyone with an account there should assume the listed data is public; reused passwords are the main risk.",
+    fix: 'Make sure the hole is closed, reset the affected accounts\' passwords (and anywhere they reused them), and tell the users if you haven\'t already. Snooze this once that\'s done; it comes back only if a new breach is listed.',
+    affected: hits.map((b) => ({
+      label: `${b.title} (${b.domain})`,
+      url: `https://haveibeenpwned.com/PwnedWebsites#${encodeURIComponent(b.name)}`,
+      note: [b.breachDate && `breached ${b.breachDate}`, b.pwnCount != null && `${b.pwnCount.toLocaleString('en-US')} accounts`, b.dataClasses.slice(0, 5).join(', ')].filter(Boolean).join(' · '),
+    })),
+    source: 'Have I Been Pwned',
+  }];
 }

@@ -143,6 +143,7 @@ allows 5 requests per 30 s, which is plenty here; set `NVD_API_KEY` to go faster
 
 | Certificates issued in the last 14 days for a name nothing in Cerebro serves, or from a CA that domain hasn't used before | Medium | crt.sh (Certificate Transparency) |
 | Hostnames with a valid public certificate that nothing in Cerebro serves (possible leftover DNS / subdomain takeover) | Low | crt.sh |
+| A website on one of your domains is listed as breached | High if within 2 years and passwords leaked, Medium if within 2 years, else Low | Have I Been Pwned (free catalogue) |
 
 Your domains are the Cloudflare zones plus the registrable part of every name on the map
 (NPM proxy hosts, tunnel routes); internal names (`.internal`, `.lan`…) are skipped. A name
@@ -150,13 +151,16 @@ counts as known when it's an NPM proxy host or certificate, a tunnel route, a Cl
 record, the bare domain or `www.`; wildcard certificates are ignored, and so are CA changes on
 apex + wildcard certificates (Cloudflare's edge certificates switch CAs on their own).
 crt.sh is queried once a day per domain in the background (it's free and often slow, so a
-failed query is retried after 3 hours). Each item links to its crt.sh entry.
+failed query is retried after 3 hours). Each item links to its crt.sh entry. The Have I Been Pwned check downloads
+HIBP's public breach catalogue once a day and matches it against the same domains inside
+Cerebro, so nothing about your domains is sent. Which of your *addresses* appear in breaches
+would need a paid HIBP API key and domain verification; that part isn't built.
 
 The port-forward finding also says whether Shodan has already listed that port. Outside-in findings link to their evidence instead of the map: Shodan's page for the
 address, the NVD entry for each CVE, and (for end-of-life software on the WAN) the bare
 `http://` / `https://` WAN address, which is the page scanners actually see. The WAN
 address is the UniFi gateway's public IP. What leaves Cerebro: the WAN address (to
-`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date` and `services.nvd.nist.gov`), your domain names (to `crt.sh`), and a
+`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date` and `services.nvd.nist.gov`), your domain names (to `crt.sh`), a download of HIBP's breach catalogue, and a
 download of the CISA KEV list. Answers are cached (Shodan 6 h, others 24 h); if a source
 is down the last good answer is used and the row says so. Shodan refreshes its scan data
 every few days, so a port you just closed can linger. Image versions come from the tag
