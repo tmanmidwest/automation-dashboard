@@ -186,8 +186,9 @@ export class TopologyService {
             break;
           }
           case 'nginx-proxy-manager': {
-            const [proxyHosts, certificates] = await Promise.all([list(i.id, 'proxy_host', errs), list(i.id, 'certificate', errs)]);
-            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts, certificates });
+            // Access lists only refine one finding's wording; a failure there isn't a feed error.
+            const [proxyHosts, certificates, accessLists] = await Promise.all([list(i.id, 'proxy_host', errs), list(i.id, 'certificate', errs), list(i.id, 'access_list', [])]);
+            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts, certificates, accessLists });
             break;
           }
           case 'backblaze': {

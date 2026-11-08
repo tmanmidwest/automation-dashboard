@@ -41,7 +41,7 @@ export interface BuildInput {
   }[];
   proxmox: { inst: InstRef; baseHost: string | null; guests: ConnectorResource[] }[];
   docker: { inst: InstRef; endpointHost: string | null; hosts: ConnectorResource[]; containers: ConnectorResource[] }[];
-  npm: { inst: InstRef; baseHost: string | null; basePort?: string | null; proxyHosts: ConnectorResource[]; certificates?: ConnectorResource[] }[];
+  npm: { inst: InstRef; baseHost: string | null; basePort?: string | null; proxyHosts: ConnectorResource[]; certificates?: ConnectorResource[]; accessLists?: ConnectorResource[] }[];
   technitium: { inst: InstRef; baseHost: string | null; records: { zone: string; record: ConnectorResource }[]; leases: ConnectorResource[] }[];
   cloudflare: { inst: InstRef; tunnels: { tunnel: ConnectorResource; routes: ConnectorResource[] }[] }[];
   replicator: { name: string; appName: string; project: string; dockerInstanceId: string; status: string }[];

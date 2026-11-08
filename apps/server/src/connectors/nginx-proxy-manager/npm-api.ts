@@ -162,7 +162,21 @@ export class NpmApi {
   streams() { return this.get<NpmStream[]>('/api/nginx/streams'); }
   deadHosts() { return this.get<NpmDeadHost[]>('/api/nginx/dead-hosts'); }
   certificates() { return this.get<NpmCertificate[]>('/api/nginx/certificates'); }
-  accessLists() { return this.get<NpmAccessList[]>('/api/nginx/access-lists?expand=items,clients,proxy_hosts'); }
+  /**
+   * Access lists with their users and IP rules. Some NPM versions return HTTP 500 when
+   * asked to expand `proxy_hosts`, so fall back to fewer expansions instead of failing.
+   */
+  async accessLists(): Promise<NpmAccessList[]> {
+    let last: unknown;
+    for (const expand of ['items,clients,proxy_hosts', 'items,clients', '']) {
+      try {
+        return await this.get<NpmAccessList[]>(`/api/nginx/access-lists${expand ? `?expand=${expand}` : ''}`);
+      } catch (err) {
+        last = err;
+      }
+    }
+    throw last;
+  }
   /** Recent audit-log entries (newest first), with the acting user inlined. */
   auditLog() { return this.get<NpmAuditEntry[]>('/api/audit-log?expand=user'); }
 

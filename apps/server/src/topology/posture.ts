@@ -80,20 +80,41 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
     const npmIp = isIp(n.baseHost) ? n.baseHost : null;
     const port80 = wanForwards.find((f) => f.wanPort === '80' && f.ip && (f.ip === npmIp || (!npmIp && npmIps.has(f.ip))));
     const withAuth = http.filter((p) => { const a = str(p.details?.access_list); return !!a && !/^public$/i.test(a); });
+    // What each access list does, when NPM lets Cerebro read them: a login (users) or an IP allow-list.
+    const acl = (p: ConnectorResource) => {
+      const ref = str(p.details?.access_list)?.replace(/^#/, '');
+      const l = ref ? (n.accessLists ?? []).find((x) => x.id === ref) : undefined;
+      if (!l) return { name: ref ? `#${ref}` : null, kind: 'unknown' as const };
+      const users = Number(l.details?.auth_users ?? 0);
+      const ips = Number(l.details?.client_rules ?? 0);
+      return { name: l.name, kind: users > 0 ? ('login' as const) : ips > 0 ? ('ip' as const) : ('unknown' as const) };
+    };
+    const login = withAuth.filter((p) => acl(p).kind === 'login');
+    const ipOnly = withAuth.filter((p) => acl(p).kind === 'ip');
+    const unknownAcl = withAuth.filter((p) => acl(p).kind === 'unknown');
+    // Every host limited to known IPs (and none with a login) → the internet can't actually use them.
+    const allIpLimited = ipOnly.length === http.length;
     out.push({
       id: `npm-http:${n.inst.id}`,
-      severity: port80 ? 'high' : 'medium',
+      severity: port80 && !allIpLimited ? 'high' : 'medium',
       category: 'encryption',
-      title: `${plural(http.length, 'proxy host')} served over plain HTTP`,
-      why:
+      title: login.length
+        ? `${plural(http.length, 'proxy host')} served over plain HTTP, ${login.length === http.length ? 'all' : login.length} with a password login`
+        : `${plural(http.length, 'proxy host')} served over plain HTTP`,
+      why: (
         (port80
           ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so these are reachable from the internet without encryption. `
           : 'Traffic to these names is unencrypted on the network. ') +
-        (withAuth.length
-          ? `${plural(withAuth.length, 'of them is', 'of them are')} behind an access list; if that list asks for a username and password, those travel in clear text too.`
-          : 'Anyone on the path can read or change what is sent.'),
+        (login.length
+          ? `${plural(login.length, 'of them asks', 'of them ask')} for a username and password (access list "${acl(login[0]).name}"), and that login travels in clear text, readable by anyone on the path. `
+          : '') +
+        (ipOnly.length
+          ? `${plural(ipOnly.length, 'is', 'are')} limited to certain IP addresses (access list "${acl(ipOnly[0]).name}"), so ${allIpLimited ? 'outsiders are turned away, but the traffic itself is still unencrypted' : 'outsiders are turned away from those'}. `
+          : '') +
+        (unknownAcl.length ? `${plural(unknownAcl.length, 'is', 'are')} behind an access list Cerebro couldn't read; if it asks for a password, that travels in clear text too. ` : '') +
+        (!withAuth.length ? 'Anyone on the path can read or change what is sent.' : '')).trim(),
       fix: 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL".',
-      affected: http.map((p) => ({ label: p.name, nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined, note: [str(p.details?.forward), withAuth.includes(p) ? `access list ${str(p.details?.access_list)}` : null].filter(Boolean).join(' · ') })),
+      affected: http.map((p) => ({ label: p.name, nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined, note: [str(p.details?.forward), withAuth.includes(p) ? `access list ${acl(p).name}${acl(p).kind === 'login' ? ' (password)' : acl(p).kind === 'ip' ? ' (IP allow-list)' : ''}` : null].filter(Boolean).join(' · ') })),
       alsoOn: port80?.ip ? [nodeByIp.get(port80.ip)?.id].filter((x): x is string => !!x) : undefined,
       source: n.inst.name,
     });
