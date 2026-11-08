@@ -64,6 +64,9 @@ services:
       REMOTE_BROWSER_GEOMETRY: ${REMOTE_BROWSER_GEOMETRY:-1280x800}
     volumes:
       - cerebro_signal:/data/signal
+      # Trivy's vulnerability database (~1 GB), kept so the nightly image scan doesn't
+      # re-download it after every redeploy. Optional.
+      - cerebro_trivy:/data/trivy
       # Fabric RDP session recordings — shared with the guacd sidecar (guacd writes,
       # the app serves them back for playback). See docs/fabric-remote-access.md.
       - cerebro_fabric_recordings:/recordings
@@ -128,3 +131,4 @@ volumes:
   cerebro_redis:
   cerebro_signal:
   cerebro_fabric_recordings:
+  cerebro_trivy:

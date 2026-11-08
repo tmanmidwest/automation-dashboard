@@ -116,6 +116,27 @@ ENV PATH="/opt/java/bin:${PATH}"
 ENV SIGNAL_CLI_DATA_DIR=/data/signal
 RUN mkdir -p /data/signal
 
+# Trivy → nightly CVE scan of the images your containers run (docs/architecture-map.md).
+# Pinned release. Do NOT use 0.69.4–0.69.6: those were malicious (GHSA-69fq-xp46-6x23).
+# The checksums file is checked against the hash below, then the tarball against the
+# checksums file. If anything doesn't match, Trivy is left out (the build still succeeds and
+# the map says the scan is unavailable) rather than installing an unverified binary.
+ARG TRIVY_VERSION=0.76.1
+ARG TRIVY_CHECKSUMS_SHA256=885debc41b570179e81af560e5f393a66be29b9ff8c52915674f3eb2304c535d
+ENV TRIVY_CACHE_DIR=/data/trivy
+RUN set -u; mkdir -p /data/trivy; cd /tmp \
+ && case "$(dpkg --print-architecture)" in amd64) TA=Linux-64bit;; arm64) TA=Linux-ARM64;; *) TA=;; esac \
+ && TAR="trivy_${TRIVY_VERSION}_${TA}.tar.gz" SUMS="trivy_${TRIVY_VERSION}_checksums.txt" \
+ && BASE="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}" \
+ && if [ -n "$TA" ] \
+      && wget -q "$BASE/$SUMS" "$BASE/$TAR" \
+      && echo "${TRIVY_CHECKSUMS_SHA256}  $SUMS" | sha256sum -c - \
+      && grep " ${TAR}\$" "$SUMS" | sha256sum -c - \
+      && tar -xzf "$TAR" -C /usr/local/bin trivy; then \
+      trivy --version; \
+    else echo "WARNING: Trivy not installed (download or checksum failed); image CVE scan disabled" >&2; fi; \
+    rm -f /tmp/trivy_*
+
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json

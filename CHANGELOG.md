@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Exposure paths** — the Architecture Map's "Exposed to the internet" row now lists every
+  way in (WAN port forwards, Cloudflare tunnels) and each path to a machine, hop by hop, with
+  the posture findings on each hop. Paths where several kinds of problem stack up get their own
+  finding. NPM hosts whose access list allows only private ranges count as LAN-only; names with
+  no public DNS record (checked over DNS-over-HTTPS, resolver configurable) are flagged as
+  reachable if someone knows the name; and any name can be marked "Treat as internal".
+- **Have I Been Pwned check (free)** — posture findings flag any website on your domains
+  that HIBP lists as breached. The public breach catalogue is downloaded once a day and
+  matched inside Cerebro; no API key, and nothing about your domains is sent.
+- **Certificate Transparency check** — posture findings now read crt.sh once a day for your
+  domains and flag certificates issued in the last 14 days for names nothing in Cerebro
+  serves (or from a CA the domain hasn't used), plus hostnames that still have a valid public
+  certificate but no longer point at anything Cerebro knows. Part of the outside-in checks.
+- **Known CVEs for your infrastructure versions** — posture findings now look up the
+  Proxmox VE, Nginx Proxy Manager, UniFi Network, UniFi OS and UniFi switch firmware
+  versions you run in NVD (once a day, in the background) and raise a finding with each
+  matching CVE, its score and the fixed version; High when critical or on CISA's Known
+  Exploited list. Part of the outside-in checks. See `docs/architecture-map.md#posture-findings`.
+- **CVE scan of running container images** — the Architecture Map's posture findings now
+  include a nightly Trivy scan of every image a running container uses, by registry digest
+  (nothing runs on the Docker hosts). Images with a CVE on CISA's Known Exploited list are
+  High; fixable critical CVEs are Medium (High if internet-facing); fixable high CVEs are
+  Low. *Scan now* and an on/off switch sit in the Posture findings row. Trivy is bundled in
+  the image (pinned, checksum-verified). See `docs/architecture-map.md#posture-findings`.
 - **App Replicator apps from a pasted compose** — register an app by pasting a compose
   file that runs prebuilt images instead of pointing at a Git repo. Variables and ports
   are read from it as usual, each deployment runs it as its own compose stack, and a

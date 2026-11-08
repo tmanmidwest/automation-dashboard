@@ -41,11 +41,15 @@ export interface BuildInput {
   }[];
   proxmox: { inst: InstRef; baseHost: string | null; guests: ConnectorResource[] }[];
   docker: { inst: InstRef; endpointHost: string | null; hosts: ConnectorResource[]; containers: ConnectorResource[] }[];
-  npm: { inst: InstRef; baseHost: string | null; basePort?: string | null; proxyHosts: ConnectorResource[]; certificates?: ConnectorResource[] }[];
+  npm: { inst: InstRef; baseHost: string | null; basePort?: string | null; proxyHosts: ConnectorResource[]; certificates?: ConnectorResource[]; accessLists?: ConnectorResource[] }[];
   technitium: { inst: InstRef; baseHost: string | null; records: { zone: string; record: ConnectorResource }[]; leases: ConnectorResource[] }[];
   cloudflare: { inst: InstRef; tunnels: { tunnel: ConnectorResource; routes: ConnectorResource[] }[] }[];
   replicator: { name: string; appName: string; project: string; dockerInstanceId: string; status: string }[];
   fabric: { id: string; name: string; hostname: string | null; localIp: string | null; online: boolean; mode: string }[];
+  /** Public DNS (Cloudflare zones and record names); only used for posture findings and exposure paths. */
+  /** Public names you marked "Treat as internal" (settings posture.internalNames). */
+  internalNames?: string[];
+  publicDns?: { zones: string[]; names: string[]; /** Public-resolver answers for names outside those zones. */ resolved?: Record<string, boolean> };
   /** Proxmox backup files (Backblaze connector's local vzdump list); only used for posture findings. */
   backups?: { inst: InstRef; files: ConnectorResource[] }[];
   feeds: TopoFeed[];
@@ -639,7 +643,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
           ips: [],
           macs: [],
           infra: true,
-          details: [{ source: d.inst.name, items: detailItems(c.details) }],
+          details: [{ source: d.inst.name, items: detailItems(c.details, ['repo_digest']) }],
           sources: [{ instanceId: d.inst.id, connectorId: 'docker', name: d.inst.name, kind: 'container', resourceId: c.id }],
         });
         for (const m of (ports ?? '').matchAll(/(\d+)→\d+/g)) portOwners.set(`${hostId}:${m[1]}`, cid);
@@ -728,7 +732,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
       const m = to ? /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?/.exec(to) : null;
       if (!m) continue;
       const tgt = targetFor(m[1], m[2]);
-      if (tgt) addEdge('internet', tgt, 'forwards', `WAN :${pf.details?.port ?? '?'} → :${m[2] ?? '?'}`, `Port forward "${pf.name}" (${pf.details?.protocol ?? 'tcp'}, from ${pf.details?.from ?? 'any'})`);
+      if (tgt) addEdge('internet', tgt, 'forwards', `WAN :${pf.details?.port ?? '?'} → :${m[2] ?? '?'}`, `Port forward "${pf.name}" (WAN :${pf.details?.port ?? '?'}, ${pf.details?.protocol ?? 'tcp'}, from ${pf.details?.from ?? 'any'})`);
     }
     for (const r of u.firewallRules) {
       const status = String(r.status ?? '').toLowerCase();

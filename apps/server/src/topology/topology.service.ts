@@ -6,8 +6,16 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
-import { applySnoozes, buildFindings, eolProducts, wanIps, type Snooze } from './posture';
+import type { HibpBreach } from './hibp.service';
+import { applySnoozes, buildFindings, ctDomains, npmNameGuards, sortFindings, eolProducts, productVersions, wanIps, type CtInput, type Snooze, type VersionCveInput } from './posture';
 import { OutsideInService } from './outside-in.service';
+import { ImageScanService } from './image-scan.service';
+import { VersionCveService } from './version-cve.service';
+import { CtLogService, registrable } from './ct-log.service';
+import { buildExposure, comboFindings } from './exposure';
+
+const INTERNAL_KEY = 'posture.internalNames';
+import { HibpService } from './hibp.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
 
@@ -43,6 +51,10 @@ export class TopologyService {
     private readonly logging: LoggingService,
     private readonly settings: SettingsService,
     private readonly outsideIn: OutsideInService,
+    private readonly imageScan: ImageScanService,
+    private readonly versionCve: VersionCveService,
+    private readonly ctLog: CtLogService,
+    private readonly hibp: HibpService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -56,7 +68,9 @@ export class TopologyService {
       g = this.cache.graph;
     }
     // Snoozes are applied per request, so snoozing shows up without a rebuild.
-    return { ...g, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
+    // Scan status is live too (progress while a scan runs).
+    const imageScan = await this.imageScan.summary().catch(() => g.imageScan);
+    return { ...g, imageScan, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
   }
 
   private async snoozes(): Promise<Record<string, Snooze>> {
@@ -82,6 +96,38 @@ export class TopologyService {
     this.cache = null;
   }
 
+  /** Public names you marked "Treat as internal" (they drop out of exposure paths and internet findings). */
+  async internalNames(): Promise<string[]> {
+    const v = await this.settings.get<string[]>(INTERNAL_KEY);
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  }
+
+  async setInternal(name: string, internal: boolean): Promise<void> {
+    const n = name.trim().toLowerCase();
+    const cur = new Set(await this.internalNames());
+    if (internal) cur.add(n);
+    else cur.delete(n);
+    await this.settings.set(INTERNAL_KEY, [...cur].sort());
+    this.cache = null;
+  }
+
+  async setPublicDnsResolver(url: string | null): Promise<void> {
+    await this.ctLog.setResolverUrl(url);
+    this.cache = null;
+  }
+
+  /** Switch the nightly image CVE scan on or off. */
+  async setImageScan(on: boolean): Promise<void> {
+    await this.imageScan.setEnabled(on);
+    this.cache = null;
+  }
+
+  /** Start a scan of every running image now (returns at once; the map shows progress). */
+  async scanImagesNow(): Promise<void> {
+    this.cache = null;
+    void this.imageScan.scanAll(true).then(() => { this.cache = null; }).catch(() => undefined);
+  }
+
   async unsnooze(id: string): Promise<boolean> {
     const all = await this.snoozes();
     if (!all[id]) return false;
@@ -95,6 +141,20 @@ export class TopologyService {
     this.inflight = this.gather(refresh)
       .then(async (input) => {
         const graph = buildTopology(input);
+        input.internalNames = await this.internalNames();
+        // Public DNS (Cloudflare) tells internet-facing names from internal ones.
+        try {
+          const cf = await this.ctLog.cloudflareNames();
+          // Names NPM serves outside the Cloudflare zones: ask public resolvers.
+          const others = input.npm
+            .flatMap((n) => n.proxyHosts.flatMap((p) => String(p.details?.domains ?? p.name ?? '').split(/[,\s]+/)))
+            .map((x) => x.trim().toLowerCase())
+            .filter((x) => x.includes('.') && !cf.zones.some((z) => x === z || x.endsWith(`.${z}`)));
+          input.publicDns = { ...cf, resolved: others.length ? await this.ctLog.publicResolve(others) : {} };
+          graph.publicDnsResolver = await this.ctLog.resolverUrl();
+        } catch {
+          /* unknown: names are treated as public */
+        }
         let intel = null;
         try {
           if (await this.outsideIn.enabled()) {
@@ -106,8 +166,54 @@ export class TopologyService {
         } catch (err) {
           void this.logging.warn('topology', `Outside-in checks failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+        // Known CVEs for Proxmox / NPM / UniFi versions (NVD); part of the outside-in checks.
+        let versionCves: VersionCveInput | null = null;
+        if (graph.outsideIn?.enabled) {
+          try {
+            const tested: Record<string, Record<string, unknown> | null> = {};
+            for (const x of [...input.proxmox, ...input.npm, ...input.unifi]) tested[x.inst.id] = this.instances.lastTestDetails(x.inst.id);
+            const products = productVersions(input, graph, tested);
+            const store = await this.versionCve.cached();
+            versionCves = { products, cves: store };
+            if (products.some((p) => store[p.cpe]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'NVD'])];
+            // Fetch what's missing or stale in the background; rebuild when it lands.
+            void this.versionCve.refresh(products.map((p) => p.cpe)).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+          } catch (err) {
+            void this.logging.warn('topology', `Version CVE lookups failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        // Certificate Transparency (crt.sh) for your public domains; also part of outside-in.
+        let ct: CtInput | null = null;
+        let hibp: { domains: string[]; breaches: HibpBreach[] } | null = null;
+        if (graph.outsideIn?.enabled) {
+          try {
+            const cf = await this.ctLog.cloudflareNames();
+            const domains = ctDomains(graph, cf.zones, registrable);
+            const store = await this.ctLog.cached();
+            ct = { extraNames: cf.names, store: Object.fromEntries(Object.entries(store).filter(([d]) => domains.includes(d))) };
+            if (domains.some((d) => store[d]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'crt.sh'])];
+            void this.ctLog.refresh(domains).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+            // Have I Been Pwned (free catalogue, matched locally) for the same domains.
+            const hs = await this.hibp.cached();
+            hibp = { domains, breaches: hs.breaches };
+            if (hs.error && !hs.at) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'Have I Been Pwned'])];
+            void this.hibp.refresh().then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+          } catch (err) {
+            void this.logging.warn('topology', `Certificate log check failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        let scans = null;
         try {
-          graph.findings = buildFindings(input, graph, new Date(), intel);
+          graph.imageScan = await this.imageScan.summary();
+          if (graph.imageScan.enabled) scans = await this.imageScan.results();
+        } catch (err) {
+          void this.logging.warn('topology', `Image CVE results unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        try {
+          graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct, hibp);
+          // Exposure paths use the findings for their hops; path combos become a finding too.
+          graph.exposure = buildExposure(graph, graph.findings, npmNameGuards(input));
+          graph.findings = sortFindings([...graph.findings, ...comboFindings(graph.exposure, new Map(graph.nodes.map((n) => [n.id, n])))]);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];
@@ -186,8 +292,9 @@ export class TopologyService {
             break;
           }
           case 'nginx-proxy-manager': {
-            const [proxyHosts, certificates] = await Promise.all([list(i.id, 'proxy_host', errs), list(i.id, 'certificate', errs)]);
-            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts, certificates });
+            // Access lists only refine one finding's wording; a failure there isn't a feed error.
+            const [proxyHosts, certificates, accessLists] = await Promise.all([list(i.id, 'proxy_host', errs), list(i.id, 'certificate', errs), list(i.id, 'access_list', [])]);
+            input.npm.push({ inst, baseHost: hostOf(cfg.baseUrl), basePort: portOf(cfg.baseUrl), proxyHosts, certificates, accessLists });
             break;
           }
           case 'backblaze': {

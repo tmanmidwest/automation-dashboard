@@ -1,6 +1,10 @@
 import type { ConnectorResource, PostureFinding, PostureSeverity, TopologyGraph, TopoNode } from '@cerebro/shared';
 import type { BuildInput } from './topology.builder';
 import type { OutsideInData } from './outside-in.service';
+import type { ImageScanResult } from './image-scan.service';
+import { affects, cmpVersion, type NvdCve } from './version-cve.service';
+import type { CtStore } from './ct-log.service';
+import type { HibpBreach } from './hibp.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -45,7 +49,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null, ct?: CtInput | null, hibp?: { domains: string[]; breaches: HibpBreach[] } | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -79,22 +83,66 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
     if (!http.length) continue;
     const npmIp = isIp(n.baseHost) ? n.baseHost : null;
     const port80 = wanForwards.find((f) => f.wanPort === '80' && f.ip && (f.ip === npmIp || (!npmIp && npmIps.has(f.ip))));
-    const withAuth = http.filter((p) => { const a = str(p.details?.access_list); return !!a && !/^public$/i.test(a); });
+    const acl = (p: ConnectorResource) => npmAcl(n.accessLists, p);
+    // LAN-only hosts (access list allows only private ranges): the internet is turned away.
+    const marked = new Set((input.internalNames ?? []).map((x) => x.toLowerCase()));
+    const lan = http.filter((p) => acl(p).kind === 'lan' || marked.has(p.name.toLowerCase()));
+    const wan = http.filter((p) => !lan.includes(p));
+    const login = wan.filter((p) => acl(p).kind === 'login');
+    const ipOnly = wan.filter((p) => acl(p).kind === 'ip');
+    const unknownAcl = wan.filter((p) => acl(p).kind === 'unknown');
+    const open = wan.filter((p) => !ipOnly.includes(p));
+    // Names with no public DNS record still answer to anyone who sends that name to the WAN.
+    const unlisted = open.filter((p) => publicDnsState(input, p.name) === 'unlisted');
+    const listed = open.filter((p) => !unlisted.includes(p));
+    const severity: PostureSeverity = !wan.length ? 'low' : port80 && listed.length ? 'high' : 'medium';
+    const where = (p: ConnectorResource) => {
+      const a = acl(p);
+      if (marked.has(p.name.toLowerCase()) && a.kind !== 'lan') return 'marked internal';
+      if (a.kind === 'lan') return `access list ${a.name} (LAN only)`;
+      if (a.kind === 'login') return `access list ${a.name} (password)`;
+      if (a.kind === 'ip') return `access list ${a.name} (IP allow-list)`;
+      if (a.name) return `access list ${a.name}`;
+      return null;
+    };
     out.push({
       id: `npm-http:${n.inst.id}`,
-      severity: port80 ? 'high' : 'medium',
+      severity,
       category: 'encryption',
-      title: `${plural(http.length, 'proxy host')} served over plain HTTP`,
-      why:
-        (port80
-          ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so these are reachable from the internet without encryption. `
-          : 'Traffic to these names is unencrypted on the network. ') +
-        (withAuth.length
-          ? `${plural(withAuth.length, 'of them is', 'of them are')} behind an access list; if that list asks for a username and password, those travel in clear text too.`
-          : 'Anyone on the path can read or change what is sent.'),
-      fix: 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL".',
-      affected: http.map((p) => ({ label: p.name, nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined, note: [str(p.details?.forward), withAuth.includes(p) ? `access list ${str(p.details?.access_list)}` : null].filter(Boolean).join(' · ') })),
-      alsoOn: port80?.ip ? [nodeByIp.get(port80.ip)?.id].filter((x): x is string => !!x) : undefined,
+      title: !wan.length
+        ? `${plural(http.length, 'LAN-only proxy host')} served over plain HTTP`
+        : login.length
+          ? `${plural(http.length, 'proxy host')} served over plain HTTP, ${login.length === http.length ? 'all' : login.length} with a password login`
+          : `${plural(http.length, 'proxy host')} served over plain HTTP`,
+      why: (
+        (wan.length && port80
+          ? `WAN port 80 is forwarded to this proxy ("${port80.pf.name}"), so ${lan.length ? 'the hosts not limited to your LAN' : 'these'} are reachable from the internet without encryption. `
+          : wan.length
+            ? 'Traffic to these names is unencrypted on the network. '
+            : '') +
+        (login.length
+          ? `${plural(login.length, 'of them asks', 'of them ask')} for a username and password (access list "${acl(login[0]).name}"), and that login travels in clear text, readable by anyone on the path. `
+          : '') +
+        (ipOnly.length
+          ? `${plural(ipOnly.length, 'is', 'are')} limited to certain IP addresses (access list "${acl(ipOnly[0]).name}"), so outsiders are turned away from ${ipOnly.length === 1 ? 'it' : 'those'}. `
+          : '') +
+        (lan.length
+          ? `${plural(lan.length, 'is', 'are')} limited to your local network by ${lan.length === 1 ? 'its' : 'their'} access list, so internet requests are refused${wan.length ? '' : ', but the traffic inside your network is still unencrypted'}. `
+          : '') +
+        (unlisted.length && port80
+          ? `${plural(unlisted.length, 'has', 'have')} no public DNS record, which keeps ${unlisted.length === 1 ? 'it' : 'them'} out of sight but not closed: anyone who sends the name to your WAN address still reaches ${unlisted.length === 1 ? 'it' : 'them'}, and names leak through certificate logs. `
+          : '') +
+        (unknownAcl.length ? `${plural(unknownAcl.length, 'is', 'are')} behind an access list Cerebro couldn't read; if it asks for a password, that travels in clear text too. ` : '') +
+        (!wan.some((p) => acl(p).name) && wan.length ? 'Anyone on the path can read or change what is sent.' : '')).trim(),
+      fix: wan.length
+        ? 'In Nginx Proxy Manager, request a Let\'s Encrypt certificate for each host and turn on "Force SSL". To keep a host internal, give it an access list that allows only your LAN ranges.'
+        : 'Low priority: add a certificate and "Force SSL" when convenient (a DNS-challenge certificate works for internal-only names).',
+      affected: http.map((p) => ({
+        label: p.name,
+        nodeId: byId.has(`dns:${p.name.toLowerCase()}`) ? `dns:${p.name.toLowerCase()}` : undefined,
+        note: [str(p.details?.forward), where(p), unlisted.includes(p) ? 'not in public DNS' : null].filter(Boolean).join(' · '),
+      })),
+      alsoOn: wan.length && port80?.ip ? [nodeByIp.get(port80.ip)?.id].filter((x): x is string => !!x) : undefined,
       source: n.inst.name,
     });
   }
@@ -320,7 +368,16 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   }
 
   if (intel) out.push(...outsideInFindings(input, graph, intel, now));
+  if (scans) out.push(...imageCveFindings(input, graph, scans, intel ?? null));
+  if (versionCves) out.push(...versionCveFindings(versionCves, intel ?? null));
+  if (ct) out.push(...ctLogFindings(input, graph, ct, now));
+  if (hibp) out.push(...hibpFindings(hibp.domains, hibp.breaches, now));
 
+  return sortFindings(out);
+}
+
+/** Worst first, then by category and title. */
+export function sortFindings(out: PostureFinding[]): PostureFinding[] {
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
 
@@ -580,3 +637,377 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
 
 const fmtDayUTC = (d: Date) => d.toISOString().slice(0, 10);
 const shodanUrl = (ip: string) => `https://www.shodan.io/host/${encodeURIComponent(ip)}`;
+
+
+// ── container image CVEs (Trivy results + CISA KEV) ────────────────────────
+
+function imageCveFindings(input: BuildInput, graph: TopologyGraph, scans: Record<string, ImageScanResult>, intel: OutsideInData | null): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const fromInternet = new Set(graph.edges.filter((e) => e.source === 'internet' && (e.type === 'forwards' || e.type === 'resolves')).map((e) => e.target));
+  for (const e of graph.edges) if (e.type === 'forwards' && fromInternet.has(e.source) && byId.get(e.source)?.type === 'dns_name') fromInternet.add(e.target);
+  const nvd = (id: string) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`;
+
+  type Row = { label: string; nodeId?: string; exposed: boolean; scan: ImageScanResult; image: string; host: string };
+  const rows: Row[] = [];
+  for (const d of input.docker) for (const c of d.containers) {
+    const rd = str(c.details?.repo_digest);
+    const scan = rd ? scans[rd] : undefined;
+    if (!scan || scan.error) continue;
+    const nodeId = `ctr:${d.inst.id}:${c.id.slice(0, 12)}`;
+    const node = byId.get(nodeId);
+    rows.push({ label: c.name || node?.label || c.id.slice(0, 12), nodeId: node ? nodeId : undefined, exposed: fromInternet.has(nodeId), scan, image: str(c.details?.image) ?? rd!, host: d.inst.name });
+  }
+  const top = (s: ImageScanResult, pred: (v: ImageScanResult['vulns'][number]) => boolean) => s.vulns.find(pred);
+  const example = (v?: ImageScanResult['vulns'][number]) => (v ? `e.g. ${v.id} in ${v.pkg} ${v.installed}${v.fixed ? ` → ${v.fixed}` : ' (no fix yet)'}` : '');
+  const urlOf = (v?: ImageScanResult['vulns'][number]) => (v ? nvd(v.id) : undefined);
+  const countsText = (s: ImageScanResult) => [s.counts.critical && `${s.counts.critical} critical`, s.counts.high && `${s.counts.high} high`, `${s.counts.fixable} fixable`].filter(Boolean).join(', ');
+
+  // 1. CVEs on CISA's Known Exploited list.
+  if (intel?.kev.size) {
+    const kevRows = rows
+      .map((r) => ({ r, kev: r.scan.ids.filter((id) => intel.kev.has(id.toUpperCase())) }))
+      .filter((x) => x.kev.length);
+    if (kevRows.length)
+      out.push({
+        id: 'image-cve-kev',
+        severity: 'high',
+        category: 'patching',
+        title: `${plural(kevRows.length, 'container runs', 'containers run')} an image with an actively exploited vulnerability`,
+        why: "These CVEs are on CISA's Known Exploited Vulnerabilities list: attackers are using them now." + (kevRows.some((x) => x.r.exposed) ? ' At least one of these containers is reachable from the internet.' : ''),
+        fix: 'Update the image (pull a newer tag or digest and recreate the container). If no fixed release exists yet, limit who can reach the container.',
+        affected: kevRows.map(({ r, kev }) => {
+          const k = intel.kev.get(kev[0].toUpperCase());
+          return { label: r.label, nodeId: r.nodeId, url: nvd(kev[0]), note: `${kev.join(', ')}${k?.vulnerabilityName ? ` (${k.vulnerabilityName})` : ''} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` };
+        }),
+        source: 'Trivy + CISA KEV',
+      });
+  }
+
+  // 2. Critical CVEs with a fix available.
+  const crit = rows.filter((r) => r.scan.vulns.some((v) => v.severity === 'CRITICAL' && v.fixed));
+  if (crit.length)
+    out.push({
+      id: 'image-cve-critical',
+      severity: crit.some((r) => r.exposed) ? 'high' : 'medium',
+      category: 'patching',
+      title: `${plural(crit.length, 'container has', 'containers have')} critical vulnerabilities with a fix available`,
+      why: 'A fixed version of the affected package exists, so updating the image usually clears these.' + (crit.some((r) => r.exposed) ? ' At least one is reachable from the internet.' : ''),
+      fix: 'Pull the newest image for the tag and recreate the container. If the newest image still has them, the maintainer hasn\'t rebuilt yet; check again in a few days or pin a newer tag.',
+      affected: crit
+        .sort((a, b) => Number(b.exposed) - Number(a.exposed) || b.scan.counts.critical - a.scan.counts.critical)
+        .map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed))} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` })),
+      source: 'Trivy',
+    });
+
+  // 3. High CVEs with a fix (and no fixable critical).
+  const high = rows.filter((r) => !crit.includes(r) && r.scan.vulns.some((v) => v.severity === 'HIGH' && v.fixed));
+  if (high.length)
+    out.push({
+      id: 'image-cve-high',
+      severity: 'low',
+      category: 'patching',
+      title: `${plural(high.length, 'container has', 'containers have')} high-severity vulnerabilities with a fix available`,
+      why: 'Not critical, but fixed versions exist; they usually clear with the next image update.',
+      fix: 'Update these images during normal maintenance.',
+      affected: high.map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'HIGH' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'HIGH' && !!v.fixed))} · ${r.image} · on ${r.host}` })),
+      source: 'Trivy',
+    });
+
+  return out;
+}
+
+
+// ── known CVEs for infrastructure software versions (NVD) ──────────────────
+
+/** One installed product version to look up: `cpe` is NVD's "vendor:product". */
+export interface ProductVersion {
+  cpe: string;
+  product: string;
+  version: string;
+  where: string;
+  nodeId?: string;
+}
+export interface VersionCveInput {
+  products: ProductVersion[];
+  /** NVD answers per cpe (VersionCveService.cached()). */
+  cves: Record<string, { cves: NvdCve[] } | undefined>;
+}
+
+/** Product versions Cerebro knows, from connection tests (`tested[instanceId].version`) and UniFi device firmware. */
+export function productVersions(input: BuildInput, graph: TopologyGraph, tested: Record<string, Record<string, unknown> | null>): ProductVersion[] {
+  const out: ProductVersion[] = [];
+  const ver = (v: unknown) => {
+    const m = /\d+(?:\.\d+)+/.exec(String(v ?? ''));
+    return m ? m[0] : null;
+  };
+  for (const p of input.proxmox) {
+    const v = ver(tested[p.inst.id]?.version);
+    const node = graph.nodes.find((n) => n.roles.includes('Proxmox node') && n.sources.some((s) => s.connectorId === 'proxmox' && s.instanceId === p.inst.id));
+    if (v) out.push({ cpe: 'proxmox:virtual_environment', product: 'Proxmox VE', version: v, where: p.inst.name, nodeId: node?.id });
+  }
+  for (const n of input.npm) {
+    const v = ver(tested[n.inst.id]?.version);
+    const node = n.baseHost ? graph.nodes.find((x) => x.ips.includes(n.baseHost!)) : undefined;
+    if (v) out.push({ cpe: 'jc21:nginx_proxy_manager', product: 'Nginx Proxy Manager', version: v, where: n.inst.name, nodeId: node?.id });
+  }
+  for (const u of input.unifi) {
+    const v = ver(tested[u.inst.id]?.version);
+    const gw = u.devices.find((d) => /gateway/i.test(String(d.details?.type ?? '')));
+    if (v) out.push({ cpe: 'ui:unifi_network_application', product: 'UniFi Network', version: v, where: u.inst.name, nodeId: gw ? `dev:${gw.id.toLowerCase()}` : undefined });
+    for (const d of u.devices) {
+      const t = String(d.details?.type ?? '');
+      // "5.1.34.34103": the 4th part is a build number; NVD ranges use the release (5.1.34).
+      const fw = ver(d.details?.firmware)?.split('.').slice(0, 3).join('.');
+      if (!fw) continue;
+      // A UniFi console's firmware version is its UniFi OS version.
+      if (/gateway/i.test(t)) out.push({ cpe: 'ui:unifi_os', product: 'UniFi OS', version: fw, where: d.name, nodeId: `dev:${d.id.toLowerCase()}` });
+      else if (/switch/i.test(t)) out.push({ cpe: 'ui:unifi_switch_firmware', product: 'UniFi switch firmware', version: fw, where: d.name, nodeId: `dev:${d.id.toLowerCase()}` });
+      // Access points: NVD has no CPE for current AP firmware, so there's nothing to match.
+    }
+  }
+  return out;
+}
+
+function versionCveFindings(vc: VersionCveInput, intel: OutsideInData | null): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  // Same product + version on several devices (e.g. switches) → one finding.
+  const groups = new Map<string, ProductVersion[]>();
+  for (const p of vc.products) {
+    const k = `${p.cpe}|${p.version}`;
+    groups.set(k, [...(groups.get(k) ?? []), p]);
+  }
+  for (const ps of groups.values()) {
+    const { cpe, product, version } = ps[0];
+    const hits = (vc.cves[cpe]?.cves ?? [])
+      .map((c) => ({ c, r: affects(version, c), kev: intel?.kev.get(c.id.toUpperCase()) }))
+      .filter((h): h is { c: NvdCve; r: NonNullable<ReturnType<typeof affects>>; kev: ReturnType<NonNullable<typeof intel>['kev']['get']> } => !!h.r);
+    if (!hits.length) continue;
+    const kevN = hits.filter((h) => h.kev).length;
+    const critN = hits.filter((h) => h.c.severity === 'CRITICAL').length;
+    const highN = hits.filter((h) => h.c.severity === 'HIGH').length;
+    const severity: PostureSeverity = kevN || critN ? 'high' : highN ? 'medium' : 'low';
+    // The lowest version clear of every matched range ("fixed in").
+    const fixes = hits.map((h) => (h.r.end && !h.r.endIncl ? h.r.end : null)).filter((x): x is string => !!x);
+    const fixAt = fixes.sort(cmpVersion).pop();
+    const nvd = (id: string) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`;
+    hits.sort((a, b) => Number(!!b.kev) - Number(!!a.kev) || (b.c.score ?? 0) - (a.c.score ?? 0));
+    out.push({
+      id: `version-cve-${cpe.replace(/[^a-z0-9]+/gi, '-')}`,
+      severity,
+      category: 'patching',
+      title: `${product} ${version} has ${plural(hits.length, 'known vulnerability', 'known vulnerabilities')}`,
+      why:
+        `NVD lists ${hits.length === 1 ? 'this CVE' : 'these CVEs'} for ${product} ${version}` +
+        (critN || highN ? ` (${[critN && `${critN} critical`, highN && `${highN} high`].filter(Boolean).join(', ')})` : '') +
+        '.' + (kevN ? ` ${plural(kevN, 'is', 'are')} on CISA's Known Exploited list, so attackers are using ${kevN === 1 ? 'it' : 'them'} now.` : ''),
+      fix: fixAt ? `Update ${product} to ${fixAt} or later.` : `Update ${product} to the newest release; check each CVE for the fixed version.`,
+      affected: [
+        ...ps.map((p) => ({ label: p.where, nodeId: p.nodeId, note: `${product} ${version}` })),
+        ...hits.slice(0, 15).map((h) => ({
+          label: h.c.id,
+          url: nvd(h.c.id),
+          note: [
+            h.c.score != null ? `CVSS ${h.c.score}${h.c.severity ? ` ${h.c.severity.toLowerCase()}` : ''}` : null,
+            h.r.end ? (h.r.endIncl ? `affects up to ${h.r.end}` : `fixed in ${h.r.end}`) : h.r.exact ? `affects ${h.r.exact}` : null,
+            h.kev ? 'on CISA KEV' : null,
+            h.c.summary ?? null,
+          ].filter(Boolean).join(' · '),
+        })),
+      ],
+      source: kevN ? 'NVD + CISA KEV' : 'NVD',
+    });
+  }
+  return out;
+}
+
+
+
+// ── certificate transparency (crt.sh) ─────────────────────────────────────
+
+export interface CtInput {
+  /** Cloudflare DNS record names (the map doesn't carry these). */
+  extraNames: string[];
+  store: CtStore;
+}
+
+/** Your public domains: Cloudflare zones plus the registrable part of every proxied/tunnelled name. */
+export function ctDomains(graph: TopologyGraph, zones: string[], registrable: (n: string) => string | null): string[] {
+  const out = new Set(zones.map((z) => z.toLowerCase()));
+  for (const n of graph.nodes) if (n.type === 'dns_name') { const r = registrable(n.label); if (r) out.add(r); }
+  return [...out].sort();
+}
+
+const NEW_DAYS = 14;
+
+function ctLogFindings(input: BuildInput, graph: TopologyGraph, ct: CtInput, now: Date): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  const known = new Set<string>(ct.extraNames.map((n) => n.toLowerCase().replace(/\.$/, '')));
+  for (const n of graph.nodes) if (n.type === 'dns_name') known.add(n.label.toLowerCase());
+  for (const n of input.npm) {
+    for (const h of n.proxyHosts) for (const d of String(h.details?.domains ?? h.name ?? '').split(/[\s,]+/)) if (d) known.add(d.toLowerCase());
+    for (const c of n.certificates ?? []) for (const d of String(c.details?.domains ?? c.name ?? '').split(/[\s,]+/)) if (d) known.add(d.toLowerCase());
+  }
+  const domains = Object.keys(ct.store);
+  const isKnown = (name: string) => {
+    if (name.startsWith('*.')) return true; // a wildcard says nothing about which names you use
+    if (known.has(name) || domains.includes(name) || domains.some((d) => name === `www.${d}`)) return true;
+    // Covered by one of your own wildcard records/hosts.
+    for (const k of known) if (k.startsWith('*.') && name.endsWith(k.slice(1)) && !name.slice(0, -k.length + 1).includes('.')) return true;
+    return false;
+  };
+  const t = (iso: string) => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`).getTime();
+  const crt = (id: number) => `https://crt.sh/?id=${id}`;
+  const newCut = now.getTime() - NEW_DAYS * DAY;
+
+  type Item = { label: string; url: string; note: string };
+  const fresh: Item[] = [];
+  const stale = new Map<string, Item & { at: number }>();
+  for (const [domain, e] of Object.entries(ct.store)) {
+    const certs = e.certs.filter((c) => t(c.notAfter) > now.getTime());
+    const issuersBefore = new Set(e.certs.filter((c) => t(c.notBefore) < newCut).map((c) => c.issuer.replace(/\s*\(.*\)$/, '')));
+    for (const c of certs) {
+      const unknown = c.names.filter((n) => (n === domain || n.endsWith(`.${domain}`)) && !isKnown(n));
+      const isNew = t(c.notBefore) >= newCut;
+      const org = c.issuer.replace(/\s*\(.*\)$/, '');
+      // Cloudflare's edge certificates (apex + wildcard only) switch CAs on their own; not a signal.
+      const edgeOnly = c.names.every((n) => n === domain || n === `*.${domain}`);
+      const newIssuer = isNew && !edgeOnly && issuersBefore.size > 0 && !issuersBefore.has(org);
+      if (isNew && (unknown.length || newIssuer)) {
+        fresh.push({
+          label: (unknown.length ? unknown : c.names).slice(0, 3).join(', ') + (Math.max(unknown.length, c.names.length) > 3 ? ' …' : ''),
+          url: crt(c.id),
+          note: [`issued ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}`, unknown.length ? 'name not in Cerebro' : null, newIssuer ? `a CA ${domain} hasn't used before` : null].filter(Boolean).join(' · '),
+        });
+      } else if (!isNew) {
+        for (const n of unknown) {
+          const prev = stale.get(n);
+          if (!prev || prev.at < t(c.notBefore)) stale.set(n, { label: n, url: crt(c.id), note: `certificate from ${fmtDayUTC(new Date(t(c.notBefore)))} by ${c.issuer}, valid to ${fmtDayUTC(new Date(t(c.notAfter)))}`, at: t(c.notBefore) });
+        }
+      }
+    }
+  }
+  // A name already flagged as new isn't listed again as stale.
+  if (fresh.length)
+    out.push({
+      id: 'ct-new-certs',
+      severity: 'medium',
+      category: 'exposure',
+      title: `${plural(fresh.length, 'certificate was', 'certificates were')} issued for your domains in the last ${NEW_DAYS} days that ${fresh.length === 1 ? "doesn't" : "don't"} match what Cerebro knows`,
+      why: "Every public certificate is logged in Certificate Transparency. One for a name you don't serve, or from a CA you don't use, can mean someone else got a certificate for your domain (a hijacked DNS record or account), or a service you set up outside what Cerebro sees.",
+      fix: 'Open each one on crt.sh. If you recognise it (a new service, Microsoft 365, a hosted app), add it to Cloudflare/NPM or snooze this. If not, check who controls that DNS name and revoke the certificate through the issuing CA.',
+      affected: fresh.slice(0, 25),
+      source: 'crt.sh',
+    });
+  const staleItems = [...stale.values()].sort((a, b) => b.at - a.at).map(({ at: _at, ...i }) => i);
+  if (staleItems.length)
+    out.push({
+      id: 'ct-unknown-names',
+      severity: 'low',
+      category: 'exposure',
+      title: `${plural(staleItems.length, 'hostname has', 'hostnames have')} a valid public certificate but nothing in Cerebro serves ${staleItems.length === 1 ? 'it' : 'them'}`,
+      why: "Anyone can list these names from the public certificate logs. If one is left over from a service you removed, its DNS record may still point somewhere you don't control any more (a subdomain takeover).",
+      fix: 'Remove DNS records for names you no longer use. Names served by something Cerebro doesn\'t watch (a hosted service) are fine; snooze this.',
+      affected: staleItems.slice(0, 30),
+      source: 'crt.sh',
+    });
+  return out;
+}
+
+
+// ── Have I Been Pwned (free catalogue: was a site on your domains breached?) ─
+
+function hibpFindings(domains: string[], breaches: HibpBreach[], now: Date): PostureFinding[] {
+  const hits = breaches.filter((b) => domains.some((d) => b.domain === d || b.domain.endsWith(`.${d}`)));
+  if (!hits.length) return [];
+  const recent = (b: HibpBreach) => !!b.breachDate && now.getTime() - new Date(b.breachDate).getTime() < 2 * 365 * DAY;
+  const sev = (b: HibpBreach): PostureSeverity => (recent(b) ? (b.dataClasses.some((c) => /password/i.test(c)) ? 'high' : 'medium') : 'low');
+  const worst = hits.map(sev).sort((a, b) => SEV_RANK[b] - SEV_RANK[a])[0];
+  hits.sort((a, b) => String(b.breachDate).localeCompare(String(a.breachDate)));
+  return [{
+    id: 'hibp-site-breach',
+    severity: worst,
+    category: 'exposure',
+    title: `Have I Been Pwned lists ${plural(hits.length, 'breach', 'breaches')} of a site on your domains`,
+    why: "The site's user data was taken and is circulating. Anyone with an account there should assume the listed data is public; reused passwords are the main risk.",
+    fix: 'Make sure the hole is closed, reset the affected accounts\' passwords (and anywhere they reused them), and tell the users if you haven\'t already. Snooze this once that\'s done; it comes back only if a new breach is listed.',
+    affected: hits.map((b) => ({
+      label: `${b.title} (${b.domain})`,
+      url: `https://haveibeenpwned.com/PwnedWebsites#${encodeURIComponent(b.name)}`,
+      note: [b.breachDate && `breached ${b.breachDate}`, b.pwnCount != null && `${b.pwnCount.toLocaleString('en-US')} accounts`, b.dataClasses.slice(0, 5).join(', ')].filter(Boolean).join(' · '),
+    })),
+    source: 'Have I Been Pwned',
+  }];
+}
+
+
+// ── NPM access lists and public DNS (shared with exposure paths) ───────────
+
+const PRIVATE_V4: [number, number][] = [[0x0a000000, 8], [0xac100000, 12], [0xc0a80000, 16], [0x7f000000, 8], [0x64400000, 10], [0xa9fe0000, 16]];
+/** Is this access-list address (IP or CIDR) inside private / local space? */
+export function isPrivateAddr(addr: string): boolean {
+  const a = addr.trim().toLowerCase();
+  if (/^(fd|fc|fe80|::1)/.test(a)) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(a);
+  if (!m) return false;
+  const ip = ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0;
+  const len = m[5] != null ? +m[5] : 32;
+  return PRIVATE_V4.some(([net, bits]) => len >= bits && ((ip >>> (32 - bits)) << (32 - bits)) >>> 0 === net);
+}
+
+/** What a proxy host's NPM access list does: LAN only, a password login, an IP allow-list, or unknown. */
+export function npmAcl(lists: ConnectorResource[] | undefined, p: ConnectorResource): { name: string | null; kind: 'lan' | 'login' | 'ip' | 'unknown' | 'none' } {
+  const raw = str(p.details?.access_list);
+  if (!raw || /^public$/i.test(raw)) return { name: null, kind: 'none' };
+  const ref = raw.replace(/^#/, '');
+  const l = (lists ?? []).find((x) => x.id === ref || x.name === raw);
+  if (!l) return { name: `#${ref}`, kind: 'unknown' };
+  const users = Number(l.details?.auth_users ?? 0);
+  const rules = (str(l.details?.clients) ?? '').split(',').map((r) => r.trim()).filter(Boolean).map((r) => { const [d, ...a] = r.split(/\s+/); return { allow: d.toLowerCase() === 'allow', addr: a.join(' ') }; });
+  const allows = rules.filter((r) => r.allow);
+  const satisfyAny = /^any$/i.test(str(l.details?.satisfy) ?? '');
+  // NPM denies everyone else once there's an allow rule. "Satisfy any" + a login lets a password in from anywhere.
+  if (allows.length && allows.every((r) => r.addr !== 'all' && isPrivateAddr(r.addr)) && !(satisfyAny && users > 0)) return { name: l.name, kind: 'lan' };
+  if (users > 0) return { name: l.name, kind: 'login' };
+  if (Number(l.details?.client_rules ?? 0) > 0) return { name: l.name, kind: 'ip' };
+  return { name: l.name, kind: 'unknown' };
+}
+
+/** Does this name have a public DNS record? "unknown" when its zone isn't in a Cloudflare connector. */
+export function publicDnsState(input: BuildInput, name: string): 'listed' | 'unlisted' | 'unknown' {
+  const pd = input.publicDns;
+  const n = name.trim().toLowerCase().replace(/\.$/, '');
+  if (!pd) return 'unknown';
+  const zone = pd.zones.find((z) => n === z || n.endsWith(`.${z}`));
+  // Not a Cloudflare zone: use what public resolvers said, if they answered.
+  if (!zone) return pd.resolved?.[n] === true ? 'listed' : pd.resolved?.[n] === false ? 'unlisted' : 'unknown';
+  const names = new Set(pd.names.map((x) => x.toLowerCase().replace(/\.$/, '')));
+  if (names.has(n)) return 'listed';
+  const parent = n.slice(n.indexOf('.') + 1);
+  if (n !== zone && names.has(`*.${parent}`)) return 'listed';
+  return 'unlisted';
+}
+
+
+/** Per public name served by NPM (dns node id): what guards it, for exposure paths. */
+export function npmNameGuards(input: BuildInput): Map<string, { lan: boolean; marked?: boolean; notes: string[] }> {
+  const out = new Map<string, { lan: boolean; marked?: boolean; notes: string[] }>();
+  const marked = new Set((input.internalNames ?? []).map((x) => x.toLowerCase()));
+  for (const n of input.npm)
+    for (const p of n.proxyHosts) {
+      const a = npmAcl(n.accessLists, p);
+      const ssl = !/^off$/i.test(str(p.details?.ssl) ?? '');
+      const notes = [
+        a.kind === 'login' ? `password login (${a.name})` : a.kind === 'ip' ? `IP allow-list (${a.name})` : a.kind === 'unknown' && a.name ? `access list ${a.name}` : a.kind === 'none' ? 'no access list' : null,
+        ssl ? null : 'plain HTTP',
+        publicDnsState(input, p.name) === 'unlisted' ? (a.kind === 'ip' ? 'not in public DNS' : 'not in public DNS (reachable if someone knows the name)') : null,
+      ].filter((x): x is string => !!x);
+      for (const name of (str(p.details?.domains) ?? p.name).split(/[,\s]+/).filter(Boolean)) {
+        const m = marked.has(name.toLowerCase());
+        out.set(`dns:${name.toLowerCase()}`, { lan: a.kind === 'lan' || m, marked: m && a.kind !== 'lan', notes });
+      }
+    }
+  // Tunnel names you marked internal.
+  for (const n of marked) if (!out.has(`dns:${n}`)) out.set(`dns:${n}`, { lan: true, marked: true, notes: [] });
+  return out;
+}

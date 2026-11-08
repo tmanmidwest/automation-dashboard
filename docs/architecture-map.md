@@ -128,15 +128,70 @@ internet can see, from free public sources with no keys:
 | Containers whose release loses support within 90 days | Low | endoflife.date + Docker |
 | Shodan tags on the WAN address (compromised / malware → High, end-of-life → Medium, self-signed → Low) | varies | Shodan InternetDB |
 
+| Known CVEs for the Proxmox VE, Nginx Proxy Manager, UniFi Network, UniFi OS (console firmware) and UniFi switch firmware versions you run | High if any is critical or on CISA's Known Exploited list, Medium if high, else Low | NVD + CISA KEV |
+
+Versions come from each connector's connection test (Proxmox, NPM, UniFi Network) and
+from UniFi device firmware (the console's firmware is its UniFi OS version; the build
+number after the third part is dropped). NVD is queried once a day per product, in the
+background, by CPE (`proxmox:virtual_environment`, `jc21:nginx_proxy_manager`,
+`ui:unifi_network_application`, `ui:unifi_os`, `ui:unifi_switch_firmware`) and the
+version check happens in Cerebro, so only product names leave. Only CVEs where NVD gives a
+version range or an exact version count. NVD has no CPE for current UniFi access point
+firmware (U6/U7), and lists few UniFi OS CVEs, so a clean result there means "nothing in
+NVD", not "no advisories"; the firmware-update finding still covers them. Without a key NVD
+allows 5 requests per 30 s, which is plenty here; set `NVD_API_KEY` to go faster.
+
+| Certificates issued in the last 14 days for a name nothing in Cerebro serves, or from a CA that domain hasn't used before | Medium | crt.sh (Certificate Transparency) |
+| Hostnames with a valid public certificate that nothing in Cerebro serves (possible leftover DNS / subdomain takeover) | Low | crt.sh |
+| A website on one of your domains is listed as breached | High if within 2 years and passwords leaked, Medium if within 2 years, else Low | Have I Been Pwned (free catalogue) |
+
+Your domains are the Cloudflare zones plus the registrable part of every name on the map
+(NPM proxy hosts, tunnel routes); internal names (`.internal`, `.lan`…) are skipped. A name
+counts as known when it's an NPM proxy host or certificate, a tunnel route, a Cloudflare DNS
+record, the bare domain or `www.`; wildcard certificates are ignored, and so are CA changes on
+apex + wildcard certificates (Cloudflare's edge certificates switch CAs on their own).
+crt.sh is queried once a day per domain in the background (it's free and often slow, so a
+failed query is retried after 3 hours). Each item links to its crt.sh entry. The Have I Been Pwned check downloads
+HIBP's public breach catalogue once a day and matches it against the same domains inside
+Cerebro, so nothing about your domains is sent. Which of your *addresses* appear in breaches
+would need a paid HIBP API key and domain verification; that part isn't built.
+
 The port-forward finding also says whether Shodan has already listed that port. Outside-in findings link to their evidence instead of the map: Shodan's page for the
 address, the NVD entry for each CVE, and (for end-of-life software on the WAN) the bare
 `http://` / `https://` WAN address, which is the page scanners actually see. The WAN
 address is the UniFi gateway's public IP. What leaves Cerebro: the WAN address (to
-`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date`), and a
+`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date` and `services.nvd.nist.gov`), your domain names (to `crt.sh`), a download of HIBP's breach catalogue, and a
 download of the CISA KEV list. Answers are cached (Shodan 6 h, others 24 h); if a source
 is down the last good answer is used and the row says so. Shodan refreshes its scan data
 every few days, so a port you just closed can linger. Image versions come from the tag
 (`postgres:15-alpine` → 15); `latest` and untagged images are skipped.
+
+**Container image CVE scan** (on by default; *Scan now* and *Turn off* in the Posture
+findings row; `POST /api/topology/image-scan` starts a scan (`connectors:action`),
+`PUT /api/topology/image-scan {enabled}` switches it (`connectors:write`), both audited).
+Once a night at 3 am Cerebro runs [Trivy](https://trivy.dev), bundled in the Cerebro
+image, against every image a running container uses. It scans the exact image by its
+registry digest (`repo@sha256:…`) straight from the registry, so nothing runs on the
+Docker hosts. An unchanged digest is rescanned after a day (new CVEs get published
+against old images). Locally built images (no registry digest) are skipped.
+
+| Check | Severity | Source |
+|---|---|---|
+| Image has a CVE on CISA's Known Exploited list | High | Trivy + CISA KEV (needs outside-in checks on) |
+| Image has critical CVEs with a fixed package version | Medium, High if internet-facing | Trivy |
+| Image has high CVEs with a fix (and no fixable critical) | Low | Trivy |
+
+Unfixed CVEs are counted but don't raise a finding on their own (there's nothing to do
+yet), unless they're on the KEV list. Each affected container names an example CVE with
+the package and fixed version, and links to its NVD entry. Results are kept in settings
+(`posture.imageScan.results`) so a restart doesn't lose them. What leaves Cerebro: Trivy
+downloads its vulnerability database (`mirror.gcr.io` / `ghcr.io`) and image layers from
+each image's registry (Docker Hub, ghcr.io, lscr.io…), so the server needs outbound HTTPS
+to those. Private registries that need a login show up as "couldn't be pulled". The
+database (~1 GB unpacked) lives in `/data/trivy`; `docker-compose.yml` mounts the
+`cerebro_trivy` volume there so it survives redeploys. The Dockerfile pins the Trivy
+release (`TRIVY_VERSION`) and checks it against a pinned checksum; if that check fails
+the image builds without Trivy and the row says the scan is unavailable.
 
 **Badges and Posture view.** Every tile carries a badge with its worst finding (e.g.
 "1 HIGH"), rolled up from what's inside it, so a VLAN shows the findings of its machines.
@@ -152,6 +207,47 @@ under the **Snoozed** filter.
 
 Findings are computed in `apps/server/src/topology/posture.ts` each time the map is
 rebuilt and returned as `findings` on `GET /api/topology`.
+
+## Exposure paths
+
+Open **Exposed to the internet** in Needs attention (or the Internet tile) to see every way in
+and what it reaches, hop by hop:
+
+- **WAN port forwards**, grouped by the machine they land on ("WAN :80, :443"). When that's
+  Nginx Proxy Manager, each proxy host becomes a path: proxy → public name → backend.
+- **Cloudflare tunnels**: tunnel → public name → backend.
+
+Each hop is outlined by its worst posture finding and lists them underneath (a finding on what
+the hop runs on, like the VM's backup, says "on ubuDocker02"). Click a hop to open it.
+
+**What counts as reachable.** NPM picks a host by the name in the request, so every proxy
+host behind a forwarded port is reachable unless something turns outsiders away:
+
+- An access list that allows only private ranges (10/8, 172.16/12, 192.168/16, 100.64/10,
+  link-local, IPv6 ULA) is **LAN only**: the host drops out of the paths and its plain-HTTP
+  finding drops to Low. ("Satisfy any" with a password login still lets the internet in.)
+- A name with **no public DNS record** stays on the path, noted "reachable if someone knows
+  the name". Names leak through certificate logs, and anyone can send any name to the WAN.
+  For Cloudflare zones Cerebro reads the zone's records; for other domains it asks a public
+  DNS-over-HTTPS resolver, so home DNS (Technitium, or the gateway catching port 53) can't
+  answer instead. The resolver is Cloudflare's by default; *Change* it in the Posture
+  findings row (`PUT /api/topology/public-dns-resolver {url}`, any DoH JSON endpoint such as
+  `https://dns.google/resolve`). Nothing about your domains is configured in code: they come
+  from the Cloudflare and NPM connectors.
+- **Treat as internal** on a path is for names only your network can use in a way Cerebro
+  can't see (a firewall rule on the backend, say). They leave the paths and the internet
+  findings and are listed under "Marked internal by you" with *Undo*
+  (`PUT /api/topology/internal-names {name, internal}`, settings `posture.internalNames`,
+  `connectors:write`, audited).
+
+**Combination findings.** Where two or more kinds of Medium-or-worse problem line up on one
+path (say plain HTTP + an outdated or vulnerable image + an old backup), a finding "N paths
+from the internet stack several kinds of problem" lists those paths: High when one of the
+problems is High or three kinds stack, else Medium. The proxy every path shares is left out
+of the count, since its problems are its own findings.
+
+Paths are built from the map's edges after the findings (`apps/server/src/topology/exposure.ts`)
+and returned as `exposure` on `GET /api/topology`.
 
 ## Show as map
 
@@ -190,6 +286,5 @@ counts, "reached from"), `FocusMap.tsx` (Show as map) and `NodeDetails.tsx`.
 
 ## Not yet
 
-Planned next: exposure paths (internet → proxy → machine, hop by hop, as "Show as map"),
-saved views and
+Planned next: saved views and
 manual links for what can't be inferred, and live status push.
