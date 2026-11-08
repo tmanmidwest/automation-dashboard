@@ -1,6 +1,7 @@
 import type { ConnectorResource, PostureFinding, PostureSeverity, TopologyGraph, TopoNode } from '@cerebro/shared';
 import type { BuildInput } from './topology.builder';
 import type { OutsideInData } from './outside-in.service';
+import type { ImageScanResult } from './image-scan.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -45,7 +46,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -341,6 +342,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
   }
 
   if (intel) out.push(...outsideInFindings(input, graph, intel, now));
+  if (scans) out.push(...imageCveFindings(input, graph, scans, intel ?? null));
 
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
@@ -601,3 +603,82 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
 
 const fmtDayUTC = (d: Date) => d.toISOString().slice(0, 10);
 const shodanUrl = (ip: string) => `https://www.shodan.io/host/${encodeURIComponent(ip)}`;
+
+
+// ── container image CVEs (Trivy results + CISA KEV) ────────────────────────
+
+function imageCveFindings(input: BuildInput, graph: TopologyGraph, scans: Record<string, ImageScanResult>, intel: OutsideInData | null): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const fromInternet = new Set(graph.edges.filter((e) => e.source === 'internet' && (e.type === 'forwards' || e.type === 'resolves')).map((e) => e.target));
+  for (const e of graph.edges) if (e.type === 'forwards' && fromInternet.has(e.source) && byId.get(e.source)?.type === 'dns_name') fromInternet.add(e.target);
+  const nvd = (id: string) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`;
+
+  type Row = { label: string; nodeId?: string; exposed: boolean; scan: ImageScanResult; image: string; host: string };
+  const rows: Row[] = [];
+  for (const d of input.docker) for (const c of d.containers) {
+    const rd = str(c.details?.repo_digest);
+    const scan = rd ? scans[rd] : undefined;
+    if (!scan || scan.error) continue;
+    const nodeId = `ctr:${d.inst.id}:${c.id.slice(0, 12)}`;
+    const node = byId.get(nodeId);
+    rows.push({ label: c.name || node?.label || c.id.slice(0, 12), nodeId: node ? nodeId : undefined, exposed: fromInternet.has(nodeId), scan, image: str(c.details?.image) ?? rd!, host: d.inst.name });
+  }
+  const top = (s: ImageScanResult, pred: (v: ImageScanResult['vulns'][number]) => boolean) => s.vulns.find(pred);
+  const example = (v?: ImageScanResult['vulns'][number]) => (v ? `e.g. ${v.id} in ${v.pkg} ${v.installed}${v.fixed ? ` → ${v.fixed}` : ' (no fix yet)'}` : '');
+  const urlOf = (v?: ImageScanResult['vulns'][number]) => (v ? nvd(v.id) : undefined);
+  const countsText = (s: ImageScanResult) => [s.counts.critical && `${s.counts.critical} critical`, s.counts.high && `${s.counts.high} high`, `${s.counts.fixable} fixable`].filter(Boolean).join(', ');
+
+  // 1. CVEs on CISA's Known Exploited list.
+  if (intel?.kev.size) {
+    const kevRows = rows
+      .map((r) => ({ r, kev: r.scan.ids.filter((id) => intel.kev.has(id.toUpperCase())) }))
+      .filter((x) => x.kev.length);
+    if (kevRows.length)
+      out.push({
+        id: 'image-cve-kev',
+        severity: 'high',
+        category: 'patching',
+        title: `${plural(kevRows.length, 'container runs', 'containers run')} an image with an actively exploited vulnerability`,
+        why: "These CVEs are on CISA's Known Exploited Vulnerabilities list: attackers are using them now." + (kevRows.some((x) => x.r.exposed) ? ' At least one of these containers is reachable from the internet.' : ''),
+        fix: 'Update the image (pull a newer tag or digest and recreate the container). If no fixed release exists yet, limit who can reach the container.',
+        affected: kevRows.map(({ r, kev }) => {
+          const k = intel.kev.get(kev[0].toUpperCase());
+          return { label: r.label, nodeId: r.nodeId, url: nvd(kev[0]), note: `${kev.join(', ')}${k?.vulnerabilityName ? ` (${k.vulnerabilityName})` : ''} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` };
+        }),
+        source: 'Trivy + CISA KEV',
+      });
+  }
+
+  // 2. Critical CVEs with a fix available.
+  const crit = rows.filter((r) => r.scan.vulns.some((v) => v.severity === 'CRITICAL' && v.fixed));
+  if (crit.length)
+    out.push({
+      id: 'image-cve-critical',
+      severity: crit.some((r) => r.exposed) ? 'high' : 'medium',
+      category: 'patching',
+      title: `${plural(crit.length, 'container has', 'containers have')} critical vulnerabilities with a fix available`,
+      why: 'A fixed version of the affected package exists, so updating the image usually clears these.' + (crit.some((r) => r.exposed) ? ' At least one is reachable from the internet.' : ''),
+      fix: 'Pull the newest image for the tag and recreate the container. If the newest image still has them, the maintainer hasn\'t rebuilt yet; check again in a few days or pin a newer tag.',
+      affected: crit
+        .sort((a, b) => Number(b.exposed) - Number(a.exposed) || b.scan.counts.critical - a.scan.counts.critical)
+        .map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed))} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` })),
+      source: 'Trivy',
+    });
+
+  // 3. High CVEs with a fix (and no fixable critical).
+  const high = rows.filter((r) => !crit.includes(r) && r.scan.vulns.some((v) => v.severity === 'HIGH' && v.fixed));
+  if (high.length)
+    out.push({
+      id: 'image-cve-high',
+      severity: 'low',
+      category: 'patching',
+      title: `${plural(high.length, 'container has', 'containers have')} high-severity vulnerabilities with a fix available`,
+      why: 'Not critical, but fixed versions exist; they usually clear with the next image update.',
+      fix: 'Update these images during normal maintenance.',
+      affected: high.map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'HIGH' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'HIGH' && !!v.fixed))} · ${r.image} · on ${r.host}` })),
+      source: 'Trivy',
+    });
+
+  return out;
+}

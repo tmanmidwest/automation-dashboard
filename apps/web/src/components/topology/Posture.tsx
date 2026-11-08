@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BellOff, Bell, ExternalLink, ChevronDown, ChevronRight, Crosshair, ShieldCheck, X } from 'lucide-react';
-import type { OutsideInSummary, PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
+import type { ImageScanSummary, OutsideInSummary, PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/auth/AuthContext';
@@ -133,9 +133,10 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
 }
 
 /** The open row for Needs attention → Posture findings. */
-export function PostureRow({ findings, outsideIn, onShow, onChanged, onClose }: {
+export function PostureRow({ findings, outsideIn, imageScan, onShow, onChanged, onClose }: {
   findings: PostureFinding[];
   outsideIn?: OutsideInSummary;
+  imageScan?: ImageScanSummary;
   onShow: (nodeId: string) => void;
   onChanged: () => void;
   onClose: () => void;
@@ -158,6 +159,7 @@ export function PostureRow({ findings, outsideIn, onShow, onChanged, onClose }: 
         <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
       </div>
       <OutsideInLine info={outsideIn} onChanged={onChanged} />
+      <ImageScanLine info={imageScan} onChanged={onChanged} />
       <div className="flex flex-wrap gap-1.5" role="tablist">
         {tabs.map((t) => (
           <button key={t.key} role="tab" aria-selected={cat === t.key} onClick={() => setCat(t.key)}
@@ -204,6 +206,49 @@ function OutsideInLine({ info, onChanged }: { info?: OutsideInSummary; onChanged
       {info.errors.length > 0 && <span className="text-amber-600 dark:text-amber-300">Couldn't reach {info.errors.join(', ')} (using the last data Cerebro has)</span>}
       {can('connectors:write') && (
         <button className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={toggle}>{info.enabled ? 'Turn off' : 'Turn on'}</button>
+      )}
+    </div>
+  );
+}
+
+/** Status of the nightly container image CVE scan, with Scan now and the on/off switch. */
+function ImageScanLine({ info, onChanged }: { info?: ImageScanSummary; onChanged: () => void }) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const running = !!info?.running;
+  // While a scan runs, refresh the map every 15 s so progress and new findings show up.
+  useEffect(() => {
+    if (!running) return;
+    const t = window.setInterval(onChanged, 15_000);
+    return () => window.clearInterval(t);
+  }, [running, onChanged]);
+  if (!info) return null;
+  const call = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const when = info.lastRunAt ? new Date(info.lastRunAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted-foreground">
+      <span className="font-medium text-foreground/80">Image CVE scan {info.enabled ? 'on' : 'off'}</span>
+      {info.enabled && !info.available && <span className="text-amber-600 dark:text-amber-300">Trivy isn't installed in this Cerebro image; rebuild the image to enable it</span>}
+      {info.enabled && info.available && running && <span>Scanning{info.progress ? ` ${info.progress.done} of ${info.progress.total} images` : ''}…</span>}
+      {info.enabled && info.available && !running && (
+        <span>
+          {when ? `${info.scanned} image${info.scanned === 1 ? '' : 's'} scanned · last run ${when}` : 'Not run yet (runs nightly at 3 am)'}
+          {info.failed > 0 && <span className="text-amber-600 dark:text-amber-300"> · {info.failed} couldn't be pulled from their registry</span>}
+        </span>
+      )}
+      {info.enabled && info.available && !running && can('connectors:action') && (
+        <button className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={() => call(() => api.post('/api/topology/image-scan', {}))}>Scan now</button>
+      )}
+      {can('connectors:write') && (
+        <button className="text-accent hover:underline disabled:opacity-50" disabled={busy} onClick={() => call(() => api.put('/api/topology/image-scan', { enabled: !info.enabled }))}>{info.enabled ? 'Turn off' : 'Turn on'}</button>
       )}
     </div>
   );

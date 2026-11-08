@@ -848,10 +848,14 @@ export class DockerConnector implements Connector {
 
     if (kind === CONTAINER_KIND) {
       const containers = await api.listContainers(true);
-      const updates = await this.updatesByContainerId(api, containers).catch(() => new Map<string, boolean | null>());
+      const repoDigests = new Map<string, string>();
+      const updates = await this.updatesByContainerId(api, containers, repoDigests).catch(() => new Map<string, boolean | null>());
       return containers
         .map((c) => {
           const r = this.containerToResource(c);
+          // "repo@sha256:…" of the image actually running (absent for locally built images): what a CVE scan pulls.
+          const rd = c.ImageID ? repoDigests.get(c.ImageID) : undefined;
+          if (rd) r.details = { ...r.details, repo_digest: rd };
           if (c.Id && updates.get(c.Id) === true) r.tags = { ...r.tags, updates: 'available' };
           return r;
         })
@@ -1478,7 +1482,7 @@ export class DockerConnector implements Connector {
    * cached registry-digest comparison as the overview count. Non-blocking: unknown entries kick off
    * a background refresh. Used to surface "update available" on stacks and their member containers.
    */
-  private async updatesByContainerId(api: DockerApi, containers: DockerContainer[]): Promise<Map<string, boolean | null>> {
+  private async updatesByContainerId(api: DockerApi, containers: DockerContainer[], repoDigests?: Map<string, string>): Promise<Map<string, boolean | null>> {
     const out = new Map<string, boolean | null>();
     let images: Awaited<ReturnType<DockerApi['listImages']>>;
     try {
@@ -1487,7 +1491,11 @@ export class DockerConnector implements Connector {
       return out;
     }
     const digestByImageId = new Map<string, string | null>();
-    for (const im of images) digestByImageId.set(im.Id, DockerConnector.localDigest(im.RepoDigests));
+    for (const im of images) {
+      digestByImageId.set(im.Id, DockerConnector.localDigest(im.RepoDigests));
+      const rd = im.RepoDigests?.find((d) => d.includes('@'));
+      if (rd && repoDigests) repoDigests.set(im.Id, rd);
+    }
     for (const c of containers) {
       if (c.State !== 'running' || !c.Image || !c.ImageID || !c.Id) continue;
       const local = digestByImageId.get(c.ImageID);

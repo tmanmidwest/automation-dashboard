@@ -8,6 +8,7 @@ import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
 import { applySnoozes, buildFindings, eolProducts, wanIps, type Snooze } from './posture';
 import { OutsideInService } from './outside-in.service';
+import { ImageScanService } from './image-scan.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
 
@@ -43,6 +44,7 @@ export class TopologyService {
     private readonly logging: LoggingService,
     private readonly settings: SettingsService,
     private readonly outsideIn: OutsideInService,
+    private readonly imageScan: ImageScanService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -56,7 +58,9 @@ export class TopologyService {
       g = this.cache.graph;
     }
     // Snoozes are applied per request, so snoozing shows up without a rebuild.
-    return { ...g, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
+    // Scan status is live too (progress while a scan runs).
+    const imageScan = await this.imageScan.summary().catch(() => g.imageScan);
+    return { ...g, imageScan, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
   }
 
   private async snoozes(): Promise<Record<string, Snooze>> {
@@ -80,6 +84,18 @@ export class TopologyService {
   async setOutsideIn(on: boolean): Promise<void> {
     await this.outsideIn.setEnabled(on);
     this.cache = null;
+  }
+
+  /** Switch the nightly image CVE scan on or off. */
+  async setImageScan(on: boolean): Promise<void> {
+    await this.imageScan.setEnabled(on);
+    this.cache = null;
+  }
+
+  /** Start a scan of every running image now (returns at once; the map shows progress). */
+  async scanImagesNow(): Promise<void> {
+    this.cache = null;
+    void this.imageScan.scanAll(true).then(() => { this.cache = null; }).catch(() => undefined);
   }
 
   async unsnooze(id: string): Promise<boolean> {
@@ -106,8 +122,15 @@ export class TopologyService {
         } catch (err) {
           void this.logging.warn('topology', `Outside-in checks failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+        let scans = null;
         try {
-          graph.findings = buildFindings(input, graph, new Date(), intel);
+          graph.imageScan = await this.imageScan.summary();
+          if (graph.imageScan.enabled) scans = await this.imageScan.results();
+        } catch (err) {
+          void this.logging.warn('topology', `Image CVE results unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        try {
+          graph.findings = buildFindings(input, graph, new Date(), intel, scans);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];

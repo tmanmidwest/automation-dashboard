@@ -100,6 +100,20 @@ export interface TopologyGraph {
   findings?: PostureFinding[];
   /** What the outside-in checks saw (absent when they're switched off). */
   outsideIn?: OutsideInSummary;
+  /** Container image CVE scan status. */
+  imageScan?: ImageScanSummary;
+}
+
+/** Status of the container image CVE scan (Trivy). */
+export interface ImageScanSummary {
+  enabled: boolean;
+  /** False when Trivy isn't installed in this Cerebro image. */
+  available: boolean;
+  running: boolean;
+  progress?: { done: number; total: number };
+  lastRunAt?: string;
+  scanned: number;
+  failed: number;
 }
 
 /** Outside-in checks: public data about your WAN address and software versions. */

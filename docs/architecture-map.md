@@ -138,6 +138,33 @@ is down the last good answer is used and the row says so. Shodan refreshes its s
 every few days, so a port you just closed can linger. Image versions come from the tag
 (`postgres:15-alpine` → 15); `latest` and untagged images are skipped.
 
+**Container image CVE scan** (on by default; *Scan now* and *Turn off* in the Posture
+findings row; `POST /api/topology/image-scan` starts a scan (`connectors:action`),
+`PUT /api/topology/image-scan {enabled}` switches it (`connectors:write`), both audited).
+Once a night at 3 am Cerebro runs [Trivy](https://trivy.dev), bundled in the Cerebro
+image, against every image a running container uses. It scans the exact image by its
+registry digest (`repo@sha256:…`) straight from the registry, so nothing runs on the
+Docker hosts. An unchanged digest is rescanned after a day (new CVEs get published
+against old images). Locally built images (no registry digest) are skipped.
+
+| Check | Severity | Source |
+|---|---|---|
+| Image has a CVE on CISA's Known Exploited list | High | Trivy + CISA KEV (needs outside-in checks on) |
+| Image has critical CVEs with a fixed package version | Medium, High if internet-facing | Trivy |
+| Image has high CVEs with a fix (and no fixable critical) | Low | Trivy |
+
+Unfixed CVEs are counted but don't raise a finding on their own (there's nothing to do
+yet), unless they're on the KEV list. Each affected container names an example CVE with
+the package and fixed version, and links to its NVD entry. Results are kept in settings
+(`posture.imageScan.results`) so a restart doesn't lose them. What leaves Cerebro: Trivy
+downloads its vulnerability database (`mirror.gcr.io` / `ghcr.io`) and image layers from
+each image's registry (Docker Hub, ghcr.io, lscr.io…), so the server needs outbound HTTPS
+to those. Private registries that need a login show up as "couldn't be pulled". The
+database (~1 GB unpacked) lives in `/data/trivy`; `docker-compose.yml` mounts the
+`cerebro_trivy` volume there so it survives redeploys. The Dockerfile pins the Trivy
+release (`TRIVY_VERSION`) and checks it against a pinned checksum; if that check fails
+the image builds without Trivy and the row says the scan is unavailable.
+
 **Badges and Posture view.** Every tile carries a badge with its worst finding (e.g.
 "1 HIGH"), rolled up from what's inside it, so a VLAN shows the findings of its machines.
 **Posture view** (next to *Phones & IoT clients*, remembered per browser) tints each tile

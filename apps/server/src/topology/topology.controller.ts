@@ -50,6 +50,24 @@ export class TopologyController {
     return { enabled: dto.enabled };
   }
 
+  /** Container image CVE scan (Trivy, nightly): on by default. */
+  @Put('image-scan')
+  @RequirePermissions('connectors:write')
+  async imageScan(@Body() dto: OutsideInDto, @CurrentUser() user: SessionUser) {
+    await this.topology.setImageScan(dto.enabled);
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: dto.enabled ? 'posture.image_scan_enabled' : 'posture.image_scan_disabled' });
+    return { enabled: dto.enabled };
+  }
+
+  /** Scan every running image now instead of waiting for the nightly run. */
+  @Post('image-scan')
+  @RequirePermissions('connectors:action')
+  async scanNow(@CurrentUser() user: SessionUser) {
+    await this.topology.scanImagesNow();
+    await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.image_scan_started' });
+    return { started: true };
+  }
+
   @Delete('findings/:id/snooze')
   @RequirePermissions('connectors:action')
   async unsnooze(@Param('id') id: string, @CurrentUser() user: SessionUser) {

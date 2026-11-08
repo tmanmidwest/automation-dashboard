@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **CVE scan of running container images** — the Architecture Map's posture findings now
+  include a nightly Trivy scan of every image a running container uses, by registry digest
+  (nothing runs on the Docker hosts). Images with a CVE on CISA's Known Exploited list are
+  High; fixable critical CVEs are Medium (High if internet-facing); fixable high CVEs are
+  Low. *Scan now* and an on/off switch sit in the Posture findings row. Trivy is bundled in
+  the image (pinned, checksum-verified). See `docs/architecture-map.md#posture-findings`.
 - **App Replicator apps from a pasted compose** — register an app by pasting a compose
   file that runs prebuilt images instead of pointing at a Git repo. Variables and ports
   are read from it as usual, each deployment runs it as its own compose stack, and a

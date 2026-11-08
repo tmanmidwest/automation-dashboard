@@ -639,7 +639,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
           ips: [],
           macs: [],
           infra: true,
-          details: [{ source: d.inst.name, items: detailItems(c.details) }],
+          details: [{ source: d.inst.name, items: detailItems(c.details, ['repo_digest']) }],
           sources: [{ instanceId: d.inst.id, connectorId: 'docker', name: d.inst.name, kind: 'container', resourceId: c.id }],
         });
         for (const m of (ports ?? '').matchAll(/(\d+)→\d+/g)) portOwners.set(`${hostId}:${m[1]}`, cid);
