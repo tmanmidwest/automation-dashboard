@@ -16,8 +16,9 @@ const STORE_KEY = 'posture.ctLog';
 export const RESOLVER_KEY = 'posture.publicDnsResolver';
 export const DEFAULT_RESOLVER = 'https://cloudflare-dns.com/dns-query';
 const TTL_MS = 24 * 3600_000;
-const RETRY_MS = 3 * 3600_000;
+const RETRY_MS = 3600_000;
 /** crt.sh is a free shared service and often slow; be gentle. */
+// (falls back to Cert Spotter when crt.sh is down)
 const GAP_MS = 5_000;
 const TIMEOUT_MS = 60_000;
 
@@ -172,12 +173,57 @@ export class CtLogService {
     return changed;
   }
 
+  /**
+   * crt.sh first (most complete), retried once: its JSON endpoint often answers 502 when busy.
+   * If it still fails, SSLMate's Cert Spotter API (free, no key for this volume) answers instead.
+   */
   private async fetchDomain(domain: string): Promise<CtCert[]> {
-    const url = `https://crt.sh/?q=${encodeURIComponent(`%.${domain}`)}&output=json&exclude=expired`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS), headers: { accept: 'application/json', 'user-agent': 'Cerebro posture checks' } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return parseCrtSh(await res.text());
+    const headers = { accept: 'application/json', 'user-agent': 'Cerebro posture checks' };
+    let crtErr = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, 10_000));
+      try {
+        const res = await fetch(`https://crt.sh/?q=${encodeURIComponent(`%.${domain}`)}&output=json&exclude=expired`, { signal: AbortSignal.timeout(TIMEOUT_MS), headers });
+        // crt.sh answers 404 when it has no certificates for the name.
+        if (res.status === 404) return [];
+        if (res.ok) return parseCrtSh(await res.text());
+        crtErr = `crt.sh HTTP ${res.status}`;
+        if (res.status < 500) break;
+      } catch (err) {
+        crtErr = `crt.sh ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    try {
+      const u = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(domain)}&include_subdomains=true&expand=dns_names&expand=issuer`;
+      const res = await fetch(u, { signal: AbortSignal.timeout(TIMEOUT_MS), headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return parseCertSpotter(await res.json());
+    } catch (err) {
+      throw new Error(`${crtErr}; Cert Spotter ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
+}
+
+/** Cert Spotter issuances → the same shape as crt.sh (current certificates only). */
+export function parseCertSpotter(j: unknown): CtCert[] {
+  const rows = Array.isArray(j) ? (j as { id?: string; dns_names?: string[]; issuer?: { friendly_name?: string; name?: string }; not_before?: string; not_after?: string; revoked?: boolean }[]) : [];
+  const now = Date.now();
+  return rows
+    .filter((r) => r.not_before && r.not_after && new Date(r.not_after).getTime() > now)
+    .map((r, i) => {
+      const iss = r.issuer?.name ?? '';
+      const o = /(?:^|,\s*)O="?([^,"]+)"?/.exec(iss)?.[1];
+      const cn = /(?:^|,\s*)CN="?([^,"]+)"?/.exec(iss)?.[1];
+      return {
+        // Not a crt.sh id: negative, so links fall back to a crt.sh search for the name.
+        id: -(i + 1),
+        issuer: r.issuer?.friendly_name || (o ? `${o}${cn ? ` (${cn})` : ''}` : cn ?? iss),
+        names: [...new Set((r.dns_names ?? []).map((n) => n.toLowerCase()))].sort(),
+        notBefore: r.not_before!,
+        notAfter: r.not_after!,
+      };
+    })
+    .sort((a, b) => b.notBefore.localeCompare(a.notBefore));
 }
 
 /** crt.sh JSON → one entry per certificate (crt.sh lists the precertificate and the certificate separately). */
