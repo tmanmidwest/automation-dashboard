@@ -177,7 +177,7 @@ export class TopologyService {
             versionCves = { products, cves: store };
             if (products.some((p) => store[p.cpe]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'NVD'])];
             // Fetch what's missing or stale in the background; rebuild when it lands.
-            void this.versionCve.refresh(products.map((p) => p.cpe)).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+            void this.versionCve.refresh(products.map((p) => p.cpe), refresh).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
           } catch (err) {
             void this.logging.warn('topology', `Version CVE lookups failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -192,12 +192,12 @@ export class TopologyService {
             const store = await this.ctLog.cached();
             ct = { extraNames: cf.names, store: Object.fromEntries(Object.entries(store).filter(([d]) => domains.includes(d))) };
             if (domains.some((d) => store[d]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'the certificate logs (crt.sh and Cert Spotter)'])];
-            void this.ctLog.refresh(domains).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+            void this.ctLog.refresh(domains, refresh).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
             // Have I Been Pwned (free catalogue, matched locally) for the same domains.
             const hs = await this.hibp.cached();
             hibp = { domains, breaches: hs.breaches };
             if (hs.error && !hs.at) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'Have I Been Pwned'])];
-            void this.hibp.refresh().then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+            void this.hibp.refresh(refresh).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
           } catch (err) {
             void this.logging.warn('topology', `Certificate log check failed: ${err instanceof Error ? err.message : String(err)}`);
           }
