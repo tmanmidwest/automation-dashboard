@@ -2,6 +2,7 @@ import type { ConnectorResource, PostureFinding, PostureSeverity, TopologyGraph,
 import type { BuildInput } from './topology.builder';
 import type { OutsideInData } from './outside-in.service';
 import type { ImageScanResult } from './image-scan.service';
+import { affects, cmpVersion, type NvdCve } from './version-cve.service';
 
 /**
  * Security posture findings: things worth fixing, worked out only from what the
@@ -46,7 +47,7 @@ function parseDump(f: ConnectorResource): { vmid: string; at: Date | null } | nu
   return { vmid: m[2], at };
 }
 
-export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null): PostureFinding[] {
+export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date = new Date(), intel?: OutsideInData | null, scans?: Record<string, ImageScanResult> | null, versionCves?: VersionCveInput | null): PostureFinding[] {
   const out: PostureFinding[] = [];
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const nodeByIp = new Map<string, TopoNode>();
@@ -343,6 +344,7 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
 
   if (intel) out.push(...outsideInFindings(input, graph, intel, now));
   if (scans) out.push(...imageCveFindings(input, graph, scans, intel ?? null));
+  if (versionCves) out.push(...versionCveFindings(versionCves, intel ?? null));
 
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
@@ -682,3 +684,108 @@ function imageCveFindings(input: BuildInput, graph: TopologyGraph, scans: Record
 
   return out;
 }
+
+
+// ── known CVEs for infrastructure software versions (NVD) ──────────────────
+
+/** One installed product version to look up: `cpe` is NVD's "vendor:product". */
+export interface ProductVersion {
+  cpe: string;
+  product: string;
+  version: string;
+  where: string;
+  nodeId?: string;
+}
+export interface VersionCveInput {
+  products: ProductVersion[];
+  /** NVD answers per cpe (VersionCveService.cached()). */
+  cves: Record<string, { cves: NvdCve[] } | undefined>;
+}
+
+/** Product versions Cerebro knows, from connection tests (`tested[instanceId].version`) and UniFi device firmware. */
+export function productVersions(input: BuildInput, graph: TopologyGraph, tested: Record<string, Record<string, unknown> | null>): ProductVersion[] {
+  const out: ProductVersion[] = [];
+  const ver = (v: unknown) => {
+    const m = /\d+(?:\.\d+)+/.exec(String(v ?? ''));
+    return m ? m[0] : null;
+  };
+  for (const p of input.proxmox) {
+    const v = ver(tested[p.inst.id]?.version);
+    const node = graph.nodes.find((n) => n.roles.includes('Proxmox node') && n.sources.some((s) => s.connectorId === 'proxmox' && s.instanceId === p.inst.id));
+    if (v) out.push({ cpe: 'proxmox:virtual_environment', product: 'Proxmox VE', version: v, where: p.inst.name, nodeId: node?.id });
+  }
+  for (const n of input.npm) {
+    const v = ver(tested[n.inst.id]?.version);
+    const node = n.baseHost ? graph.nodes.find((x) => x.ips.includes(n.baseHost!)) : undefined;
+    if (v) out.push({ cpe: 'jc21:nginx_proxy_manager', product: 'Nginx Proxy Manager', version: v, where: n.inst.name, nodeId: node?.id });
+  }
+  for (const u of input.unifi) {
+    const v = ver(tested[u.inst.id]?.version);
+    const gw = u.devices.find((d) => /gateway/i.test(String(d.details?.type ?? '')));
+    if (v) out.push({ cpe: 'ui:unifi_network_application', product: 'UniFi Network', version: v, where: u.inst.name, nodeId: gw ? `dev:${gw.id.toLowerCase()}` : undefined });
+    for (const d of u.devices) {
+      const t = String(d.details?.type ?? '');
+      // "5.1.34.34103": the 4th part is a build number; NVD ranges use the release (5.1.34).
+      const fw = ver(d.details?.firmware)?.split('.').slice(0, 3).join('.');
+      if (!fw) continue;
+      // A UniFi console's firmware version is its UniFi OS version.
+      if (/gateway/i.test(t)) out.push({ cpe: 'ui:unifi_os', product: 'UniFi OS', version: fw, where: d.name, nodeId: `dev:${d.id.toLowerCase()}` });
+      else if (/switch/i.test(t)) out.push({ cpe: 'ui:unifi_switch_firmware', product: 'UniFi switch firmware', version: fw, where: d.name, nodeId: `dev:${d.id.toLowerCase()}` });
+      // Access points: NVD has no CPE for current AP firmware, so there's nothing to match.
+    }
+  }
+  return out;
+}
+
+function versionCveFindings(vc: VersionCveInput, intel: OutsideInData | null): PostureFinding[] {
+  const out: PostureFinding[] = [];
+  // Same product + version on several devices (e.g. switches) → one finding.
+  const groups = new Map<string, ProductVersion[]>();
+  for (const p of vc.products) {
+    const k = `${p.cpe}|${p.version}`;
+    groups.set(k, [...(groups.get(k) ?? []), p]);
+  }
+  for (const ps of groups.values()) {
+    const { cpe, product, version } = ps[0];
+    const hits = (vc.cves[cpe]?.cves ?? [])
+      .map((c) => ({ c, r: affects(version, c), kev: intel?.kev.get(c.id.toUpperCase()) }))
+      .filter((h): h is { c: NvdCve; r: NonNullable<ReturnType<typeof affects>>; kev: ReturnType<NonNullable<typeof intel>['kev']['get']> } => !!h.r);
+    if (!hits.length) continue;
+    const kevN = hits.filter((h) => h.kev).length;
+    const critN = hits.filter((h) => h.c.severity === 'CRITICAL').length;
+    const highN = hits.filter((h) => h.c.severity === 'HIGH').length;
+    const severity: PostureSeverity = kevN || critN ? 'high' : highN ? 'medium' : 'low';
+    // The lowest version clear of every matched range ("fixed in").
+    const fixes = hits.map((h) => (h.r.end && !h.r.endIncl ? h.r.end : null)).filter((x): x is string => !!x);
+    const fixAt = fixes.sort(cmpVersion).pop();
+    const nvd = (id: string) => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`;
+    hits.sort((a, b) => Number(!!b.kev) - Number(!!a.kev) || (b.c.score ?? 0) - (a.c.score ?? 0));
+    out.push({
+      id: `version-cve-${cpe.replace(/[^a-z0-9]+/gi, '-')}`,
+      severity,
+      category: 'patching',
+      title: `${product} ${version} has ${plural(hits.length, 'known vulnerability', 'known vulnerabilities')}`,
+      why:
+        `NVD lists ${hits.length === 1 ? 'this CVE' : 'these CVEs'} for ${product} ${version}` +
+        (critN || highN ? ` (${[critN && `${critN} critical`, highN && `${highN} high`].filter(Boolean).join(', ')})` : '') +
+        '.' + (kevN ? ` ${plural(kevN, 'is', 'are')} on CISA's Known Exploited list, so attackers are using ${kevN === 1 ? 'it' : 'them'} now.` : ''),
+      fix: fixAt ? `Update ${product} to ${fixAt} or later.` : `Update ${product} to the newest release; check each CVE for the fixed version.`,
+      affected: [
+        ...ps.map((p) => ({ label: p.where, nodeId: p.nodeId, note: `${product} ${version}` })),
+        ...hits.slice(0, 15).map((h) => ({
+          label: h.c.id,
+          url: nvd(h.c.id),
+          note: [
+            h.c.score != null ? `CVSS ${h.c.score}${h.c.severity ? ` ${h.c.severity.toLowerCase()}` : ''}` : null,
+            h.r.end ? (h.r.endIncl ? `affects up to ${h.r.end}` : `fixed in ${h.r.end}`) : h.r.exact ? `affects ${h.r.exact}` : null,
+            h.kev ? 'on CISA KEV' : null,
+            h.c.summary ?? null,
+          ].filter(Boolean).join(' · '),
+        })),
+      ],
+      source: kevN ? 'NVD + CISA KEV' : 'NVD',
+    });
+  }
+  return out;
+}
+

@@ -128,11 +128,24 @@ internet can see, from free public sources with no keys:
 | Containers whose release loses support within 90 days | Low | endoflife.date + Docker |
 | Shodan tags on the WAN address (compromised / malware → High, end-of-life → Medium, self-signed → Low) | varies | Shodan InternetDB |
 
+| Known CVEs for the Proxmox VE, Nginx Proxy Manager, UniFi Network, UniFi OS (console firmware) and UniFi switch firmware versions you run | High if any is critical or on CISA's Known Exploited list, Medium if high, else Low | NVD + CISA KEV |
+
+Versions come from each connector's connection test (Proxmox, NPM, UniFi Network) and
+from UniFi device firmware (the console's firmware is its UniFi OS version; the build
+number after the third part is dropped). NVD is queried once a day per product, in the
+background, by CPE (`proxmox:virtual_environment`, `jc21:nginx_proxy_manager`,
+`ui:unifi_network_application`, `ui:unifi_os`, `ui:unifi_switch_firmware`) and the
+version check happens in Cerebro, so only product names leave. Only CVEs where NVD gives a
+version range or an exact version count. NVD has no CPE for current UniFi access point
+firmware (U6/U7), and lists few UniFi OS CVEs, so a clean result there means "nothing in
+NVD", not "no advisories"; the firmware-update finding still covers them. Without a key NVD
+allows 5 requests per 30 s, which is plenty here; set `NVD_API_KEY` to go faster.
+
 The port-forward finding also says whether Shodan has already listed that port. Outside-in findings link to their evidence instead of the map: Shodan's page for the
 address, the NVD entry for each CVE, and (for end-of-life software on the WAN) the bare
 `http://` / `https://` WAN address, which is the page scanners actually see. The WAN
 address is the UniFi gateway's public IP. What leaves Cerebro: the WAN address (to
-`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date`), and a
+`internetdb.shodan.io`), product names like "postgresql" (to `endoflife.date` and `services.nvd.nist.gov`), and a
 download of the CISA KEV list. Answers are cached (Shodan 6 h, others 24 h); if a source
 is down the last good answer is used and the row says so. Shodan refreshes its scan data
 every few days, so a port you just closed can linger. Image versions come from the tag

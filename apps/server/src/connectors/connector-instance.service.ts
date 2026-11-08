@@ -278,7 +278,10 @@ export class ConnectorInstanceService implements OnModuleInit {
     try {
       const ctx = await this.buildContext(instance);
       const result = await this.connectorFor(instance).testConnection(ctx);
-      if (result.ok) this.markSynced(id);
+      if (result.ok) {
+        this.markSynced(id);
+        if (result.details) this.testDetails.set(id, { at: Date.now(), details: { ...result.details } });
+      }
       this.recordHealth(id, !!result.ok, result.message);
       return result;
     } catch (err) {
@@ -293,6 +296,14 @@ export class ConnectorInstanceService implements OnModuleInit {
    * same up/down state that raises the "Connector unreachable" alert. Absent = not tested
    * since boot (the overview then falls back to "has telemetry" as before).
    */
+  /** Details of the last successful connection test (e.g. the product version), per instance. */
+  private testDetails = new Map<string, { at: number; details: Record<string, unknown> }>();
+
+  /** What the last successful connection test reported (Proxmox/NPM/UniFi report `version`). */
+  lastTestDetails(id: string): Record<string, unknown> | null {
+    return this.testDetails.get(id)?.details ?? null;
+  }
+
   private health = new Map<string, { ok: boolean; message?: string; at: number; since: number }>();
 
   private recordHealth(id: string, ok: boolean, message?: string): void {

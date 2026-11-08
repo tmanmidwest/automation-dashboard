@@ -186,7 +186,7 @@ function OutsideInLine({ info, onChanged }: { info?: OutsideInSummary; onChanged
   if (!info) return null;
   const toggle = async () => {
     const on = !info.enabled;
-    if (on === false || window.confirm('Turn on outside-in checks?\n\nCerebro will send your WAN address to Shodan InternetDB and software names (e.g. "postgresql") to endoflife.date, and download the CISA Known Exploited Vulnerabilities list.')) {
+    if (on === false || window.confirm('Turn on outside-in checks?\n\nCerebro will send your WAN address to Shodan InternetDB and software names (e.g. "postgresql", "proxmox") to endoflife.date and NVD, and download the CISA Known Exploited Vulnerabilities list.')) {
       setBusy(true);
       try {
         await api.put('/api/topology/outside-in', { enabled: on });

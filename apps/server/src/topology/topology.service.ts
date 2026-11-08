@@ -6,9 +6,10 @@ import { ConnectorInstanceService } from '../connectors/connector-instance.servi
 import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
-import { applySnoozes, buildFindings, eolProducts, wanIps, type Snooze } from './posture';
+import { applySnoozes, buildFindings, eolProducts, productVersions, wanIps, type Snooze, type VersionCveInput } from './posture';
 import { OutsideInService } from './outside-in.service';
 import { ImageScanService } from './image-scan.service';
+import { VersionCveService } from './version-cve.service';
 
 const SNOOZE_KEY = 'posture.snoozes';
 
@@ -45,6 +46,7 @@ export class TopologyService {
     private readonly settings: SettingsService,
     private readonly outsideIn: OutsideInService,
     private readonly imageScan: ImageScanService,
+    private readonly versionCve: VersionCveService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -122,6 +124,22 @@ export class TopologyService {
         } catch (err) {
           void this.logging.warn('topology', `Outside-in checks failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+        // Known CVEs for Proxmox / NPM / UniFi versions (NVD); part of the outside-in checks.
+        let versionCves: VersionCveInput | null = null;
+        if (graph.outsideIn?.enabled) {
+          try {
+            const tested: Record<string, Record<string, unknown> | null> = {};
+            for (const x of [...input.proxmox, ...input.npm, ...input.unifi]) tested[x.inst.id] = this.instances.lastTestDetails(x.inst.id);
+            const products = productVersions(input, graph, tested);
+            const store = await this.versionCve.cached();
+            versionCves = { products, cves: store };
+            if (products.some((p) => store[p.cpe]?.error)) graph.outsideIn.errors = [...new Set([...graph.outsideIn.errors, 'NVD'])];
+            // Fetch what's missing or stale in the background; rebuild when it lands.
+            void this.versionCve.refresh(products.map((p) => p.cpe)).then((changed) => { if (changed) this.cache = null; }).catch(() => undefined);
+          } catch (err) {
+            void this.logging.warn('topology', `Version CVE lookups failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         let scans = null;
         try {
           graph.imageScan = await this.imageScan.summary();
@@ -130,7 +148,7 @@ export class TopologyService {
           void this.logging.warn('topology', `Image CVE results unavailable: ${err instanceof Error ? err.message : String(err)}`);
         }
         try {
-          graph.findings = buildFindings(input, graph, new Date(), intel, scans);
+          graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];

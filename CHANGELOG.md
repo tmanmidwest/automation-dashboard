@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Known CVEs for your infrastructure versions** — posture findings now look up the
+  Proxmox VE, Nginx Proxy Manager, UniFi Network, UniFi OS and UniFi switch firmware
+  versions you run in NVD (once a day, in the background) and raise a finding with each
+  matching CVE, its score and the fixed version; High when critical or on CISA's Known
+  Exploited list. Part of the outside-in checks. See `docs/architecture-map.md#posture-findings`.
 - **CVE scan of running container images** — the Architecture Map's posture findings now
   include a nightly Trivy scan of every image a running container uses, by registry digest
   (nothing runs on the Docker hosts). Images with a CVE on CISA's Known Exploited list are
