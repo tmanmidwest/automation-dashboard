@@ -361,11 +361,13 @@ export class ConnectorInstanceService implements OnModuleInit {
   async listResourcesCached(
     id: string,
     kind: string,
-    opts?: { refresh?: boolean },
+    opts?: { refresh?: boolean; maxAgeMs?: number },
   ): Promise<ConnectorResourceList> {
     const cacheKey = `${id}:${kind}`;
     const cached = this.resourceCache.get(cacheKey);
-    if (!opts?.refresh && cached) {
+    // maxAgeMs: callers that rebuild in the background can still serve the cache, but not forever.
+    const tooOld = cached && opts?.maxAgeMs !== undefined && Date.now() - cached.at > opts.maxAgeMs;
+    if (!opts?.refresh && cached && !tooOld) {
       return { resources: cached.resources, syncedAt: new Date(cached.at).toISOString(), stale: true };
     }
     try {

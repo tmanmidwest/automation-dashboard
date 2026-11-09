@@ -21,6 +21,8 @@ const SNOOZE_KEY = 'posture.snoozes';
 
 /** Serve a built graph this long before rebuilding in the background. */
 const SERVE_MAX_MS = 2 * 60_000;
+/** A background rebuild re-reads a connector's resource list once its cached copy is this old. */
+const RESOURCE_MAX_MS = 5 * 60_000;
 /** A Fabric agent seen this recently counts as online. */
 const AGENT_ONLINE_MS = 3 * 60_000;
 
@@ -59,6 +61,7 @@ export class TopologyService {
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
   private inflight: Promise<TopologyGraph> | null = null;
+  private inflightForced = false;
 
   async graph(force = false): Promise<TopologyGraph> {
     let g: TopologyGraph;
@@ -137,7 +140,13 @@ export class TopologyService {
   }
 
   private rebuild(refresh: boolean): Promise<TopologyGraph> {
-    if (this.inflight) return this.inflight;
+    if (this.inflight) {
+      // A Refresh that lands while a background rebuild (cached data) runs waits for it, then
+      // re-reads everything live; joining it would hand back the cached data.
+      if (!refresh || this.inflightForced) return this.inflight;
+      return this.inflight.catch(() => undefined).then(() => this.rebuild(true));
+    }
+    this.inflightForced = refresh;
     this.inflight = this.gather(refresh)
       .then(async (input) => {
         const graph = buildTopology(input);
@@ -253,7 +262,7 @@ export class TopologyService {
     /** One resource list; a failure marks the feed but never sinks the whole map. */
     const list = async (instId: string, kind: string, errs: string[]): Promise<ConnectorResource[]> => {
       try {
-        return (await this.instances.listResourcesCached(instId, kind, { refresh })).resources;
+        return (await this.instances.listResourcesCached(instId, kind, { refresh, maxAgeMs: RESOURCE_MAX_MS })).resources;
       } catch (err) {
         errs.push(`${kind}: ${err instanceof Error ? err.message : String(err)}`);
         return [];
