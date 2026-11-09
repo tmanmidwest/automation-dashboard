@@ -272,8 +272,10 @@ live) is built by `apps/server/src/topology/`:
    machine carries it. Proxmox guests report their NIC MAC and VLAN tag from the VM config,
    so a VM matches its switch port even without the QEMU guest agent.
 3. Each machine goes in the UniFi network whose subnet holds its IP.
-4. Addresses that a proxy, port forward or firewall rule names but no connector knows
-   become *unknown addresses*, worth a look.
+4. Addresses that a proxy, port forward, DNS record or firewall rule names but no connector
+   knows become *unknown addresses*, worth a look. The posture finding lists, for each one,
+   the rules and DNS records that still name it (and "outside your networks" when no UniFi
+   subnet holds it), so you know what to delete; it drops off on the next Refresh.
 
 Sources read: UniFi (devices, clients, networks, port forwards, firewall rules), Proxmox
 (qemu, lxc), Docker (host, containers), Nginx Proxy Manager (proxy hosts), Technitium

@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **"Addresses match no known machine" finding didn't say why** — each address now lists the
+  firewall rules and DNS records that still name it, and says when it sits outside every UniFi
+  network. Rules whose other side is "any" (which draw no line on the map) are included.
 - **Architecture Map showing deleted firewall rules (and other removed items)** — the map's
   background rebuild reused each connector's last-fetched list indefinitely, and a Refresh
   click that landed during a background rebuild got that rebuild's cached result. Background

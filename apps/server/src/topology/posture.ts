@@ -337,18 +337,18 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
       source: 'Docker',
     });
 
-  // 7. Firewall rules naming addresses no connector has seen.
+  // 7. Firewall rules, DNS records and tunnels naming addresses no connector has seen.
   const unknown = graph.nodes.filter((n) => n.type === 'host' && n.sources.length === 0);
   if (unknown.length)
     out.push({
       id: 'unknown-addresses',
       severity: 'low',
       category: 'hygiene',
-      title: `${plural(unknown.length, 'address', 'addresses')} in firewall rules or links match no known machine`,
+      title: `${plural(unknown.length, 'address', 'addresses')} in firewall rules or DNS records match no known machine`,
       why: 'Rules for machines that are gone are easy to forget, and the address can be handed to something new that then gets the old access.',
-      fix: 'Check each one; remove the rule or group entry if the machine is retired.',
-      affected: unknown.map((n) => ({ label: n.label, nodeId: n.id })),
-      source: 'UniFi',
+      fix: 'Each address lists what still names it. If the machine is retired, remove that rule, group entry or DNS record; it drops off here on the next map refresh.',
+      affected: unknown.map((n) => ({ label: n.label, nodeId: n.id, note: usedBy(graph, n) })),
+      source: 'UniFi rules, DNS records and tunnels',
     });
 
   // 8. Running VMs without the QEMU guest agent (Proxmox reports no IP).
@@ -1010,4 +1010,23 @@ export function npmNameGuards(input: BuildInput): Map<string, { lan: boolean; ma
   // Tunnel names you marked internal.
   for (const n of marked) if (!out.has(`dns:${n}`)) out.set(`dns:${n}`, { lan: true, marked: true, notes: [] });
   return out;
+}
+
+/** What still names an address nobody has seen: firewall rules (and groups), DNS records, forwards. */
+function usedBy(graph: TopologyGraph, n: TopoNode): string {
+  const byId = new Map(graph.nodes.map((x) => [x.id, x]));
+  const refs: string[] = [];
+  for (const e of graph.edges) {
+    if (e.source !== n.id && e.target !== n.id) continue;
+    const other = byId.get(e.source === n.id ? e.target : e.source);
+    if (e.type === 'fw_allow' || e.type === 'fw_block') refs.push(...(e.notes ?? []).map((x) => `rule ${x}`));
+    else if (e.type === 'resolves' && other?.type === 'dns_name') refs.push(`DNS ${other.label}`);
+    else if (e.notes?.length) refs.push(...e.notes);
+    else if (other) refs.push(other.label);
+  }
+  for (const d of n.details) if (d.source === 'Named by') refs.push(...d.items.map((i) => `rule ${i.value}`));
+  const uniq = [...new Set(refs)];
+  const shown = uniq.slice(0, 3).join('; ') + (uniq.length > 3 ? `; +${uniq.length - 3} more` : '');
+  const outside = n.parent ? '' : 'outside your networks';
+  return [shown ? `Named by ${shown}` : '', outside].filter(Boolean).join(' · ');
 }
