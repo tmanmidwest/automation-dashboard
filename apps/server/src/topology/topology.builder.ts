@@ -745,10 +745,19 @@ export function buildTopology(input: BuildInput): TopologyGraph {
       const fromInternet = /internet in/i.test(ruleset) || /^external|^wan/i.test(str(r.details?.from) ?? '');
       const srcIds = src === 'any' ? (fromInternet ? ['internet'] : []) : resolveEndpoint(src);
       const dstIds = dst === 'any' ? (/internet out/i.test(ruleset) ? ['internet'] : []) : resolveEndpoint(dst);
-      if (!srcIds.length || !dstIds.length) continue;
-      const type: TopoEdgeType = status === 'allow' ? 'fw_allow' : 'fw_block';
       const port = str(r.details?.destinationPort);
       const note = `${r.name}${ruleset ? ` (${ruleset})` : ''}${port ? ` · port ${port}` : ''}`;
+      // An address no connector knows keeps a list of the rules naming it, even when the other
+      // side ("any" in a LAN rule) gives the rule no edge to draw.
+      for (const id of [...srcIds, ...dstIds]) {
+        const n = nodes.get(id);
+        if (!n || n.type !== 'host' || n.sources.length) continue;
+        let d = n.details.find((x) => x.source === 'Named by');
+        if (!d) n.details.push((d = { source: 'Named by', items: [] }));
+        if (!d.items.some((i) => i.value === note)) d.items.push({ label: 'Firewall rule', value: note });
+      }
+      if (!srcIds.length || !dstIds.length) continue;
+      const type: TopoEdgeType = status === 'allow' ? 'fw_allow' : 'fw_block';
       for (const s of srcIds) for (const d of dstIds) addEdge(s, d, type, port ? `:${port}` : undefined, note);
     }
   }
