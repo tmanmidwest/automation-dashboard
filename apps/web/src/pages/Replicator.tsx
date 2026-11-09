@@ -6,6 +6,7 @@ import type {
   IngressTarget, CfTunnelOption, NpmCertOption, ReplicatorIngress, TargetKind,
   DeploymentEnvView, DeploymentEnvDrift, DeploymentEnvOrigin, ReplicatorFixedPort, ReplicatorMount,
 } from '@cerebro/shared';
+import { fixedPortKey, isMovableFixedPort } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -754,6 +755,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
     [app.variables, app.fixedPorts],
   );
   const [ports, setPorts] = useState<Record<string, number>>({});
+  const [fixedMoves, setFixedMoves] = useState<Record<string, number>>({});
   const [taskCpu, setTaskCpu] = useState('256');
   const [taskMemory, setTaskMemory] = useState('512');
   const [forceRebuild, setForceRebuild] = useState(true);
@@ -776,7 +778,6 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
   const hostNetConflicts = (plan ? hostNetPorts : [])
     .map((pp) => ({ port: pp.variable && values[pp.variable] ? Number(values[pp.variable]) : pp.hostPort, variable: pp.variable }))
     .filter((e) => Number.isFinite(e.port) && plan!.usedPorts.includes(e.port));
-  const anyHardcoded = app.fixedPorts.some((pp) => !pp.adjustable);
 
   const ready = isEcs ? configured : !!plan;
   const cost = isEcs ? estimateEcsMonthlyUsd(taskCpu, taskMemory) : null;
@@ -798,6 +799,8 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
       const pr: Record<string, number> = {};
       for (const s of p.suggestions) pr[s.variable] = s.suggested;
       setPorts(pr);
+      // Hardcoded ports already taken on the host start on the next free one.
+      setFixedMoves(seedFixedMoves(app.fixedPorts, [...p.usedPorts, ...p.suggestions.map((s) => s.suggested)]));
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Could not plan the deploy.'); }
     finally { setBusy(false); }
   }
@@ -808,7 +811,7 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
       await api.post(`/api/replicator/apps/${app.id}/deploy`, {
         dockerInstanceId: instanceId, targetKind, name, values, secrets,
         ports: isEcs ? {} : ports, forceRebuild, extraEnv: extraEntriesOf(extras),
-        ...(isEcs ? { taskCpu, taskMemory } : { mounts: mountEntriesOf(mounts) }),
+        ...(isEcs ? { taskCpu, taskMemory } : { mounts: mountEntriesOf(mounts), fixedPortMoves: fixedMoves }),
       });
       onDeployed();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Deploy failed.'); setBusy(false); }
@@ -901,17 +904,8 @@ function DeployDialog({ app, targets, onClose, onDeployed, setErr }: {
                   }} />
               ))}
             </div>
-            {app.fixedPorts.length > 0 && (
-              <div className="rounded-lg border border-border/60 px-3 py-2">
-                <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Reachable ports (fixed)</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {app.fixedPorts.map((pp) => fixedPortLabel(pp)).join(' · ')}
-                </p>
-                <p className="text-[0.65rem] text-muted-foreground/70 mt-0.5">
-                  Set by the compose file — ingress can target these after deploy.{anyHardcoded ? ' Hardcoded ports can’t be remapped per instance.' : ''}
-                </p>
-              </div>
-            )}
+            <FixedPortsEditor fixed={app.fixedPorts} moves={fixedMoves} onChange={setFixedMoves}
+              usedPorts={isEcs ? null : plan?.usedPorts ?? null} hostIp={plan?.hostIp} movable={!isEcs} />
             <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} />
             {!isEcs && <MountsEditor rows={mounts} onChange={setMounts} services={serviceOptions} />}
             <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -966,12 +960,32 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
   const [forceRebuild, setForceRebuild] = useState(true);
   const [busy, setBusy] = useState(false);
 
+  // Hardcoded compose ports: start from where this deployment binds them now.
+  const currentMoves = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const p of deployment.ports) {
+      if (p.composeHostPort != null) m[fixedPortKey({ service: p.service, hostPort: p.composeHostPort, protocol: p.protocol })] = p.hostPort;
+    }
+    for (const fp of app.fixedPorts.filter(isMovableFixedPort)) m[fixedPortKey(fp)] ??= fp.hostPort;
+    return m;
+  }, [deployment.ports, app.fixedPorts]);
+  const [fixedMoves, setFixedMoves] = useState<Record<string, number>>(currentMoves);
+  // The host's in-use ports, minus this deployment's own (they're free to keep).
+  const [hostUsed, setHostUsed] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (isEcs || !app.fixedPorts.some(isMovableFixedPort)) return;
+    const own = new Set(deployment.ports.flatMap((p) => Array.from({ length: (p.hostPortEnd ?? p.hostPort) - p.hostPort + 1 }, (_, i) => p.hostPort + i)));
+    api.post<DeployTargetInfo>(`/api/replicator/apps/${app.id}/plan`, { dockerInstanceId: deployment.dockerInstanceId })
+      .then((p) => setHostUsed(p.usedPorts.filter((n) => !own.has(n))))
+      .catch(() => setHostUsed(null));
+  }, [app.id, app.fixedPorts, deployment.dockerInstanceId, deployment.ports, isEcs]);
+
   async function submit() {
     setBusy(true); setErr(null);
     try {
       await api.post(`/api/replicator/deployments/${deployment.id}/redeploy`, {
         edit: true, values, secrets, ports, forceRebuild, extraEnv: extraEntriesOf(extras),
-        ...(isEcs ? {} : { mounts: mountEntriesOf(mounts) }),
+        ...(isEcs ? {} : { mounts: mountEntriesOf(mounts), fixedPortMoves: fixedMoves }),
       });
       onDone();
     } catch (e) { setErr(e instanceof ApiError ? e.message : 'Redeploy failed.'); setBusy(false); }
@@ -1004,6 +1018,9 @@ function EditRedeployDialog({ app, deployment, onClose, onDone, setErr }: {
               }} />
           ))}
         </div>
+        {!isEcs && (
+          <FixedPortsEditor fixed={app.fixedPorts} moves={fixedMoves} onChange={setFixedMoves} usedPorts={hostUsed} movable />
+        )}
         <ExtraEnvEditor rows={extras} onChange={setExtras} schemaNames={schemaNames} allowKeepBlank />
         {!isEcs && <MountsEditor rows={mounts} onChange={setMounts} services={serviceOptions} />}
         <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -1917,6 +1934,102 @@ function MountsEditor({ rows, onChange, services }: {
           <Button type="button" size="sm" variant="outline" onClick={add}><Plus className="h-4 w-4" /> Add mount</Button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Every host port a (possibly ranged) mapping starting at `start` binds. */
+function spanFrom(start: number, p: ReplicatorFixedPort): number[] {
+  const width = p.hostPortEnd && p.hostPortEnd > p.hostPort ? p.hostPortEnd - p.hostPort : 0;
+  return Array.from({ length: width + 1 }, (_, i) => start + i);
+}
+
+/** First start port at/above the compose's own whose whole span is free (and not already taken in this form). */
+function freeStartFor(p: ReplicatorFixedPort, used: Set<number>): number {
+  let start = p.hostPort;
+  while (start < 65535 && spanFrom(start, p).some((n) => used.has(n))) start++;
+  return start;
+}
+
+/**
+ * Seed host ports for the compose's hardcoded mappings: keep the compose's own
+ * port when it's free on the host, else the next free one. `initial` (redeploy)
+ * wins over both.
+ */
+function seedFixedMoves(fixed: ReplicatorFixedPort[], usedPorts: number[], initial: Record<string, number> = {}): Record<string, number> {
+  const used = new Set(usedPorts);
+  const out: Record<string, number> = {};
+  for (const p of fixed.filter(isMovableFixedPort)) {
+    const k = fixedPortKey(p);
+    const start = initial[k] ?? freeStartFor(p, used);
+    out[k] = start;
+    for (const n of spanFrom(start, p)) used.add(n);
+  }
+  return out;
+}
+
+/**
+ * The compose's hardcoded port mappings, each with a host port this deployment
+ * can change. Cerebro rewrites only the moved mapping in this deployment's copy
+ * of the compose — the app (and its repo) stay as they are.
+ */
+function FixedPortsEditor({ fixed, moves, onChange, usedPorts, hostIp, movable }: {
+  fixed: ReplicatorFixedPort[]; moves: Record<string, number>; onChange: (m: Record<string, number>) => void;
+  usedPorts: number[] | null; hostIp?: string; movable: boolean;
+}) {
+  if (!fixed.length) return null;
+  const used = new Set(usedPorts ?? []);
+  // Ports this form already assigns elsewhere also count as taken for each row.
+  const startOf = (p: ReplicatorFixedPort) => moves[fixedPortKey(p)] ?? p.hostPort;
+  return (
+    <div className="rounded-lg border border-border/60 px-3 py-2 space-y-1.5">
+      <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Ports set in the compose</p>
+      {fixed.map((p) => {
+        const k = fixedPortKey(p);
+        const canMove = movable && isMovableFixedPort(p);
+        if (!canMove) {
+          return <p key={k + p.mode} className="text-xs text-muted-foreground font-mono">{fixedPortLabel(p)}</p>;
+        }
+        const start = startOf(p);
+        const span = Number.isFinite(start) && start > 0 ? spanFrom(start, p) : [];
+        const others = new Set(fixed.filter((o) => o !== p && isMovableFixedPort(o) && (o.protocol ?? 'tcp') === (p.protocol ?? 'tcp')).flatMap((o) => spanFrom(startOf(o), o)));
+        const busy = span.filter((n) => used.has(n));
+        const dup = span.filter((n) => others.has(n));
+        const moved = start !== p.hostPort;
+        const width = p.hostPortEnd && p.hostPortEnd > p.hostPort ? p.hostPortEnd - p.hostPort : 0;
+        const proto = p.protocol === 'udp' ? '/udp' : '';
+        return (
+          <div key={k}>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-mono text-muted-foreground min-w-0 truncate">
+                {p.service ?? 'app'} · compose {p.hostPort}{width ? `-${p.hostPortEnd}` : ''}{proto} → {p.containerPort}
+              </span>
+              <span className="ml-auto text-muted-foreground">host port</span>
+              <Input type="number" className="h-7 w-24 text-xs" value={Number.isFinite(start) ? String(start) : ''}
+                onChange={(e) => onChange({ ...moves, [k]: Number(e.target.value) })} />
+              {width > 0 && <span className="text-muted-foreground">–{start + width}</span>}
+            </div>
+            {busy.length > 0 ? (
+              <p className="text-xs text-destructive mt-0.5">
+                ⚠ {busy.join(', ')} already in use{hostIp ? ` on ${hostIp}` : ''}. Pick a free host port.
+                {usedPorts && (
+                  <button type="button" className="ml-1 underline" onClick={() => {
+                    const taken = new Set([...used, ...others]);
+                    onChange({ ...moves, [k]: freeStartFor({ ...p }, taken) });
+                  }}>Use next free</button>
+                )}
+              </p>
+            ) : dup.length > 0 ? (
+              <p className="text-xs text-destructive mt-0.5">⚠ {dup.join(', ')} is also used by another port of this app.</p>
+            ) : moved ? (
+              <p className="text-xs text-amber-400 mt-0.5">
+                Moved from {p.hostPort} for this deployment — Cerebro rewrites just this mapping in its copy of the compose.
+              </p>
+            ) : null}
+          </div>
+        );
+      })}
+      <p className="text-[0.65rem] text-muted-foreground/70">Ingress can target these after deploy.</p>
     </div>
   );
 }
