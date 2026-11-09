@@ -104,7 +104,7 @@ stored schema rather than re-reading the repo):
 | Compose shape | Becomes |
 | --- | --- |
 | `"${APP_PORT:-8080}:80"` | a `host_port` **variable** (adjustable per deployment) — unchanged |
-| `"8123:8123"` (literal) | a fixed port, `adjustable: false` — can't be remapped per instance |
+| `"8123:8123"` (literal) | a fixed port, `adjustable: false` — **movable per deployment** (see below) |
 | `"3000-3002:3000-3002"` | a fixed port range |
 | `"51820:51820/udp"` | a fixed port, `protocol: 'udp'` |
 | `target:/published:` long form | parsed the same way (literal → fixed, `${VAR}` → variable) |
@@ -120,9 +120,10 @@ Cerebro infers nothing and warns, rather than guessing the wrong port.
 **Every reachable port is preflighted** against the host's bound ports before a deploy, so a
 collision is caught up front with an actionable message rather than a container that fails to bind:
 a parameterized port says *pick a different host port*; a host-network port backed by an env var says
-*change `<VAR>`* (its own field in the form); a hardcoded literal says *free it on the host or edit
-the compose*. The deploy form also runs this check **live** for host-network ports, flagging a clash
-(and clearing to a ✓) as you edit the backing variable. All reachable ports land in the deployment's
+*change `<VAR>`* (its own field in the form); a hardcoded literal says *give it a different host port
+in the deploy dialog*. The deploy form also runs this check **live** for host-network ports and for
+hardcoded ports, flagging a clash as you edit. Every port of a published range is checked (not just
+its first), and tcp/udp on the same number (DNS 53) don't count as a clash with each other. All reachable ports land in the deployment's
 stored `ports`, so the preflight and the ingress picker see every one however the repo declared it.
 A redeploy excludes the deployment's own currently-bound ports, so it never conflicts with itself.
 
@@ -131,11 +132,34 @@ A redeploy excludes the deployment's own currently-bound ports, so it never conf
 hand-added port is `source: 'manual'` and, like a hand-added variable, survives a schema refresh.
 This is what keeps a repo that binds its port in some unreadable way from being a dead end.
 
-**The remaining limitation:** a *hardcoded* literal host port can't be moved (Cerebro doesn't rewrite
-the compose), so you can't run two instances of such an app on one host — the preflight will correctly
-refuse the second. A host-network port backed by an env var is **not** subject to this — change the
-var. A `docker-compose.override.yml` that remaps a hardcoded port is a possible follow-up; it's purely
-additive on top of this.
+### Moving a hardcoded port per deployment (2026-11-09)
+
+A compose that hardcodes `- "5055:5055"` used to run only once per host. Now the deploy dialog (and
+Edit & redeploy) lists each hardcoded published mapping under **Ports set in the compose** with its
+own **host port** field. After *Next: check ports* it is pre-filled with the compose's port when
+that's free on the host, or the next free port (a range keeps its width) when it isn't, with a red
+warning + *Use next free* if you type a taken one.
+
+A moved port is stored on the deployment's `ports` entry as `hostPort` (where it binds) plus
+`composeHostPort` (what the compose says). At deploy, Cerebro **rewrites just that one mapping** in
+the copy of the compose it hands to Docker (`compose-port-remap.ts`, the same line walk as
+introspection; short and long form, bind IPs, `/udp`, ranges and comments kept):
+
+- **Pasted compose** — rewritten before it's written to the stack dir.
+- **Generated compose** — rewritten before it's written beside the checkout.
+- **Repo compose** — read from the fresh checkout and written beside it as `.cerebro-<name>` (same
+  directory, so relative paths, `env_file` and `.env` resolve unchanged), and used in its place. The
+  tracked file is never edited, so `git reset --hard` stays clean; the copy is removed when nothing is
+  moved.
+
+Why not an override file: Compose *appends* `ports` across `-f` files, so an override can't drop the
+original binding without `!override` (Compose 2.24+), which would also have to restate every other
+port of the service. The text rewrite works on any Compose version.
+
+If the compose later loses a mapping a deployment moved (upstream change), the deploy fails with a
+message naming it — open Edit & redeploy to review. Moves are Docker-only (ECS has no host ports),
+and only apply to the replicator's own deploys: redeploying the stack from the Docker connector's
+Stacks page uses the unmodified compose.
 
 ### Env files (`env_file:` / `.env.example`)
 

@@ -6,6 +6,25 @@ import { dockerTargetFrom, type DockerTarget } from './docker-target';
 import { buildEnvMap, toDotenv, type DeployTarget, type DeploySpec, type DeployOutcome, type DestroyContext } from './deploy-target';
 import { renderComposeOverride } from './compose-override';
 import { RepoIntrospectService } from './repo-introspect.service';
+import { remapComposePorts, type PortRemap } from './compose-port-remap';
+import type { ReplicatorPort } from '@cerebro/shared';
+
+/** The hardcoded ports this deployment moved, as compose rewrites. */
+function remapsOf(portList: ReplicatorPort[]): PortRemap[] {
+  return portList
+    .filter((p) => p.composeHostPort != null && p.composeHostPort !== p.hostPort)
+    .map((p) => ({ service: p.service, protocol: p.protocol === 'udp' ? 'udp' : 'tcp', from: p.composeHostPort!, to: p.hostPort }));
+}
+
+/** Rewrite the moved ports into `text`, or throw naming any the compose no longer has. */
+function applyRemaps(text: string, remaps: PortRemap[]): string {
+  const { text: out, missing } = remapComposePorts(text, remaps);
+  if (missing.length) {
+    const list = missing.map((r) => `${r.service} ${r.from}${r.protocol === 'udp' ? '/udp' : ''}`).join(', ');
+    throw new Error(`This deployment moves the compose's hardcoded port ${list}, but the compose no longer has that mapping. Edit & redeploy to review its ports.`);
+  }
+  return out;
+}
 
 /**
  * The original App Replicator target: materialize a deployment as a compose stack
@@ -53,9 +72,13 @@ export class DockerDeployTarget implements DeployTarget {
 
     // A pasted compose: no repo to clone — write it as a plain compose stack and
     // `up` with `--pull always`, so a redeploy picks up a newer image.
+    const remaps = remapsOf(spec.portList);
     if (spec.source.compose) {
+      let compose: string;
+      try { compose = applyRemaps(spec.source.compose, remaps); }
+      catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Could not adjust the compose ports.', deployedCommit: null }; }
       const res = await this.stacks.deploy(
-        target, spec.targetInstanceId, spec.project, spec.source.compose, env,
+        target, spec.targetInstanceId, spec.project, compose, env,
         { pull: true, forceRecreate: spec.forceRebuild }, overrideCompose, onPhase,
       );
       return { ok: res.ok, message: res.message, deployedCommit: null };
@@ -76,12 +99,17 @@ export class DockerDeployTarget implements DeployTarget {
       if (c.usesGeneratedCompose) generatedCompose = c.text;
       else gitPath = c.composePath;
     }
+    if (generatedCompose && remaps.length) {
+      try { generatedCompose = applyRemaps(generatedCompose, remaps); }
+      catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Could not adjust the compose ports.', deployedCommit: null }; }
+    }
+    const rewriteCompose = remaps.length ? (text: string) => applyRemaps(text, remaps) : undefined;
 
     const result = await this.stacks.deployGit(
       target,
       spec.targetInstanceId,
       spec.project,
-      { gitUrl, gitRef: spec.source.gitRef, gitPath, credKey: spec.source.gitCredKey, env, overrideCompose, generatedCompose },
+      { gitUrl, gitRef: spec.source.gitRef, gitPath, credKey: spec.source.gitCredKey, env, overrideCompose, generatedCompose, rewriteCompose },
       { pull: true, forceRebuild: spec.forceRebuild },
       onPhase,
     );
