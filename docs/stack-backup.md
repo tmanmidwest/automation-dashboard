@@ -386,9 +386,16 @@ Sunday at 04:00" means the same thing in both places.
 
 **The minute tick** is guarded three ways: an in-memory minute slot (one tick cannot double-fire), a
 durable "did a run for this policy already start this minute" check against `StackBackupRun` so a
-redeploy mid-minute does not re-run, and a per-repository busy set. That last one matters because
+redeploy mid-minute does not re-run, and a per-repository queue. That last one matters because
 concurrent backups into one restic repo spend their time fighting over the repository lock instead
-of moving data — a deferred stack is logged and picked up on its next slot.
+of moving data — so due stacks wait in line per repository and run one after another.
+
+> **Queued, not dropped (2026-11).** The tick used to *skip* a stack whose repository was busy and
+> wait for its next slot — tomorrow, for a daily backup. Harmless with one stack per time slot, but a
+> backup set fires every member in the same minute, and all but the first would never have run. The
+> queue is in memory: a restart drops what was waiting, and the staleness sweep catches anything
+> that then goes overdue. A nightly prune that finds the repository busy is still skipped, and the
+> queue drains once the prune it was waiting behind finishes.
 
 **Retention** runs `forget` per policy and `prune` once per repository. Per policy, so each stack
 keeps its own N snapshots rather than N shared across every stack; and split, because `forget` is
@@ -425,6 +432,58 @@ Not built: the periodic `restic check --read-data-subset` integrity pass. It dow
 metadata (and a sample of data) on every run, which is a real egress cost against B2, and the P6
 verify-restore is the stronger check of the same property.
 
+## Backup sets (2026-11)
+
+A **set** is a group of stack backups sharing one repository, schedule, consistency mode, transfer,
+secret mode and exclude list — typically "everything on this Raspberry Pi". Optionally scoped to one
+host with **auto-include**, so a stack deployed there later is backed up without anyone remembering
+to add it.
+
+**Members stay ordinary policies.** The set writes its settings onto each member row whenever the
+set is saved (`set-inherit.ts` decides which columns), so the scheduler, retention, staleness alerts,
+restore and the assistant tools are unchanged and know nothing about sets. A member can keep any
+**setting group** for itself (`setOverrides`: `target`, `schedule`, `quiesce`, `transfer`,
+`secretMode`, `excludes`); the policy form shows "from set / own setting" per group, and the server
+ignores whatever a form sends for a group the member does not override, so a stale form cannot quietly
+fork a member. **Bind paths and dump hooks are always per stack** — binds stay opt-in per path even
+for auto-included stacks, and the coverage view lists the bind paths a stack uses but does not capture.
+
+Checks and balances:
+
+| Situation | Behaviour |
+|---|---|
+| Scheduled sealed set with no set passphrase | refused before anything is written — auto-include can add a stack at any moment and it must be sealable unattended |
+| Set passphrase | `stack-backup:set:<id>:passphrase`; a member uses its own passphrase first, then the set's |
+| Stack already in another set | refused ("remove it there first") — one stack, one set |
+| Existing standalone backup joins a set | keeps its bind paths and hooks, takes the set's settings |
+| Remove a member | **keep** (standalone, same settings) or **delete** its configuration; snapshots are never touched |
+| Removed from an auto-include set (either way) | remembered in `excludedStacks`, never re-added; the set dialog can release it |
+| Auto-include | hourly at :15 and on "Scan host"; adds only stacks with no backup anywhere that are not ignored or excluded; never removes anything |
+| Host without SSH | `transfer` is forced to `relay` for that member whatever the set says |
+| Limit a set to one host while it has members elsewhere | refused |
+| Delete a set | members become standalone with their current settings; any that sealed with the set's passphrase get their own copy first |
+| "Back up all" | every enabled member is queued behind the repository, one at a time; sealed members with nothing stored are skipped and listed |
+| Turn a set off | pauses every member that takes its schedule from the set |
+
+## Coverage (2026-11)
+
+Configured backups cannot answer "what has **no** backup?". `GET /api/stack-backup/coverage` lists
+every compose project on every enabled Docker host (Engine API `containers/json`, 10 s per host so one
+dead Pi cannot stall the page), plus each host's CPU architecture, and gives each stack a status:
+
+`protected` (scheduled, recent success) · `pending` (scheduled, never succeeded yet) · `manual` ·
+`stale` (2.5× its interval, same as the alert) · `failing` · `disabled` · `unprotected` · `ignored` ·
+`missing` (backed up, but no longer on a host that answered).
+
+**Ignore** records "no backup on purpose" (with an optional reason) in `StackCoverageEntry`; ignored
+stacks never alert and auto-include skips them.
+
+**`backup.unprotected` alert.** The same table records when each stack was first seen. The hourly
+sweep alerts once per host for stacks that appeared since Cerebro started watching and still have no
+backup an hour later (time for auto-include or an operator to act). Everything present the first
+time a host is scanned is the **baseline** and does not alert — it is visible in the coverage view
+instead of arriving as a flood of mail on day one.
+
 ## Data model
 
 Phase 1 (migration `0031_stack_backup`):
@@ -443,6 +502,9 @@ StackBackupRun      id, policyId, connectorInstanceId, stackName, targetId, trig
                     snapshotId, bytesAdded, bytesTotal, filesNew, filesTotal, volumes, binds,
                     durationMs, message, log, startedAt, finishedAt
 ```
+
+Backup sets (migration `0052_stack_backup_sets`) add `StackBackupSet`, `StackCoverageEntry`, and
+`setId` + `setOverrides` on `StackBackupPolicy`.
 
 Phase 2 (migration `0033_stack_secret_bindings`) adds `StackSecretBinding` (above). Phase 3
 (migration `0032_stack_restore`) adds:
@@ -470,7 +532,8 @@ for S3), with `…:provider-host` for the append-only key handed to hosts.
   the single place every run ends, so a scheduled run and a manual one notify identically
 - **Automations** — trigger `stack.backup.failed`; action `backup stack now` / `restore stack`
 - **Monitors** — an optional `backup-age` probe type
-- **Tool catalog** (`tools/tool-catalog.service.ts`) — `list_stack_backups`,
+- **Tool catalog** (`tools/tool-catalog.service.ts`) — `get_stack_backup_coverage`,
+  `list_stack_backup_sets`, `list_stack_backups`,
   `list_stack_backup_runs`, `list_stack_snapshots`, `list_stack_backup_targets`, `get_stack_secrets`
   (read); `backup_stack_now` and `verify_stack_backup` (confirm-gated actions, passphrases redacted
   from the audit trail); `plan_stack_restore` (a dry run, so it is a read). Executing a restore is
@@ -497,6 +560,7 @@ the vault came back first. `embed` mode is the escape hatch for when that orderi
 | **P4** | Scheduling (minute tick, restart-safe, per-repo serialized), per-policy retention + nightly prune, stored sealing passphrase, staleness alerts, timeline + notification wiring | **BUILT** |
 | **P5** | Quiesce (`pause`/`stop`) with guaranteed resume, pre/post dump hooks, exclude patterns UI, file-based credential capture, `relay` transfer (backup + restore) | **BUILT** |
 | **P6** | Bind remapping + port preflight on restore, verify-restore sandbox, single-file download, credential-file write-back, MCP/assistant tools | **BUILT** |
+| **Sets** | Backup sets (shared settings, per-member overrides, auto-include), coverage view + `backup.unprotected` alert, ignore, per-repository run queue | **BUILT 2026-11** |
 
 ## Known sharp edges
 

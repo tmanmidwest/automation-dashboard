@@ -64,31 +64,71 @@ export class StackBackupScheduler {
       if (already) continue;
 
       // Serialize per repository: concurrent backups to one restic repo spend their
-      // time fighting over the lock instead of moving data.
-      if (this.busyTargets.has(policy.targetId)) {
-        void this.logging.info(
-          'stack-backup',
-          `[${policy.stackName}] Scheduled backup deferred — another backup is using that repository.`,
-        );
-        continue;
-      }
-
-      void this.runOne(policy.id, policy.targetId, policy.stackName, describeSchedule(this.backups.scheduleOf(policy)));
+      // time fighting over the lock instead of moving data. Queue rather than drop —
+      // a backup set fires a dozen stacks in the same minute, and skipping all but
+      // one until tomorrow would quietly leave the rest unprotected.
+      this.enqueue(policy.id, policy.targetId, policy.stackName, 'schedule', describeSchedule(this.backups.scheduleOf(policy)));
     }
   }
 
-  private async runOne(policyId: string, targetId: string, stackName: string, when: string): Promise<void> {
+  /** Stacks waiting for their repository, in order, per target. */
+  private readonly queues = new Map<string, QueuedRun[]>();
+  /** Every policy currently queued or running through the queue. */
+  private readonly queued = new Set<string>();
+
+  /**
+   * Put a backup in line behind whatever is using its repository. Returns false
+   * when that stack is already waiting or running — a second copy would only
+   * capture the same thing twice.
+   */
+  enqueue(policyId: string, targetId: string, stackName: string, trigger: 'manual' | 'schedule', when: string): boolean {
+    if (this.queued.has(policyId)) return false;
+    this.queued.add(policyId);
+    const q = this.queues.get(targetId) ?? [];
+    q.push({ policyId, stackName, trigger, when });
+    this.queues.set(targetId, q);
+    if (this.busyTargets.has(targetId)) {
+      void this.logging.info('stack-backup', `[${stackName}] Backup queued — another backup is using that repository.`);
+    }
+    void this.drain(targetId);
+    return true;
+  }
+
+  /** How many stacks are waiting (not yet started) per repository — for the UI. */
+  queuedPolicyIds(): string[] {
+    return [...this.queued];
+  }
+
+  /** Run a repository's queue one stack at a time. Re-entrant calls while busy are no-ops. */
+  private async drain(targetId: string): Promise<void> {
+    if (this.busyTargets.has(targetId)) return;
     this.busyTargets.add(targetId);
     try {
-      void this.logging.info('stack-backup', `[${stackName}] Scheduled backup started (${when}).`);
-      const run = await this.backups.startBackup(policyId, undefined, 'schedule');
+      for (;;) {
+        const next = this.queues.get(targetId)?.shift();
+        if (!next) break;
+        try {
+          await this.runOne(next);
+        } finally {
+          this.queued.delete(next.policyId);
+        }
+      }
+    } finally {
+      this.queues.delete(targetId);
+      this.busyTargets.delete(targetId);
+    }
+  }
+
+  private async runOne(job: QueuedRun): Promise<void> {
+    const { policyId, stackName, trigger, when } = job;
+    try {
+      void this.logging.info('stack-backup', `[${stackName}] ${trigger === 'schedule' ? 'Scheduled' : 'Queued'} backup started (${when}).`);
+      const run = await this.backups.startBackup(policyId, undefined, trigger);
       // startBackup returns as soon as the row exists; wait for it so the repository
       // stays reserved for the duration of the actual work.
       await this.awaitRun(run.id);
     } catch (err) {
-      void this.logging.error('stack-backup', `[${stackName}] Scheduled backup could not start: ${msg(err)}`);
-    } finally {
-      this.busyTargets.delete(targetId);
+      void this.logging.error('stack-backup', `[${stackName}] ${trigger === 'schedule' ? 'Scheduled' : 'Queued'} backup could not start: ${msg(err)}`);
     }
   }
 
@@ -167,6 +207,8 @@ export class StackBackupScheduler {
         }).catch(() => { /* never let alerting break maintenance */ });
       } finally {
         this.busyTargets.delete(target.id);
+        // Anything that queued up behind the prune gets its turn now.
+        if (this.queues.get(target.id)?.length) void this.drain(target.id);
       }
     }
   }
@@ -224,6 +266,13 @@ function retentionFlags(t: {
   if (t.keepMonthly) flags.push('--keep-monthly', String(t.keepMonthly));
   if (t.keepWithinDays) flags.push('--keep-within', `${t.keepWithinDays}d`);
   return flags;
+}
+
+interface QueuedRun {
+  policyId: string;
+  stackName: string;
+  trigger: 'manual' | 'schedule';
+  when: string;
 }
 
 function sleep(ms: number): Promise<void> {

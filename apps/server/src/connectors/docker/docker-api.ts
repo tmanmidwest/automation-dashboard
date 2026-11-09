@@ -92,6 +92,8 @@ export interface DockerContainer {
   Ports?: { IP?: string; PrivatePort?: number; PublicPort?: number; Type?: string }[];
   Labels?: Record<string, string>;
   NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+  /** The list endpoint includes mounts too — enough to see bind sources without an inspect per container. */
+  Mounts?: { Type?: string; Source?: string; Destination?: string; RW?: boolean; Name?: string }[];
 }
 
 export interface DockerContainerInspect {

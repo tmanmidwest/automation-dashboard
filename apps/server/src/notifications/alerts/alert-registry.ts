@@ -62,6 +62,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: true,
   },
   {
+    key: 'backup.unprotected',
+    label: 'New stack with no backup',
+    description: 'A compose stack appeared on a Docker host and still has no backup an hour later. Stacks already present when Cerebro first looked do not alert.',
+    category: 'Backups',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: true,
+  },
+  {
     key: 'retention.failure',
     label: 'Retention prune failed',
     description: 'Applying backup retention (pruning old snapshots) failed.',

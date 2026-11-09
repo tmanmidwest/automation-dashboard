@@ -9,6 +9,7 @@ import { StackBackupService } from './stack-backup.service';
 import { StackRestoreService } from './stack-restore.service';
 import { StackBackupScheduler } from './stack-backup-scheduler.service';
 import { StackBackupController } from './stack-backup.controller';
+import { StackBackupSetService } from './stack-backup-set.service';
 
 /**
  * Stack backup & restore — capture a Compose stack's volumes, config and metadata
@@ -24,8 +25,8 @@ import { StackBackupController } from './stack-backup.controller';
   // uses the same "what is taken on this host" check as a replicator deploy.
   imports: [ConnectorsModule, SecretsModule, NotificationsModule, AppReplicatorModule],
   controllers: [StackBackupController],
-  providers: [BackupTargetService, SecretCaptureService, StackBackupService, StackRestoreService, StackBackupScheduler],
+  providers: [BackupTargetService, SecretCaptureService, StackBackupService, StackRestoreService, StackBackupScheduler, StackBackupSetService],
   // Exported for the shared tool catalog (assistant / MCP).
-  exports: [BackupTargetService, StackBackupService, StackRestoreService],
+  exports: [BackupTargetService, StackBackupService, StackRestoreService, StackBackupSetService],
 })
 export class StackBackupModule {}

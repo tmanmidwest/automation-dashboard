@@ -102,6 +102,11 @@ export interface StackBackupPolicy {
   nextRunAt?: string | null;
   /** Human rendering of the schedule, e.g. "Weekly on Sunday at 04:00 (server time)". */
   scheduleText: string;
+  /** The backup set this stack belongs to, if any. */
+  setId?: string | null;
+  setName?: string | null;
+  /** Setting groups this stack keeps for itself instead of taking from its set. */
+  setOverrides: SetOverride[];
   createdAt: string;
 }
 
@@ -129,6 +134,152 @@ export interface SaveBackupPolicyInput {
    * makes a sealed backup restorable when Cerebro itself is gone.
    */
   sealPassphrase?: string;
+  /**
+   * Only for a stack in a backup set: which setting groups this stack keeps for
+   * itself. Every group NOT listed is taken from the set and the values sent for
+   * it here are ignored. Omit to leave the stored list alone.
+   */
+  setOverrides?: SetOverride[];
+}
+
+// ── Backup sets + coverage ───────────────────────────────────────────────────
+
+/** Setting groups a set member can keep for itself. */
+export type SetOverride = 'target' | 'schedule' | 'quiesce' | 'transfer' | 'secretMode' | 'excludes';
+export const SET_OVERRIDES: SetOverride[] = ['target', 'schedule', 'quiesce', 'transfer', 'secretMode', 'excludes'];
+
+/**
+ * A group of stack backups sharing one set of settings. Each member is still an
+ * ordinary stack backup (policy); the set writes its settings onto every member
+ * that has not overridden them. Bind paths and dump hooks are always per stack.
+ */
+export interface StackBackupSet {
+  id: string;
+  name: string;
+  description?: string | null;
+  /** Docker host this set is scoped to, or null for a set spanning hosts. */
+  connectorInstanceId?: string | null;
+  hostName?: string | null;
+  /** Every stack found on the host joins automatically (needs a host). */
+  autoInclude: boolean;
+  /** Stacks taken out of an auto-include set by hand — never re-added. */
+  excludedStacks: string[];
+  targetId: string;
+  targetName?: string;
+  enabled: boolean;
+  frequency: BackupFrequency;
+  dayOfWeek: number;
+  dayOfMonth: number;
+  hour: number;
+  minute: number;
+  quiesce: QuiesceMode;
+  transfer: TransferMode;
+  secretMode: SecretMode;
+  excludes: string[];
+  hasSealPassphrase: boolean;
+  scheduleText: string;
+  nextRunAt?: string | null;
+  lastSyncAt?: string | null;
+  lastSyncMessage?: string | null;
+  /** Member stack backups. */
+  members: StackBackupSetMember[];
+  createdAt: string;
+}
+
+export interface StackBackupSetMember {
+  policyId: string;
+  connectorInstanceId: string;
+  hostName?: string;
+  stackName: string;
+  setOverrides: SetOverride[];
+  lastStatus: string;
+  lastRunAt?: string | null;
+}
+
+export interface SaveBackupSetInput {
+  name: string;
+  description?: string | null;
+  connectorInstanceId?: string | null;
+  autoInclude?: boolean;
+  targetId: string;
+  enabled?: boolean;
+  frequency?: BackupFrequency;
+  dayOfWeek?: number;
+  dayOfMonth?: number;
+  hour?: number;
+  minute?: number;
+  quiesce?: QuiesceMode;
+  transfer?: TransferMode;
+  secretMode?: SecretMode;
+  excludes?: string[];
+  /** Sealing passphrase for every member that has none of its own. Omit to keep; '' clears. */
+  sealPassphrase?: string;
+  /** Stacks to put back into an auto-include set's reach. Omit to leave alone. */
+  excludedStacks?: string[];
+}
+
+/** Add stacks to a set. A stack that already has a backup joins with its bind paths and hooks kept. */
+export interface AddSetMembersInput {
+  stacks: { connectorInstanceId: string; stackName: string }[];
+}
+
+/** Result of "back up the whole set now" — members run one after another per repository. */
+export interface RunSetResult {
+  queued: string[];
+  skipped: { stackName: string; reason: string }[];
+}
+
+/**
+ * How well one compose stack is protected:
+ * - `protected`   scheduled, and the last success is recent enough
+ * - `pending`     scheduled, but has not completed a backup yet
+ * - `manual`      a backup exists but nothing runs it on a schedule
+ * - `stale`       scheduled, but no success for well past its interval
+ * - `failing`     the last run failed
+ * - `disabled`    the backup is switched off
+ * - `unprotected` no backup at all
+ * - `ignored`     no backup, on purpose
+ * - `missing`     a backup exists but the stack is no longer on the host
+ */
+export type CoverageStatus =
+  | 'protected' | 'pending' | 'manual' | 'stale' | 'failing' | 'disabled' | 'unprotected' | 'ignored' | 'missing';
+
+export interface StackCoverageRow {
+  connectorInstanceId: string;
+  stackName: string;
+  status: CoverageStatus;
+  policyId?: string | null;
+  setId?: string | null;
+  setName?: string | null;
+  lastSuccessAt?: string | null;
+  scheduleText?: string | null;
+  /** Bind-mount host paths the stack uses that its backup does not capture. */
+  uncapturedBinds: string[];
+  /** Cerebro deployed this stack itself. */
+  managed: boolean;
+  ignoreReason?: string | null;
+  firstSeenAt?: string | null;
+}
+
+export interface HostCoverage {
+  connectorInstanceId: string;
+  hostName: string;
+  /** Docker's own architecture string (x86_64, aarch64, armv7l…), when reachable. */
+  architecture?: string | null;
+  reachable: boolean;
+  error?: string | null;
+  stacks: StackCoverageRow[];
+}
+
+export interface CoverageReport {
+  hosts: HostCoverage[];
+  totals: Record<CoverageStatus, number>;
+  generatedAt: string;
+}
+
+export interface IgnoreStackInput {
+  ignored: boolean;
+  reason?: string;
 }
 
 /** One backup attempt. */

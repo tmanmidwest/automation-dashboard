@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive, CalendarClock, CheckCircle2, Database, Download, Folder, FolderOpen, HardDriveDownload,
-  HardDriveUpload, KeyRound, Loader2, Lock, Plus, RefreshCw, ScrollText, ShieldCheck, Trash2,
+  HardDriveUpload, KeyRound, Layers, Loader2, Lock, Plus, RefreshCw, ScrollText, ShieldCheck, Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import type {
   BackupFrequency, BackupHost, BackupTargetKind, SaveBackupPolicyInput, SaveBackupTargetInput, SecretMode,
   SnapshotEntry, StackBackupCandidate, StackBackupPolicy, StackBackupRun, StackBackupTarget,
-  QuiesceMode, StackHook, StackRestoreRun, StackSecretsReport, StackSnapshot, TransferMode,
-  VerifyRestoreInput,
+  QuiesceMode, SetOverride, StackBackupSet, StackHook, StackRestoreRun, StackSecretsReport, StackSnapshot,
+  TransferMode, VerifyRestoreInput,
 } from '@cerebro/shared';
+import { CoverageCard, SetDialog, SetsCard } from '@/components/StackBackupSets';
 import { RestoreWizard } from '@/components/RestoreWizard';
 import { StackSecretsDialog } from '@/components/StackSecretsDialog';
 import { api, ApiError } from '@/lib/api';
@@ -84,6 +85,11 @@ export function StackBackups() {
 
   const [targetDialog, setTargetDialog] = useState<StackBackupTarget | 'new' | null>(null);
   const [policyDialog, setPolicyDialog] = useState<StackBackupPolicy | 'new' | null>(null);
+  /** "Back up" from the coverage list opens the add form with that stack already picked. */
+  const [preselect, setPreselect] = useState<string>('');
+  const [sets, setSets] = useState<StackBackupSet[]>([]);
+  const [setDialog, setSetDialog] = useState<StackBackupSet | 'new' | null>(null);
+  const [coverageKey, setCoverageKey] = useState(0);
   const [runPrompt, setRunPrompt] = useState<StackBackupPolicy | null>(null);
   const [logRun, setLogRun] = useState<StackBackupRun | null>(null);
   const [logRestore, setLogRestore] = useState<StackRestoreRun | null>(null);
@@ -94,14 +100,15 @@ export function StackBackups() {
 
   const refresh = useCallback(async () => {
     try {
-      const [t, p, r, h, rr] = await Promise.all([
+      const [t, p, r, h, rr, ss] = await Promise.all([
         api.get<StackBackupTarget[]>('/api/stack-backup/targets'),
         api.get<StackBackupPolicy[]>('/api/stack-backup/policies'),
         api.get<StackBackupRun[]>('/api/stack-backup/runs?limit=25'),
         api.get<BackupHost[]>('/api/stack-backup/hosts'),
         api.get<StackRestoreRun[]>('/api/stack-backup/restores?limit=15'),
+        api.get<StackBackupSet[]>('/api/stack-backup/sets'),
       ]);
-      setTargets(t); setPolicies(p); setRuns(r); setHosts(h); setRestores(rr);
+      setTargets(t); setPolicies(p); setRuns(r); setHosts(h); setRestores(rr); setSets(ss);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Failed to load.');
       setPolicies([]);
@@ -142,7 +149,7 @@ export function StackBackups() {
               <RefreshCw className="h-4 w-4 mr-2" /> Refresh
             </Button>
             {canWrite && (
-              <Button onClick={() => setPolicyDialog('new')} disabled={!targets.length}>
+              <Button onClick={() => { setPreselect(''); setPolicyDialog('new'); }} disabled={!targets.length}>
                 <Plus className="h-4 w-4 mr-2" /> Back up a stack
               </Button>
             )}
@@ -167,6 +174,29 @@ export function StackBackups() {
             {canWrite && <Button onClick={() => setTargetDialog('new')}><Plus className="h-4 w-4 mr-2" /> Add a target</Button>}
           </CardContent>
         </Card>
+      )}
+
+      {targets.length > 0 && (
+        <CoverageCard
+          canWrite={canWrite}
+          sets={sets}
+          refreshKey={coverageKey}
+          onBackUp={(instanceId, stackName) => { setPreselect(`${instanceId}/${stackName}`); setPolicyDialog('new'); }}
+          onChanged={() => void refresh()}
+        />
+      )}
+
+      {targets.length > 0 && (
+        <SetsCard
+          sets={sets}
+          targets={targets}
+          hosts={hosts}
+          policies={policies ?? []}
+          canWrite={canWrite}
+          onEdit={setSetDialog}
+          onChanged={() => { void refresh(); setCoverageKey((k) => k + 1); }}
+          onError={setErr}
+        />
       )}
 
       {/* ── Configured stack backups ── */}
@@ -194,6 +224,9 @@ export function StackBackups() {
                       <span className="text-muted-foreground font-normal"> on {p.hostName ?? p.connectorInstanceId}</span>
                     </div>
                     <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
+                      {p.setName && (
+                        <><span className="inline-flex items-center gap-1 text-sky-400"><Layers className="h-3 w-3" />{p.setName}</span><span>·</span></>
+                      )}
                       <span>→ {p.targetName}</span>
                       <span>·</span>
                       <span className="inline-flex items-center gap-1">
@@ -237,7 +270,10 @@ export function StackBackups() {
                         size="icon"
                         variant="ghost"
                         aria-label="Remove"
-                        onClick={() => act(`del:${p.id}`, () => api.delete(`/api/stack-backup/policies/${p.id}`))}
+                        onClick={() => act(`del:${p.id}`, async () => {
+                          await api.delete(`/api/stack-backup/policies/${p.id}`);
+                          setCoverageKey((k) => k + 1);
+                        })}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -414,8 +450,18 @@ export function StackBackups() {
         <PolicyDialog
           targets={targets}
           policy={policyDialog === 'new' ? null : policyDialog}
+          preselect={policyDialog === 'new' ? preselect : undefined}
           onClose={() => setPolicyDialog(null)}
-          onSaved={() => { setPolicyDialog(null); void refresh(); }}
+          onSaved={() => { setPolicyDialog(null); void refresh(); setCoverageKey((k) => k + 1); }}
+        />
+      )}
+      {setDialog && (
+        <SetDialog
+          set={setDialog === 'new' ? null : setDialog}
+          targets={targets}
+          hosts={hosts}
+          onClose={() => setSetDialog(null)}
+          onSaved={() => { setSetDialog(null); void refresh(); setCoverageKey((k) => k + 1); }}
         />
       )}
       {runPrompt && (
@@ -814,18 +860,43 @@ function TargetDialog({ target, onClose, onSaved }: {
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 /** Pick a host + stack, see what would be captured, choose a schedule, and save. */
-function PolicyDialog({ targets, policy, onClose, onSaved }: {
+/** For a stack in a set: one checkbox per setting group, "use my own instead of the set's". */
+function OverrideToggle({ group, overrides, setOverrides }: {
+  group: SetOverride;
+  overrides: SetOverride[] | null;
+  setOverrides: (v: SetOverride[]) => void;
+}) {
+  if (!overrides) return null;
+  const own = overrides.includes(group);
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-muted-foreground font-normal">
+      <input
+        type="checkbox"
+        checked={own}
+        onChange={(e) => setOverrides(e.target.checked ? [...overrides, group] : overrides.filter((g) => g !== group))}
+      />
+      {own ? 'own setting' : 'from set'}
+    </label>
+  );
+}
+
+function PolicyDialog({ targets, policy, preselect, onClose, onSaved }: {
   targets: StackBackupTarget[];
   /** Editing an existing configuration, or null to add one. */
   policy?: StackBackupPolicy | null;
+  /** Stack to pick on open when adding (`instanceId/stackName`). */
+  preselect?: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const editing = !!policy;
   const [candidates, setCandidates] = useState<StackBackupCandidate[] | null>(null);
   const [selected, setSelected] = useState<string>(
-    policy ? `${policy.connectorInstanceId}/${policy.stackName}` : '',
+    policy ? `${policy.connectorInstanceId}/${policy.stackName}` : preselect ?? '',
   );
+  // Null when the stack is not in a set — then every field is simply its own.
+  const [overrides, setOverrides] = useState<SetOverride[] | null>(policy?.setId ? policy.setOverrides : null);
+  const locked = (g: SetOverride) => !!overrides && !overrides.includes(g);
   const [detail, setDetail] = useState<StackBackupCandidate | null>(null);
   const [secrets, setSecrets] = useState<StackSecretsReport | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -886,7 +957,9 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
       preHooks: preHooks.filter((h) => h.cmd.trim()),
       postHooks: postHooks.filter((h) => h.cmd.trim()),
       frequency, dayOfWeek, dayOfMonth, hour, minute,
+      enabled: policy?.enabled ?? true,
       ...(sealPassphrase ? { sealPassphrase } : {}),
+      ...(overrides ? { setOverrides: overrides } : {}),
     };
     setSaving(true); setErr(null);
     try {
@@ -986,16 +1059,35 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
           </>
         )}
 
+        {overrides && (
+          <div className="rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm">
+            <span className="inline-flex items-center gap-1 font-medium"><Layers className="h-4 w-4" /> Part of set “{policy?.setName}”</span>
+            <p className="text-xs text-muted-foreground mt-1">
+              Settings marked “from set” follow the set and change when it does. Tick “own setting” to keep a different
+              value for this stack only. Bind paths and dump hooks are always this stack's own.
+            </p>
+          </div>
+        )}
+
         <div>
-          <Label>Repository</Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Repository</Label>
+            <OverrideToggle group="target" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('target')} className="min-w-0 disabled:opacity-60">
           <select className={selectCls} value={targetId} onChange={(e) => setTargetId(e.target.value)}>
             {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
+        </fieldset>
         </div>
 
         {/* ── Schedule ── */}
         <div className="rounded-md border border-border p-3">
-          <Label>Schedule</Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Schedule</Label>
+            <OverrideToggle group="schedule" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('schedule')} className="min-w-0 disabled:opacity-60">
           <div className="flex items-end gap-2 flex-wrap mt-1">
             <select className={`${selectCls} w-auto`} value={frequency} onChange={(e) => setFrequency(e.target.value as BackupFrequency)}>
               <option value="off">Manual only</option>
@@ -1030,11 +1122,16 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
           {frequency !== 'off' && (
             <p className="text-xs text-muted-foreground mt-2">Server local time. A scheduled run captures exactly what “Back up now” does.</p>
           )}
+        </fieldset>
         </div>
 
         {/* ── Transfer ── */}
         <div className="rounded-md border border-border p-3">
-          <Label>Transfer</Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Transfer</Label>
+            <OverrideToggle group="transfer" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('transfer')} className="min-w-0 disabled:opacity-60">
           <select
             className={`${selectCls} mt-1`}
             value={transfer}
@@ -1050,11 +1147,16 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
               ? 'Bulk data goes straight from the host to the repository and never touches Cerebro. The host needs SSH, outbound network, and to be able to pull the helper image.'
               : 'For a host with no SSH or no outbound network. Every byte crosses the network twice and is staged on Cerebro’s disk, and dump hooks, compose capture and credential files are unavailable.'}
           </p>
+        </fieldset>
         </div>
 
         {/* ── Consistency ── */}
         <div className="rounded-md border border-border p-3">
-          <Label>Consistency</Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Consistency</Label>
+            <OverrideToggle group="quiesce" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('quiesce')} className="min-w-0 disabled:opacity-60">
           <select className={`${selectCls} mt-1`} value={quiesce} onChange={(e) => setQuiesce(e.target.value as QuiesceMode)}>
             <option value="hot">Hot — never interrupt the stack</option>
             <option value="pause">Pause — freeze the containers for the capture</option>
@@ -1067,6 +1169,7 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
                 ? 'Processes are frozen, so on-disk state stops changing. Open connections survive; clients see a stall for the length of the capture.'
                 : 'The cleanest copy, and real downtime: the stack is stopped for the capture and started again afterwards, whether or not the backup succeeds.'}
           </p>
+        </fieldset>
         </div>
 
         {/* ── Hooks ── */}
@@ -1096,7 +1199,11 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
         )}
 
         <div>
-          <Label>Exclude patterns <span className="text-muted-foreground font-normal">(one per line)</span></Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Exclude patterns <span className="text-muted-foreground font-normal">(one per line)</span></Label>
+            <OverrideToggle group="excludes" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('excludes')} className="min-w-0 disabled:opacity-60">
           <textarea
             className="mt-1 w-full min-h-16 rounded-md border border-input bg-background/60 px-2 py-1.5 text-sm font-mono"
             value={excludes}
@@ -1104,10 +1211,15 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
             placeholder={'*.tmp\n**/cache/**'}
           />
           <p className="text-xs text-muted-foreground mt-1">Passed to restic as <code>--exclude</code>. Useful for caches and thumbnails inside a captured volume.</p>
+        </fieldset>
         </div>
 
         <div>
-          <Label>Secrets</Label>
+          <div className="flex items-center gap-3">
+            <Label className="flex-1">Secrets</Label>
+            <OverrideToggle group="secretMode" overrides={overrides} setOverrides={setOverrides} />
+          </div>
+          <fieldset disabled={locked('secretMode')} className="min-w-0 disabled:opacity-60">
           <select className={selectCls} value={secretMode} onChange={(e) => setSecretMode(e.target.value as SecretMode)}>
             <option value="embed">Sealed — values encrypted with a passphrase</option>
             <option value="reference" disabled={!secrets?.referenceReady}>
@@ -1127,6 +1239,7 @@ function PolicyDialog({ targets, policy, onClose, onSaved }: {
               Vault reference unavailable: {secrets.referenceBlockedBy} Open the stack’s secrets view to promote them into the vault.
             </p>
           )}
+        </fieldset>
         </div>
 
         {secretMode === 'embed' && (

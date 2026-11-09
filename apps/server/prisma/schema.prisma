@@ -892,6 +892,59 @@ model StackBackupTarget {
   updatedAt DateTime @updatedAt
 
   policies StackBackupPolicy[]
+  sets     StackBackupSet[]
+}
+
+/// A group of stack backups that share one set of settings (docs/stack-backup.md,
+/// "Backup sets"). Policies stay the unit that runs — the set is a management
+/// layer that writes its settings onto every member that has not overridden them,
+/// so the scheduler, retention and staleness checks are unchanged.
+model StackBackupSet {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  /// Optional Docker ConnectorInstance this set is scoped to. Required for autoInclude.
+  connectorInstanceId String?
+  /// Add every compose stack found on the host as a member (hourly sync).
+  autoInclude Boolean @default(false)
+  /// Stacks removed from an auto-include set by hand, so the next sync does not re-add them.
+  excludedStacks String[] @default([])
+  targetId    String
+  target      StackBackupTarget @relation(fields: [targetId], references: [id], onDelete: Restrict)
+  enabled     Boolean @default(true)
+  frequency   String  @default("off")
+  dayOfWeek   Int     @default(0)
+  dayOfMonth  Int     @default(1)
+  hour        Int     @default(3)
+  minute      Int     @default(0)
+  quiesce     String  @default("hot")
+  transfer    String  @default("direct")
+  secretMode  String  @default("embed")
+  excludes    String[] @default([])
+  lastSyncAt      DateTime?
+  lastSyncMessage String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  policies StackBackupPolicy[]
+
+  @@index([targetId])
+}
+
+/// Every compose stack Cerebro has seen on a Docker host, for the coverage view and
+/// the "new stack with no backup" alert. `ignored` records "no backup on purpose".
+model StackCoverageEntry {
+  id                  String   @id @default(cuid())
+  connectorInstanceId String
+  stackName           String
+  firstSeenAt         DateTime @default(now())
+  lastSeenAt          DateTime @default(now())
+  ignored             Boolean  @default(false)
+  ignoreReason        String?
+  /// Set once the unprotected alert has gone out (or the stack was part of the first baseline).
+  alertedAt           DateTime?
+
+  @@unique([connectorInstanceId, stackName])
 }
 
 /// What to back up for one stack on one Docker host, and (from Phase 4) when.
@@ -929,6 +982,12 @@ model StackBackupPolicy {
   lastRunAt   DateTime?
   lastStatus  String    @default("never")
   lastMessage String?
+  /// The backup set this stack belongs to, if any. Its settings flow down onto this row.
+  setId       String?
+  set         StackBackupSet? @relation(fields: [setId], references: [id], onDelete: SetNull)
+  /// Setting groups this stack keeps for itself instead of taking from its set:
+  /// 'target' | 'schedule' | 'quiesce' | 'transfer' | 'secretMode' | 'excludes'.
+  setOverrides String[] @default([])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -936,6 +995,7 @@ model StackBackupPolicy {
 
   @@unique([connectorInstanceId, stackName])
   @@index([targetId])
+  @@index([setId])
 }
 
 /// One backup attempt. Holds the restic summary plus the full run log.
