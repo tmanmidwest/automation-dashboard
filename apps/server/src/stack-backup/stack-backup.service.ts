@@ -22,6 +22,7 @@ import { synthesizeCompose } from './compose-synth';
 import { appendHostFiles, removeHostDir, runHelper, writeHostDir, type HelperMount } from './helper-runner';
 import { friendlyRestic, parseBackupSummary, resticEnv, runResticLocalTolerant } from './restic-cli';
 import { quiesceStack, runHooks, type Resume } from './quiesce';
+import { cleanOverrides, inheritedColumns, setSealKey, transferFor } from './set-inherit';
 import {
   estimateBytes, fmtBytes as fmtRelayBytes, freeBytes, planRelay, pullSource, relayRoot, resetStaging,
 } from './relay';
@@ -78,6 +79,22 @@ export class StackBackupService {
    */
   private sealKey(policyId: string): string {
     return `stack-backup:policy:${policyId}:passphrase`;
+  }
+
+  /**
+   * Whether a run of this policy can seal unattended: its own stored passphrase,
+   * or the shared one on its backup set.
+   */
+  async hasStoredSeal(policy: { id: string; setId?: string | null }): Promise<boolean> {
+    if (await this.secrets.has(this.sealKey(policy.id))) return true;
+    return !!policy.setId && (await this.secrets.has(setSealKey(policy.setId)));
+  }
+
+  private async storedSeal(policy: { id: string; setId?: string | null }): Promise<string | undefined> {
+    const own = await this.secrets.reveal(this.sealKey(policy.id)).catch(() => null);
+    if (own) return own;
+    if (!policy.setId) return undefined;
+    return (await this.secrets.reveal(setSealKey(policy.setId)).catch(() => null)) ?? undefined;
   }
 
   /** The schedule as the scheduler and the UI both read it. */
@@ -206,12 +223,12 @@ export class StackBackupService {
   async listPolicies(): Promise<StackBackupPolicy[]> {
     const rows = await this.prisma.stackBackupPolicy.findMany({
       orderBy: [{ stackName: 'asc' }],
-      include: { target: { select: { name: true } } },
+      include: { target: { select: { name: true } }, set: { select: { name: true } } },
     });
     const hostNames = await this.hostNames();
     return Promise.all(
       rows.map(async (r) =>
-        this.policyDto(r, hostNames.get(r.connectorInstanceId), r.target.name, await this.secrets.has(this.sealKey(r.id))),
+        this.policyDto(r, hostNames.get(r.connectorInstanceId), r.target.name, await this.hasStoredSeal(r), r.set?.name),
       ),
     );
   }
@@ -219,6 +236,32 @@ export class StackBackupService {
   async savePolicy(input: SaveBackupPolicyInput): Promise<StackBackupPolicy> {
     if (!input.connectorInstanceId || !input.stackName) throw new BadRequestException('A host and stack are required.');
     await this.hostOrThrow(input.connectorInstanceId);
+    const existing = await this.prisma.stackBackupPolicy.findUnique({
+      where: { connectorInstanceId_stackName: { connectorInstanceId: input.connectorInstanceId, stackName: input.stackName } },
+      include: { set: true },
+    });
+    // A set member takes every setting group it has not overridden from its set —
+    // whatever the form sent for those groups is ignored, so the set stays the
+    // single source of truth and a stale form cannot quietly fork a member.
+    const overrides = existing?.set
+      ? cleanOverrides(input.setOverrides ?? existing.setOverrides)
+      : cleanOverrides(existing?.setOverrides);
+    if (existing?.set) {
+      const inherited = inheritedColumns(existing.set, overrides);
+      const ssh = await this.hostHasSsh(input.connectorInstanceId);
+      input = {
+        ...input,
+        ...(inherited.targetId !== undefined ? { targetId: inherited.targetId } : {}),
+        ...(inherited.frequency !== undefined ? {
+          enabled: inherited.enabled, frequency: inherited.frequency as SaveBackupPolicyInput['frequency'],
+          dayOfWeek: inherited.dayOfWeek, dayOfMonth: inherited.dayOfMonth, hour: inherited.hour, minute: inherited.minute,
+        } : {}),
+        ...(inherited.quiesce !== undefined ? { quiesce: inherited.quiesce as QuiesceMode } : {}),
+        ...(inherited.transfer !== undefined ? { transfer: transferFor(inherited.transfer, ssh) as TransferMode } : {}),
+        ...(inherited.secretMode !== undefined ? { secretMode: inherited.secretMode as SecretMode } : {}),
+        ...(inherited.excludes !== undefined ? { excludes: inherited.excludes } : {}),
+      };
+    }
     const target = await this.prisma.stackBackupTarget.findUnique({ where: { id: input.targetId } });
     if (!target) throw new BadRequestException('Choose a backup target.');
 
@@ -246,6 +289,7 @@ export class StackBackupService {
       excludes: (input.excludes ?? []).filter(Boolean),
       preHooks: validateHooks(input.preHooks) as unknown as Prisma.InputJsonValue,
       postHooks: validateHooks(input.postHooks) as unknown as Prisma.InputJsonValue,
+      setOverrides: overrides,
     };
     const row = await this.prisma.stackBackupPolicy.upsert({
       where: {
@@ -256,7 +300,7 @@ export class StackBackupService {
       },
       update: data,
       create: { connectorInstanceId: input.connectorInstanceId, stackName: input.stackName, ...data },
-      include: { target: { select: { name: true } } },
+      include: { target: { select: { name: true } }, set: { select: { name: true } } },
     });
 
     // The passphrase is keyed by the policy id, so it can only be written once the
@@ -275,7 +319,7 @@ export class StackBackupService {
 
     // A sealed backup cannot run unattended without a stored passphrase, so refuse
     // to leave a schedule armed that would fail every night at 03:00.
-    const hasSeal = await this.secrets.has(this.sealKey(row.id));
+    const hasSeal = await this.hasStoredSeal(row);
     if (data.frequency !== 'off' && data.secretMode === 'embed' && !hasSeal) {
       await this.prisma.stackBackupPolicy.update({ where: { id: row.id }, data: { frequency: 'off' } });
       throw new BadRequestException(
@@ -284,10 +328,20 @@ export class StackBackupService {
     }
 
     const hostNames = await this.hostNames();
-    return this.policyDto(row, hostNames.get(row.connectorInstanceId), row.target.name, hasSeal);
+    return this.policyDto(row, hostNames.get(row.connectorInstanceId), row.target.name, hasSeal, row.set?.name);
   }
 
   async removePolicy(id: string): Promise<void> {
+    const row = await this.prisma.stackBackupPolicy.findUnique({ where: { id }, include: { set: true } });
+    if (!row) throw new NotFoundException('Stack backup not found.');
+    // Removing a stack from an auto-include set by deleting its backup must stick:
+    // remember it, or the next hourly sync would quietly add it straight back.
+    if (row.set?.autoInclude && !row.set.excludedStacks.includes(row.stackName)) {
+      await this.prisma.stackBackupSet.update({
+        where: { id: row.set.id },
+        data: { excludedStacks: { push: row.stackName } },
+      });
+    }
     await this.prisma.stackBackupPolicy.delete({ where: { id } }).catch(() => {
       throw new NotFoundException('Stack backup not found.');
     });
@@ -471,7 +525,7 @@ export class StackBackupService {
     // uses it too rather than asking again for something Cerebro already holds.
     let seal = passphrase;
     if (policy.secretMode === 'embed' && !seal) {
-      seal = (await this.secrets.reveal(this.sealKey(policy.id))) ?? undefined;
+      seal = await this.storedSeal(policy);
     }
     if (policy.secretMode === 'embed' && !seal) {
       throw new BadRequestException('This backup seals its secrets — supply the passphrase, or store one on the policy.');
@@ -903,6 +957,17 @@ export class StackBackupService {
     };
   }
 
+  /** Whether a host can run the direct helper (has SSH). False when it cannot be resolved. */
+  async hostHasSsh(instanceId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.connectorInstance.findUnique({ where: { id: instanceId } });
+      if (!row) return false;
+      return !!hostAccess(await this.instances.contextFor(row), this.stacks).ssh;
+    } catch {
+      return false;
+    }
+  }
+
   private async hostOrThrow(id: string) {
     const host = await this.prisma.connectorInstance.findUnique({ where: { id } });
     if (!host || host.connectorId !== DOCKER) throw new BadRequestException('That Docker host no longer exists.');
@@ -923,10 +988,12 @@ export class StackBackupService {
       frequency: string; dayOfWeek: number; dayOfMonth: number; hour: number; minute: number;
       quiesce: string; transfer: string; secretMode: string; includeBinds: string[]; excludes: string[];
       preHooks: unknown; postHooks: unknown; lastRunAt: Date | null; lastStatus: string; lastMessage: string | null; createdAt: Date;
+      setId?: string | null; setOverrides?: string[];
     },
     hostName?: string,
     targetName?: string,
     hasSealPassphrase = false,
+    setName?: string | null,
   ): StackBackupPolicy {
     const schedule = this.scheduleOf(row);
     return {
@@ -955,6 +1022,9 @@ export class StackBackupService {
       hasSealPassphrase,
       nextRunAt: row.enabled ? (nextRunAt(schedule)?.toISOString() ?? null) : null,
       scheduleText: row.enabled ? describeSchedule(schedule) : 'disabled',
+      setId: row.setId ?? null,
+      setName: setName ?? null,
+      setOverrides: cleanOverrides(row.setOverrides),
       createdAt: row.createdAt.toISOString(),
     };
   }

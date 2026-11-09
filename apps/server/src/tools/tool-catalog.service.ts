@@ -23,6 +23,7 @@ import { DeploymentService } from '../app-replicator/deployment.service';
 import { UpdateCheckService } from '../app-replicator/update-check.service';
 import { IngressService } from '../app-replicator/ingress.service';
 import { StackBackupService } from '../stack-backup/stack-backup.service';
+import { StackBackupSetService } from '../stack-backup/stack-backup-set.service';
 import { StackRestoreService } from '../stack-backup/stack-restore.service';
 
 /**
@@ -76,6 +77,7 @@ export class ToolCatalogService {
     private readonly ingress: IngressService,
     private readonly stackBackups: StackBackupService,
     private readonly stackRestores: StackRestoreService,
+    private readonly stackBackupSets: StackBackupSetService,
   ) {}
 
   /** Every tool the given user is permitted to use. */
@@ -481,6 +483,24 @@ export class ToolCatalogService {
         permission: 'backup:read',
         inputSchema: {},
         run: () => this.stackBackups.listPolicies(),
+      });
+
+      read({
+        name: 'get_stack_backup_coverage',
+        description:
+          'Every Compose stack on every Docker host and how well it is backed up: protected, manual-only, stale, failing, disabled, unprotected (no backup), ignored on purpose, or missing (backed up but no longer on the host). Also lists bind-mount paths each stack uses that its backup does not capture, and each host\'s CPU architecture.',
+        permission: 'backup:read',
+        inputSchema: {},
+        run: () => this.stackBackupSets.coverage(),
+      });
+
+      read({
+        name: 'list_stack_backup_sets',
+        description:
+          'List backup sets — groups of stack backups sharing one schedule and settings, optionally scoped to one Docker host with auto-include of every stack on it — with their member stacks.',
+        permission: 'backup:read',
+        inputSchema: {},
+        run: () => this.stackBackupSets.listSets(),
       });
 
       read({

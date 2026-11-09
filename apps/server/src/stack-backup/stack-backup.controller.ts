@@ -4,7 +4,9 @@ import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators
 import { BackupTargetService } from './backup-target.service';
 import { StackBackupService } from './stack-backup.service';
 import { StackRestoreService } from './stack-restore.service';
+import { StackBackupSetService } from './stack-backup-set.service';
 import type {
+  AddSetMembersInput, IgnoreStackInput, SaveBackupSetInput,
   BindSecretInput, ExecuteRestoreInput, RestorePlanInput, RunBackupInput, SaveBackupPolicyInput,
   SaveBackupTargetInput, SessionUser, VerifyRestoreInput,
 } from '@cerebro/shared';
@@ -20,7 +22,90 @@ export class StackBackupController {
     private readonly targets: BackupTargetService,
     private readonly backups: StackBackupService,
     private readonly restores: StackRestoreService,
+    private readonly sets: StackBackupSetService,
   ) {}
+
+  // ── Coverage ──
+  /** Every compose stack on every Docker host, and how well each one is backed up. */
+  @Get('coverage')
+  @RequirePermissions('backup:read')
+  coverage() {
+    return this.sets.coverage();
+  }
+
+  /** Mark a stack as not needing a backup (or undo it). */
+  @Put('coverage/:instanceId/:stackName/ignore')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  async ignore(@Param('instanceId') instanceId: string, @Param('stackName') stackName: string, @Body() body: IgnoreStackInput) {
+    await this.sets.setIgnored(instanceId, stackName, body ?? { ignored: true });
+    return { ok: true };
+  }
+
+  // ── Backup sets ──
+  @Get('sets')
+  @RequirePermissions('backup:read')
+  listSets() {
+    return this.sets.listSets();
+  }
+
+  @Get('sets/:id')
+  @RequirePermissions('backup:read')
+  getSet(@Param('id') id: string) {
+    return this.sets.getSet(id);
+  }
+
+  @Post('sets')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  createSet(@Body() body: SaveBackupSetInput) {
+    return this.sets.saveSet(null, body);
+  }
+
+  @Put('sets/:id')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  updateSet(@Param('id') id: string, @Body() body: SaveBackupSetInput) {
+    return this.sets.saveSet(id, body);
+  }
+
+  /** Delete a set. Its stacks keep their backups as standalone ones. */
+  @Delete('sets/:id')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  async deleteSet(@Param('id') id: string) {
+    await this.sets.deleteSet(id);
+    return { ok: true };
+  }
+
+  @Post('sets/:id/members')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  addMembers(@Param('id') id: string, @Body() body: AddSetMembersInput) {
+    return this.sets.addMembers(id, body);
+  }
+
+  /** `?mode=delete` also removes the stack's backup configuration; default keeps it standalone. */
+  @Delete('sets/:id/members/:policyId')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  removeMember(@Param('id') id: string, @Param('policyId') policyId: string, @Query('mode') mode?: string) {
+    return this.sets.removeMember(id, policyId, mode === 'delete' ? 'delete' : 'keep');
+  }
+
+  @Post('sets/:id/sync')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  syncSet(@Param('id') id: string) {
+    return this.sets.syncSet(id);
+  }
+
+  @Post('sets/:id/run')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  runSet(@Param('id') id: string) {
+    return this.sets.runSet(id);
+  }
 
   // ── Targets ──
   @Get('targets')

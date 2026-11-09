@@ -7,7 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **Stack backup sets** — group stack backups under one repository, schedule and set of settings
+  (for example everything on a Raspberry Pi). A set can be tied to one host and auto-include every
+  stack found there (hourly, or "Scan host"). Each stack can keep any setting for itself; bind paths
+  and dump hooks stay per stack. "Back up all" queues every member. Deleting a set or removing a stack
+  never stops its backups unless you choose that.
+- **Backup coverage** on the Stack Backups page — every compose stack on every Docker host with its
+  status (protected, no backup yet, overdue, failing, no backup, ignored, not on host), the host's CPU
+  architecture, and bind paths a stack uses that its backup does not capture. Stacks can be marked as
+  not needing a backup. New alert **"New stack with no backup"** fires once for a stack that appears and
+  still has no backup an hour later (stacks already there when Cerebro first looks don't alert).
+
 ### Fixed
+- **Scheduled stack backups sharing a repository were skipped** — when two stacks were due in the
+  same minute on the same repository, only the first ran and the rest waited until their next slot
+  (the next day for a daily backup). They now queue and run one after another.
 - **Architecture Map showing deleted firewall rules (and other removed items)** — the map's
   background rebuild reused each connector's last-fetched list indefinitely, and a Refresh
   click that landed during a background rebuild got that rebuild's cached result. Background
