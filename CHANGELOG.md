@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **Architecture Map showing deleted firewall rules (and other removed items)** — the map's
+  background rebuild reused each connector's last-fetched list indefinitely, and a Refresh
+  click that landed during a background rebuild got that rebuild's cached result. Background
+  rebuilds now re-read any list older than 5 minutes, and Refresh always reads live.
 - **Certificate log check failing with "Couldn't reach crt.sh"** — crt.sh's JSON endpoint often
   answers 502 when busy, and 404 for a domain with no certificates. A 404 now means "none", a
   502 is retried once, and Cert Spotter answers when crt.sh is still down.
