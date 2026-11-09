@@ -22,7 +22,15 @@ import type {
   ReplicatorIngress, ReplicatorIngressKind, TargetKind, EcsDeploymentRefs, ExtraEnvEntry, ReplicatorMount,
   DeploymentEnvView, DeploymentEnvEntry, DeploymentEnvOrigin, DeploymentEnvDrift, ReplicatorFixedPort,
 } from '@cerebro/shared';
+import { fixedPortKey, isMovableFixedPort } from '@cerebro/shared';
 import type { ReplicatorApp as AppRow, ReplicatorDeployment as DeploymentRow, ReplicatorIngress as IngressRow } from '@prisma/client';
+
+/** Every host port a port entry binds (a published range covers start..end). */
+function spanOf(p: { hostPort: number; hostPortEnd?: number | null }): number[] {
+  const out: number[] = [];
+  for (let n = p.hostPort; n <= (p.hostPortEnd ?? p.hostPort); n++) out.push(n);
+  return out;
+}
 
 /** The vault key holding one deployment's secret variable value. */
 function secretKey(deploymentId: string, varName: string): string {
@@ -189,7 +197,7 @@ export class DeploymentService {
 
     // Resolve ports; Docker preflights them against the host (ECS has no host ports).
     const fixedPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];
-    const portList = this.resolvePorts(variables, fixedPorts, input.ports, input.values);
+    const portList = this.resolvePorts(variables, fixedPorts, input.ports, input.values, targetKind === 'docker' ? input.fixedPortMoves : undefined);
     if (targetKind === 'docker') {
       const target = await this.targetFor(input.dockerInstanceId);
       await this.preflightPorts(target, portList);
@@ -321,8 +329,14 @@ export class DeploymentService {
       for (const p of portList) if (p.variable && p.mode !== 'host_network' && p.adjustable !== false) chosenPorts[p.variable] = p.hostPort;
       for (const [name, val] of Object.entries(opts.ports ?? {})) if (val != null) chosenPorts[name] = Number(val);
       const fixedPorts = (app.fixedPorts as unknown as ReplicatorFixedPort[]) ?? [];
-      const newPortList = this.resolvePorts(variables, fixedPorts, chosenPorts, mergedValues);
-      if (target) await this.preflightPorts(target, newPortList, new Set(portList.map((p) => p.hostPort)));
+      // Hardcoded ports this deployment already moved stay moved unless edited.
+      const moves: Record<string, number> = {};
+      for (const p of portList) {
+        if (p.composeHostPort != null) moves[fixedPortKey({ service: p.service, hostPort: p.composeHostPort, protocol: p.protocol })] = p.hostPort;
+      }
+      for (const [k, val] of Object.entries(opts.fixedPortMoves ?? {})) if (val != null) moves[k] = Number(val);
+      const newPortList = this.resolvePorts(variables, fixedPorts, chosenPorts, mergedValues, targetKind === 'docker' ? moves : undefined);
+      if (target) await this.preflightPorts(target, newPortList, new Set(portList.flatMap((p) => spanOf(p))));
 
       // Required-value validation, accounting for an already-stored secret.
       const missing = variables
@@ -748,6 +762,8 @@ export class DeploymentService {
     fixedPorts: ReplicatorFixedPort[],
     chosen: Record<string, number>,
     values: Record<string, string>,
+    /** Docker only: per-deployment host ports for hardcoded mappings (`fixedPortKey` → port). */
+    moves?: Record<string, number>,
   ): ReplicatorPort[] {
     const out: ReplicatorPort[] = [];
     for (const v of variables.filter((x) => x.role === 'host_port')) {
@@ -760,9 +776,24 @@ export class DeploymentService {
     }
     for (const p of fixedPorts ?? []) {
       let hostPort = p.hostPort;
+      let hostPortEnd = p.hostPortEnd ?? null;
+      let composeHostPort: number | null = null;
       if (p.mode === 'host_network' && p.variable) {
         const chosenVal = Number(values[p.variable] ?? p.hostPort);
         if (Number.isInteger(chosenVal) && chosenVal >= 1 && chosenVal <= 65535) hostPort = chosenVal;
+      }
+      // A hardcoded mapping moved for this deployment: bind elsewhere, and remember
+      // the compose's own port so the deploy can rewrite that one mapping.
+      const moved = moves && isMovableFixedPort(p) ? moves[fixedPortKey({ service: p.service, hostPort: p.hostPort, protocol: p.protocol })] : undefined;
+      if (moved != null && Number(moved) !== p.hostPort) {
+        const to = Number(moved);
+        const width = hostPortEnd != null ? hostPortEnd - p.hostPort : 0;
+        if (!Number.isInteger(to) || to < 1 || to + width > 65535) {
+          throw new BadRequestException(`Invalid host port ${moved} for ${p.service ?? 'app'}'s ${p.hostPort}.`);
+        }
+        hostPort = to;
+        hostPortEnd = hostPortEnd != null ? to + width : null;
+        composeHostPort = p.hostPort;
       }
       out.push({
         service: p.service ?? 'app',
@@ -771,8 +802,9 @@ export class DeploymentService {
         containerPort: p.containerPort,
         mode: p.mode,
         adjustable: p.adjustable,
-        hostPortEnd: p.hostPortEnd ?? null,
+        hostPortEnd,
         protocol: p.protocol,
+        composeHostPort,
       });
     }
     return out;
@@ -782,12 +814,19 @@ export class DeploymentService {
     const used = new Set(await this.ports.usedPorts(target.ssh));
     // A redeploy's own currently-bound ports aren't a conflict with itself.
     if (exclude) for (const p of exclude) used.delete(p);
-    const seen = new Set<number>();
+    const seen = new Set<string>();
     const conflicts: string[] = [];
     for (const p of portList) {
-      if (seen.has(p.hostPort)) { conflicts.push(`${p.hostPort} (assigned twice in this deployment)`); continue; }
-      seen.add(p.hostPort);
-      if (!used.has(p.hostPort)) continue;
+      // Every port of a published range counts, not just its first.
+      const span = spanOf(p);
+      // tcp and udp on the same number (e.g. DNS 53) don't clash with each other.
+      const proto = p.protocol === 'udp' ? 'udp' : 'tcp';
+      const dup = span.find((n) => seen.has(`${n}/${proto}`));
+      if (dup != null) { conflicts.push(`${dup} (assigned twice in this deployment)`); continue; }
+      for (const n of span) seen.add(`${n}/${proto}`);
+      const busy = span.filter((n) => used.has(n));
+      if (!busy.length) continue;
+      const label = busy.length === 1 ? String(busy[0]) : busy.join(', ');
       // In use on the host — the remedy depends on whether Cerebro can move it.
       // A host-network or hardcoded port can't be auto-assigned, but one backed by
       // an env var can still be changed by the operator, so the message says how.
@@ -796,9 +835,9 @@ export class DeploymentService {
           ? `${p.hostPort} (in use on the host — this app binds it directly via host networking; change ${p.variable} to a free port and deploy again)`
           : `${p.hostPort} (in use on the host — this app binds it directly via host networking and hardcodes the port, so free it on the host or edit the app's compose)`);
       } else if (p.adjustable === false) {
-        conflicts.push(`${p.hostPort} (in use on the host — hardcoded in the app's compose, so free it on the host or edit the compose)`);
+        conflicts.push(`${label} (in use on the host — hardcoded in the app's compose; give it a different host port in the deploy dialog, or free it on the host)`);
       } else {
-        conflicts.push(`${p.hostPort} (already in use on the host — pick a different host port)`);
+        conflicts.push(`${label} (already in use on the host — pick a different host port)`);
       }
     }
     if (conflicts.length) throw new BadRequestException(`Port conflict: ${conflicts.join('; ')}.`);

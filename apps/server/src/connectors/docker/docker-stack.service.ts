@@ -59,6 +59,14 @@ export interface StackGitSource {
    * redeploy or rollback can rewrite it.
    */
   generatedCompose?: string;
+  /**
+   * Rewrite the repo's compose text before it's used (App Replicator: move a
+   * hardcoded host port for this deployment). The result is written beside the
+   * original as `.cerebro-<name>` — same directory, so relative paths, `env_file`
+   * and the `.env` resolve exactly as before — and used in its place. Throws to
+   * fail the deploy. Not stored: only the replicator's own deploys apply it.
+   */
+  rewriteCompose?: (text: string) => string;
 }
 
 /** Where a generated compose (see `StackGitSource.generatedCompose`) lives, relative to the stack dir. */
@@ -345,6 +353,21 @@ export class DockerStackService {
         if (wg.code !== 0) throw new Error('Failed to write the generated compose file on the host.');
       } else {
         await runSsh(target.ssh, `rm -f '${base}/${GENERATED_COMPOSE_FILE}'`).catch(() => { /* best-effort */ });
+      }
+
+      // A per-deployment rewrite of the repo's compose (e.g. a moved hardcoded
+      // port): read it from the fresh checkout, rewrite, and use the copy instead.
+      const rewrittenName = `.cerebro-${composeFile.replace(/^.*\//, '')}`;
+      if (!generated && src.rewriteCompose) {
+        const orig = await runSsh(target.ssh, `cat '${composeFile}'`);
+        if (orig.code !== 0) throw new Error(`Could not read ${relCompose} from the checkout to adjust its ports.`);
+        const next = src.rewriteCompose(orig.stdout);
+        const copy = `${composeDir}/${rewrittenName}`;
+        const wr = await runSsh(target.ssh, `cat > '${copy}'`, next);
+        if (wr.code !== 0) throw new Error('Failed to write the adjusted compose file on the host.');
+        composeFile = copy;
+      } else {
+        await runSsh(target.ssh, `rm -f '${composeDir}/${rewrittenName}'`).catch(() => { /* best-effort */ });
       }
 
       // Write the .env beside the compose (only if provided).

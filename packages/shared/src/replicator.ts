@@ -98,6 +98,25 @@ export interface ReplicatorPort {
   hostPortEnd?: number | null;
   /** 'udp' for a `/udp` mapping; otherwise tcp. */
   protocol?: 'tcp' | 'udp';
+  /**
+   * Set when this deployment moved a port the compose hardcodes: the host port the
+   * compose itself says (range start). `hostPort` is where it really binds; Cerebro
+   * rewrites that one mapping in the compose it hands to Docker, per deployment.
+   */
+  composeHostPort?: number | null;
+}
+
+/**
+ * Identifies a hardcoded published port across the app schema and a deployment's
+ * moves: service, the host port the compose declares, and protocol.
+ */
+export function fixedPortKey(p: { service?: string | null; hostPort: number; protocol?: 'tcp' | 'udp' }): string {
+  return `${p.service ?? 'app'}|${p.hostPort}|${p.protocol === 'udp' ? 'udp' : 'tcp'}`;
+}
+
+/** True for a port the compose hardcodes as a literal `ports:` mapping — the kind a deployment can move. */
+export function isMovableFixedPort(p: ReplicatorFixedPort): boolean {
+  return p.mode === 'published' && !p.adjustable && p.source !== 'manual';
 }
 
 /**
@@ -390,6 +409,12 @@ export interface DeployInput {
   secrets: Record<string, string>;
   /** Chosen host port per host_port variable name. */
   ports: Record<string, number>;
+  /**
+   * Docker only: new host ports for ports the compose hardcodes, keyed by
+   * `fixedPortKey` of the compose's own mapping. Cerebro rewrites just those
+   * mappings in this deployment's copy of the compose; the app is untouched.
+   */
+  fixedPortMoves?: Record<string, number>;
   /** Env entries beyond the app's schema, added by the operator for this instance. */
   extraEnv?: ExtraEnvEntry[];
   /** Volume mounts to layer on for this instance (bind/named). Docker target only. */
@@ -419,6 +444,11 @@ export interface RedeployInput {
   secrets?: Record<string, string>;
   /** Edited host ports (host_port var name→port). A key left out keeps the stored port. */
   ports?: Record<string, number>;
+  /**
+   * Edited moves for hardcoded compose ports (`fixedPortKey` → host port). A key
+   * left out keeps the stored move; the compose's own port moves it back.
+   */
+  fixedPortMoves?: Record<string, number>;
   /**
    * The complete set of env extras after the edit — it **replaces** the stored
    * ones rather than merging, so an entry left out is removed (and its vault
