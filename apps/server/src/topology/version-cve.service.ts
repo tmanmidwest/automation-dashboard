@@ -52,6 +52,7 @@ export class VersionCveService {
   ) {}
 
   private refreshing: Promise<boolean> | null = null;
+  private triedSinceBoot = false;
 
   /** Cached CVEs per CPE ("ui:unifi_os"); missing = not fetched yet. */
   async cached(): Promise<Store> {
@@ -62,19 +63,22 @@ export class VersionCveService {
    * Fetch any product that is missing or older than a day, in the background.
    * Resolves true when something new was stored (so the caller can rebuild).
    */
-  refresh(cpes: string[]): Promise<boolean> {
+  refresh(cpes: string[], retryFailed = false): Promise<boolean> {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.doRefresh([...new Set(cpes)]).finally(() => { this.refreshing = null; });
+    this.refreshing = this.doRefresh([...new Set(cpes)], retryFailed).finally(() => { this.refreshing = null; });
     return this.refreshing;
   }
 
-  private async doRefresh(cpes: string[]): Promise<boolean> {
+  private async doRefresh(cpes: string[], retryFailed: boolean): Promise<boolean> {
+    // A restart, or a manual Refresh, retries sources that failed instead of waiting out the backoff.
+    const skipBackoff = retryFailed || !this.triedSinceBoot;
+    this.triedSinceBoot = true;
     const store = await this.cached();
     const now = Date.now();
     const todo = cpes.filter((c) => {
       const e = store[c];
       if (!e) return true;
-      if (e.failedAt && now - new Date(e.failedAt).getTime() < RETRY_MS) return false;
+      if (!skipBackoff && e.failedAt && now - new Date(e.failedAt).getTime() < RETRY_MS) return false;
       return now - new Date(e.at).getTime() > TTL_MS;
     });
     let changed = false;

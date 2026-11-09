@@ -60,6 +60,7 @@ export class CtLogService {
   ) {}
 
   private refreshing: Promise<boolean> | null = null;
+  private triedSinceBoot = false;
 
   async cached(): Promise<CtStore> {
     return (await this.settings.get<CtStore>(STORE_KEY)) ?? {};
@@ -140,13 +141,16 @@ export class CtLogService {
     return out;
   }
 
-  refresh(domains: string[]): Promise<boolean> {
+  refresh(domains: string[], retryFailed = false): Promise<boolean> {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.doRefresh([...new Set(domains)].sort()).finally(() => { this.refreshing = null; });
+    this.refreshing = this.doRefresh([...new Set(domains)].sort(), retryFailed).finally(() => { this.refreshing = null; });
     return this.refreshing;
   }
 
-  private async doRefresh(domains: string[]): Promise<boolean> {
+  private async doRefresh(domains: string[], retryFailed: boolean): Promise<boolean> {
+    // A restart, or a manual Refresh, retries sources that failed instead of waiting out the backoff.
+    const skipBackoff = retryFailed || !this.triedSinceBoot;
+    this.triedSinceBoot = true;
     const store = await this.cached();
     const now = Date.now();
     // Forget domains you no longer have.
@@ -154,7 +158,7 @@ export class CtLogService {
     const todo = domains.filter((d) => {
       const e = store[d];
       if (!e) return true;
-      if (e.failedAt && now - new Date(e.failedAt).getTime() < RETRY_MS) return false;
+      if (!skipBackoff && e.failedAt && now - new Date(e.failedAt).getTime() < RETRY_MS) return false;
       return now - new Date(e.at).getTime() > TTL_MS;
     });
     let changed = false;

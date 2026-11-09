@@ -40,23 +40,27 @@ export class HibpService {
   ) {}
 
   private refreshing: Promise<boolean> | null = null;
+  private triedSinceBoot = false;
 
   async cached(): Promise<HibpStore> {
     return { breaches: [], ...((await this.settings.get<HibpStore>(STORE_KEY)) ?? {}) };
   }
 
   /** Re-read the catalogue if it's a day old; resolves true when something new was stored. */
-  refresh(): Promise<boolean> {
+  refresh(retryFailed = false): Promise<boolean> {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.doRefresh().finally(() => { this.refreshing = null; });
+    this.refreshing = this.doRefresh(retryFailed).finally(() => { this.refreshing = null; });
     return this.refreshing;
   }
 
-  private async doRefresh(): Promise<boolean> {
+  private async doRefresh(retryFailed: boolean): Promise<boolean> {
+    // A restart, or a manual Refresh, retries sources that failed instead of waiting out the backoff.
+    const skipBackoff = retryFailed || !this.triedSinceBoot;
+    this.triedSinceBoot = true;
     const prev = await this.cached();
     const now = Date.now();
     if (prev.at && now - new Date(prev.at).getTime() < TTL_MS) return false;
-    if (prev.failedAt && now - new Date(prev.failedAt).getTime() < RETRY_MS) return false;
+    if (!skipBackoff && prev.failedAt && now - new Date(prev.failedAt).getTime() < RETRY_MS) return false;
     try {
       const res = await fetch('https://haveibeenpwned.com/api/v3/breaches', {
         signal: AbortSignal.timeout(TIMEOUT_MS),
