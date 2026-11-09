@@ -10,7 +10,7 @@ import { runSsh, shellQuote, type SshConfig } from '../connectors/docker/docker-
 import { openBundle } from '../system-backup/bundle';
 import type {
   ExecuteRestoreInput, RestoreBindPlan, RestoreMode, RestorePlan, RestorePlanInput, RestorePortPlan,
-  RestoreSecret, RestoreVolumePlan, SecretMode, SnapshotEntry, StackRestoreRun, StackSnapshot,
+  RestoreImagePlan, RestoreSecret, RestoreVolumePlan, SecretMode, SnapshotEntry, StackRestoreRun, StackSnapshot,
   VerifyRestoreInput,
 } from '@cerebro/shared';
 import { BackupTargetService } from './backup-target.service';
@@ -26,9 +26,14 @@ import { pushDir, relayRoot } from './relay';
 import { mkdir, rm } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import {
-  decodeTags, dumpFile, listFiles, listSnapshots, resticEnv, runResticLocalTolerant,
+  decodeTags, dumpFile, listFiles, listSnapshots, parseBackupSummary, PRE_RESTORE_TAG, resticEnv, runResticLocalTolerant,
   type ResticRepoAuth,
 } from './restic-cli';
+import { removeHostDir, writeHostDir } from './helper-runner';
+import {
+  digestFor, normalizeArch, pinComposeImages, platformLabel, platformRuns, repoOf, type ManifestImage,
+} from './image-platform';
+import type { DockerApi } from '../connectors/docker/docker-api';
 import { trimChar } from '../common/text';
 
 const DOCKER = 'docker';
@@ -46,6 +51,9 @@ interface Manifest {
   host?: string;
   connectorInstanceId?: string;
   secretMode?: SecretMode;
+  /** Image versions and platforms (snapshots from 2026-11 on). */
+  images?: ManifestImage[];
+  hostArchitecture?: string | null;
   volumes?: { name: string; driver?: string; options?: Record<string, string> | null; labels?: Record<string, string> | null }[];
   containers?: {
     name: string;
@@ -104,6 +112,8 @@ export class StackRestoreService {
         hostLabel: t.hostId ? hostNames.get(t.hostId) : undefined,
         policyId: t.policyId,
         runId: t.runId,
+        preRestore: t.preRestore,
+        restoreRunId: t.restoreRunId,
       };
     });
   }
@@ -297,7 +307,44 @@ export class StackRestoreService {
       }
     }
 
+    // Image versions and CPU platform: can each image come back, at the version it
+    // was backed up with, on this host's CPU?
+    let destArch: string | null = null;
+    try {
+      destArch = (await api.info()).Architecture ?? null;
+    } catch {
+      warnings.push(`Could not read ${host.name}'s CPU architecture, so image compatibility was not checked.`);
+    }
+    const destPlat = normalizeArch(destArch);
+    const images = await planImages(api, manifest, destPlat);
+    const sourcePlat = normalizeArch(manifest.hostArchitecture);
+    if (sourcePlat && destPlat && platformLabel(sourcePlat) !== platformLabel(destPlat)) {
+      warnings.push(`Different CPU: the snapshot came from a ${platformLabel(sourcePlat)} host and ${host.name} is ${platformLabel(destPlat)}. Check the image list below.`);
+    }
+    const unsupported = images.filter((i) => i.status === 'unsupported').map((i) => i.ref);
+    if (unsupported.length) {
+      warnings.push(`No build for ${platformLabel(destPlat)} exists for: ${unsupported.join(', ')}. The data restores, but those services will not start on ${host.name}.`);
+    }
+    const local = images.filter((i) => i.status === 'local').map((i) => i.ref);
+    if (local.length) {
+      warnings.push(`Built on the source host and in no registry: ${local.join(', ')}. A full restore cannot pull them — rebuild them on ${host.name} (Stack Migrate can copy images between hosts).`);
+    }
+    const tagOnly = images.filter((i) => i.status === 'tag-only').map((i) => i.ref);
+    if (tagOnly.length) {
+      warnings.push(`The backed-up version has no ${platformLabel(destPlat)} build for: ${tagOnly.join(', ')}. Those keep their tag and pull its current version, which may be newer than the data.`);
+    }
+
+    // What this restore would overwrite — a safety copy is taken of exactly this first.
+    const overwrites = [
+      ...volumes.filter((v) => v.exists).map((v) => `volume ${v.dest}`),
+      ...binds.filter((b) => b.exists).map((b) => b.dest),
+    ];
+
     return {
+      images,
+      sourcePlatform: sourcePlat ? platformLabel(sourcePlat) : null,
+      destPlatform: destPlat ? platformLabel(destPlat) : null,
+      overwrites,
       snapshot,
       targetId: input.targetId,
       destInstanceId: host.id,
@@ -350,7 +397,13 @@ export class StackRestoreService {
 
   // ── Executing ─────────────────────────────────────────────────────
 
-  async start(input: ExecuteRestoreInput): Promise<StackRestoreRun> {
+  /**
+   * @param opts.guarded set by the operator-facing endpoint: overwriting existing
+   *   data needs the destination name typed back, and a safety copy of what is
+   *   overwritten is taken first (unless explicitly skipped). Internal callers
+   *   (the migrator, verify) restore onto names they just planned and leave it off.
+   */
+  async start(input: ExecuteRestoreInput, opts: { guarded?: boolean } = {}): Promise<StackRestoreRun> {
     const plan = await this.plan(input);
     if (plan.conflicts.length && !input.force) {
       throw new BadRequestException(`Restore blocked: ${plan.conflicts.join(' ')}`);
@@ -371,6 +424,24 @@ export class StackRestoreService {
       throw new BadRequestException('Nothing selected to restore.');
     }
 
+    // Overwriting data that already exists is the one step a restore cannot take
+    // back on its own — so it needs the name typed, and gets a safety copy.
+    const overwrite = [...volumes.filter((v) => v.exists), ...binds.filter((b) => b.exists)];
+    const safetyCopy = !!opts.guarded && overwrite.length > 0 && input.mode !== 'verify' && !input.skipSafetyCopy;
+    if (opts.guarded && overwrite.length && input.mode !== 'verify') {
+      if ((input.confirmName ?? '').trim() !== plan.destStackName) {
+        throw new BadRequestException(
+          `This restore overwrites existing data on ${plan.destHostName}. Type the stack name "${plan.destStackName}" to confirm.`,
+        );
+      }
+      const ctx = await this.instances.contextFor(await this.hostOrThrow(plan.destInstanceId));
+      if (safetyCopy && !hostAccess(ctx, this.stacks).ssh) {
+        throw new BadRequestException(
+          `${plan.destHostName} has no SSH, so Cerebro cannot take a safety copy of the data before overwriting it. Tick "skip the safety copy" to restore anyway.`,
+        );
+      }
+    }
+
     const run = await this.prisma.stackRestoreRun.create({
       data: {
         snapshotId: plan.snapshot.id,
@@ -386,7 +457,7 @@ export class StackRestoreService {
     });
 
     this.active.add(key);
-    void this.execute(run.id, plan, input, volumes, binds).finally(() => this.active.delete(key));
+    void this.execute(run.id, plan, input, volumes, binds, { safetyCopy }).finally(() => this.active.delete(key));
     return this.runDto(run, plan.destHostName);
   }
 
@@ -593,7 +664,7 @@ export class StackRestoreService {
     volumes: RestoreVolumePlan[],
     binds: RestoreBindPlan[],
     /** A verify run shares its log and finishes the row itself once it has a verdict. */
-    opts: { log?: string[]; keepRunning?: boolean } = {},
+    opts: { log?: string[]; keepRunning?: boolean; safetyCopy?: boolean } = {},
   ): Promise<void> {
     const started = Date.now();
     const log = opts.log ?? [];
@@ -615,6 +686,15 @@ export class StackRestoreService {
       }
 
       say(`Restoring snapshot ${plan.snapshot.shortId} (${plan.sourceStackName}) to ${host.name} as "${plan.destStackName}".`);
+
+      // 0) Safety copy: snapshot exactly what is about to be overwritten, so this
+      //    restore can itself be undone. If it fails, nothing has been touched yet.
+      if (opts.safetyCopy && access.ssh) {
+        const safetyId = await this.takeSafetyCopy(runId, plan, volumes, binds, access, target.helperImage, hostAuth, host.name, say, log);
+        await this.prisma.stackRestoreRun.update({ where: { id: runId }, data: { safetySnapshotId: safetyId } });
+      } else if (input.skipSafetyCopy && [...volumes, ...binds].some((x) => x.exists)) {
+        say('Safety copy skipped on request — the data being overwritten is not kept.');
+      }
 
       // 1) Volumes must exist before the helper can mount them, and must be created
       //    with the driver they had — an NFS volume recreated as a local one would
@@ -687,6 +767,21 @@ export class StackRestoreService {
         const { env, composeSecrets, files } = await this.resolveSnapshotSecrets(auth, plan, input.passphrase);
         // Literals lifted out of the compose at capture time go back in verbatim.
         let compose = restoreCompose(stored, composeSecrets);
+        // Bring the stack back on the image versions it was backed up with, where
+        // that version has a build for this host's CPU.
+        if (input.imageVersion !== 'tag') {
+          const pins = new Map(plan.images.filter((i) => i.pinnable && i.digest).map((i) => [i.ref, i.digest!]));
+          if (pins.size) {
+            const r = pinComposeImages(compose, pins);
+            compose = r.compose;
+            if (r.pinned.length) say(`Pinned ${r.pinned.length} image(s) to the backed-up version: ${r.pinned.join(', ')}.`);
+            if (r.variable.length) say(`Not pinned (image set by a variable): ${r.variable.join(', ')}.`);
+          }
+          const kept = plan.images.filter((i) => !i.pinnable).map((i) => i.ref);
+          if (kept.length) say(`Kept the tag (no usable backed-up version): ${kept.join(', ')}.`);
+        } else {
+          say('Image tags kept as-is — they pull whatever version is current.');
+        }
         let outEnv = env;
         if (input.mode === 'verify') {
           compose = unpublishPorts(compose);
@@ -750,6 +845,73 @@ export class StackRestoreService {
       say(`Failed: ${message}`);
       await this.finish(runId, { status: 'error', message, deployed, durationMs: Date.now() - started, log: log.join('\n') });
       void this.logging.error('stack-backup', `Restore ${runId} failed: ${message}`);
+    }
+  }
+
+  /**
+   * Snapshot the destination's existing volumes and bind paths that this restore
+   * is about to overwrite, as an ordinary stack snapshot (with a manifest) so the
+   * normal restore wizard can put it back. Tagged `kind:pre-restore` and with the
+   * restore run's id. Runs with the host's append-only key, like any backup.
+   */
+  private async takeSafetyCopy(
+    runId: string,
+    plan: RestorePlan,
+    volumes: RestoreVolumePlan[],
+    binds: RestoreBindPlan[],
+    access: ReturnType<typeof hostAccess>,
+    helperImage: string,
+    hostAuth: ResticRepoAuth,
+    hostName: string,
+    say: (line: string) => void,
+    log: string[],
+  ): Promise<string> {
+    const vols = volumes.filter((v) => v.exists);
+    const bnds = binds.filter((b) => b.exists);
+    say(`Taking a safety copy of what will be overwritten: ${[...vols.map((v) => v.dest), ...bnds.map((b) => b.dest)].join(', ')}…`);
+    const manifest = {
+      schema: 1,
+      capturedAt: new Date().toISOString(),
+      kind: 'pre-restore',
+      restoreRunId: runId,
+      project: plan.destStackName,
+      host: hostName,
+      connectorInstanceId: plan.destInstanceId,
+      secretMode: 'raw',
+      volumes: vols.map((v) => ({ name: v.dest })),
+      containers: [],
+      capture: { root: '/data', transfer: 'direct', volumes: vols.map((v) => v.dest), binds: bnds.map((b) => b.dest), hasCompose: false, hasEnv: false },
+    };
+    const hostDir = `/var/tmp/cerebro-safety-${runId}`;
+    await writeHostDir(access.ssh!, hostDir, { 'manifest.json': `${JSON.stringify(manifest, null, 2)}\n` });
+    try {
+      const mounts: HelperMount[] = [
+        ...vols.map((v) => ({ source: v.dest, dest: `/data/volumes/${v.dest}`, kind: 'volume' as const, readOnly: true })),
+        ...bnds.map((b) => ({ source: b.dest, dest: `/data/binds/${bindSlug(b.dest)}`, kind: 'bind' as const, readOnly: true })),
+        { source: hostDir, dest: '/data/meta', kind: 'bind', readOnly: true },
+      ];
+      const res = await runHelper({
+        ssh: access.ssh!,
+        image: helperImage,
+        env: resticEnv(hostAuth),
+        mounts,
+        args: [
+          'backup', '/data', '--json', '--host', safeHost(hostName),
+          '--tag', 'cerebro', '--tag', 'type:stack', '--tag', PRE_RESTORE_TAG,
+          '--tag', `host:${plan.destInstanceId}`, '--tag', `stack:${plan.destStackName}`, '--tag', `restore:${runId}`,
+        ],
+        timeoutMs: RESTORE_TIMEOUT_MS,
+      });
+      if (res.stderr.trim()) log.push(res.stderr.trim());
+      const summary = parseBackupSummary(res.stdout);
+      // exit 3 = snapshot written but some files unreadable; still a usable undo point.
+      if ((res.code !== 0 && res.code !== 3) || !summary.snapshotId) {
+        throw new Error(`Safety copy failed (exit ${res.code})${resticFailReason(res.stderr)} — nothing was overwritten.`);
+      }
+      say(`Safety copy saved as snapshot ${summary.snapshotId.slice(0, 8)}. Restore it to undo this restore.`);
+      return summary.snapshotId;
+    } finally {
+      await removeHostDir(access.ssh!, hostDir);
     }
   }
 
@@ -1114,6 +1276,7 @@ export class StackRestoreService {
       id: string; snapshotId: string; targetId: string; sourceStackName: string; destInstanceId: string;
       destStackName: string; mode: string; status: string; message: string | null; volumes: number;
       binds: number; deployed: boolean; durationMs: number | null; startedAt: Date; finishedAt: Date | null;
+      safetySnapshotId?: string | null;
     },
     destHostName?: string,
   ): StackRestoreRun {
@@ -1131,6 +1294,7 @@ export class StackRestoreService {
       volumes: row.volumes,
       binds: row.binds,
       deployed: row.deployed,
+      safetySnapshotId: row.safetySnapshotId ?? null,
       durationMs: row.durationMs,
       startedAt: row.startedAt.toISOString(),
       finishedAt: row.finishedAt?.toISOString() ?? null,
@@ -1171,4 +1335,80 @@ function escapeRe(v: string): string {
 /** Compose's own project-name rules: lowercase, alphanumerics, dash and underscore. */
 function projectName(name: string): string {
   return trimChar(name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-'), '-');
+}
+
+function safeHost(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'cerebro';
+}
+
+/** How long one registry question may take before the image is reported as "unknown". */
+const REGISTRY_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('the registry did not answer in time')), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+/**
+ * Work out, per image, whether the backed-up version can run on the destination.
+ * The destination daemon asks the registry (`/distribution`), so the answer uses
+ * that host's own registry access — the same path a pull would take.
+ */
+export async function planImages(
+  api: Pick<DockerApi, 'distributionInspect'>,
+  manifest: { images?: ManifestImage[]; containers?: { image?: string; labels?: Record<string, string> }[] },
+  dest: { architecture: string; variant?: string } | null,
+): Promise<RestoreImagePlan[]> {
+  if (!manifest.images) {
+    const refs = [...new Set((manifest.containers ?? []).map((c) => c.image).filter((r): r is string => !!r))];
+    return refs.map((ref) => ({
+      ref, services: [], backedUpPlatform: 'unknown', status: 'unknown' as const, pinnable: false,
+      note: 'This snapshot predates image version tracking, so the tag pulls whatever version is current.',
+    }));
+  }
+  const destLabel = dest ? platformLabel(dest) : 'this host';
+  const platformsOf = async (ref: string) =>
+    ((await withTimeout(api.distributionInspect(ref), REGISTRY_TIMEOUT_MS)).Platforms ?? [])
+      .filter((p) => p.architecture && p.architecture !== 'unknown');
+
+  return Promise.all(manifest.images.map(async (img): Promise<RestoreImagePlan> => {
+    const base = { ref: img.ref, services: img.services, backedUpPlatform: platformLabel(img) };
+    const digest = digestFor(img.ref, img.repoDigests);
+    const runsHere = !dest || platformRuns(img, dest);
+    if (!digest) {
+      return {
+        ...base, digest: null, status: 'local', pinnable: false,
+        note: runsHere
+          ? 'Built on the source host and not in any registry, so a restore cannot pull it.'
+          : `Built on the source host for ${platformLabel(img)}, which ${destLabel} cannot run — it must be rebuilt there.`,
+      };
+    }
+    try {
+      const avail = await platformsOf(`${repoOf(img.ref)}@${digest}`);
+      const availablePlatforms = avail.map((p) => platformLabel(p));
+      // A single-platform manifest may report no platform list; fall back to what ran.
+      const fits = avail.length ? (!dest || avail.some((p) => platformRuns(p, dest))) : runsHere;
+      if (fits) return { ...base, digest, availablePlatforms, status: 'pinned', pinnable: true };
+      try {
+        const tagAvail = await platformsOf(img.ref);
+        if (!dest || tagAvail.some((p) => platformRuns(p, dest))) {
+          return {
+            ...base, digest, availablePlatforms, status: 'tag-only', pinnable: false,
+            note: `The backed-up version has no ${destLabel} build; the tag's current version does, so it will be used.`,
+          };
+        }
+      } catch { /* fall through to unsupported */ }
+      return { ...base, digest, availablePlatforms, status: 'unsupported', pinnable: false, note: `No ${destLabel} build of this image.` };
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      return {
+        ...base, digest, status: 'unknown', pinnable: runsHere,
+        note: runsHere
+          ? `Could not ask the registry (${why}). The backed-up image was ${platformLabel(img)}, which ${destLabel} can run, so it is pinned.`
+          : `Could not ask the registry (${why}). The backed-up image was ${platformLabel(img)}; it only runs on ${destLabel} if it is published for that CPU too.`,
+      };
+    }
+  }));
 }

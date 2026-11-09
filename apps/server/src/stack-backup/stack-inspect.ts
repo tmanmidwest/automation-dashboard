@@ -1,4 +1,5 @@
 import type { DockerApi } from '../connectors/docker/docker-api';
+import type { ManifestImage } from './image-platform';
 
 /**
  * Works out what a compose stack is made of, so a backup can capture all of it.
@@ -71,6 +72,10 @@ export interface StackInspection {
   volumes: StackVolumeInfo[];
   binds: StackBindInfo[];
   networks: { name: string; driver?: string }[];
+  /** Every distinct image the stack runs, with its registry digest and platform. */
+  images: ManifestImage[];
+  /** The Docker host's own CPU architecture as the daemon reports it (x86_64, aarch64…). */
+  hostArchitecture?: string | null;
   /** From the compose labels — where the stack's compose file lives on the host. */
   composePath?: string;
   workingDir?: string;
@@ -171,8 +176,40 @@ export async function inspectStack(api: DockerApi, project: string): Promise<Sta
     }
   }
 
+  // Images: the digest each was pulled as and the platform it runs on, so a
+  // restore can bring back the exact version and check it runs on the target CPU.
+  const images = new Map<string, ManifestImage>();
+  for (const c of containers) {
+    if (!c.image) continue;
+    const key = `${c.image}|${c.imageId ?? ''}`;
+    const known = images.get(key);
+    if (known) {
+      if (c.service && !known.services.includes(c.service)) known.services.push(c.service);
+      continue;
+    }
+    const entry: ManifestImage = { ref: c.image, imageId: c.imageId, repoDigests: [], services: c.service ? [c.service] : [] };
+    try {
+      const img = await api.inspectImage(c.imageId || c.image);
+      entry.repoDigests = img.RepoDigests ?? [];
+      entry.os = img.Os;
+      entry.architecture = img.Architecture;
+      entry.variant = img.Variant;
+    } catch {
+      /* image removed since the container started — the ref is still worth recording */
+    }
+    images.set(key, entry);
+  }
+  let hostArchitecture: string | null = null;
+  try {
+    hostArchitecture = (await api.info()).Architecture ?? null;
+  } catch {
+    /* a socket proxy may deny /info */
+  }
+
   const first = members[0]?.Labels ?? {};
   return {
+    images: [...images.values()],
+    hostArchitecture,
     project,
     containers,
     volumes,
@@ -209,6 +246,8 @@ export function manifestOf(inspection: StackInspection, extra: Record<string, un
     project: inspection.project,
     composePath: inspection.composePath,
     workingDir: inspection.workingDir,
+    hostArchitecture: inspection.hostArchitecture ?? null,
+    images: inspection.images,
     networks: inspection.networks,
     volumes: inspection.volumes,
     binds: inspection.binds,

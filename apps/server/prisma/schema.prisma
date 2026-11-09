@@ -1053,6 +1053,8 @@ model StackRestoreRun {
   binds   Int     @default(0)
   /// `docker compose up -d` ran as part of the restore.
   deployed   Boolean @default(false)
+  /// restic snapshot of the data this restore overwrote, taken just before it — the undo point.
+  safetySnapshotId String?
   durationMs Int?
   log        String?
   startedAt  DateTime  @default(now())

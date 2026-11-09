@@ -344,6 +344,74 @@ browser from the snapshot browser. This is the everyday case — "I need yesterd
 does not warrant restoring a whole volume. Capped at 16 MB, since it is buffered through the server,
 and gated on `backup:restore` because it hands back stack data.
 
+## Image versions and CPU architecture (2026-11)
+
+Restoring the data is half the job; the other half is that the stack comes back on an image that
+can open it. Two ways that goes wrong on bare-metal hosts:
+
+- **The tag moved.** A compose that says `postgres:16` pulls whatever `16` means *today*. A volume
+  written by 16.4 reopened by a 16.9 image usually works; one written by `latest` months ago and
+  reopened by a new major does not.
+- **The CPU differs.** A snapshot from a Raspberry Pi (arm64 or 32-bit arm) restored onto an x86
+  host, or the other way round, needs every image to have a build for the new CPU. Locally built
+  images never do — they exist only on the host that built them.
+
+**What a backup records.** The manifest (`meta/manifest.json`) now carries `hostArchitecture` (the
+source host's `docker info` Architecture) and an `images` list: for each image a stack runs, the
+reference as configured, the local image id, the `RepoDigests` Docker recorded when it was pulled
+(the registry's manifest-list digest, so pinning to it still resolves to the right CPU build), and
+the image's own os/architecture/variant. Snapshots taken before this change have no `images`; the
+plan falls back to the container image references and says it cannot pin them.
+
+**What the plan says.** For each image (`planImages` in `stack-restore.service.ts`) the plan asks
+the destination's Docker daemon for `GET /distribution/{ref}@{digest}/json` — the registry's own list
+of platforms — and reports one status:
+
+| Status | Meaning |
+|---|---|
+| `pinned` | The backed-up version has a build for the destination CPU; the restore will run exactly it. |
+| `tag-only` | No digest was recorded (or the registry no longer has it); the restore pulls the tag as it is today. |
+| `unsupported` | The registry has no build of that image for the destination CPU. The stack will not start there. |
+| `local` | Built on the source host; not in any registry. It has to be rebuilt on the destination. |
+| `unknown` | The registry could not be asked (rate limit, offline). If the backed-up platform runs on the destination it is still pinned. |
+
+arm64 hosts are treated as able to run 32-bit arm images (64-bit Raspberry Pi OS does); arm variants
+run downwards (v7 runs v6). A CPU difference between source and destination is a warning; an
+`unsupported` or `local` image is a warning naming the services affected. None of these block —
+an operator may know the image will be swapped — but they are the first thing in the plan.
+
+**Pinned by default.** A `full` restore rewrites each `image: ref` line in the restored compose to
+`image: ref@sha256:…` (`pinComposeImages` in `image-platform.ts`). Only lines whose value is exactly
+a captured reference are touched; an image set through `${VARIABLE}` is left alone and logged. The
+wizard's "Image versions" choice switches to `tag` to keep the tags as written (pull current).
+The original compose in the repository is never changed; to move off the pinned version later, edit
+the stack and drop the `@sha256:…`.
+
+## Undoing a restore (2026-11)
+
+A restore that writes into volumes or bind paths that **already exist** on the destination is
+*guarded*:
+
+1. **Typed confirm.** The API refuses it unless `confirmName` equals the destination stack name.
+   The wizard shows an "This overwrites existing data" box listing every volume and path that will be
+   written into, with the name field. A restore to a new stack name or new paths needs no confirm.
+2. **Safety copy first.** Before writing anything, the helper backs up exactly what is about to be
+   overwritten into the same repository as a normal snapshot tagged `kind:pre-restore` and
+   `restore:<runId>`, with a small manifest so it is restorable like any other snapshot. The run
+   records `safetySnapshotId` and its log says "Safety copy saved as snapshot …". If the safety copy
+   fails, the restore stops before touching anything. It can be unticked ("Take a safety copy
+   first") when there is no room in the repository; it needs SSH to the host, so on a relay-only host
+   it must be unticked.
+3. **Undo.** A restore run with a safety copy shows **Undo** in the Restores list. It opens the wizard
+   on the safety copy, titled "Undo restore of …", with every captured path pre-selected. An undo is
+   itself a guarded restore, so it also takes a safety copy — undo can be undone.
+
+Safety copies are kept 30 days: nightly maintenance runs
+`restic forget --tag kind:pre-restore --group-by host,paths --keep-within 30d` before prune, on
+targets that have retention configured (a target with no retention keeps everything, safety copies
+included). The snapshot list labels them "safety copy before restore". Verify restores and the Stack
+Migrate flow write only to new names and are never guarded.
+
 ## Verify restore (Phase 6 — built)
 
 Every other signal in this feature tells you a backup was **written**. This is the only one that
@@ -561,6 +629,7 @@ the vault came back first. `embed` mode is the escape hatch for when that orderi
 | **P5** | Quiesce (`pause`/`stop`) with guaranteed resume, pre/post dump hooks, exclude patterns UI, file-based credential capture, `relay` transfer (backup + restore) | **BUILT** |
 | **P6** | Bind remapping + port preflight on restore, verify-restore sandbox, single-file download, credential-file write-back, MCP/assistant tools | **BUILT** |
 | **Sets** | Backup sets (shared settings, per-member overrides, auto-include), coverage view + `backup.unprotected` alert, ignore, per-repository run queue | **BUILT 2026-11** |
+| **Images + undo** | Image digests + CPU platform in the manifest, pinned-version restore, CPU/registry checks in the plan, typed confirm + safety copy before overwrite, Undo | **BUILT 2026-11** |
 
 ## Known sharp edges
 

@@ -245,10 +245,27 @@ export class DockerApi {
   listImages(): Promise<DockerImage[]> {
     return this.get<DockerImage[]>('/images/json');
   }
-  inspectImage(id: string): Promise<{ RepoDigests?: string[]; Id?: string; Config?: { Labels?: Record<string, string> | null } }> {
+  inspectImage(id: string): Promise<{
+    RepoDigests?: string[]; Id?: string; Os?: string; Architecture?: string; Variant?: string;
+    Config?: { Labels?: Record<string, string> | null };
+  }> {
     return this.get<{ RepoDigests?: string[]; Id?: string; Config?: { Labels?: Record<string, string> | null } }>(`/images/${encodeURIComponent(id)}/json`);
   }
   /** True if a local image with this ref (name:tag or id) exists. */
+  /**
+   * Ask the daemon what a registry reference resolves to and which platforms it
+   * is built for (`GET /distribution/{name}/json`) — without pulling it. The
+   * daemon does the registry round trip with its own credentials and proxy, so
+   * this answers exactly what a later pull on that host would get.
+   */
+  distributionInspect(ref: string): Promise<{
+    Descriptor?: { digest?: string; mediaType?: string };
+    Platforms?: { architecture?: string; os?: string; variant?: string }[];
+  }> {
+    // The name keeps its slashes and colon — the endpoint takes the reference verbatim.
+    return this.get(`/distribution/${encodeURI(ref)}/json`);
+  }
+
   async imageExists(ref: string): Promise<boolean> {
     try {
       await this.inspectImage(ref);

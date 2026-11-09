@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { HardDriveUpload, Loader2, ShieldAlert, TriangleAlert } from 'lucide-react';
+import { Cpu, HardDriveUpload, Loader2, ShieldAlert, ShieldCheck, TriangleAlert } from 'lucide-react';
 import type {
   BackupHost, ExecuteRestoreInput, RestoreMode, RestorePlan, StackRestoreRun, StackSnapshot,
 } from '@cerebro/shared';
@@ -18,6 +18,14 @@ const SECRET_STATE_TEXT: Record<string, string> = {
   sealed: 'comes from the sealed blob',
   plain: 'stored in the snapshot',
 };
+const IMAGE_STATUS: Record<string, { label: string; cls: string }> = {
+  pinned: { label: 'backed-up version', cls: 'text-emerald-400' },
+  'tag-only': { label: 'newer version (tag)', cls: 'text-amber-400' },
+  unsupported: { label: 'no build for this CPU', cls: 'text-destructive' },
+  local: { label: 'built locally', cls: 'text-amber-400' },
+  unknown: { label: 'not checked', cls: 'text-muted-foreground' },
+};
+
 const SECRET_STATE_COLOR: Record<string, string> = {
   resolved: 'text-emerald-400',
   drifted: 'text-amber-400',
@@ -57,6 +65,9 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
   const [restoreCredentialFiles, setRestoreCredentialFiles] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [force, setForce] = useState(false);
+  const [imageVersion, setImageVersion] = useState<'pinned' | 'tag'>('pinned');
+  const [skipSafetyCopy, setSkipSafetyCopy] = useState(false);
+  const [confirmName, setConfirmName] = useState('');
   const [starting, setStarting] = useState(false);
 
   // Keep the very first plan's defaults without fighting the operator's edits.
@@ -78,6 +89,9 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
         setDestStackName(p.destStackName);
         setVolumes(p.volumes.map((v) => v.source));
         if (!p.hasCompose) setMode('data');
+        // A safety copy holds only what a restore was about to overwrite, so
+        // undoing it means putting every captured path back.
+        if (snapshot.preRestore) setBinds(p.binds.map((b) => b.source));
       }
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Could not build a restore plan.');
@@ -85,7 +99,7 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
     } finally {
       setPlanning(false);
     }
-  }, [targetId, snapshot.id, destInstanceId, bindMap]);
+  }, [targetId, snapshot.id, snapshot.preRestore, destInstanceId, bindMap]);
 
   useEffect(() => { void runPlan(destStackName); }, [runPlan]);
 
@@ -107,6 +121,9 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
       restoreCredentialFiles,
       passphrase: passphrase || undefined,
       force,
+      imageVersion,
+      skipSafetyCopy,
+      confirmName: confirmName.trim() || undefined,
     };
     setStarting(true); setErr(null);
     try {
@@ -117,7 +134,15 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
     }
   }
 
-  const blocked = !!plan?.conflicts.length && !force;
+  // What this restore, as currently selected, would overwrite on the destination.
+  const overwriting = plan
+    ? [
+      ...plan.volumes.filter((v) => v.exists && volumes.includes(v.source)).map((v) => `volume ${v.dest}`),
+      ...plan.binds.filter((b) => b.exists && binds.includes(b.source)).map((b) => b.dest),
+    ]
+    : [];
+  const needsConfirm = overwriting.length > 0;
+  const blocked = (!!plan?.conflicts.length && !force) || (needsConfirm && confirmName.trim() !== plan?.destStackName);
   const needsPass = mode === 'full' && !!plan?.needsPassphrase && plan.hasEnv;
 
   return (
@@ -125,8 +150,12 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
       open
       size="lg"
       onClose={onClose}
-      title={`Restore ${snapshot.stackName ?? 'stack'} · ${snapshot.shortId}`}
-      description={`Taken ${new Date(snapshot.time).toLocaleString()}${snapshot.hostLabel ? ` from ${snapshot.hostLabel}` : ''}.`}
+      title={snapshot.preRestore
+        ? `Undo restore of ${snapshot.stackName ?? 'stack'} · ${snapshot.shortId}`
+        : `Restore ${snapshot.stackName ?? 'stack'} · ${snapshot.shortId}`}
+      description={snapshot.preRestore
+        ? `Safety copy taken ${new Date(snapshot.time).toLocaleString()}, just before a restore overwrote this data. Restoring it puts the data back as it was.`
+        : `Taken ${new Date(snapshot.time).toLocaleString()}${snapshot.hostLabel ? ` from ${snapshot.hostLabel}` : ''}.`}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
@@ -201,6 +230,37 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
                 </label>
               )}
             </div>
+
+            {mode === 'full' && plan.images.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2">
+                  <Label className="flex-1">Images</Label>
+                  {(plan.sourcePlatform || plan.destPlatform) && (
+                    <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                      <Cpu className="h-3 w-3" /> {plan.sourcePlatform ?? '?'} → {plan.destPlatform ?? '?'}
+                    </span>
+                  )}
+                </div>
+                <div className="max-h-40 overflow-auto text-xs space-y-1 mt-1">
+                  {plan.images.map((i) => (
+                    <div key={i.ref} className="flex items-baseline gap-2">
+                      <span className="font-mono break-all">{i.ref}</span>
+                      <span className={IMAGE_STATUS[i.status]?.cls ?? ''}>{IMAGE_STATUS[i.status]?.label ?? i.status}</span>
+                      {i.note && <span className="text-muted-foreground">— {i.note}</span>}
+                    </div>
+                  ))}
+                </div>
+                <select className={selectCls} value={imageVersion} onChange={(e) => setImageVersion(e.target.value as 'pinned' | 'tag')}>
+                  <option value="pinned">Run the versions this backup was taken with (recommended)</option>
+                  <option value="tag">Use the tags as written — pull whatever version is current</option>
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {imageVersion === 'pinned'
+                    ? 'Each image is pinned to the exact version that wrote this data, where that version has a build for this CPU. Upgrade afterwards on purpose.'
+                    : 'Newer images can refuse data written by an older version (a database major upgrade, for example).'}
+                </p>
+              </div>
+            )}
 
             <div>
               <Label>Volumes</Label>
@@ -329,6 +389,28 @@ export function RestoreWizard({ targetId, snapshot, hosts, canRestore, onClose, 
                 <Label>Sealing passphrase</Label>
                 <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} autoComplete="off" />
                 <p className="text-xs text-muted-foreground mt-1">The one used when this backup was taken — it rebuilds the stack’s .env.</p>
+              </div>
+            )}
+
+            {needsConfirm && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+                <div className="text-sm font-medium inline-flex items-center gap-1">
+                  <ShieldCheck className="h-4 w-4" /> This overwrites existing data
+                </div>
+                <p className="text-xs text-muted-foreground break-all">{overwriting.join(', ')}</p>
+                <label className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" className="mt-1" checked={!skipSafetyCopy} onChange={(e) => setSkipSafetyCopy(!e.target.checked)} />
+                  <span>
+                    Take a safety copy first
+                    <span className="block text-xs text-muted-foreground">
+                      Snapshots exactly what is overwritten, so this restore can be undone from the Restores list. Kept 30 days on repositories with retention.
+                    </span>
+                  </span>
+                </label>
+                <div>
+                  <Label>Type <span className="font-mono">{plan.destStackName}</span> to confirm</Label>
+                  <Input value={confirmName} onChange={(e) => setConfirmName(e.target.value)} autoComplete="off" />
+                </div>
               </div>
             )}
 
