@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil, FileText, Lock, HardDrive } from 'lucide-react';
+import { Boxes, Plus, Trash2, Rocket, GitBranch, RotateCw, Loader2, KeyRound, Wand2, Globe, ExternalLink, X, ArrowUpCircle, RefreshCw, FileCog, Pencil, FileText, Lock, HardDrive, ChevronRight, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import type {
   ReplicatorApp, ReplicatorDeployment, ReplicatorTarget, ReplicatorVariable, ReplicatorPort,
   IntrospectResult, DeployTargetInfo, SecretSummary, RefreshSchemaResult,
@@ -16,6 +16,11 @@ import { Label } from '@/components/ui/label';
 import { Dialog } from '@/components/ui/dialog';
 
 const selectCls = 'mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm';
+
+const EXPANDED_KEY = 'replicator.apps.expanded';
+
+/** Case-insensitive, number-aware name order ("app2" before "app10"). */
+const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 const STATUS_COLOR: Record<string, string> = {
   deployed: 'text-emerald-400', pending: 'text-amber-400', updating: 'text-amber-400',
@@ -73,6 +78,20 @@ export function Replicator() {
   const [ingressFor, setIngressFor] = useState<ReplicatorDeployment | null>(null);
   const [envFor, setEnvFor] = useState<ReplicatorDeployment | null>(null);
   const [checking, setChecking] = useState(false);
+  // Apps whose details are expanded (collapsed is the default), remembered per browser.
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) || '[]') as string[]); } catch { return new Set(); }
+  });
+  const saveExpanded = (next: Set<string>) => {
+    try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...next])); } catch { /* storage blocked */ }
+    return next;
+  };
+  const toggleExpanded = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return saveExpanded(next);
+    });
 
   async function checkUpdates() {
     setChecking(true); setErr(null);
@@ -104,8 +123,12 @@ export function Replicator() {
   const deploymentsByApp = useMemo(() => {
     const m = new Map<string, ReplicatorDeployment[]>();
     for (const d of deployments) { const arr = m.get(d.appId) ?? []; arr.push(d); m.set(d.appId, arr); }
+    for (const arr of m.values()) arr.sort((a, b) => byName(a.project, b.project));
     return m;
   }, [deployments]);
+
+  const sortedApps = useMemo(() => [...(apps ?? [])].sort((a, b) => byName(a.name, b.name)), [apps]);
+  const allExpanded = sortedApps.length > 0 && sortedApps.every((a) => expanded.has(a.id));
 
   // Docker host IP per connector instance, so each deployment row can show where
   // to reach its published ports directly.
@@ -149,11 +172,21 @@ export function Replicator() {
           No apps yet. {canWrite && 'Register one from a Git repo to get started.'}
         </CardContent></Card>
       ) : (
-        <div className="space-y-4">
-          {apps.map((app) => (
+        <div className="space-y-2">
+          <div className="flex justify-end">
+            <Button variant="ghost" size="sm"
+              onClick={() => setExpanded(saveExpanded(allExpanded ? new Set() : new Set(sortedApps.map((a) => a.id))))}>
+              {allExpanded
+                ? <><ChevronsDownUp className="h-4 w-4" /> Collapse all</>
+                : <><ChevronsUpDown className="h-4 w-4" /> Expand all</>}
+            </Button>
+          </div>
+          {sortedApps.map((app) => (
             <AppCard
               key={app.id}
               app={app}
+              expanded={expanded.has(app.id)}
+              onToggle={() => toggleExpanded(app.id)}
               deployments={deploymentsByApp.get(app.id) ?? []}
               canWrite={canWrite}
               hasIngress={ingressTargets.length > 0}
@@ -232,8 +265,9 @@ export function Replicator() {
 
 // ── App card + its deployments ──────────────────────────────────────
 
-function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, onRefreshSchema, onEditCompose, onEdit, onIngress, onEnv, onChanged, setErr }: {
-  app: ReplicatorApp; deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
+function AppCard({ app, expanded, onToggle, deployments, canWrite, hasIngress, hostIps, onDeploy, onRefreshSchema, onEditCompose, onEdit, onIngress, onEnv, onChanged, setErr }: {
+  app: ReplicatorApp; expanded: boolean; onToggle: () => void;
+  deployments: ReplicatorDeployment[]; canWrite: boolean; hasIngress: boolean;
   /** Docker connector instance id → host IP/name from its SSH config. */
   hostIps: Map<string, string>;
   onDeploy: () => void; onRefreshSchema: () => void; onEditCompose: () => void; onEdit: (d: ReplicatorDeployment) => void;
@@ -254,21 +288,40 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
     finally { setBusy(null); }
   }
 
+  // Summary chips for the collapsed row, so problems stay visible without expanding.
+  const errors = deployments.filter((d) => d.status === 'error').length;
+  const busyCount = deployments.filter(isInFlight).length;
+  const updates = deployments.filter((d) => d.updateAvailable && !isInFlight(d)).length;
+  const detailsId = `replicator-app-${app.id}`;
+
   return (
     <Card>
-      <CardHeader className="flex-row items-start justify-between gap-4">
-        <div className="min-w-0">
-          <CardTitle className="flex items-center gap-2"><Boxes className="h-5 w-5" /> {app.name}</CardTitle>
-          <CardDescription className="flex items-center gap-2 mt-1">
-            {app.compose
-              ? <><FileText className="h-3.5 w-3.5" /> Pasted compose <span className="opacity-60">· runs prebuilt images, Docker hosts only</span></>
-              : <><GitBranch className="h-3.5 w-3.5" /> {app.gitUrl}<span className="opacity-60">@{app.gitRef}</span></>}
-          </CardDescription>
-          <p className="text-xs text-muted-foreground mt-1">
-            {app.variables.length} variables · {ports} port{ports === 1 ? '' : 's'} · {secrets} secret{secrets === 1 ? '' : 's'}
-            {app.usesGeneratedCompose && <span className="text-amber-400" title="The repo has no docker-compose.yml; Cerebro generates one at deploy time. Docker hosts only."> · generated compose</span>}
-          </p>
-        </div>
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+        <button type="button" onClick={onToggle} aria-expanded={expanded} aria-controls={detailsId}
+          className="min-w-0 flex-1 basis-72 flex flex-wrap items-center gap-x-2 gap-y-1 text-left rounded-md -mx-1 px-1 py-1 hover:bg-muted/40">
+          <ChevronRight className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          <CardTitle className="flex items-center gap-2 min-w-0 text-base">
+            <Boxes className="h-5 w-5 shrink-0" /> <span className="truncate">{app.name}</span>
+          </CardTitle>
+          <span className="flex items-center gap-1.5 flex-wrap text-xs text-muted-foreground">
+            <span className="rounded-full bg-muted/60 px-2 py-0.5">
+              {deployments.length} deployment{deployments.length === 1 ? '' : 's'}
+            </span>
+            {busyCount > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 text-amber-400 px-2 py-0.5">
+                <Loader2 className="h-3 w-3 animate-spin" /> {busyCount} in progress
+              </span>
+            )}
+            {errors > 0 && (
+              <span className="rounded-full bg-destructive/15 text-destructive px-2 py-0.5">{errors} error{errors === 1 ? '' : 's'}</span>
+            )}
+            {updates > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 text-amber-400 px-2 py-0.5">
+                <ArrowUpCircle className="h-3 w-3" /> {updates === 1 ? 'update available' : `${updates} updates`}
+              </span>
+            )}
+          </span>
+        </button>
         {canWrite && (
           <div className="flex items-center gap-2 shrink-0">
             <Button onClick={onDeploy}><Rocket className="h-4 w-4" /> Deploy</Button>
@@ -291,8 +344,22 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
           </div>
         )}
       </CardHeader>
-      {deployments.length > 0 && (
-        <CardContent className="pt-0">
+      {expanded && (
+        <CardContent id={detailsId} className="pt-0 space-y-3">
+          <div className="pl-6">
+          <CardDescription className="flex items-center gap-2">
+            {app.compose
+              ? <><FileText className="h-3.5 w-3.5" /> Pasted compose <span className="opacity-60">· runs prebuilt images, Docker hosts only</span></>
+              : <><GitBranch className="h-3.5 w-3.5" /> {app.gitUrl}<span className="opacity-60">@{app.gitRef}</span></>}
+          </CardDescription>
+          <p className="text-xs text-muted-foreground mt-1">
+            {app.variables.length} variables · {ports} port{ports === 1 ? '' : 's'} · {secrets} secret{secrets === 1 ? '' : 's'}
+            {app.usesGeneratedCompose && <span className="text-amber-400" title="The repo has no docker-compose.yml; Cerebro generates one at deploy time. Docker hosts only."> · generated compose</span>}
+          </p>
+          </div>
+          {deployments.length === 0 ? (
+            <p className="text-xs text-muted-foreground pl-6">Not deployed anywhere yet.</p>
+          ) : (
           <div className="rounded-lg border border-border/60 divide-y divide-border/60">
             {deployments.map((d) => (
               <div key={d.id} className="px-3 py-2 text-sm">
@@ -372,6 +439,7 @@ function AppCard({ app, deployments, canWrite, hasIngress, hostIps, onDeploy, on
               </div>
             ))}
           </div>
+          )}
         </CardContent>
       )}
     </Card>
