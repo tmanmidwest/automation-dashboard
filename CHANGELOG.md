@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Certificate log check failing with "Couldn't reach crt.sh"** — crt.sh's JSON endpoint often
   answers 502 when busy, and 404 for a domain with no certificates. A 404 now means "none", a
   502 is retried once, and Cert Spotter answers when crt.sh is still down.
+- **Outside-in warnings lingering after a restart** — a certificate-log, NVD or Have I Been Pwned
+  lookup that failed used to wait out its retry delay even across a restart. Now a restart, or
+  the map's Refresh button, tries failed lookups again straight away.
 ### Added
 - **Exposure paths** — the Architecture Map's "Exposed to the internet" row now lists every
   way in (WAN port forwards, Cloudflare tunnels) and each path to a machine, hop by hop, with
