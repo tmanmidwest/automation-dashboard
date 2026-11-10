@@ -1,4 +1,4 @@
-import { Controller, Get, MessageEvent, Query, Sse } from '@nestjs/common';
+import { Controller, Get, MessageEvent, NotFoundException, Param, Query, Sse } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { TimelineService } from './timeline.service';
@@ -7,6 +7,7 @@ import { CurrentUser, RequirePermissions } from '../auth/decorators';
 import { hasPermission, TIMELINE_KINDS } from '@cerebro/shared';
 import type {
   SessionUser,
+  TimelineEventDetail,
   TimelineKind,
   TimelinePage,
   TimelineQuery,
@@ -34,6 +35,19 @@ export class TimelineController {
   ): Promise<TimelinePage> {
     const q = this.buildQuery(user, { kinds, severities, source, actorId, text, before, limit });
     return this.timeline.query(q);
+  }
+
+  /**
+   * One event plus its same-source neighbours, for the dashboard's "Needs attention"
+   * click-through and the Ship's Log detail panel. Audit events need audit:read, the
+   * same gate as the list — a caller without it gets a 404, not a hint it exists.
+   */
+  @Get('event/:id')
+  @RequirePermissions('logs:read')
+  async event(@CurrentUser() user: SessionUser | undefined, @Param('id') id: string): Promise<TimelineEventDetail> {
+    const detail = await this.timeline.getEvent(id, { allowAudit: hasPermission(user?.permissions, 'audit:read') });
+    if (!detail) throw new NotFoundException('That log entry no longer exists (it may have been pruned).');
+    return detail;
   }
 
   /**

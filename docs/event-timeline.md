@@ -151,6 +151,22 @@ No schema change in Phase 2 if we lean on `AuditLog`. This is the "reach" half o
 
 ---
 
+## Click-through from the dashboard
+
+Every row in the dashboard's **Needs attention** banner (and the Live activity feed) opens
+somewhere. `apps/web/src/lib/event-links.ts` resolves an event to the page that owns the
+condition: the connector (by `meta.connectorId`, or `[<instance name>]` in a connector log
+line), the monitor, Stack backups, Posture, Health, Fabric, Secrets, etc., keyed on the alert
+key or app-log context. When there is no such page — an auth rejection is the common case,
+since the request came from outside — the row opens the event's own Ship's Log entry,
+`/timeline?event=<id>`.
+
+That entry is served by `GET /api/timeline/event/:id` (logs:read; audit ids need audit:read):
+the event plus what the same source logged a few minutes either side. For a
+`Rejected POST /mcp …` line that includes the "API token rejected: …" / "Bearer JWT
+rejected: …" reason written just before it, and the rejection itself now records the
+caller's IP, method, path and user agent.
+
 ## Files touched (summary)
 
 | File | Change |

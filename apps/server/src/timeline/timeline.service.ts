@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import type { TimelineEvent, TimelineKind, TimelinePage, TimelineQuery } from '@cerebro/shared';
+import type { TimelineEvent, TimelineEventDetail, TimelineKind, TimelinePage, TimelineQuery } from '@cerebro/shared';
 import {
   mapAppLogRow,
   mapAuditRow,
@@ -55,6 +55,81 @@ export class TimelineService {
     // filtered page) so a filtered-empty page still pages backwards in time.
     const nextCursor = hasMore ? (page[page.length - 1]?.ts ?? raw[raw.length - 1]?.ts ?? null) : null;
     return { events: page, nextCursor };
+  }
+
+  /**
+   * One event by its composite id (`<kind>:<rowId>`), plus what the same source logged a
+   * few minutes either side — the context an operator needs to tell what went wrong
+   * (an auth rejection's preceding reason, a monitor's flaps, a re-fired alert).
+   * Returns null when the id is malformed or the row is gone (logs are pruned).
+   */
+  async getEvent(id: string, opts: { allowAudit: boolean }): Promise<TimelineEventDetail | null> {
+    const sep = id.indexOf(':');
+    if (sep <= 0) return null;
+    const prefix = id.slice(0, sep);
+    const rowId = id.slice(sep + 1);
+    if (!rowId) return null;
+    const around = (ts: Date, ms: number) => ({ gte: new Date(ts.getTime() - ms), lte: new Date(ts.getTime() + ms) });
+
+    switch (prefix) {
+      case 'app_log': {
+        const row = await this.prisma.appLog.findUnique({ where: { id: rowId } });
+        if (!row) return null;
+        const near = await this.prisma.appLog.findMany({
+          where: { id: { not: row.id }, context: row.context, level: { in: ['info', 'warn', 'error'] }, createdAt: around(row.createdAt, 2 * 60_000) },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        });
+        return { event: mapAppLogRow(row), related: near.map(mapAppLogRow) };
+      }
+      case 'notification': {
+        const row = await this.prisma.notificationLog.findUnique({ where: { id: rowId } });
+        if (!row) return null;
+        const near = await this.prisma.notificationLog.findMany({
+          where: {
+            id: { not: row.id },
+            createdAt: around(row.createdAt, 30 * 60_000),
+            ...(row.alertKey ? { alertKey: row.alertKey } : { title: row.title }),
+            ...(row.connectorId ? { connectorId: row.connectorId } : {}),
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        });
+        return { event: mapNotificationRow(row), related: near.map(mapNotificationRow) };
+      }
+      case 'monitor': {
+        const n = Number(rowId);
+        if (!Number.isInteger(n)) return null;
+        const row = await this.prisma.monitorHeartbeat.findUnique({ where: { id: n }, include: { monitor: { select: { name: true } } } });
+        if (!row) return null;
+        const near = await this.prisma.monitorHeartbeat.findMany({
+          where: { id: { not: row.id }, monitorId: row.monitorId, important: true, at: around(row.at, 60 * 60_000) },
+          orderBy: { at: 'desc' },
+          take: 20,
+        });
+        const name = row.monitor?.name;
+        return { event: mapMonitorHeartbeatRow(row, name), related: near.map((r) => mapMonitorHeartbeatRow(r, name)) };
+      }
+      case 'audit': {
+        if (!opts.allowAudit) return null;
+        const row = await this.prisma.auditLog.findUnique({ where: { id: rowId } });
+        return row ? { event: mapAuditRow(row), related: [] } : null;
+      }
+      case 'job': {
+        const row = await this.prisma.backupRun.findUnique({ where: { id: rowId } });
+        return row ? { event: mapBackupRunRow(row), related: [] } : null;
+      }
+      case 'stackbackup': {
+        const row = await this.prisma.stackBackupRun.findUnique({ where: { id: rowId } });
+        return row ? { event: mapStackBackupRunRow(row), related: [] } : null;
+      }
+      case 'stackrestore': {
+        const row = await this.prisma.stackRestoreRun.findUnique({ where: { id: rowId } });
+        return row ? { event: mapStackRestoreRunRow(row), related: [] } : null;
+      }
+      default:
+        return null;
+    }
   }
 
   // ── Per-source fetchers (map via the shared mappers) ────────────

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ArrowUp } from 'lucide-react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { ArrowUp, ChevronRight, X } from 'lucide-react';
 import type {
+  ConnectorInstanceSummary,
   TimelineEvent,
+  TimelineEventDetail,
   TimelineKind,
   TimelinePage,
   TimelineSeverity,
@@ -14,6 +16,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { eventHintLinks, eventSourceLink, type ConnectorRef } from '@/lib/event-links';
 
 // Kept in lockstep with @cerebro/shared's TIMELINE_KINDS / TIMELINE_SEVERITIES.
 // Defined locally because the web layer imports only *types* from shared (its
@@ -37,19 +40,23 @@ const SEVERITY: Record<TimelineSeverity, { spine: string; text: string; label: s
   critical: { spine: 'bg-destructive', text: 'text-destructive', label: 'Crit' },
 };
 
-/** Where a row links to, if anywhere. */
-function targetFor(e: TimelineEvent): string | null {
-  if (!e.source) return null;
-  if (e.kind === 'monitor') return `/monitors/${e.source}`;
-  if (e.kind === 'job' || e.kind === 'notification' || e.kind === 'audit') {
-    return `/connectors/${e.source}`;
-  }
-  return null;
-}
-
 export function Timeline() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const focusId = params.get('event');
+  const [connectors, setConnectors] = useState<ConnectorRef[]>([]);
+  useEffect(() => {
+    if (!can('connectors:read')) return;
+    api.get<ConnectorInstanceSummary[]>('/api/connectors/instances').then(setConnectors).catch(() => {});
+  }, [can]);
+  const focus = (id: string | null) => {
+    const next = new URLSearchParams(params);
+    if (id) next.set('event', id);
+    else next.delete('event');
+    setParams(next);
+    if (id) window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const allKinds = KINDS.filter((k) => k !== 'audit' || can('audit:read'));
   const [kinds, setKinds] = useState<Set<TimelineKind>>(new Set());
@@ -173,6 +180,8 @@ export function Timeline() {
         </form>
       </div>
 
+      {focusId && <FocusedEvent id={focusId} connectors={connectors} onClose={() => focus(null)} onFocus={focus} />}
+
       {pending.length > 0 && (
         <div className="flex justify-center mb-3">
           <button
@@ -190,14 +199,15 @@ export function Timeline() {
           <div className="divide-y divide-border/50">
             {events.map((e) => {
               const sev = SEVERITY[e.severity];
-              const target = targetFor(e);
+              const target = eventSourceLink(e, connectors)?.to ?? null;
               const isOpen = expanded.has(e.id);
               return (
                 <div
                   key={e.id}
                   className={cn(
                     'flex gap-3 px-3 py-2.5 items-start',
-                    target && 'cursor-pointer hover:bg-muted/40 transition-colors',
+                    e.detail && 'cursor-pointer hover:bg-muted/40 transition-colors',
+                    e.id === focusId && 'bg-primary/10',
                   )}
                   onClick={() => {
                     if (e.detail) toggle(expanded, e.id, setExpanded);
@@ -229,6 +239,15 @@ export function Timeline() {
                       <p className="mt-1 text-xs text-muted-foreground break-words font-mono">{e.detail}</p>
                     )}
                   </div>
+                  <button
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      focus(e.id);
+                    }}
+                    className="shrink-0 text-xs text-muted-foreground hover:text-foreground hover:underline pt-0.5"
+                  >
+                    details
+                  </button>
                   {target && (
                     <button
                       onClick={(ev) => {
@@ -258,6 +277,142 @@ export function Timeline() {
         </CardContent>
       </Card>
     </>
+  );
+}
+
+/**
+ * The entry a link landed on (`/timeline?event=<id>`, e.g. from a dashboard "Needs attention"
+ * row): full text, structured fields, where the condition lives, and what the same source
+ * logged around it — for an auth rejection, that's the reason line written just before.
+ */
+function FocusedEvent({
+  id,
+  connectors,
+  onClose,
+  onFocus,
+}: {
+  id: string;
+  connectors: ConnectorRef[];
+  onClose: () => void;
+  onFocus: (id: string) => void;
+}) {
+  const [data, setData] = useState<TimelineEventDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setData(null);
+    setError(null);
+    api
+      .get<TimelineEventDetail>(`/api/timeline/event/${encodeURIComponent(id)}`)
+      .then((d) => alive && setData(d))
+      .catch((e) => alive && setError(e instanceof Error ? e.message : 'Could not load this entry.'));
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  const e = data?.event;
+  const source = e ? eventSourceLink(e, connectors) : null;
+  const hints = e ? eventHintLinks(e) : [];
+  const metaEntries = Object.entries(e?.meta ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== '');
+
+  return (
+    <Card className="mb-4 border-primary/40">
+      <CardContent className="p-4 space-y-3">
+        <div className="flex items-start gap-3">
+          {e && <span className={cn('mt-1 w-1 self-stretch rounded-full shrink-0', SEVERITY[e.severity].spine)} aria-hidden />}
+          <div className="flex-1 min-w-0">
+            {e ? (
+              <>
+                <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                  <span className={cn('uppercase tracking-wider font-semibold', SEVERITY[e.severity].text)}>
+                    {KIND_LABEL[e.kind]} · {SEVERITY[e.severity].label}
+                  </span>
+                  <span className="tabular-nums">{new Date(e.ts).toLocaleString()}</span>
+                  {e.source && <span>· source <span className="font-mono">{e.source}</span></span>}
+                  {e.actor?.email && <span>· {e.actor.email}</span>}
+                </div>
+                <p className="mt-1 text-sm break-words">{e.title}</p>
+                {e.detail && <p className="mt-1 text-xs text-muted-foreground break-words font-mono">{e.detail}</p>}
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">{error ?? 'Loading entry…'}</p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {e && metaEntries.length > 0 && (
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5 text-xs pl-4">
+            {metaEntries.map(([k, v]) => (
+              <div key={k} className="contents">
+                <dt className="text-muted-foreground">{k}</dt>
+                <dd className="font-mono break-all">{typeof v === 'string' ? v : JSON.stringify(v)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+
+        {e && (
+          <div className="pl-4 flex flex-wrap items-center gap-2 text-xs">
+            {source ? (
+              <Link
+                to={source.to}
+                className="inline-flex items-center gap-1 rounded-md border border-accent/40 px-2.5 py-1 text-accent hover:bg-accent/10"
+              >
+                Go to {source.label} <ChevronRight className="h-3.5 w-3.5" />
+              </Link>
+            ) : (
+              <span className="text-muted-foreground">
+                {hints.length > 0
+                  ? 'This came from a request to Cerebro, not from a connector or monitor, so this entry is where it lives. Related settings:'
+                  : 'This has no page of its own; this entry and the lines around it are the full record.'}
+              </span>
+            )}
+            {hints.map((h) => (
+              <Link
+                key={h.to}
+                to={h.to}
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-muted-foreground hover:text-foreground hover:bg-muted/40"
+              >
+                {h.label} <ChevronRight className="h-3.5 w-3.5" />
+              </Link>
+            ))}
+          </div>
+        )}
+
+        {data && data.related.length > 0 && (
+          <div className="pl-4">
+            <p className="text-[0.65rem] uppercase tracking-wider font-semibold text-muted-foreground mb-1">
+              Around the same time from {e?.source ?? 'this source'}
+            </p>
+            <div className="divide-y divide-border/40 rounded-md border border-border/50">
+              {data.related.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => onFocus(r.id)}
+                  className="w-full flex gap-3 px-2 py-1.5 text-left text-xs hover:bg-muted/40"
+                >
+                  <span className="text-muted-foreground tabular-nums shrink-0 w-20">{new Date(r.ts).toLocaleTimeString()}</span>
+                  <span className={cn('shrink-0 w-10 uppercase font-semibold', SEVERITY[r.severity].text)}>{SEVERITY[r.severity].label}</span>
+                  <span className="flex-1 min-w-0 break-words">{r.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
