@@ -9,6 +9,11 @@ import {
   type FabricDesktopStartedFrame,
   type FabricHelloFrame,
   type FabricHealthFrame,
+  type FabricUpdatesFrame,
+  type FabricUpdatesLogFrame,
+  type FabricUpdatesResultFrame,
+  type OsUpdateReboot,
+  type OsUpdateScope,
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
@@ -55,6 +60,11 @@ export class AgentRegistryService {
     /** True when this agent's offline should NOT alert (a workstation). */
     quietOffline: (agentId: string) => Promise<boolean>;
   } | null = null;
+  private updates: {
+    report: (agentId: string, frame: FabricUpdatesFrame) => Promise<void>;
+    log: (agentId: string, frame: FabricUpdatesLogFrame) => Promise<void>;
+    result: (agentId: string, frame: FabricUpdatesResultFrame) => Promise<void>;
+  } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -99,6 +109,40 @@ export class AgentRegistryService {
   /** Push the health reporting cadence to every connected agent. */
   broadcastHealthInterval(intervalMs: number): void {
     for (const id of this.live.keys()) this.send(id, { t: 'health-config', healthIntervalMs: intervalMs });
+  }
+
+  /** Install the OS Updates module's hooks (called once by OsUpdatesService on init). */
+  setUpdatesHooks(hooks: NonNullable<AgentRegistryService['updates']>): void {
+    this.updates = hooks;
+  }
+
+  /** Ask an agent to look for OS updates now. Returns whether it was online. */
+  requestUpdatesCheck(agentId: string): boolean {
+    if (!this.live.has(agentId)) return false;
+    this.send(agentId, { t: 'updates-check' });
+    return true;
+  }
+
+  /**
+   * Send a signed install / restart command. Throws when the agent is offline. The
+   * signature is added in vault signing mode; an agent with a pinned key refuses
+   * an unsigned one and reports that back as a refused run.
+   */
+  async sendUpdatesCommand(
+    agentId: string,
+    cmd: { runId: string; action: 'install'; scope: OsUpdateScope; reboot: OsUpdateReboot } | { runId: string; action: 'reboot' },
+  ): Promise<{ signed: boolean }> {
+    if (!this.live.has(agentId)) throw new Error('The machine is offline.');
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId }, select: { credHash: true } });
+    if (!agent?.credHash) throw new Error('This agent has no credential (revoked?).');
+    if (cmd.action === 'install') {
+      const token = await this.updateSigning.signUpdatesToken(agent.credHash, cmd.runId, 'install', cmd.scope, cmd.reboot).catch(() => null);
+      this.send(agentId, { t: 'updates-install', runId: cmd.runId, scope: cmd.scope, reboot: cmd.reboot, ...(token ? { issuedAt: token.issuedAt, sig: token.signature } : {}) });
+      return { signed: !!token };
+    }
+    const token = await this.updateSigning.signUpdatesToken(agent.credHash, cmd.runId, 'reboot').catch(() => null);
+    this.send(agentId, { t: 'updates-reboot', runId: cmd.runId, ...(token ? { issuedAt: token.issuedAt, sig: token.signature } : {}) });
+    return { signed: !!token };
   }
 
   /** Ask one connected agent for a fresh health sample. Returns whether it was online. */
@@ -282,6 +326,14 @@ export class AgentRegistryService {
           await this.health.ingest(agentId, frame).catch((e) =>
             this.logger.warn(`Health ingest failed for ${agentId}: ${e instanceof Error ? e.message : e}`),
           );
+        }
+        break;
+      case 'updates':
+      case 'updates-log':
+      case 'updates-result':
+        if (this.updates) {
+          const fn = frame.t === 'updates' ? this.updates.report(agentId, frame) : frame.t === 'updates-log' ? this.updates.log(agentId, frame) : this.updates.result(agentId, frame);
+          await fn.catch((e) => this.logger.warn(`OS updates frame (${frame.t}) failed for ${agentId}: ${e instanceof Error ? e.message : e}`));
         }
         break;
       case 'stream-opened':

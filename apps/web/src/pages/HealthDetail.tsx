@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { MetricChart, type ChartSeries } from '@/components/health/MetricChart';
+import { UpdatesCard } from '@/components/health/UpdatesCard';
 import {
   AvailabilityLine, PctBar, RoleIcon, STATUS_STYLE, StatusDot, fmtAgo, fmtBitRate, fmtByteRate, fmtBytes, fmtDuration, fmtPct, osLabel,
 } from '@/components/health/health-ui';
@@ -169,6 +170,8 @@ export function HealthDetail() {
           <Stat label="Processes" value={s.procs != null ? String(s.procs) : '—'} sub={s.load1 != null ? `load ${s.load1} / ${s.load5} / ${s.load15}` : undefined} />
         </div>
       )}
+
+      <UpdatesCard agentId={agentId} canManage={can('fabric:manage')} />
 
       {/* Charts */}
       <div className="flex items-center justify-between mb-2">

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **OS updates** (Health → Updates) — the Cerebro agent finds pending updates with the machine's own
+  package manager (apt, dnf/yum, zypper, pacman, apk, Windows Update, macOS Software Update), marks
+  security updates and tells you when a restart is needed. Install them on one or many machines
+  (security only or everything, restart never / if needed / always, now or later) with the output
+  streamed live. Proxmox VMs and containers can get a snapshot first. **Schedules** patch machines
+  on their own in a maintenance window, in rings (a few machines first, the rest later, held back if
+  an earlier ring fails); laptops that are asleep are caught up before the window closes. Commands are
+  signed with the update-signing key, and a machine can opt out with `CEREBRO_OS_UPDATES=report|off`.
+  New alerts for failed runs and security updates waiting over a week, and two new Posture findings.
+  See `docs/os-updates.md`.
+- Cerebro agent **0.7.0** — adds OS update checks and installs. Existing agents update themselves on
+  their next connect.
 - **Health** page (`/health`) — CPU, memory, every filesystem, disk I/O, network and uptime for each
   machine running the Cerebro agent (Linux, macOS, Windows), worst first, with a 0–100 health score,
   24 h sparklines and online/offline time. Each machine has a detail page with charts (1 h / 24 h / 7 d /

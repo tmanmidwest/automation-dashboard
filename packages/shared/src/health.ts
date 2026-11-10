@@ -1,6 +1,8 @@
 // Health monitoring — resource health reported by the Cerebro agent.
 // See docs/health-monitoring.md.
 
+import type { OsUpdateStatus } from './os-updates';
+
 /** One filesystem in a health sample. */
 export interface HealthDisk {
   mount: string;
@@ -168,6 +170,8 @@ export interface HealthMachine {
   /** Last 24 h of CPU / memory, ~48 points, for sparklines. */
   spark: { at: string; cpu: number | null; mem: number | null }[];
   availability: { day: HealthAvailability; week: HealthAvailability; month: HealthAvailability };
+  /** OS updates the agent found (agent 0.7+); null before its first report. */
+  updates: OsUpdateStatus | null;
 }
 
 export interface HealthFleet {

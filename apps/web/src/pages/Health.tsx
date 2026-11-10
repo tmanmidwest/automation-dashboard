@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { HeartPulse, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-react';
 import type { HealthFleet, HealthMachine, HealthSettings, HealthStatus, HealthThresholds } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
@@ -14,6 +14,8 @@ import { cn } from '@/lib/utils';
 import {
   PctBar, RoleIcon, Sparkline, STATUS_STYLE, StatusDot, fmtAgo, fmtDuration, fmtPct, osLabel, roleLabel, worstDisk,
 } from '@/components/health/health-ui';
+import { UpdatesChip } from '@/components/health/updates-ui';
+import { UpdatesTab } from '@/components/health/UpdatesTab';
 
 const REFRESH_MS = 30_000;
 type Filter = HealthStatus | 'attention' | null;
@@ -29,6 +31,9 @@ export function Health() {
   const [os, setOs] = useState<string>('all');
   const [filter, setFilter] = useState<Filter>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') === 'updates' ? 'updates' : 'machines';
+  const setTab = (t: 'machines' | 'updates') => setParams(t === 'updates' ? { tab: 'updates' } : {}, { replace: true });
 
   async function load() {
     setLoading(true);
@@ -64,8 +69,8 @@ export function Health() {
 
   return (
     <>
-      <PageHeader title="Health" description="CPU, memory, disks and uptime reported by the Cerebro agent on each machine. Worst first."
-        actions={
+      <PageHeader title="Health" description={tab === 'updates' ? 'OS updates the Cerebro agent found on each machine, with installs, restarts and schedules.' : 'CPU, memory, disks and uptime reported by the Cerebro agent on each machine. Worst first.'}
+        actions={tab === 'updates' ? undefined :
           <div className="flex items-center gap-2">
             {can('fabric:manage') && (
               <Button variant="outline" onClick={() => setShowSettings(true)}><Settings2 className="h-4 w-4" /> Settings</Button>
@@ -76,6 +81,20 @@ export function Health() {
           </div>
         } />
 
+      <div className="flex gap-1 mb-4 border-b border-border">
+        {([['machines', 'Machines'], ['updates', 'Updates']] as const).map(([k, label]) => {
+          const n = k === 'updates' ? (fleet?.machines ?? []).filter((m) => (m.updates?.security ?? 0) > 0).length : 0;
+          return (
+            <button key={k} onClick={() => setTab(k)}
+              className={cn('px-3 py-2 text-sm -mb-px border-b-2 transition-colors', tab === k ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground')}>
+              {label}{n > 0 && <span className="ml-1.5 rounded-full bg-amber-500/20 text-amber-300 px-1.5 text-[11px] tabular-nums">{n}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === 'updates' && <UpdatesTab />}
+      {tab === 'machines' && <>
       {err && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
       {!fleet && !err && <p className="text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p>}
 
@@ -128,6 +147,7 @@ export function Health() {
                   <th className="text-left font-medium px-3 py-2 w-48">Memory · 24h</th>
                   <th className="text-left font-medium px-3 py-2 w-40">Fullest disk</th>
                   <th className="text-left font-medium px-3 py-2 w-40">Online · 7d</th>
+                  <th className="text-left font-medium px-3 py-2 w-36">Updates</th>
                   <th className="text-left font-medium px-3 py-2">Issues</th>
                 </tr>
               </thead>
@@ -145,6 +165,8 @@ export function Health() {
           </div>
         </>
       )}
+
+      </>}
 
       {showSettings && fleet && (
         <SettingsDialog settings={fleet.settings} onClose={() => setShowSettings(false)} onSaved={() => { setShowSettings(false); load(); }} />
@@ -222,6 +244,7 @@ function Row({ m, t, onOpen }: { m: HealthMachine; t?: HealthThresholds; onOpen:
         <span className="text-emerald-400">{fmtDuration(m.availability.week.onlineSec)}</span>
         <span className="text-muted-foreground"> on · {fmtDuration(m.availability.week.offlineSec)} off</span>
       </td>
+      <td className="px-3 py-2.5 text-xs"><UpdatesChip u={m.updates} /></td>
       <td className="px-3 py-2.5 text-xs"><IssueText m={m} /></td>
     </tr>
   );
@@ -246,6 +269,7 @@ function MobileCard({ m, t, onOpen }: { m: HealthMachine; t?: HealthThresholds; 
         </div>
       </div>
       <div className="mt-2 text-xs"><IssueText m={m} /></div>
+      {m.updates && <div className="mt-1 text-xs flex gap-1.5"><span className="text-muted-foreground">Updates:</span><UpdatesChip u={m.updates} /></div>}
     </button>
   );
 }

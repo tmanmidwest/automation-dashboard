@@ -808,6 +808,8 @@ model Agent {
   health        AgentHealth?
   healthSamples AgentHealthSample[]
   healthRollups AgentHealthRollup[]
+  updateStatus  AgentUpdateStatus?
+  updateRuns    AgentUpdateRun[]
 }
 
 // ---------------------------------------------------------------------------
@@ -883,6 +885,108 @@ model AgentHealthRollup {
 
   @@unique([agentId, res, bucket])
   @@index([res, bucket])
+}
+
+/// OS updates (docs/os-updates.md): what the agent last found pending on the machine.
+model AgentUpdateStatus {
+  agentId        String    @id
+  agent          Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  checkedAt      DateTime?
+  /// apt, dnf, yum, zypper, pacman, apk, windows-update, softwareupdate.
+  manager        String?
+  supported      Boolean   @default(false)
+  error          String?
+  note           String?
+  total          Int       @default(0)
+  security       Int       @default(0)
+  /// False when the package manager can't tell security fixes apart (pacman, apk).
+  securityKnown  Boolean   @default(false)
+  rebootRequired Boolean   @default(false)
+  rebootReason   String?
+  /// When the pending restart / security updates were first seen (for "waiting N days").
+  rebootSince    DateTime?
+  securitySince  DateTime?
+  canInstall     Boolean   @default(false)
+  proxmox        Boolean   @default(false)
+  /// The box's CEREBRO_OS_UPDATES: on | report | off.
+  mode           String    @default("on")
+  /// Run id of an install in progress on the box.
+  installing     String?
+  checking       Boolean   @default(false)
+  /// OsUpdatePackage[] (capped at 400 by the agent).
+  packages       Json?
+  updatedAt      DateTime  @updatedAt
+}
+
+/// One install or restart, started by hand or by an update schedule.
+model AgentUpdateRun {
+  id            String    @id @default(cuid())
+  agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId       String
+  /// install | reboot
+  kind          String
+  /// manual | schedule
+  trigger       String    @default("manual")
+  scheduleId    String?
+  /// Groups the runs one schedule window (or one bulk request) created.
+  batchId       String?
+  /// Ring (0-based) of the schedule this run belongs to.
+  ring          Int?
+  /// security | all
+  scope         String    @default("all")
+  /// never | if-needed | always
+  reboot        String    @default("never")
+  /// Take a Proxmox snapshot of the VM / container first.
+  snapshot      Boolean   @default(false)
+  /// scheduled | snapshot | sent | running | succeeded | failed | refused | missed | cancelled | unknown
+  status        String
+  scheduledFor  DateTime?
+  /// A scheduled run that can't start by this time (machine offline) is marked missed.
+  windowEnd     DateTime?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  message       String?
+  exitCode      Int?
+  installed     Int?
+  rebooting     Boolean   @default(false)
+  snapshotName  String?
+  snapshotNote  String?
+  /// Output lines, newest last; capped.
+  log           String    @default("")
+  logLines      Int       @default(0)
+  requestedBy   String?
+  /// Pending counts when the run started.
+  pendingBefore Int?
+  createdAt     DateTime  @default(now())
+
+  @@index([agentId, createdAt])
+  @@index([status])
+  @@index([scheduleId])
+  @@index([batchId])
+}
+
+/// A maintenance window that patches machines automatically, ring by ring.
+model UpdateSchedule {
+  id            String    @id @default(cuid())
+  name          String
+  enabled       Boolean   @default(true)
+  /// Days of the week it runs (0 = Sunday … 6 = Saturday), server local time.
+  days          Int[]
+  hour          Int
+  minute        Int
+  /// How long after the start a machine that was offline can still be patched.
+  windowHours   Int       @default(4)
+  scope         String    @default("security")
+  reboot        String    @default("if-needed")
+  snapshot      Boolean   @default(true)
+  /// [{ agentIds: string[], delayHours: number }] — ring 1 first, each later ring
+  /// waits delayHours after the window opens (and for the earlier rings to pass).
+  rings         Json
+  /// Skip later rings when an earlier ring had a failure.
+  stopOnFailure Boolean   @default(true)
+  lastFiredAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
 /// A local endpoint on the box the agent will proxy to (Phase 2+). Discovered by

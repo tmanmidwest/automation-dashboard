@@ -23,6 +23,8 @@ machine, use **Fabric → Add machine**.
 
 Anything a machine doesn't expose is left out rather than shown as zero.
 
+Pending OS updates (and installing them) are on the **Updates** tab; see [OS updates](os-updates.md).
+
 ## How it reports
 
 - The agent pushes a `health` frame over its existing outbound WebSocket. Cerebro never connects to

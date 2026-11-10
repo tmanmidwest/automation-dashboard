@@ -25,6 +25,6 @@ import { FabricApprovalService } from './fabric-approval.service';
   imports: [PrismaModule, LoggingModule, NotificationsModule, SettingsModule],
   controllers: [FabricController],
   providers: [FabricService, FabricSftpService, FabricCaService, FabricUpdateSigningService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricApprovalService],
-  exports: [AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService],
+  exports: [AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricUpdateSigningService],
 })
 export class FabricModule {}
