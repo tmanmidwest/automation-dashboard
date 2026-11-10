@@ -503,8 +503,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
           await this.finish(run, 'missed', this.registry.isOnline(run.agentId) ? 'Another update run on this machine was still going when the window closed.' : 'The machine was offline for the whole window.');
           continue;
         }
-        if (busy.has(run.agentId) || !this.registry.isOnline(run.agentId)) continue;
-        // Later rings wait for earlier ones in the same window.
+        // Later rings wait for earlier ones in the same window (and are held back if one failed).
         if (run.batchId && run.ring && run.ring > 0) {
           const gate = await this.ringGate(run);
           if (gate === 'wait') continue;
@@ -513,6 +512,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
             continue;
           }
         }
+        if (busy.has(run.agentId) || !this.registry.isOnline(run.agentId)) continue;
         machines ??= new Map((await this.machines()).map((m) => [m.agentId, m]));
         const m = machines.get(run.agentId);
         if (!m) continue;

@@ -143,6 +143,7 @@ docs/        Feature deep-dives (see the index below)
 | Dashboard & UI | [Telemetry snapshots + connector status](docs/dashboard-telemetry-snapshots.md) · [Command palette](docs/command-palette.md) · [LCARS theme](docs/lcars-ui.md) |
 | Apps & stacks | [Docker Fleet](docs/docker-fleet.md) · [App Replicator](docs/app-replicator.md) · [ECS target](docs/app-replicator-ecs-target.md) · [ECS live test](docs/app-replicator-ecs-live-test.md) · [Stack Backup](docs/stack-backup.md) · [Stack Migrator](docs/stack-migrator.md) |
 | Health | [Machine health (CPU, memory, disks, uptime) from the Cerebro agent](docs/health-monitoring.md) |
+| OS updates | [Pending OS updates, installs, restarts and update schedules](docs/os-updates.md) |
 | Fabric | [Remote access](docs/fabric-remote-access.md) · [Waypoints](docs/fabric-waypoints.md) · [Remote desktop](docs/fabric-remote-desktop.md) · [Remote Browser autofill](docs/fabric-remote-browser-credential-injection.md) · [Agent signing](docs/fabric-agent-signing.md) |
 | Platform | [Secrets vault](docs/secrets-vault.md) · [MFA](docs/mfa-totp.md) · [Password sign-in policy](docs/local-login-policy.md) · [Ship's Log](docs/event-timeline.md) · [Automations](docs/automations.md) · [The Computer](docs/assistant-computer.md) · [API + MCP server](docs/api-and-mcp-server.md) · [System backup](docs/system-backup.md) |
 

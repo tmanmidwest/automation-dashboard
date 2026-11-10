@@ -513,7 +513,7 @@ function ItemRow({ a, fixed, canAct, busy, fresh, menuOpen, onMenu, accepting, o
       <div className="flex items-center gap-2 min-w-0">
         <div className="flex items-baseline gap-2.5 min-w-0 flex-1 whitespace-nowrap" title={[a.label, a.note].filter(Boolean).join(' · ')}>
           {a.url && !a.nodeId
-            ? <a className="text-sm font-medium text-accent hover:underline truncate shrink-0 max-w-[60%] inline-flex items-center gap-1" href={a.url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3 w-3 shrink-0" />{a.label}</a>
+            ? <a className="text-sm font-medium text-accent hover:underline truncate shrink-0 max-w-[60%] inline-flex items-center gap-1" href={a.url} {...(a.url.startsWith('/') ? {} : { target: '_blank', rel: 'noopener noreferrer' })}><ExternalLink className="h-3 w-3 shrink-0" />{a.label}</a>
             : a.nodeId
               ? <button className="text-sm font-medium text-accent hover:underline truncate shrink-0 max-w-[60%] text-left" onClick={() => onShow(a.nodeId!)}>{a.label}</button>
               : <span className="text-sm font-medium truncate shrink-0 max-w-[60%]">{a.label}</span>}

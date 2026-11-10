@@ -52,6 +52,11 @@ CEREBRO_URL=http://localhost:3000 ENROLL=cbroenroll_… ./cerebro-agent
   every 30s by default, plus hardware/OS inventory on connect and every 6h. Queued
   while disconnected (up to ~1h) and sent on reconnect. See
   [`docs/health-monitoring.md`](../docs/health-monitoring.md).
+- `updates` / `updates-log` / `updates-result` — pending OS updates (checked every 6h
+  with the machine's own package manager), install output and results. Installs and
+  restarts only run on a signed command from Cerebro, and `CEREBRO_OS_UPDATES=report`
+  (check only) or `off` in `config.env` opts the machine out. See
+  [`docs/os-updates.md`](../docs/os-updates.md).
 
 Authentication is a bearer credential over TLS (sha256-stored server-side, like a
 Cerebro API token). mTLS is the Phase-5 hardening target.

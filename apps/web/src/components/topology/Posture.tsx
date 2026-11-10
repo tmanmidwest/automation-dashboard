@@ -101,7 +101,7 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
               {f.affected.map((a, i) => (
                 <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
                   {a.url && !a.nodeId
-                    ? <a className="text-accent hover:underline inline-flex items-center gap-1" href={a.url} target="_blank" rel="noopener noreferrer" title="Opens in a new tab"><ExternalLink className="h-3 w-3" />{a.label}</a>
+                    ? <a className="text-accent hover:underline inline-flex items-center gap-1" href={a.url} {...(a.url.startsWith('/') ? {} : { target: '_blank', rel: 'noopener noreferrer' })} title="Opens in a new tab"><ExternalLink className="h-3 w-3" />{a.label}</a>
                     : a.nodeId
                     ? <button className="text-accent hover:underline inline-flex items-center gap-1" onClick={() => onShow(a.nodeId!)} title="Show on the map"><Crosshair className="h-3 w-3" />{a.label}</button>
                     : <span>{a.label}</span>}
