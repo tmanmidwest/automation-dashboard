@@ -7,7 +7,8 @@ import { effectiveSshHost } from '../connectors/docker/docker-ssh';
 import { SettingsService } from '../settings/settings.service';
 import { buildTopology, type BuildInput, type InstRef } from './topology.builder';
 import type { HibpBreach } from './hibp.service';
-import { applySnoozes, buildFindings, ctDomains, npmNameGuards, sortFindings, eolProducts, productVersions, wanIps, type CtInput, type Snooze, type VersionCveInput } from './posture';
+import { buildFindings, ctDomains, npmNameGuards, sortFindings, eolProducts, productVersions, wanIps, type CtInput, type VersionCveInput } from './posture';
+import { PostureTrackingService } from './posture-tracking.service';
 import { OutsideInService } from './outside-in.service';
 import { ImageScanService } from './image-scan.service';
 import { VersionCveService } from './version-cve.service';
@@ -16,8 +17,6 @@ import { buildExposure, comboFindings } from './exposure';
 
 const INTERNAL_KEY = 'posture.internalNames';
 import { HibpService } from './hibp.service';
-
-const SNOOZE_KEY = 'posture.snoozes';
 
 /** Serve a built graph this long before rebuilding in the background. */
 const SERVE_MAX_MS = 2 * 60_000;
@@ -57,6 +56,7 @@ export class TopologyService {
     private readonly versionCve: VersionCveService,
     private readonly ctLog: CtLogService,
     private readonly hibp: HibpService,
+    private readonly tracking: PostureTrackingService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -70,27 +70,17 @@ export class TopologyService {
       if (Date.now() - this.cache.at >= SERVE_MAX_MS) void this.rebuild(false).catch(() => { /* keep last good */ });
       g = this.cache.graph;
     }
-    // Snoozes are applied per request, so snoozing shows up without a rebuild.
+    // Item snoozes / accepted risks are applied per request, so they show up without a rebuild.
     // Scan status is live too (progress while a scan runs).
     const imageScan = await this.imageScan.summary().catch(() => g.imageScan);
-    return { ...g, imageScan, findings: applySnoozes(g.findings ?? [], await this.snoozes()) };
+    return { ...g, imageScan, findings: await this.tracking.annotate(g.findings ?? [], g) };
   }
 
-  private async snoozes(): Promise<Record<string, Snooze>> {
-    return ((await this.settings.get<Record<string, Snooze>>(SNOOZE_KEY)) ?? {}) as Record<string, Snooze>;
-  }
-
-  /** Hide a finding for `days`, or until it gains an item it didn't have. Returns the finding as now shown. */
-  async snooze(id: string, days: number): Promise<PostureFinding | null> {
-    const f = (await this.graph()).findings?.find((x) => x.id === id);
-    if (!f) return null;
-    const all = await this.snoozes();
-    const now = Date.now();
-    // Drop lapsed entries while we're here, so the setting doesn't grow forever.
-    for (const [k, v] of Object.entries(all)) if (new Date(v.until).getTime() <= now) delete all[k];
-    all[id] = { until: new Date(now + days * 86_400_000).toISOString(), labels: f.affected.map((a) => a.label) };
-    await this.settings.set(SNOOZE_KEY, all);
-    return { ...f, snoozedUntil: all[id].until };
+  /** Snooze every open item of a finding for `days` (the map's finding card). Returns the finding as now shown. */
+  async snooze(id: string, days: number, actor?: string): Promise<PostureFinding | null> {
+    if (!(await this.graph()).findings?.some((x) => x.id === id)) return null;
+    await this.tracking.setItems(id, [], 'snooze', { days, actor });
+    return (await this.graph()).findings?.find((x) => x.id === id) ?? null;
   }
 
   /** Switch the outside-in checks on or off; the next map build picks it up. */
@@ -131,12 +121,8 @@ export class TopologyService {
     void this.imageScan.scanAll(true).then(() => { this.cache = null; }).catch(() => undefined);
   }
 
-  async unsnooze(id: string): Promise<boolean> {
-    const all = await this.snoozes();
-    if (!all[id]) return false;
-    delete all[id];
-    await this.settings.set(SNOOZE_KEY, all);
-    return true;
+  async unsnooze(id: string, actor?: string): Promise<boolean> {
+    return (await this.tracking.setItems(id, [], 'reopen', { actor })) > 0;
   }
 
   private rebuild(refresh: boolean): Promise<TopologyGraph> {
@@ -218,6 +204,7 @@ export class TopologyService {
         } catch (err) {
           void this.logging.warn('topology', `Image CVE results unavailable: ${err instanceof Error ? err.message : String(err)}`);
         }
+        let findingsOk = true;
         try {
           graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct, hibp);
           // Exposure paths use the findings for their hops; path combos become a finding too.
@@ -226,7 +213,11 @@ export class TopologyService {
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
           graph.findings = [];
+          findingsOk = false;
         }
+        // Remember first seen / fixed. A build with a failed connector can't say something was
+        // fixed (its findings may just be missing), so then nothing is marked fixed.
+        await this.tracking.sync(graph.findings, findingsOk && graph.feeds.every((f) => f.ok));
         try {
           const rows = await this.prisma.networkDevice.findMany({ where: { typeOverride: { not: null } }, select: { mac: true, typeOverride: true } });
           for (const r of rows) this.applyType(graph, r.mac, r.typeOverride);

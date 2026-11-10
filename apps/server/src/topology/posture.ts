@@ -9,8 +9,8 @@ import type { HibpBreach } from './hibp.service';
 /**
  * Security posture findings: things worth fixing, worked out only from what the
  * connectors already report (no outside lookups). Pure, so it is tested against
- * copies of live data. Grouped findings keep one stable id per check + source, so a
- * snooze survives rebuilds; see `isSnoozed` for how a snooze lapses early.
+ * copies of live data. Grouped findings keep one stable id per check + source, so what
+ * posture-tracking.ts records about them (first seen, snoozes, accepted risk) survives rebuilds.
  */
 
 const SEV_RANK: Record<PostureSeverity, number> = { high: 3, medium: 2, low: 1 };
@@ -380,27 +380,6 @@ export function buildFindings(input: BuildInput, graph: TopologyGraph, now: Date
 export function sortFindings(out: PostureFinding[]): PostureFinding[] {
   return out.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
 }
-
-/** What a snooze remembers: until when, and which items it covered. */
-export interface Snooze {
-  until: string;
-  labels: string[];
-}
-
-/** Snoozed until the date passes, or until the finding picks up an item it didn't have when snoozed. */
-export function isSnoozed(f: PostureFinding, s: Snooze | undefined, now: Date = new Date()): boolean {
-  if (!s || new Date(s.until).getTime() <= now.getTime()) return false;
-  const had = new Set(s.labels);
-  return f.affected.every((a) => had.has(a.label));
-}
-
-export function applySnoozes(findings: PostureFinding[], snoozes: Record<string, Snooze>, now: Date = new Date()): PostureFinding[] {
-  return findings.map((f) => {
-    const s = snoozes[f.id];
-    return isSnoozed(f, s, now) ? { ...f, snoozedUntil: s!.until } : { ...f, snoozedUntil: undefined };
-  });
-}
-
 
 // ── outside-in (Shodan InternetDB, CISA KEV, endoflife.date) ───────────────
 

@@ -1169,3 +1169,59 @@ model NetworkDevice {
 
   @@index([status])
 }
+
+/// A posture finding Cerebro has seen, keyed by the finding's stable id, so the Posture
+/// page can say when it first appeared and when it went away. Findings themselves are still
+/// computed on each map build (topology/posture.ts); this only remembers their history.
+/// See docs/posture.md.
+model PostureFindingRecord {
+  id          String               @id
+  severity    String
+  category    String
+  title       String
+  source      String
+  /// The finding as last built, so a fixed one can still be shown.
+  snapshot    Json
+  firstSeenAt DateTime             @default(now())
+  lastSeenAt  DateTime             @default(now())
+  /// Set when a build no longer finds it; cleared if it comes back.
+  resolvedAt  DateTime?
+  items       PostureItemRecord[]
+  events      PostureEvent[]
+
+  @@index([resolvedAt])
+}
+
+/// One affected item of a finding (by its label) and what you decided about it.
+model PostureItemRecord {
+  findingId        String
+  label            String
+  firstSeenAt      DateTime             @default(now())
+  /// Set when the finding no longer lists this item.
+  goneAt           DateTime?
+  /// "open" | "snoozed" | "accepted"
+  status           String               @default("open")
+  /// Snoozed (or accepted) until; null on an accepted item = until something changes.
+  until            DateTime?
+  note             String?
+  setBy            String?
+  setAt            DateTime?
+  /// The finding's severity when the risk was accepted; a worse severity reopens it.
+  acceptedSeverity String?
+  finding          PostureFindingRecord @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@id([findingId, label])
+}
+
+/// What happened to a finding: first seen, items added / fixed, snoozed, accepted, reopened.
+model PostureEvent {
+  id        String               @id @default(cuid())
+  findingId String
+  at        DateTime             @default(now())
+  kind      String
+  text      String
+  actor     String?
+  finding   PostureFindingRecord @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@index([findingId, at])
+}

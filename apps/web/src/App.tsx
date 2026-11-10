@@ -47,6 +47,7 @@ import { ZumaSettings } from '@/pages/settings/ZumaSettings';
 
 // The map pulls in React Flow + ELK; load it only when someone opens it.
 const ArchitectureMap = lazy(() => import('@/pages/ArchitectureMap'));
+const Posture = lazy(() => import('@/pages/Posture'));
 
 function FullscreenBrand() {
   return (
@@ -115,6 +116,7 @@ function Router() {
       <Route path="/timeline" element={<Protected><RequirePerm perm="logs:read"><Timeline /></RequirePerm></Protected>} />
       <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
       <Route path="/map" element={<Protected><RequirePerm perm="connectors:read"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading map…</p>}><ArchitectureMap /></Suspense></RequirePerm></Protected>} />
+      <Route path="/posture" element={<Protected><RequirePerm perm="connectors:read"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading posture…</p>}><Posture /></Suspense></RequirePerm></Protected>} />
       <Route path="/docker-fleet" element={<Protected><RequirePerm perm="connectors:read"><DockerFleet /></RequirePerm></Protected>} />
       <Route path="/replicator" element={<Protected><RequirePerm perm="replicator:read"><Replicator /></RequirePerm></Protected>} />
       <Route path="/backups" element={<Protected><RequirePerm perm="backup:read"><StackBackups /></RequirePerm></Protected>} />
