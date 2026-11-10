@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock, DatabaseBackup, Cpu, Bot, Plug, BadgeCheck } from 'lucide-react';
+import { ShieldCheck, Mail, Bell, KeyRound, Boxes, Lock, DatabaseBackup, Cpu, Bot, Plug, BadgeCheck, Users, ScrollText, Info } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -9,42 +9,66 @@ type SettingsSection = { to: string; icon: React.ComponentType<{ className?: str
 
 export function SettingsHome() {
   const { can } = useAuth();
-  // Annotate the array literal (not the .filter() result) so the `perm` string literals
+  // Annotate the array literals (not the .filter() result) so the `perm` string literals
   // are checked against Permission instead of widening to `string`.
-  const allSections: SettingsSection[] = [
-    { to: '/settings/authentication', icon: ShieldCheck, title: 'Authentication', desc: 'Local accounts and OIDC single sign-on.' },
-    { to: '/settings/email', icon: Mail, title: 'Email', desc: 'Outbound SMTP server for notifications.' },
-    { to: '/settings/notifications', icon: Bell, title: 'Notifications', desc: 'Outbound alerts by email and SMS.' },
+  // The hub itself is open to every signed-in user (About needs no permission), so each
+  // card carries its own permission — the routes enforce the same ones.
+  const configSections: SettingsSection[] = [
+    { to: '/settings/authentication', icon: ShieldCheck, title: 'Authentication', desc: 'Local accounts and OIDC single sign-on.', perm: 'settings:read' },
+    { to: '/settings/email', icon: Mail, title: 'Email', desc: 'Outbound SMTP server for notifications.', perm: 'settings:read' },
+    { to: '/settings/notifications', icon: Bell, title: 'Notifications', desc: 'Outbound alerts by email and SMS.', perm: 'settings:read' },
     { to: '/settings/secrets', icon: Lock, title: 'Secrets Vault', desc: 'Stored credentials, rotation policies, and last-used tracking.', perm: 'secrets:read' },
-    { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.' },
-    { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.' },
+    { to: '/settings/api-tokens', icon: KeyRound, title: 'API Tokens', desc: 'Bearer tokens for programmatic API and MCP access.', perm: 'settings:read' },
+    { to: '/settings/oauth-clients', icon: Boxes, title: 'OAuth Clients', desc: 'Register MCP/API clients that connect via OAuth.', perm: 'settings:read' },
     { to: '/settings/backup', icon: DatabaseBackup, title: 'Backup & Restore', desc: 'Full encrypted backup you can move to another machine.', perm: 'settings:write' },
     { to: '/settings/computer', icon: Cpu, title: 'Computer', desc: 'In-app LLM assistant — self-hosted or OpenAI-compatible model backend.', perm: 'settings:write' },
     { to: '/settings/agents', icon: Bot, title: 'Agents', desc: 'Computer agents with their own model, instructions, and tools.', perm: 'agents:manage' },
     { to: '/settings/mcp-servers', icon: Plug, title: 'MCP Servers', desc: 'External MCP servers your agents can use as tools.', perm: 'agents:manage' },
     { to: '/settings/zuma', icon: BadgeCheck, title: 'Saviynt Zuma', desc: 'Register your agents in the Saviynt Zuma agent registry.', perm: 'agents:manage' },
   ];
-  const sections = allSections.filter((s) => !s.perm || can(s.perm));
+  const systemSections: SettingsSection[] = [
+    { to: '/settings/users', icon: Users, title: 'Users', desc: 'People who can sign in, and their roles.', perm: 'users:read' },
+    { to: '/settings/logs', icon: ScrollText, title: 'Logs', desc: 'Application diagnostics and the audit trail.', perm: 'logs:read' },
+    { to: '/settings/about', icon: Info, title: 'About', desc: 'Version and build information.' },
+  ];
+  const visible = (list: SettingsSection[]) => list.filter((s) => !s.perm || can(s.perm));
+  const groups = [
+    { title: 'Configuration', sections: visible(configSections) },
+    { title: 'Users & system', sections: visible(systemSections) },
+  ].filter((g) => g.sections.length > 0);
   return (
     <>
       <PageHeader title="Settings" description="Everything is configured here — no files to edit." />
-      <div className="grid gap-4 sm:grid-cols-2">
-        {sections.map((s) => (
-          <Link key={s.to} to={s.to}>
-            <Card className="h-full transition-all hover:border-primary/50">
-              <CardContent className="pt-6 flex gap-4">
-                <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary grid place-items-center shrink-0">
-                  <s.icon className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="font-semibold">{s.title}</p>
-                  <p className="text-sm text-muted-foreground">{s.desc}</p>
-                </div>
-              </CardContent>
-            </Card>
-          </Link>
+      <div className="space-y-8">
+        {groups.map((g) => (
+          <section key={g.title}>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">{g.title}</h2>
+            <SectionGrid sections={g.sections} />
+          </section>
         ))}
       </div>
     </>
+  );
+}
+
+function SectionGrid({ sections }: { sections: SettingsSection[] }) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      {sections.map((s) => (
+        <Link key={s.to} to={s.to}>
+          <Card className="h-full transition-all hover:border-primary/50">
+            <CardContent className="pt-6 flex gap-4">
+              <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary grid place-items-center shrink-0">
+                <s.icon className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="font-semibold">{s.title}</p>
+                <p className="text-sm text-muted-foreground">{s.desc}</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+      ))}
+    </div>
   );
 }
