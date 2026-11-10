@@ -166,6 +166,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
 ### Changed
+- **Users, Logs and About moved under Settings** to declutter the sidebar. They now live at
+  `/settings/users`, `/settings/logs` and `/settings/about` (Settings page, "Users & system" group);
+  the old `/users`, `/logs` and `/about` links redirect. Each keeps its own permission, and Settings is
+  now visible to every signed-in user so About is always reachable (the cards shown follow permissions).
 - **Fabric session header names the endpoint** — a session tab now leads with the
   endpoint's label (a Waypoint route's label, or its host when it has none), then the
   address, with the Waypoint shown as a separate "via pi-gateway01" chip instead of
