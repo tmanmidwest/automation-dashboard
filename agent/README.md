@@ -48,6 +48,10 @@ CEREBRO_URL=http://localhost:3000 ENROLL=cbroenroll_… ./cerebro-agent
   are the local `127.0.0.1` SSH/RDP ports it found listening.
 - `heartbeat` — every 15s. Missing several in a row flips the agent **offline**
   in Cerebro.
+- `health` — resource health (CPU, memory, filesystems, disk I/O, network, uptime)
+  every 30s by default, plus hardware/OS inventory on connect and every 6h. Queued
+  while disconnected (up to ~1h) and sent on reconnect. See
+  [`docs/health-monitoring.md`](../docs/health-monitoring.md).
 
 Authentication is a bearer credential over TLS (sha256-stored server-side, like a
 Cerebro API token). mTLS is the Phase-5 hardening target.

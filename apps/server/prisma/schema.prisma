@@ -798,8 +798,91 @@ model Agent {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  targets  AgentTarget[]
-  sessions FabricSession[]
+  /// Health (docs/health-monitoring.md): operator override of how this machine is
+  /// treated — "server" (alerts when offline) or "workstation" (laptops/desktops:
+  /// offline is normal, tracked as offline time). Null = auto-detected (AgentHealth.autoRole).
+  healthRole String?
+
+  targets       AgentTarget[]
+  sessions      FabricSession[]
+  health        AgentHealth?
+  healthSamples AgentHealthSample[]
+  healthRollups AgentHealthRollup[]
+}
+
+// ---------------------------------------------------------------------------
+// Health — resource health reported by the Cerebro agent. docs/health-monitoring.md
+// ---------------------------------------------------------------------------
+
+/// Latest health report + inventory per agent, so the Health page loads instantly.
+model AgentHealth {
+  agentId     String    @id
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// When the latest sample was taken (agent clock, clamped to server time).
+  at          DateTime
+  /// The latest full sample (HealthSample: cpu, mem, every disk, throughput, uptime).
+  sample      Json
+  /// Hardware / OS facts (HealthInventory), refreshed every few hours and on reconnect.
+  inventory   Json?
+  inventoryAt DateTime?
+  /// Detected role: "server" | "workstation" (battery or desktop OS ⇒ workstation).
+  autoRole    String?
+  updatedAt   DateTime  @updatedAt
+}
+
+/// One raw health sample (default every 30 s). Kept ~2 days; rolled up below.
+model AgentHealthSample {
+  id           BigInt   @id @default(autoincrement())
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId      String
+  at           DateTime
+  /// Seconds this sample covers — summed for online time.
+  spanSec      Int
+  cpuPct       Float?
+  cpuMaxPct    Float?
+  memPct       Float?
+  swapPct      Float?
+  /// Fullest filesystem's used %.
+  diskPct      Float?
+  load1        Float?
+  netRxBps     Float?
+  netTxBps     Float?
+  diskReadBps  Float?
+  diskWriteBps Float?
+  /// { "<mount>": usedPct } for every filesystem.
+  disks        Json?
+
+  @@unique([agentId, at])
+  @@index([at])
+}
+
+/// 5-minute (kept 14 days) and hourly (kept ~13 months) health rollups.
+model AgentHealthRollup {
+  id        BigInt   @id @default(autoincrement())
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId   String
+  /// "5m" | "1h"
+  res       String
+  /// Bucket start (UTC).
+  bucket    DateTime
+  samples   Int
+  /// Seconds the machine was up and reporting inside this bucket.
+  onlineSec Int
+  cpuAvg    Float?
+  cpuMax    Float?
+  memAvg    Float?
+  memMax    Float?
+  swapMax   Float?
+  diskMax   Float?
+  netRxAvg  Float?
+  netTxAvg  Float?
+  readAvg   Float?
+  writeAvg  Float?
+  /// Last sample's per-mount used % in the bucket.
+  disks     Json?
+
+  @@unique([agentId, res, bucket])
+  @@index([res, bucket])
 }
 
 /// A local endpoint on the box the agent will proxy to (Phase 2+). Discovered by

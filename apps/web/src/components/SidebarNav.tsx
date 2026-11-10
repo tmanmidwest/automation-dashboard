@@ -16,6 +16,7 @@ import {
   Archive,
   HardDriveUpload,
   Network,
+  HeartPulse,
   ShieldAlert,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
@@ -41,6 +42,7 @@ const NAV: NavItem[] = [
   { to: '/replicator', label: 'App Replicator', icon: Boxes, perm: 'replicator:read', code: '02-REP' },
   { to: '/backups', label: 'Stack Backups', icon: Archive, perm: 'backup:read', code: '02-BAK' },
   { to: '/migrate', label: 'Stack Migrate', icon: HardDriveUpload, perm: 'backup:read', code: '02-MIG' },
+  { to: '/health', label: 'Health', icon: HeartPulse, perm: 'fabric:read', code: '02-HLT' },
   { to: '/fabric', label: 'Fabric', icon: Radio, perm: 'fabric:read', code: '02-FAB' },
   { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
