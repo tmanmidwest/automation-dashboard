@@ -45,6 +45,16 @@ export interface TimelineEvent {
   meta?: Record<string, unknown> | null;
 }
 
+/**
+ * GET /api/timeline/event/:id — one event plus what was logged around it from the
+ * same source (e.g. the "API token rejected: …" reason just before an auth rejection).
+ */
+export interface TimelineEventDetail {
+  event: TimelineEvent;
+  /** Same-source events within a few minutes either side, newest first; excludes `event`. */
+  related: TimelineEvent[];
+}
+
 /** Query params accepted by GET /api/timeline. */
 export interface TimelineQuery {
   kinds?: TimelineKind[];

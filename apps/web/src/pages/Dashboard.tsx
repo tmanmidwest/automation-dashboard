@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle, GripVertical, Eye, EyeOff, Settings2, RotateCcw, Siren, BellOff, X } from 'lucide-react';
+import { Server, Boxes, Network, Cpu, Users as UsersIcon, Activity, Clock, DollarSign, TrendingUp, CalendarDays, Archive, HardDrive, ShieldCheck, ShieldAlert, HeartPulse, Gauge, Radio, RefreshCw, AlertTriangle, GripVertical, Eye, EyeOff, Settings2, RotateCcw, Siren, BellOff, X, ChevronRight } from 'lucide-react';
 import type { VersionInfo, DashboardOverview, OverviewSource, MonitorSummary, MonitorStatus, TimelineEvent, TimelineKind, TimelineSeverity, TimelinePage } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
+import { eventLogLink, eventSourceLink, type ConnectorRef } from '@/lib/event-links';
 
 // Timeline presentation — web imports only *types* from shared (its CJS build can't
 // surface named runtime exports to Rollup), so the label/accent tables live here, in
@@ -25,12 +26,10 @@ const TL_SEVERITY: Record<TimelineSeverity, { spine: string; text: string; dot: 
   critical: { spine: 'bg-destructive', text: 'text-destructive', dot: 'hsl(var(--destructive))' },
 };
 
-/** Where a timeline row links to, if anywhere (mirrors the Ship's Log). */
-function timelineTarget(e: TimelineEvent): string | null {
-  if (!e.source) return null;
-  if (e.kind === 'monitor') return `/monitors/${e.source}`;
-  if (e.kind === 'job' || e.kind === 'notification' || e.kind === 'audit') return `/connectors/${e.source}`;
-  return null;
+/** Where a timeline row links to: the condition's source page when there is one, otherwise
+ *  the event's own Ship's Log entry (detail + what was logged around it) — never nowhere. */
+function timelineTarget(e: TimelineEvent, connectors: ConnectorRef[]): { to: string; label: string } {
+  return eventSourceLink(e, connectors) ?? { to: eventLogLink(e), label: 'Log entry' };
 }
 
 function useCountUp(target: number, ms = 700) {
@@ -270,25 +269,27 @@ function GaugeTile({ icon: Icon, label, pct, to }: { icon: React.ComponentType<{
 /** A single actionable item in the Attention zone (a down connector/monitor, or a recent
  *  warning/critical event). `key` is stable so it can be acknowledged; `critical` drives the
  *  banner colour and the Red Alert klaxon. */
-type AttnItem = { key: string; color: string; label: string; detail?: string; to: string | null; critical: boolean };
+type AttnItem = { key: string; color: string; label: string; detail?: string; to: string; dest: string; critical: boolean };
 
-/** One line in the "Needs attention" banner, with an acknowledge (dismiss) control. */
-function AttnRow({ color, label, detail, to, onAck }: { color: string; label: string; detail?: string; to: string | null; onAck?: () => void }) {
-  const inner = (
-    <>
-      <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color, boxShadow: `0 0 6px ${color}` }} aria-hidden />
-      <span className="text-sm truncate">{label}</span>
-      {detail && <span className="ml-auto pl-2 text-xs text-muted-foreground truncate max-w-[40%] shrink-0">{detail}</span>}
-    </>
-  );
-  const cls = 'flex items-center gap-2.5 rounded-md px-2 py-1.5 min-h-[34px] flex-1 min-w-0';
+/** One line in the "Needs attention" banner, with an acknowledge (dismiss) control. Every
+ *  row opens somewhere: its source (connector, monitor, backups, posture…) or, when the
+ *  condition has no page of its own, its Ship's Log entry. `dest` names where it goes. */
+function AttnRow({ color, label, detail, to, dest, onAck }: { color: string; label: string; detail?: string; to: string; dest: string; onAck?: () => void }) {
   return (
     <div className="flex items-center gap-1">
-      {to ? (
-        <Link to={to} className={cn(cls, 'hover:bg-background/40 transition-colors')}>{inner}</Link>
-      ) : (
-        <div className={cls}>{inner}</div>
-      )}
+      <Link
+        to={to}
+        title={`${label}\nOpen ${dest}`}
+        className="group flex items-center gap-2.5 rounded-md px-2 py-1.5 min-h-[34px] flex-1 min-w-0 hover:bg-background/40 transition-colors"
+      >
+        <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color, boxShadow: `0 0 6px ${color}` }} aria-hidden />
+        <span className="text-sm truncate group-hover:underline underline-offset-2">{label}</span>
+        <span className="ml-auto pl-2 flex items-center gap-1 text-xs text-muted-foreground min-w-0 max-w-[45%] shrink-0">
+          <span className="truncate">{detail}</span>
+          <span className="hidden sm:inline shrink-0 text-muted-foreground/60 group-hover:text-accent">· {dest}</span>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60 group-hover:text-accent" aria-hidden />
+        </span>
+      </Link>
       {onAck && (
         <button
           type="button"
@@ -641,9 +642,12 @@ export function Dashboard() {
     .slice(0, 6);
   // Unified attention list so each item can be acknowledged (session-scoped) and counted once.
   const attnItemsAll: AttnItem[] = [
-    ...offline.map((s): AttnItem => ({ key: `conn:${s.name}`, color: 'hsl(var(--destructive))', label: `Connector offline · ${s.name}`, detail: s.message ?? 'unreachable', to: '/connectors', critical: true })),
-    ...monDown.map((m): AttnItem => ({ key: `mon:${m.id}`, color: 'hsl(var(--destructive))', label: `Monitor down · ${m.name}`, detail: m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : 'no response', to: `/monitors/${m.id}`, critical: true })),
-    ...attnEvents.map((e): AttnItem => ({ key: `ev:${e.id}`, color: TL_SEVERITY[e.severity].dot, label: e.title, detail: e.actor?.email ?? TL_KIND_LABEL[e.kind], to: timelineTarget(e), critical: e.severity === 'critical' })),
+    ...offline.map((s): AttnItem => ({ key: `conn:${s.name}`, color: 'hsl(var(--destructive))', label: `Connector offline · ${s.name}`, detail: s.message ?? 'unreachable', to: s.id ? `/connectors/${s.id}` : '/connectors', dest: 'Connector', critical: true })),
+    ...monDown.map((m): AttnItem => ({ key: `mon:${m.id}`, color: 'hsl(var(--destructive))', label: `Monitor down · ${m.name}`, detail: m.lastLatencyMs != null ? `${m.lastLatencyMs} ms` : 'no response', to: `/monitors/${m.id}`, dest: 'Monitor', critical: true })),
+    ...attnEvents.map((e): AttnItem => {
+      const t = timelineTarget(e, sources);
+      return { key: `ev:${e.id}`, color: TL_SEVERITY[e.severity].dot, label: e.title, detail: e.actor?.email ?? TL_KIND_LABEL[e.kind], to: t.to, dest: t.label.split(' · ')[0], critical: e.severity === 'critical' };
+    }),
   ];
   const attnItems = attnItemsAll.filter((i) => !acked.has(i.key));
   const attnCount = attnItems.length;
@@ -776,12 +780,13 @@ export function Dashboard() {
               <div className="divide-y divide-border/40">
                 {events.map((e) => {
                   const sev = TL_SEVERITY[e.severity];
-                  const target = timelineTarget(e);
+                  const target = timelineTarget(e, sources);
                   return (
                     <div
                       key={e.id}
-                      className={cn('flex gap-2.5 px-2 py-1.5 items-start animate-fade-in', target && 'cursor-pointer hover:bg-muted/40 transition-colors')}
-                      onClick={target ? () => navigate(target) : undefined}
+                      title={`Open ${target.label}`}
+                      className="flex gap-2.5 px-2 py-1.5 items-start animate-fade-in cursor-pointer hover:bg-muted/40 transition-colors"
+                      onClick={() => navigate(target.to)}
                     >
                       <span className={cn('mt-0.5 w-1 self-stretch rounded-full shrink-0', sev.spine)} aria-hidden />
                       <span className="text-muted-foreground/70 shrink-0 w-[4.5rem] text-xs tabular-nums pt-0.5">
@@ -1034,7 +1039,7 @@ export function Dashboard() {
           </div>
           <div className="grid gap-1 sm:grid-cols-2">
             {attnItems.map((i) => (
-              <AttnRow key={i.key} color={i.color} label={i.label} detail={i.detail} to={i.to} onAck={() => ackItem(i.key)} />
+              <AttnRow key={i.key} color={i.color} label={i.label} detail={i.detail} to={i.to} dest={i.dest} onAck={() => ackItem(i.key)} />
             ))}
           </div>
         </div>

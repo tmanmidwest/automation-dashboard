@@ -71,31 +71,31 @@ export class TokenAuthService {
     const prefix = sep > 0 ? body.slice(0, sep) : '';
     const secret = sep > 0 ? body.slice(sep + 1) : '';
     if (!prefix || !secret) {
-      this.logging.warn('auth', 'API token rejected: malformed (expected cbro_<prefix>_<secret>).');
+      this.logging.warn('auth', 'API token rejected: malformed (expected cbro_<prefix>_<secret>).', { ip });
       return null;
     }
 
     const token = await this.prisma.apiToken.findUnique({ where: { prefix } });
     if (!token) {
-      this.logging.warn('auth', 'API token rejected: no token with this prefix.', { prefix });
+      this.logging.warn('auth', 'API token rejected: no token with this prefix.', { prefix, ip });
       return null;
     }
     if (token.revokedAt) {
-      this.logging.warn('auth', 'API token rejected: revoked.', { prefix });
+      this.logging.warn('auth', 'API token rejected: revoked.', { prefix, ip });
       return null;
     }
     if (token.expiresAt && token.expiresAt.getTime() <= Date.now()) {
-      this.logging.warn('auth', 'API token rejected: expired.', { prefix });
+      this.logging.warn('auth', 'API token rejected: expired.', { prefix, ip });
       return null;
     }
     if (!this.hashMatches(secret, token.hash)) {
-      this.logging.warn('auth', 'API token rejected: secret does not match.', { prefix });
+      this.logging.warn('auth', 'API token rejected: secret does not match.', { prefix, ip });
       return null;
     }
 
     const owner = await this.authService.buildSessionUser(token.userId);
     if (!owner) {
-      this.logging.warn('auth', 'API token rejected: owner account missing or disabled.', { prefix });
+      this.logging.warn('auth', 'API token rejected: owner account missing or disabled.', { prefix, ip });
       return null;
     }
 
@@ -118,6 +118,7 @@ export class TokenAuthService {
       this.logging.warn(
         'auth',
         'Bearer token rejected: not a Cerebro credential. It is neither a cbro_ API token nor a JWT — e.g. an opaque token from an external gateway/IdP (Google access tokens are opaque). Cerebro only accepts its own API tokens or OAuth access tokens.',
+        { ip },
       );
       return null;
     }
@@ -127,6 +128,7 @@ export class TokenAuthService {
       this.logging.warn(
         'auth',
         'Bearer JWT rejected: failed verification — bad signature, expired, or not issued by Cerebro. A JWT minted by an external IdP (e.g. Google) will fail here; Cerebro must issue the token itself, or use a cbro_ API token.',
+        { ip },
       );
       return null;
     }
@@ -135,7 +137,7 @@ export class TokenAuthService {
 
     const owner = await this.authService.buildSessionUser(claims.sub);
     if (!owner) {
-      this.logging.warn('auth', 'OAuth token rejected: subject user missing or disabled.', { sub: claims.sub });
+      this.logging.warn('auth', 'OAuth token rejected: subject user missing or disabled.', { sub: claims.sub, ip });
       return null;
     }
 
@@ -152,7 +154,7 @@ export class TokenAuthService {
   private async resolveMachineClient(clientId: string, scope: string, ip?: string): Promise<TokenPrincipal | null> {
     const client = await this.prisma.oAuthClient.findUnique({ where: { clientId } });
     if (!client || client.type !== 'machine' || client.disabled) {
-      this.logging.warn('auth', 'Machine client token rejected: client missing, disabled or not a machine client.', { clientId });
+      this.logging.warn('auth', 'Machine client token rejected: client missing, disabled or not a machine client.', { clientId, ip });
       return null;
     }
     if (!ipAllowed(client.ipAllowlist, ip)) {

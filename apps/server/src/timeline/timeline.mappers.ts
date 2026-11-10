@@ -95,7 +95,7 @@ export function mapAppLogRow(r: AppLogRow): TimelineEvent {
     id: `app_log:${r.id}`,
     ts: r.createdAt.toISOString(),
     kind: 'app_log',
-    severity: r.level === 'error' ? 'critical' : 'warning',
+    severity: r.level === 'error' ? 'critical' : r.level === 'warn' ? 'warning' : 'info',
     title: `${r.context}: ${r.message}`,
     detail: null,
     actor: null,
@@ -121,7 +121,7 @@ export function mapNotificationRow(r: NotificationRow): TimelineEvent {
     detail: r.detail ?? `${r.channel} · ${r.status}`,
     actor: null,
     source: r.connectorId ?? r.source ?? null,
-    meta: { channel: r.channel, status: r.status, recipients: r.recipients, alertKey: r.alertKey },
+    meta: { channel: r.channel, status: r.status, recipients: r.recipients, alertKey: r.alertKey, connectorId: r.connectorId ?? null },
   };
 }
 

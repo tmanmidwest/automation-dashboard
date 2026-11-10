@@ -49,7 +49,7 @@ export class SessionAuthGuard implements CanActivate {
       if (!user) {
         // Stale session (user deleted/disabled) — clear it.
         req.session?.destroy(() => undefined);
-        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: session no longer valid (user deleted or disabled).`);
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: session no longer valid (user deleted or disabled).`, requestMeta(req));
         throw new UnauthorizedException('Session no longer valid');
       }
       req.user = user;
@@ -63,11 +63,11 @@ export class SessionAuthGuard implements CanActivate {
       // A machine client has no user behind it: it may only read the agent catalog, so it
       // can't reach routes that check authentication but no particular permission.
       if (principal.machineClient && !isCatalogPath(req.path)) {
-        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: machine OAuth clients may only call /api/v1/agents.`);
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: machine OAuth clients may only call /api/v1/agents.`, requestMeta(req));
         throw new ForbiddenException('This client may only read the agent catalog (/api/v1/agents).');
       }
       if (sessionOnly) {
-        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: this route requires an interactive session, not a bearer token.`);
+        this.logging.warn('auth', `Rejected ${req.method} ${req.path}: this route requires an interactive session, not a bearer token.`, requestMeta(req));
         throw new ForbiddenException('This action requires an interactive session, not an API token.');
       }
       req.user = principal.user;
@@ -80,7 +80,7 @@ export class SessionAuthGuard implements CanActivate {
     // Rejected. Log at the request level (tokenAuth.resolve already logged the *why* for a
     // presented bearer). A request with no credential at all is a normal discovery probe.
     if (req.headers.authorization) {
-      this.logging.warn('auth', `Rejected ${req.method} ${req.path}: credential presented but not accepted (see the preceding reason).`);
+      this.logging.warn('auth', `Rejected ${req.method} ${req.path}: credential presented but not accepted (see the preceding reason).`, requestMeta(req));
     } else {
       this.logging.debug('auth', `Unauthenticated ${req.method} ${req.path}: no credential — sent discovery challenge.`);
     }
@@ -100,4 +100,18 @@ export class SessionAuthGuard implements CanActivate {
       `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
     );
   }
+}
+
+/**
+ * Who made a rejected request — shown on the log entry's detail view so an operator can
+ * tell which client or machine is behind it. Never includes the credential itself.
+ */
+function requestMeta(req: Request): Record<string, unknown> {
+  const ua = req.headers['user-agent'];
+  return {
+    method: req.method,
+    path: req.path,
+    ip: req.ip ?? null,
+    userAgent: typeof ua === 'string' ? ua.slice(0, 200) : null,
+  };
 }
