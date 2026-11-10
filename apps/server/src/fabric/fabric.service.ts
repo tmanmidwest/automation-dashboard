@@ -48,7 +48,7 @@ import { SecretsService } from '../secrets/secrets.service';
 import { AgentRegistryService } from './agent-registry.service';
 import { FabricSessionService } from './fabric-session.service';
 import { FabricGuacService } from './fabric-guac.service';
-import { RemoteBrowserService } from './remote-browser.service';
+import { RemoteBrowserService, normalizeRemoteBrowserGeometry } from './remote-browser.service';
 import { FabricApprovalService } from './fabric-approval.service';
 import { generateEnrollToken } from './fabric-credentials';
 import { baseUrl } from './fabric-enrollment.service';
@@ -416,7 +416,10 @@ export class FabricService implements OnModuleInit {
     agentId: string,
     targetId: string,
     user: SessionUser,
+    /** Screen size the operator picked for this session ("WxH"); blank = the configured default. */
+    geometry?: string,
   ): Promise<FabricVncSessionTicket | FabricApprovalPending> {
+    const sessionGeometry = normalizeRemoteBrowserGeometry(geometry);
     const target = await this.prisma.agentTarget.findFirst({
       where: { id: targetId, agentId },
       include: { agent: { select: { status: true } } },
@@ -448,6 +451,7 @@ export class FabricService implements OnModuleInit {
           host: target.host,
           port: target.port,
           ignoreCertErrors: target.webIgnoreCertErrors,
+          geometry: sessionGeometry,
           autofill: injectArmed ? autofill : 'off',
           cred,
           user,

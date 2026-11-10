@@ -49,6 +49,38 @@ export interface RemoteBrowserConfig {
   /** Hostname the browser container dials back to reach Cerebro's SOCKS bridge. */
   callbackHost?: string;
 }
+/** Bounds for a per-session screen size: small enough to stay usable, large
+ *  enough for a 4K window, and capped so a request can't ask Xvfb for a huge
+ *  framebuffer (it allocates width×height×4 bytes up front). */
+export const REMOTE_BROWSER_MIN_WIDTH = 640;
+export const REMOTE_BROWSER_MIN_HEIGHT = 480;
+export const REMOTE_BROWSER_MAX_WIDTH = 3840;
+export const REMOTE_BROWSER_MAX_HEIGHT = 2160;
+
+/**
+ * Validate an operator-picked screen size ("1920x1080"). Returns the clean
+ * "WxH" string (rounded down to even numbers, which Xvfb/x11vnc prefer), or
+ * undefined when none was given so the configured default applies. Anything
+ * malformed or out of range is a 400 rather than a silent fallback, so the
+ * operator knows their choice wasn't used.
+ */
+export function normalizeRemoteBrowserGeometry(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const m = typeof raw === 'string' ? raw.trim().match(/^(\d{3,5})\s*[xX×]\s*(\d{3,5})$/) : null;
+  if (!m) throw new BadRequestException('Screen size must look like 1920x1080.');
+  const w = Number(m[1]) & ~1;
+  const h = Number(m[2]) & ~1;
+  if (
+    w < REMOTE_BROWSER_MIN_WIDTH || h < REMOTE_BROWSER_MIN_HEIGHT ||
+    w > REMOTE_BROWSER_MAX_WIDTH || h > REMOTE_BROWSER_MAX_HEIGHT
+  ) {
+    throw new BadRequestException(
+      `Screen size must be between ${REMOTE_BROWSER_MIN_WIDTH}x${REMOTE_BROWSER_MIN_HEIGHT} and ${REMOTE_BROWSER_MAX_WIDTH}x${REMOTE_BROWSER_MAX_HEIGHT}.`,
+    );
+  }
+  return `${w}x${h}`;
+}
+
 const REDEEM_TTL_MS = 60_000; // tear the browser down if the ticket is never opened
 const MAX_SESSION_MS = 8 * 60 * 60 * 1000; // hard safety cap on a browser's lifetime
 const VNC_PORT = 5900;
@@ -172,6 +204,8 @@ export class RemoteBrowserService {
     port: number;
     /** Per-route: accept invalid/self-signed TLS certs for THIS session only. */
     ignoreCertErrors?: boolean;
+    /** Screen size picked for this session ("WxH", already validated); overrides the default. */
+    geometry?: string;
     /** Web-credential autofill mode ('off' when no credential is attached). */
     autofill?: FabricWebAutofillMode;
     /** Resolved web credential to inject (already revealed by FabricService). */
@@ -190,7 +224,7 @@ export class RemoteBrowserService {
     // override it for non-standard setups (e.g. a remote Docker endpoint).
     const cfg = await this.storedConfig();
     const image = cfg.image || process.env.REMOTE_BROWSER_IMAGE || 'cerebro-remote-browser:latest';
-    const geometry = cfg.geometry || process.env.REMOTE_BROWSER_GEOMETRY || '1280x800';
+    const geometry = params.geometry || cfg.geometry || process.env.REMOTE_BROWSER_GEOMETRY || '1280x800';
     const network = cfg.network || process.env.REMOTE_BROWSER_NETWORK || (await this.resolveSelfNetwork(docker));
     const callbackHost =
       cfg.callbackHost ||
@@ -311,7 +345,7 @@ export class RemoteBrowserService {
       actorEmail: params.user.email,
       action: 'fabric.remoteBrowser.launched',
       target: params.agentId,
-      meta: { targetId: params.targetId, url: params.url, host: params.host, port: params.port },
+      meta: { targetId: params.targetId, url: params.url, host: params.host, port: params.port, geometry },
     });
 
     return {
