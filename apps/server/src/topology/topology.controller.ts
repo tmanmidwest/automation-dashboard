@@ -52,7 +52,7 @@ export class TopologyController {
   @Post('findings/:id/snooze')
   @RequirePermissions('connectors:action')
   async snooze(@Param('id') id: string, @Body() dto: SnoozeDto, @CurrentUser() user: SessionUser) {
-    const f = await this.topology.snooze(id, dto.days);
+    const f = await this.topology.snooze(id, dto.days, user.displayName || user.email);
     if (!f) throw new NotFoundException('That finding is no longer open.');
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.snoozed', target: f.title, meta: { id, days: dto.days } });
     return f;
@@ -110,7 +110,7 @@ export class TopologyController {
   @Delete('findings/:id/snooze')
   @RequirePermissions('connectors:action')
   async unsnooze(@Param('id') id: string, @CurrentUser() user: SessionUser) {
-    if (!(await this.topology.unsnooze(id))) throw new NotFoundException('That finding is not snoozed.');
+    if (!(await this.topology.unsnooze(id, user.displayName || user.email))) throw new NotFoundException('That finding is not snoozed.');
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.unsnoozed', meta: { id } });
     return { ok: true };
   }

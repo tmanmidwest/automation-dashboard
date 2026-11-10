@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Posture page** — a sidebar page just for security findings. Summary tiles (open High / Medium /
+  Low, new since your last visit, fixed this week, snoozed or accepted), a filter bar (search,
+  severity, category, host, source, status, group by) kept in the URL, built-in and saved views, and a
+  list with the selected finding beside it. Each affected item is one line with its own **Snooze**,
+  **Accept risk** (with a note) and **Reopen**. Cerebro now remembers when each finding and item was
+  first seen and when it was fixed, and shows a history per finding. *Exposed to the internet* and
+  *Unknown addresses* have their own tabs. The map's Posture findings tile opens the page.
 - **Stack backup sets** — group stack backups under one repository, schedule and set of settings
   (for example everything on a Raspberry Pi). A set can be tied to one host and auto-include every
   stack found there (hourly, or "Scan host"). Each stack can keep any setting for itself; bind paths

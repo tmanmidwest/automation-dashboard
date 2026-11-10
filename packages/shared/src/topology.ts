@@ -192,11 +192,46 @@ export interface PostureFinding {
   fix: string;
   /** What it's about; nodeId links to the map when the item is on it. */
   /** nodeId links to the map; url (outside-in findings) opens the evidence, e.g. the page or Shodan's record. */
-  affected: { label: string; nodeId?: string; note?: string; url?: string }[];
+  affected: PostureAffected[];
   /** Other map items that should carry this finding's badge (e.g. the Internet tile for a port forward). */
   alsoOn?: string[];
   /** Where the data came from, e.g. "Nginx Proxy Manager", "UniFi". */
   source: string;
-  /** Set while snoozed: ISO time it wakes up again. */
+  /** Set while every item is snoozed: ISO time the first one wakes up again. */
   snoozedUntil?: string;
+  /** Tracking (Posture page). Open while any item is open; fixed ones come from GET /api/posture/fixed. */
+  status?: PostureStatus;
+  /** When Cerebro first found it (absent until it has been recorded). */
+  firstSeenAt?: string;
+  /** Set on a fixed finding: when a build stopped finding it. */
+  resolvedAt?: string;
+  /** Machines involved (host / VM / gateway labels), for filtering and grouping by host. */
+  hosts?: string[];
+}
+
+export type PostureStatus = 'open' | 'snoozed' | 'accepted' | 'fixed';
+
+/** One thing a finding is about, and what you decided about it. */
+export interface PostureAffected {
+  label: string;
+  nodeId?: string;
+  note?: string;
+  url?: string;
+  /** Absent or "open" unless snoozed / accepted. */
+  status?: 'open' | 'snoozed' | 'accepted';
+  /** Snoozed (or accepted) until; absent on an accepted item means until something changes. */
+  until?: string;
+  /** Why the risk was accepted. */
+  reason?: string;
+  setBy?: string;
+  setAt?: string;
+  firstSeenAt?: string;
+}
+
+/** One line of a finding's history. */
+export interface PostureEventView {
+  at: string;
+  kind: string;
+  text: string;
+  actor?: string;
 }
