@@ -48,6 +48,13 @@ export class TopologyController {
     return this.topology.graph(refresh === '1' || refresh === 'true');
   }
 
+  /** What the running map build is doing, step by step (for the "Checking your connectors" view). */
+  @Get('progress')
+  @RequirePermissions('connectors:read')
+  progress() {
+    return this.topology.buildProgress();
+  }
+
   /** Hide a posture finding for a while (it comes back early if it gains new items). */
   @Post('findings/:id/snooze')
   @RequirePermissions('connectors:action')

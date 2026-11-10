@@ -15,6 +15,7 @@ import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
 import { BlockButton, BlockedDevicesRow, DeviceType, NewDevicesRow, type BlockedDevice, type DeviceList } from '@/components/topology/NewDevices';
 import { ExposureSection } from '@/components/topology/Exposure';
+import { CheckingView, useBuildProgress } from '@/components/topology/CheckingView';
 import { FindingsSection, postureSummary, SEV_TINT, SevPill } from '@/components/topology/Posture';
 
 /**
@@ -134,6 +135,7 @@ export function ArchitectureMap() {
   }, [loadDevices]);
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, [load]);
 
+  const progress = useBuildProgress((!graph && !err) || refreshing);
   const model = useMemo(() => (graph ? new TopoModel(graph, showClients) : null), [graph, showClients]);
   const hits = useMemo(() => (graph && q.trim() ? graph.nodes.filter((n) => matches(n, q)).slice(0, 12) : []), [graph, q]);
 
@@ -180,7 +182,8 @@ export function ArchitectureMap() {
           <span>Partial data from {badFeeds.map((f) => f.name).join(', ')}. {badFeeds[0].message}</span>
         </div>
       )}
-      {!graph && !err && <div className="py-16 text-center text-sm text-muted-foreground">Building the map from your connectors…</div>}
+      {!graph && !err && <CheckingView progress={progress} title="Building the map" />}
+      {graph && refreshing && <div className="mb-4"><CheckingView progress={progress} title="Refreshing the map" compact /></div>}
 
       {model && focus && (
         <FocusMap model={model} focusId={focus} onBack={() => setFocus(null)} onFocus={(id) => setFocus(id)} onOpen={(id) => goTo(id)} />

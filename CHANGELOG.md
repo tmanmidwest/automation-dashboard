@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Live progress while Cerebro checks** — the Posture page and the Architecture Map show a radar
+  with a blip per step and the step list while a check runs: each connector (with what it returned or
+  its error), then the outside-in, CVE, certificate and image-scan steps, with a percentage and how
+  long the last check took. *Check now* shows a compact version above the page.
 - **Posture page** — a sidebar page just for security findings. Summary tiles (open High / Medium /
   Low, new since your last visit, fixed this week, snoozed or accepted), a filter bar (search,
   severity, category, host, source, status, group by) kept in the URL, built-in and saved views, and a

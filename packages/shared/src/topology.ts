@@ -235,3 +235,26 @@ export interface PostureEventView {
   text: string;
   actor?: string;
 }
+
+/** One step of a map build, for the "Checking your connectors" view. */
+export interface TopologyStep {
+  key: string;
+  label: string;
+  /** Connector id ("unifi", "proxmox"…) or "check" for Cerebro's own checks. */
+  kind: string;
+  state: 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
+  /** e.g. "81 clients, 6 devices" or the error. */
+  detail?: string;
+}
+
+/** GET /api/topology/progress: the build that's running (or the last one). */
+export interface TopologyProgress {
+  running: boolean;
+  /** True when it re-reads everything live (Check now / Refresh). */
+  refresh: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  /** How long the previous build took, to estimate this one. */
+  lastDurationMs?: number;
+  steps: TopologyStep[];
+}
