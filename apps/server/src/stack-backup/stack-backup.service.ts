@@ -90,7 +90,8 @@ export class StackBackupService {
     return !!policy.setId && (await this.secrets.has(setSealKey(policy.setId)));
   }
 
-  private async storedSeal(policy: { id: string; setId?: string | null }): Promise<string | undefined> {
+  /** The stored sealing passphrase for a policy (its own, else its set's). */
+  async storedSeal(policy: { id: string; setId?: string | null }): Promise<string | undefined> {
     const own = await this.secrets.reveal(this.sealKey(policy.id)).catch(() => null);
     if (own) return own;
     if (!policy.setId) return undefined;
@@ -989,6 +990,7 @@ export class StackBackupService {
       quiesce: string; transfer: string; secretMode: string; includeBinds: string[]; excludes: string[];
       preHooks: unknown; postHooks: unknown; lastRunAt: Date | null; lastStatus: string; lastMessage: string | null; createdAt: Date;
       setId?: string | null; setOverrides?: string[];
+      verifyStatus?: string; verifyMessage?: string | null; verifiedAt?: Date | null; verifyRunId?: string | null;
     },
     hostName?: string,
     targetName?: string,
@@ -1025,6 +1027,10 @@ export class StackBackupService {
       setId: row.setId ?? null,
       setName: setName ?? null,
       setOverrides: cleanOverrides(row.setOverrides),
+      verifyStatus: row.verifyStatus ?? 'never',
+      verifyMessage: row.verifyMessage ?? null,
+      verifiedAt: row.verifiedAt?.toISOString() ?? null,
+      verifyRunId: row.verifyRunId ?? null,
       createdAt: row.createdAt.toISOString(),
     };
   }

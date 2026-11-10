@@ -10,6 +10,9 @@ import { StackRestoreService } from './stack-restore.service';
 import { StackBackupScheduler } from './stack-backup-scheduler.service';
 import { StackBackupController } from './stack-backup.controller';
 import { StackBackupSetService } from './stack-backup-set.service';
+import { StackBackupAssuranceService } from './stack-backup-assurance.service';
+import { StackHostRestoreService } from './stack-host-restore.service';
+import { SettingsModule } from '../settings/settings.module';
 
 /**
  * Stack backup & restore — capture a Compose stack's volumes, config and metadata
@@ -23,10 +26,10 @@ import { StackBackupSetService } from './stack-backup-set.service';
   // duplicate orchestrator — which for a backup scheduler means running twice.
   // AppReplicatorModule supplies PortAllocatorService — restore's port preflight
   // uses the same "what is taken on this host" check as a replicator deploy.
-  imports: [ConnectorsModule, SecretsModule, NotificationsModule, AppReplicatorModule],
+  imports: [ConnectorsModule, SecretsModule, NotificationsModule, AppReplicatorModule, SettingsModule],
   controllers: [StackBackupController],
-  providers: [BackupTargetService, SecretCaptureService, StackBackupService, StackRestoreService, StackBackupScheduler, StackBackupSetService],
+  providers: [BackupTargetService, SecretCaptureService, StackBackupService, StackRestoreService, StackBackupScheduler, StackBackupSetService, StackBackupAssuranceService, StackHostRestoreService],
   // Exported for the shared tool catalog (assistant / MCP).
-  exports: [BackupTargetService, StackBackupService, StackRestoreService, StackBackupSetService],
+  exports: [BackupTargetService, StackBackupService, StackRestoreService, StackBackupSetService, StackBackupAssuranceService, StackHostRestoreService],
 })
 export class StackBackupModule {}
