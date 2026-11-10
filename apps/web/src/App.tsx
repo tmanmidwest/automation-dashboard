@@ -28,6 +28,8 @@ import { Replicator } from '@/pages/Replicator';
 import { StackBackups } from '@/pages/StackBackups';
 import { StackMigrate } from '@/pages/StackMigrate';
 import { Fabric } from '@/pages/Fabric';
+import { Health } from '@/pages/Health';
+import { HealthDetail } from '@/pages/HealthDetail';
 import { FabricSession } from '@/pages/FabricSession';
 import { Computer } from '@/pages/Computer';
 import { About } from '@/pages/About';
@@ -120,6 +122,8 @@ function Router() {
       <Route path="/backups" element={<Protected><RequirePerm perm="backup:read"><StackBackups /></RequirePerm></Protected>} />
       <Route path="/migrate" element={<Protected><RequirePerm perm="backup:read"><StackMigrate /></RequirePerm></Protected>} />
       <Route path="/fabric" element={<Protected><RequirePerm perm="fabric:read"><Fabric /></RequirePerm></Protected>} />
+      <Route path="/health" element={<Protected><RequirePerm perm="fabric:read"><Health /></RequirePerm></Protected>} />
+      <Route path="/health/:agentId" element={<Protected><RequirePerm perm="fabric:read"><HealthDetail /></RequirePerm></Protected>} />
       <Route path="/fabric/session" element={<ProtectedBare><FabricSession /></ProtectedBare>} />
       <Route path="/computer" element={<Protected><RequirePerm perm="assistant:use"><Computer /></RequirePerm></Protected>} />
       <Route path="/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />

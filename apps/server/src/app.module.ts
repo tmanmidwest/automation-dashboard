@@ -31,6 +31,7 @@ import { StackMigrateModule } from './stack-migrate/stack-migrate.module';
 import { SearchModule } from './search/search.module';
 import { AppReplicatorModule } from './app-replicator/app-replicator.module';
 import { FabricModule } from './fabric/fabric.module';
+import { HealthModule } from './health/health.module';
 import { ToolsModule } from './tools/tools.module';
 import { AssistantModule } from './assistant/assistant.module';
 import { TopologyModule } from './topology/topology.module';
@@ -74,6 +75,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     SearchModule,
     AppReplicatorModule,
     FabricModule,
+    HealthModule,
     ToolsModule,
     AssistantModule,
     TopologyModule,

@@ -643,6 +643,47 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: false,
   },
+  // ── Health (agent-reported resource health, docs/health-monitoring.md) ──
+  {
+    key: 'health.disk',
+    label: 'Disk filling up',
+    description: 'A filesystem on a machine with the Cerebro agent crossed the disk warning or critical limit (or ran low on inodes).',
+    category: 'Health',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'health.memory',
+    label: 'Memory pressure',
+    description: 'A machine stayed above the memory limit for the configured number of minutes.',
+    category: 'Health',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'health.cpu',
+    label: 'CPU pinned',
+    description: 'A machine stayed above the CPU limit for the configured number of minutes.',
+    category: 'Health',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'health.recovered',
+    label: 'Health issue cleared',
+    description: 'A disk, memory or CPU issue on a machine went back under its limit.',
+    category: 'Health',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

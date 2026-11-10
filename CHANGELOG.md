@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Health** page (`/health`) — CPU, memory, every filesystem, disk I/O, network and uptime for each
+  machine running the Cerebro agent (Linux, macOS, Windows), worst first, with a 0–100 health score,
+  24 h sparklines and online/offline time. Each machine has a detail page with charts (1 h / 24 h / 7 d /
+  30 d), filesystems, hardware facts and a "Refresh now" button. Reports every 30 s by default; a box
+  that loses its connection keeps up to ~1 h of samples and sends them when it reconnects. History is
+  kept raw for 2 days, as 5-minute averages for 14 days and hourly for ~13 months.
+- **Health alerts** — disk filling up (85% / 95%), memory above 90% / 97% for 15 minutes, CPU above
+  95% for 15 minutes, plus an optional "cleared" alert. Limits and the reporting interval are set from
+  the Health page.
+- **Servers vs workstations** — each machine is a server (alerts when offline) or a workstation
+  (laptops/desktops: going offline is normal and only counted as offline time). Detected automatically
+  (battery, macOS, desktop Windows ⇒ workstation; VMs ⇒ server) and changeable per machine. The Fabric
+  "agent offline / back online" alerts now skip workstations.
+- Cerebro agent **0.6.0** — adds health reporting. Existing agents update themselves on their next connect.
 - **Stack backup sets** — group stack backups under one repository, schedule and set of settings
   (for example everything on a Raspberry Pi). A set can be tied to one host and auto-include every
   stack found there (hourly, or "Scan host"). Each stack can keep any setting for itself; bind paths

@@ -8,6 +8,7 @@ import {
   type FabricControlFrame,
   type FabricDesktopStartedFrame,
   type FabricHelloFrame,
+  type FabricHealthFrame,
 } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../logging/audit.service';
@@ -44,6 +45,16 @@ export class AgentRegistryService {
   private readonly pendingOffline = new Map<string, NodeJS.Timeout>();
   /** In-flight desktop-start requests, keyed by request id, awaiting the agent's reply. */
   private readonly pendingDesktop = new Map<string, { resolve: (f: FabricDesktopStartedFrame) => void; timer: NodeJS.Timeout }>();
+  /**
+   * Health hooks, installed by HealthService (docs/health-monitoring.md). Kept as
+   * hooks rather than a DI dependency so Fabric doesn't depend on the Health module.
+   */
+  private health: {
+    ingest: (agentId: string, frame: FabricHealthFrame) => Promise<void>;
+    intervalMs: () => number;
+    /** True when this agent's offline should NOT alert (a workstation). */
+    quietOffline: (agentId: string) => Promise<boolean>;
+  } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -78,6 +89,23 @@ export class AgentRegistryService {
       if (a.lastSeenAt && a.lastSeenAt > staleBefore) continue; // may be reconnecting; wait
       await this.finalizeOffline(a.id, 'no heartbeat (reconciled)');
     }
+  }
+
+  /** Install the Health module's hooks (called once by HealthService on init). */
+  setHealthHooks(hooks: NonNullable<AgentRegistryService['health']>): void {
+    this.health = hooks;
+  }
+
+  /** Push the health reporting cadence to every connected agent. */
+  broadcastHealthInterval(intervalMs: number): void {
+    for (const id of this.live.keys()) this.send(id, { t: 'health-config', healthIntervalMs: intervalMs });
+  }
+
+  /** Ask one connected agent for a fresh health sample. Returns whether it was online. */
+  requestHealthNow(agentId: string): boolean {
+    if (!this.live.has(agentId)) return false;
+    this.send(agentId, { t: 'health-now' });
+    return true;
   }
 
   /** Verify a presented agent credential; returns the agent id or null. */
@@ -249,6 +277,13 @@ export class AgentRegistryService {
       }
       case 'desktop-stopped':
         break; // fire-and-forget teardown ack
+      case 'health':
+        if (this.health) {
+          await this.health.ingest(agentId, frame).catch((e) =>
+            this.logger.warn(`Health ingest failed for ${agentId}: ${e instanceof Error ? e.message : e}`),
+          );
+        }
+        break;
       case 'stream-opened':
       case 'stream-error':
       case 'close-stream':
@@ -310,8 +345,10 @@ export class AgentRegistryService {
         target: agentId,
         meta: { name: before.name, hostname: frame.hostname, os: frame.os, agentVersion: frame.agentVersion },
       });
-      // Recovery alert only when it was actually offline (not first enrollment).
-      if (before.status === 'offline') {
+      // Recovery alert only when it was actually offline (not first enrollment), and
+      // never for a workstation (its offline wasn't alerted either).
+      const quiet = this.health ? await this.health.quietOffline(agentId).catch(() => false) : false;
+      if (before.status === 'offline' && !quiet) {
         await this.notifications
           .dispatchAlert('fabric.agent_online', {
             title: `Fabric agent back online: ${before.name}`,
@@ -333,6 +370,7 @@ export class AgentRegistryService {
       agentId,
       heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
+      ...(this.health ? { healthIntervalMs: this.health.intervalMs() } : {}),
       ...(updateSigningPublicKey ? { updateSigningPublicKey } : {}),
       ...(allow ? { allow, egressCidrs: before.egressCidrs ?? [] } : {}),
     });
@@ -645,6 +683,9 @@ export class AgentRegistryService {
       target: agentId,
       meta: { name: agent.name, reason },
     });
+    // Laptops/desktops (Health role "workstation") go offline all the time — that's
+    // tracked as offline time on the Health page, not alerted. See docs/health-monitoring.md.
+    if (this.health && (await this.health.quietOffline(agentId).catch(() => false))) return;
     await this.notifications
       .dispatchAlert('fabric.agent_offline', {
         title: `Fabric agent offline: ${agent.name}`,

@@ -9,6 +9,8 @@
  * connection, heartbeat/liveness, and the /fabric inventory. No tunnels yet.
  */
 
+import type { FabricHealthConfigFrame, FabricHealthFrame, FabricHealthNowFrame } from './health';
+
 /** Lifecycle of an agent as tracked on the Agent row. */
 export type FabricAgentStatus = 'pending' | 'online' | 'offline' | 'revoked' | 'deleting';
 
@@ -247,6 +249,8 @@ export interface FabricHelloAckFrame {
   heartbeatMs: number;
   /** Latest agent version the broker serves; an older agent self-updates. */
   latestAgentVersion?: string;
+  /** Health reporting cadence in ms (0 = off). docs/health-monitoring.md */
+  healthIntervalMs?: number;
   /** base64 raw ed25519 public key for agent-update signing. The agent pins this on
    *  first receipt and verifies every self-update binary against it (fail-closed).
    *  Absent when signing isn't configured — the agent then keeps its legacy path. */
@@ -446,7 +450,8 @@ export type FabricAgentToBroker =
   | FabricStreamErrorFrame
   | FabricCloseStreamFrame
   | FabricDesktopStartedFrame
-  | FabricDesktopStoppedFrame;
+  | FabricDesktopStoppedFrame
+  | FabricHealthFrame;
 export type FabricBrokerToAgent =
   | FabricHelloAckFrame
   | FabricPingFrame
@@ -457,7 +462,9 @@ export type FabricBrokerToAgent =
   | FabricHostCertFrame
   | FabricSetAllowFrame
   | FabricDesktopStartFrame
-  | FabricDesktopStopFrame;
+  | FabricDesktopStopFrame
+  | FabricHealthConfigFrame
+  | FabricHealthNowFrame;
 export type FabricControlFrame = FabricAgentToBroker | FabricBrokerToAgent;
 
 /** Bytes of big-endian streamId prefixing every BINARY tunnel-data frame. */
@@ -466,7 +473,7 @@ export const FABRIC_STREAM_HEADER_BYTES = 4;
 /** Latest agent version the broker serves. **Keep in sync with `agentVersion`
  * in agent/main.go** — the broker sends this in hello-ack and an older agent
  * self-updates from `/api/fabric/agent/binary`. */
-export const FABRIC_AGENT_VERSION = '0.5.3';
+export const FABRIC_AGENT_VERSION = '0.6.0';
 
 /** Default cadence/liveness constants, shared so agent and broker agree. */
 export const FABRIC_HEARTBEAT_MS = 15_000;

@@ -37,7 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.5.3"
+const agentVersion = "0.6.0"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
@@ -144,6 +144,9 @@ func agentMain(stop <-chan struct{}) {
 		return
 	}
 	log.Printf("cerebro-agent v%s starting; endpoint=%s", agentVersion, cfg.URL)
+	// Resource health runs independently of the connection so a box that drops
+	// off the network still records what happened and reports it on reconnect.
+	go health.run()
 
 	backoff := time.Second
 	authFails := 0
@@ -274,6 +277,9 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 		"targets":      targets,
 	})
 
+	// Fresh connection: re-send inventory so the broker always has current facts.
+	health.requestInventory()
+
 	// Reader goroutine: routes frames and surfaces the first read error.
 	readErr := make(chan error, 1)
 	go func() {
@@ -296,6 +302,10 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 	probe := time.NewTicker(targetProbeInterval)
 	defer probe.Stop()
 	lastTargets := targetsSig(targets)
+	// Drain queued health samples onto the socket every couple of seconds (and the
+	// backlog right after a reconnect).
+	healthFlush := time.NewTicker(2 * time.Second)
+	defer healthFlush.Stop()
 	for {
 		select {
 		case <-stop:
@@ -308,6 +318,14 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 			return true, err
 		case <-ticker.C:
 			sess.writeJSON(map[string]string{"t": "heartbeat"})
+		case <-healthFlush.C:
+			if samples, inv := health.drain(); len(samples) > 0 || inv != nil {
+				frame := map[string]any{"t": "health", "samples": samples}
+				if inv != nil {
+					frame["inventory"] = inv
+				}
+				sess.writeJSON(frame)
+			}
 		case d := <-sess.hbReset:
 			// Broker asked for a different heartbeat cadence — adopt it live.
 			log.Printf("heartbeat cadence set to %s by broker", d)
@@ -661,6 +679,8 @@ type ctrlFrame struct {
 	EgressCidrs        []string     `json:"egressCidrs"`
 	UninstallSig       string       `json:"uninstallSig"`
 	UninstallIssuedAt  int64        `json:"uninstallIssuedAt"`
+	// Health: reporting cadence in ms (nil = keep current; 0 = disabled).
+	HealthIntervalMs *int64 `json:"healthIntervalMs"`
 	// Remote Desktop (P1 + P3)
 	ID       string `json:"id"`
 	Username string `json:"username"`
@@ -730,6 +750,9 @@ func (s *session) onControl(msg []byte) {
 		if s.cfg.isWaypoint() {
 			s.setAllow(c.Allow, c.EgressCidrs)
 		}
+		if c.HealthIntervalMs != nil {
+			health.setInterval(*c.HealthIntervalMs)
+		}
 		// Adopt the broker's heartbeat cadence (operator-tunable, FABRIC_HEARTBEAT_MS).
 		if c.HeartbeatMs >= 1000 {
 			select {
@@ -771,6 +794,12 @@ func (s *session) onControl(msg []byte) {
 			}
 			s.writeJSON(map[string]any{"t": "desktop-stopped", "id": id, "ok": true})
 		}(c.ID)
+	case "health-config":
+		if c.HealthIntervalMs != nil {
+			health.setInterval(*c.HealthIntervalMs)
+		}
+	case "health-now":
+		health.now()
 	case "ping":
 		// no action
 	}
