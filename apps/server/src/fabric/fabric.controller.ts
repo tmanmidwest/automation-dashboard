@@ -664,8 +664,13 @@ export class FabricController {
   @Post('agents/:id/targets/:targetId/remote-browser-session')
   @SessionOnly()
   @RequirePermissions('fabric:connect')
-  openRemoteBrowser(@Param('id') id: string, @Param('targetId') targetId: string, @CurrentUser() user: SessionUser) {
-    return this.fabric.openRemoteBrowserSession(id, targetId, user);
+  openRemoteBrowser(
+    @Param('id') id: string,
+    @Param('targetId') targetId: string,
+    @Body() body: { geometry?: string } | undefined,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.fabric.openRemoteBrowserSession(id, targetId, user, body?.geometry);
   }
 
   /**

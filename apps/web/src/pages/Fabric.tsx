@@ -169,6 +169,40 @@ function WaitingApproval() {
   );
 }
 
+/**
+ * Web (Remote Browser) screen size. The operator picks one each time they connect;
+ * the last pick is remembered per user (server-side preference, so it follows them
+ * across browsers) and preselected next time. Stored as "fit" or "WxH".
+ */
+const WEB_RES_PREF = 'fabric.web.resolution';
+const WEB_RES_MIN = { w: 640, h: 480 };
+const WEB_RES_MAX = { w: 3840, h: 2160 };
+const WEB_RES_PRESETS: { value: string; label: string }[] = [
+  { value: '1280x720', label: '1280 × 720 (HD)' },
+  { value: '1280x800', label: '1280 × 800 (previous fixed size)' },
+  { value: '1366x768', label: '1366 × 768 (laptop)' },
+  { value: '1440x900', label: '1440 × 900' },
+  { value: '1600x900', label: '1600 × 900' },
+  { value: '1920x1080', label: '1920 × 1080 (Full HD)' },
+  { value: '2560x1440', label: '2560 × 1440 (QHD)' },
+];
+/** Height of the session viewer's header bar, which "fit" leaves room for. */
+const VIEWER_HEADER_PX = 48;
+function clampEven(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, Math.floor(n))) & ~1;
+}
+/** "WxH" matching the space the viewer will have in this browser window, so the
+ *  remote page renders 1:1 with no scaling (the new tab is the same size). */
+function fitGeometry(): string {
+  const w = clampEven(window.innerWidth, WEB_RES_MIN.w, WEB_RES_MAX.w);
+  const h = clampEven(window.innerHeight - VIEWER_HEADER_PX, WEB_RES_MIN.h, WEB_RES_MAX.h);
+  return `${w}x${h}`;
+}
+function parseGeometry(v: string): { w: number; h: number } | null {
+  const m = v.trim().match(/^(\d{3,5})\s*[xX×]\s*(\d{3,5})$/);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+}
+
 /** Whether new sessions open in a new browser tab (default) vs. an in-page overlay. */
 const NEWTAB_PREF = 'fabric.openInNewTab';
 function prefNewTab(): boolean {
@@ -240,6 +274,7 @@ export function Fabric() {
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const [pendingMsg, setPendingMsg] = useState<string | null>(null);
   const [connectFor, setConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
+  const [webConnectFor, setWebConnectFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [filesFor, setFilesFor] = useState<{ agent: FabricAgentDto; target: FabricTargetDto } | null>(null);
   const [routesFor, setRoutesFor] = useState<FabricAgentDto | null>(null);
   const [adhocFor, setAdhocFor] = useState<FabricAgentDto | null>(null);
@@ -318,27 +353,11 @@ export function Fabric() {
     setConnectFor({ agent, target: t });
   };
 
-  // Remote Browser: launch the remote browser (takes a few seconds to spin up), then
-  // open the noVNC viewer on its screen.
-  const openRemoteBrowser = async (agent: FabricAgentDto, t: FabricTargetDto) => {
-    setWebBusy((s) => ({ ...s, [t.id]: true }));
-    const win = prefNewTab() ? window.open('about:blank', '_blank') : null;
-    try {
-      const resp = await api.post<FabricRemoteBrowserTicket | FabricApprovalPending>(`/api/fabric/agents/${agent.id}/targets/${t.id}/remote-browser-session`);
-      const ticket = await awaitSession(resp);
-      launchViewer('vnc', ticket, targetSessionTitle(agent, t), win, {
-        vncCreds: ticket.password ? { password: ticket.password } : undefined,
-        // On a drop, relaunch a fresh Remote Browser container for this route
-        // (auto-reconnect + the manual "Reconnect" button). No saved credential
-        // needed — the server re-derives everything from the route.
-        reconnectCtx: { agentId: agent.id, targetId: t.id, remoteBrowser: true },
-      });
-    } catch (e) {
-      win?.close();
-      setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Browser.');
-    } finally {
-      setWebBusy((s) => ({ ...s, [t.id]: false }));
-    }
+  // Remote Browser: ask for a screen size first (RemoteBrowserConnectDialog), which
+  // launches the remote browser (takes a few seconds to spin up), then we open the
+  // noVNC viewer on its screen.
+  const openRemoteBrowser = (agent: FabricAgentDto, t: FabricTargetDto) => {
+    setWebConnectFor({ agent, target: t });
   };
 
   // One-click Remote Desktop: the agent enables the box's desktop remotely (no CLI on the
@@ -1239,6 +1258,25 @@ export function Fabric() {
               reconnectCtx: t.hasCredential ? { agentId: a.id, targetId: t.id } : undefined,
             });
             setConnectFor(null);
+          }}
+        />
+      )}
+
+      {webConnectFor && (
+        <RemoteBrowserConnectDialog
+          agent={webConnectFor.agent}
+          target={webConnectFor.target}
+          onClose={() => setWebConnectFor(null)}
+          onConnected={(ticket, win, geometry) => {
+            const a = webConnectFor.agent, t = webConnectFor.target;
+            launchViewer('vnc', ticket, targetSessionTitle(a, t), win, {
+              vncCreds: ticket.password ? { password: ticket.password } : undefined,
+              // On a drop, relaunch a fresh Remote Browser container for this route at
+              // the same screen size (auto-reconnect + the manual "Reconnect" button).
+              // No saved credential needed — the server re-derives everything else.
+              reconnectCtx: { agentId: a.id, targetId: t.id, remoteBrowser: true, geometry },
+            });
+            setWebConnectFor(null);
           }}
         />
       )}
@@ -3372,6 +3410,8 @@ export interface ReconnectCtx {
   agentId: string;
   targetId: string;
   remoteBrowser?: boolean;
+  /** Remote Browser screen size ("WxH") the session was opened at, reused on relaunch. */
+  geometry?: string;
 }
 
 export async function reconnectSession(
@@ -3390,9 +3430,10 @@ export async function reconnectSession(
 /** Re-mint a Remote Browser session: spins up a brand-new ephemeral container for
  *  the same web route (the original was torn down on disconnect, so re-attaching
  *  isn't possible — we relaunch). */
-export async function reconnectRemoteBrowser(agentId: string, targetId: string): Promise<FabricSessionTicket> {
+export async function reconnectRemoteBrowser(agentId: string, targetId: string, geometry?: string): Promise<FabricSessionTicket> {
   const resp = await api.post<FabricVncSessionTicket | FabricApprovalPending>(
     `/api/fabric/agents/${agentId}/targets/${targetId}/remote-browser-session`,
+    geometry ? { geometry } : undefined,
   );
   return awaitSession(resp);
 }
@@ -3400,7 +3441,7 @@ export async function reconnectRemoteBrowser(agentId: string, targetId: string):
 /** Build the reconnect closure for a viewer from its saved reconnect ingredients. */
 export function makeReconnect(ctx: ReconnectCtx, kind: 'ssh' | 'rdp' | 'vnc'): () => Promise<FabricSessionTicket> {
   return ctx.remoteBrowser
-    ? () => reconnectRemoteBrowser(ctx.agentId, ctx.targetId)
+    ? () => reconnectRemoteBrowser(ctx.agentId, ctx.targetId, ctx.geometry)
     : () => reconnectSession(ctx.agentId, ctx.targetId, kind);
 }
 
@@ -3958,6 +3999,162 @@ export function VncViewer({
 }
 
 // ── VNC connect dialog (vault-credential picker) ─────────────────────────────
+
+/**
+ * Start a Web (Remote Browser) session: pick the remote screen size for this
+ * session. Preselects the user's last choice (saved as a per-user preference);
+ * first time defaults to "Fit to my window".
+ */
+function RemoteBrowserConnectDialog({
+  agent,
+  target,
+  onClose,
+  onConnected,
+}: {
+  agent: FabricAgentDto;
+  target: FabricTargetDto;
+  onClose: () => void;
+  onConnected: (ticket: FabricRemoteBrowserTicket, win: Window | null, geometry: string) => void;
+}) {
+  // choice: 'fit' | a preset "WxH" | 'custom'
+  const [choice, setChoice] = useState('fit');
+  const [customW, setCustomW] = useState('1920');
+  const [customH, setCustomH] = useState('1080');
+  const [fit, setFit] = useState(fitGeometry);
+  const [newTab, setNewTab] = useState(prefNewTab());
+  const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Keep the "fit" size current if the window is resized while the dialog is open.
+  useEffect(() => {
+    const onResize = () => setFit(fitGeometry());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Preselect the last choice.
+  useEffect(() => {
+    api
+      .get<{ value: unknown }>(`/api/account/preferences/${WEB_RES_PREF}`)
+      .then(({ value }) => {
+        if (typeof value !== 'string' || !value) return;
+        if (value === 'fit' || WEB_RES_PRESETS.some((p) => p.value === value)) {
+          setChoice(value);
+          return;
+        }
+        const g = parseGeometry(value);
+        if (g) {
+          setChoice('custom');
+          setCustomW(String(g.w));
+          setCustomH(String(g.h));
+        }
+      })
+      .catch(() => { /* no saved choice — keep "fit" */ });
+  }, []);
+
+  const customErr = (() => {
+    if (choice !== 'custom') return null;
+    const w = Number(customW), h = Number(customH);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || !customW || !customH) return 'Enter a width and height.';
+    if (w < WEB_RES_MIN.w || h < WEB_RES_MIN.h || w > WEB_RES_MAX.w || h > WEB_RES_MAX.h) {
+      return `Must be between ${WEB_RES_MIN.w} × ${WEB_RES_MIN.h} and ${WEB_RES_MAX.w} × ${WEB_RES_MAX.h}.`;
+    }
+    return null;
+  })();
+
+  const geometry =
+    choice === 'fit'
+      ? fit
+      : choice === 'custom'
+        ? `${clampEven(Number(customW), WEB_RES_MIN.w, WEB_RES_MAX.w)}x${clampEven(Number(customH), WEB_RES_MIN.h, WEB_RES_MAX.h)}`
+        : choice;
+
+  const submit = async () => {
+    if (customErr) return;
+    setErr(null);
+    // Remember the choice for next time ("fit" stays "fit", so it re-measures the window).
+    const remember = choice === 'fit' ? 'fit' : geometry;
+    api.put(`/api/account/preferences/${WEB_RES_PREF}`, { value: remember }).catch(() => {});
+    const win = newTab ? window.open('about:blank', '_blank') : null;
+    setBusy(true);
+    try {
+      const resp = await api.post<FabricRemoteBrowserTicket | FabricApprovalPending>(
+        `/api/fabric/agents/${agent.id}/targets/${target.id}/remote-browser-session`,
+        { geometry },
+      );
+      const ticket = await awaitSession(resp, () => setWaiting(true));
+      onConnected(ticket, win, geometry);
+    } catch (e) {
+      win?.close();
+      setErr(e instanceof ApiError ? e.message : 'Failed to start Remote Browser.');
+      setBusy(false);
+      setWaiting(false);
+    }
+  };
+
+  const [fw, fh] = fit.split('x');
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Open ${target.label?.trim() || 'Web session'}`}
+      description={`Web · ${target.webUrl || ''} via ${agent.name}`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy || !!customErr}>
+            {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Globe className="h-4 w-4 mr-1" />}
+            {busy && !waiting ? 'Starting browser…' : 'Connect'}
+          </Button>
+        </>
+      }
+    >
+      {waiting && <WaitingApproval />}
+      {err && (
+        <div className="mb-4 text-sm rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2">{err}</div>
+      )}
+      <div className="space-y-4">
+        <div>
+          <Label htmlFor="web-res">Screen size</Label>
+          <select id="web-res" className={selectCls} value={choice} onChange={(e) => setChoice(e.target.value)} disabled={busy}>
+            <option value="fit">Fit to my window ({fw} × {fh})</option>
+            {WEB_RES_PRESETS.map((p) => (
+              <option key={p.value} value={p.value}>{p.label}</option>
+            ))}
+            <option value="custom">Custom…</option>
+          </select>
+          <p className="mt-1 text-xs text-muted-foreground">
+            The size of the remote browser's screen for this session. Bigger shows more of the page; if it
+            doesn't match your window the picture is scaled to fit. Your choice is remembered for next time.
+          </p>
+        </div>
+
+        {choice === 'custom' && (
+          <div>
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Label htmlFor="web-res-w">Width</Label>
+                <Input id="web-res-w" inputMode="numeric" value={customW} onChange={(e) => setCustomW(e.target.value.replace(/\D/g, ''))} disabled={busy} />
+              </div>
+              <span className="pb-2 text-muted-foreground">×</span>
+              <div className="flex-1">
+                <Label htmlFor="web-res-h">Height</Label>
+                <Input id="web-res-h" inputMode="numeric" value={customH} onChange={(e) => setCustomH(e.target.value.replace(/\D/g, ''))} disabled={busy} />
+              </div>
+            </div>
+            {customErr && <p className="mt-1 text-xs text-destructive">{customErr}</p>}
+          </div>
+        )}
+
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={newTab} onChange={(e) => setNewTab(e.target.checked)} disabled={busy} />
+          Open in a new browser tab
+        </label>
+      </div>
+    </Dialog>
+  );
+}
 
 function VncConnectDialog({
   agent,

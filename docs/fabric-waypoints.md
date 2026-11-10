@@ -242,6 +242,14 @@ Pieces:
    the browser in the existing full-screen viewer; no new frontend transport.
 4. **Lifecycle/audit** — `FabricSession` row (`targetKind="web"`, resolved host); teardown container
    + SOCKS bridge + tunnel streams together (extend the RDP forward's `onClosed` teardown pattern).
+5. **Per-session screen size** — clicking a Web route opens a small "Open …" dialog that asks for
+   the remote screen size: **Fit to my window** (the browser window's size minus the viewer header,
+   so the page renders 1:1), presets from 1280×720 to 2560×1440, or **Custom** (640×480 – 3840×2160).
+   The pick is sent as `{ geometry: "WxH" }` on `POST …/remote-browser-session`, validated
+   server-side (`normalizeRemoteBrowserGeometry`, rounded to even numbers) and becomes the
+   container's `GEOMETRY`; with none sent, the Remote Browser settings default applies. The last
+   choice is saved per user as the `fabric.web.resolution` preference ("fit" or "WxH") and
+   preselected next time; auto-reconnect relaunches at the same size.
 
 Open decisions for Remote Browser (resolve during Phase 3 planning):
 
