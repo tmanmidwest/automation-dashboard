@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Undo for stack restores** — a restore that overwrites existing volumes or folders now asks you to
   type the stack name, then saves a safety copy of exactly what it will overwrite before writing.
   **Undo** in the Restores list puts it back. Safety copies are kept 30 days.
+- **Restore a whole host** — Stack Backups → "Restore a whole host" restores every backed-up stack from one
+  Docker host onto another (or the same one after a rebuild). It checks every stack against the
+  destination first, restores them one at a time with their folders, starts them, and carries on if one
+  fails. Overwriting existing data needs the host name typed once; each stack can still be undone.
+- **Scheduled test restores** — a daily or weekly rotation brings the latest backup of the stacks tested
+  longest ago up in a throwaway copy, on their own host or a spare one, and records pass/fail per stack.
+  New alert **"Test restore failed"**.
+- **Backup repository data checks** — each repository reads back part of its stored data monthly (or
+  weekly) with `restic check` and alerts (**"Backup repository check failed"**) if anything is damaged.
+  "Check data" runs one now.
 
 ### Fixed
 - **Scheduled stack backups sharing a repository were skipped** — when two stacks were due in the

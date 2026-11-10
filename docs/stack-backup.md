@@ -438,6 +438,84 @@ removed, and the cleanup runs even when the trial itself throws — a failed ver
 second copy of the data lying around. `keep: true` skips it deliberately when you want to poke at
 the result.
 
+## Scheduled test restores (2026-11)
+
+The verify-restore above answers "does this backup work?" once, when someone clicks it. Test restores
+ask it on a schedule, so a backup that quietly stopped being restorable (an image that no longer
+exists, a volume that no longer captures what the app needs, a secret that no longer opens) is found
+before the day it is needed.
+
+**One rotation, not a schedule per stack.** A single setting (`stackBackup.verifySchedule`: daily or
+weekly, a time, *stacks per run*, and a host) drives it. Each run picks the enabled stacks whose last
+backup succeeded, ordered by when they were last tested — never-tested first — and runs the ordinary
+verify on each one's latest successful snapshot, one after another. Every stack comes round in turn
+without twenty sandboxes starting at 04:30 on Sunday.
+
+**Where the trials run.** Either each stack's own host, or one *scratch host* for all of them. A
+scratch host keeps the load off the real hosts and also proves the backup restores somewhere else —
+but it must be able to run the images: a Pi's arm-only images will not start on an x86 scratch host,
+and the plan's CPU checks will say so in the result.
+
+**What is recorded.** `StackBackupPolicy.verifyStatus` (`success` / `error` / `skipped` / `never`),
+`verifyMessage`, `verifiedAt` and `verifyRunId` (the `StackRestoreRun` of the trial). The Test
+restores card on the Stack Backups page lists every stack with its last result, failures first, with
+"Test now" per stack and "Run now" for the rotation. A failure raises **`backup.verify_failed`**
+("Test restore failed"), once per stack per day.
+
+**Skipped, not failed:** a data-only snapshot (no compose file — nothing to bring up), and a stack
+whose secrets are sealed with no stored passphrase (the `.env` cannot be rebuilt unattended; store
+the passphrase on the stack or its set). Neither is a broken backup, so neither alerts.
+
+## Repository integrity checks (2026-11)
+
+A snapshot that was written can still be unreadable later: a provider loses or corrupts a pack, or a
+bucket lifecycle rule deletes something restic still needs. Nothing else in this feature reads the
+stored data back, so each repository gets a scheduled `restic check --read-data-subset=N%`.
+
+- **Per target:** `integrityFrequency` (`monthly` by default, `weekly`, or `off`) and
+  `integrityReadPercent` (5% by default). restic picks a random slice each time, so over a year
+  most of the data is read at least once. Reading downloads that share of the repository — B2's
+  free egress covers a few percent a month comfortably, but it is a cost on paid-egress providers.
+- **When:** a nightly sweep at 04:00 runs whichever checks are due (a target never checked is due on
+  the first night), one repository at a time, through the scheduler's `exclusive()` so it never
+  fights a backup for the repository; if a backup holds it, the check is skipped and retried the next
+  night. "Check data" on the Repositories card runs one now.
+- **Result:** `integrityStatus` / `integrityMessage` / `integrityCheckedAt` on the target, shown on
+  its row with the next due date. A failure raises **`backup.integrity`** (critical) with the tail of
+  restic's output. The usual way back from damage is `restic repair` plus a fresh backup of every
+  stack in that repository.
+
+## Restoring a whole host (2026-11)
+
+For when the host itself is gone — the Pi's SD card died, or the box was rebuilt — rather than one
+stack. Stack Backups → **Restore a whole host**.
+
+1. **Pick the host the stacks were backed up from and the host to restore onto** (the same one after a
+   rebuild, or a replacement). `StackHostRestoreService.plan` takes every stack policy on the source
+   host, finds each one's latest successful backup, and runs the ordinary single-stack restore plan
+   for it against the destination — so every check a single restore makes (running stack, ports, CPU
+   and image support, sealed secrets, existing data) is shown for the whole host at once.
+2. **Each stack gets a status:** *ready*, *read warnings*, *cannot restore* (a blocking conflict — for
+   example the stack is running there, or its secrets are sealed with no stored passphrase), or *no
+   backup*. A CPU difference between the hosts is said once at the top. Restorable stacks are ticked
+   by default.
+3. **Options:** start each stack after restoring it (default on), restore backed-up folders too
+   (default on — on a rebuilt host they are part of what was lost), and pinned or current image
+   versions.
+4. **Overwrites:** if any chosen stack would write into data that already exists on the destination,
+   the destination host's name must be typed once. Each stack's restore is still a guarded restore,
+   so each takes its own safety copy first and can be undone from the Restores list.
+5. **Run:** stacks restore one at a time in the listed order. Just before each one the plan is
+   re-checked; anything that now blocks (someone started the stack by hand) skips that stack rather
+   than overriding it — the only thing the run overrides is "these volumes already exist", which the
+   typed host name confirmed. A failure does not stop the rest. Progress and the per-stack result are
+   in the **Whole-host restores** card (`StackHostRestore` rows; each stack links to its ordinary
+   `StackRestoreRun`). A job that was running when Cerebro restarted is marked interrupted.
+
+Stacks are restored in plan order (restorable first, then alphabetical). There is no dependency
+ordering between stacks; one whose compose needs an external network another stack creates may fail
+to start on the first pass — start it again from Docker Stacks once the rest are up.
+
 ## Scheduling and retention (Phase 4 — built)
 
 Structured dropdowns, never cron. The semantics now live in `common/backup-schedule.ts` — `isDue`,
@@ -630,6 +708,7 @@ the vault came back first. `embed` mode is the escape hatch for when that orderi
 | **P6** | Bind remapping + port preflight on restore, verify-restore sandbox, single-file download, credential-file write-back, MCP/assistant tools | **BUILT** |
 | **Sets** | Backup sets (shared settings, per-member overrides, auto-include), coverage view + `backup.unprotected` alert, ignore, per-repository run queue | **BUILT 2026-11** |
 | **Images + undo** | Image digests + CPU platform in the manifest, pinned-version restore, CPU/registry checks in the plan, typed confirm + safety copy before overwrite, Undo | **BUILT 2026-11** |
+| **Assurance** | Scheduled test-restore rotation (scratch host, `backup.verify_failed`), per-repository `restic check --read-data-subset` (`backup.integrity`), whole-host restore | **BUILT 2026-11** |
 
 ## Known sharp edges
 

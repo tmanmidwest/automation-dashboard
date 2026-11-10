@@ -888,6 +888,14 @@ model StackBackupTarget {
   lastStatus    String    @default("never")
   lastMessage   String?
   lastCheckedAt DateTime?
+  /// Scheduled integrity check (`restic check --read-data-subset`): 'off' | 'weekly' | 'monthly'.
+  integrityFrequency   String    @default("monthly")
+  /// Percent of the stored data read back and verified on each check (1–100).
+  integrityReadPercent Int       @default(5)
+  /// never | running | ok | error.
+  integrityStatus      String    @default("never")
+  integrityMessage     String?
+  integrityCheckedAt   DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -988,6 +996,11 @@ model StackBackupPolicy {
   /// Setting groups this stack keeps for itself instead of taking from its set:
   /// 'target' | 'schedule' | 'quiesce' | 'transfer' | 'secretMode' | 'excludes'.
   setOverrides String[] @default([])
+  /// Last scheduled test restore of this stack: never | success | error | skipped.
+  verifyStatus  String    @default("never")
+  verifyMessage String?
+  verifiedAt    DateTime?
+  verifyRunId   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1062,6 +1075,26 @@ model StackRestoreRun {
 
   @@index([destInstanceId, startedAt])
   @@index([snapshotId])
+}
+
+/// A whole-host restore: every backed-up stack from one Docker host, restored one
+/// after another onto another host (docs/stack-backup.md, "Restoring a whole host").
+/// Each stack is an ordinary StackRestoreRun; this row ties them together.
+model StackHostRestore {
+  id               String    @id @default(cuid())
+  sourceInstanceId String
+  sourceHostName   String
+  destInstanceId   String
+  destHostName     String
+  /// running | success | partial | error.
+  status           String
+  /// HostRestoreItem[] as JSON — one per stack, in run order.
+  items            Json      @default("[]")
+  message          String?
+  startedAt        DateTime  @default(now())
+  finishedAt       DateTime?
+
+  @@index([startedAt])
 }
 
 /// One stack-migration attempt — move a Compose stack from one Docker host to

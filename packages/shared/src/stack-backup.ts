@@ -41,10 +41,23 @@ export interface StackBackupTarget {
   lastStatus: string;
   lastMessage?: string | null;
   lastCheckedAt?: string | null;
+  /** Scheduled integrity check — `restic check` reading back a slice of the stored data. */
+  integrityFrequency: IntegrityFrequency;
+  /** Percent of the data read back and verified per check. */
+  integrityReadPercent: number;
+  /** never | running | ok | error. */
+  integrityStatus: string;
+  integrityMessage?: string | null;
+  integrityCheckedAt?: string | null;
+  /** When the next scheduled integrity check is due (null when off). */
+  integrityNextAt?: string | null;
   /** How many stack policies write here (blocks deletion while non-zero). */
   policyCount: number;
   createdAt: string;
 }
+
+/** How often a repository's stored data is read back and checked. */
+export type IntegrityFrequency = 'off' | 'weekly' | 'monthly';
 
 /** Create/update a target. Credentials are plaintext on the way in only — the
  *  server writes them straight to the vault and never reads them back out here. */
@@ -67,6 +80,8 @@ export interface SaveBackupTargetInput {
   keepWeekly?: number | null;
   keepMonthly?: number | null;
   keepWithinDays?: number | null;
+  integrityFrequency?: IntegrityFrequency;
+  integrityReadPercent?: number;
 }
 
 /** What gets captured for one stack on one Docker host. */
@@ -107,6 +122,11 @@ export interface StackBackupPolicy {
   setName?: string | null;
   /** Setting groups this stack keeps for itself instead of taking from its set. */
   setOverrides: SetOverride[];
+  /** Last scheduled test restore: never | success | error | skipped. */
+  verifyStatus: string;
+  verifyMessage?: string | null;
+  verifiedAt?: string | null;
+  verifyRunId?: string | null;
   createdAt: string;
 }
 
@@ -957,4 +977,109 @@ export interface StackMigrationRun {
   /** Dismissed (soft-archived) terminal runs are hidden from the default list but kept
    *  for history; the list can opt back in with includeArchived. */
   archived?: boolean;
+}
+
+// ── Scheduled test restores (docs/stack-backup.md, "Scheduled test restores") ──
+
+/** One global rotation: each run test-restores the stacks verified longest ago. */
+export interface VerifySchedule {
+  enabled: boolean;
+  frequency: 'daily' | 'weekly';
+  /** 0 = Sunday. Weekly only. */
+  dayOfWeek: number;
+  hour: number;
+  minute: number;
+  /** Docker host to run the trials on. null = each stack's own host. */
+  scratchInstanceId: string | null;
+  /** How many stacks each run tests (1–10). */
+  stacksPerRun: number;
+}
+
+export interface VerifyScheduleStatus extends VerifySchedule {
+  scratchHostName?: string | null;
+  nextRunAt?: string | null;
+  /** True while a scheduled or manual rotation is running. */
+  running: boolean;
+  lastRunAt?: string | null;
+  lastRunMessage?: string | null;
+}
+
+// ── Whole-host restore (docs/stack-backup.md, "Restoring a whole host") ──
+
+export interface HostRestorePlanInput {
+  /** The Docker host the stacks were backed up from. */
+  sourceInstanceId: string;
+  /** Where to restore them. May be the same host (rebuilt) or another one. */
+  destInstanceId: string;
+}
+
+export type HostRestoreStackStatus = 'ready' | 'warning' | 'blocked' | 'no-snapshot';
+
+export interface HostRestoreStackPlan {
+  policyId: string;
+  stackName: string;
+  targetId: string;
+  targetName: string;
+  snapshotId: string | null;
+  snapshotShortId: string | null;
+  snapshotTime: string | null;
+  status: HostRestoreStackStatus;
+  /** Has a compose file — the stack can be brought back up, not just its data. */
+  hasCompose: boolean;
+  volumes: number;
+  binds: number;
+  /** Sealed secrets with no stored passphrase — the .env cannot be rebuilt unattended. */
+  missingPassphrase: boolean;
+  conflicts: string[];
+  warnings: string[];
+  /** Volumes / paths that already exist on the destination and would be written into. */
+  overwrites: string[];
+  /** Images with no build for the destination CPU, or built locally. */
+  imageProblems: string[];
+}
+
+export interface HostRestorePlan {
+  sourceInstanceId: string;
+  sourceHostName: string;
+  destInstanceId: string;
+  destHostName: string;
+  sourcePlatform?: string | null;
+  destPlatform?: string | null;
+  stacks: HostRestoreStackPlan[];
+}
+
+export interface HostRestoreInput extends HostRestorePlanInput {
+  /** The stacks to restore, in order. Each restores its listed snapshot. */
+  stacks: { policyId: string; snapshotId: string }[];
+  /** Bring each stack up after restoring it. */
+  deploy: boolean;
+  /** Restore captured bind paths too (on by default for a whole host). */
+  includeBinds: boolean;
+  imageVersion?: 'pinned' | 'tag';
+  /** Required when any selected stack overwrites existing data: the destination host's name. */
+  confirmHost?: string;
+}
+
+export interface HostRestoreItem {
+  policyId: string;
+  stackName: string;
+  snapshotId: string;
+  /** pending | running | success | error | skipped. */
+  status: string;
+  restoreRunId?: string | null;
+  message?: string | null;
+}
+
+export interface HostRestoreJob {
+  id: string;
+  sourceInstanceId: string;
+  sourceHostName: string;
+  destInstanceId: string;
+  destHostName: string;
+  /** running | success | partial | error. */
+  status: string;
+  items: HostRestoreItem[];
+  message?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
 }
