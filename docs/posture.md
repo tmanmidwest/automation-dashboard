@@ -31,6 +31,14 @@ WAN address) group under *No single machine*.
 "New since your last visit" compares against the visit before this one (`posture-last-visit`
 preference, per user).
 
+**While it checks** (first load after a restart, or *Check now*) the page shows a radar with
+one blip per step and the step list beside it: each connector the map reads (with what it
+returned, e.g. "81 clients · 6 devices", or its error), then Cerebro's own checks (public
+DNS, outside-in, NVD, certificate logs, image scan results, working out findings, recording
+history). The percentage is steps finished, nudged along by how long the last check took.
+It comes from `GET /api/topology/progress` (`connectors:read`), polled twice a second while a
+check runs. The Architecture Map shows the same view while it builds or refreshes.
+
 ## Per-item decisions
 
 Each affected item has a **⋯** menu (`connectors:action`):

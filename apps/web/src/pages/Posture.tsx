@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { CATEGORY_LABEL, ImageScanLine, OutsideInLine, SEV_LABEL, SevPill } from '@/components/topology/Posture';
 import { ExposureSection } from '@/components/topology/Exposure';
+import { CheckingView, useBuildProgress } from '@/components/topology/CheckingView';
 
 /**
  * Posture: every security finding in one place, to narrow down and work through.
@@ -78,6 +79,7 @@ export function PosturePage() {
   const [lastVisit, setLastVisit] = useState<string | null>(null);
   const [saved, setSaved] = useState<SavedView[]>([]);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const progress = useBuildProgress((!graph && !err) || refreshing);
 
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
@@ -183,10 +185,11 @@ export function PosturePage() {
         }
       />
       {err && <div className="mb-3 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
-      {!graph && !err && <div className="py-16 text-center text-sm text-muted-foreground">Checking your connectors…</div>}
+      {!graph && !err && <CheckingView progress={progress} />}
 
       {graph && (
         <div className="flex flex-col gap-4">
+          {refreshing && <CheckingView progress={progress} title="Checking again" compact />}
           <div className="grid gap-2.5 grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
             {tile('high', counts.high, 'High · needs action', 'text-red-500', onlySev === 'high', () => applyView('sev=high'))}
             {tile('medium', counts.medium, 'Medium', 'text-amber-500', onlySev === 'medium', () => applyView('sev=medium'))}
