@@ -1,3 +1,4 @@
+import { osUpdateFindings } from '../os-updates/os-updates.logic';
 import { Injectable } from '@nestjs/common';
 import type { ConnectorResource, PostureFinding, TopoFeed, TopologyGraph, TopologyProgress, TopologyStep } from '@cerebro/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -267,7 +268,7 @@ export class TopologyService {
           graph.findings = buildFindings(input, graph, new Date(), intel, scans, versionCves, ct, hibp);
           // Exposure paths use the findings for their hops; path combos become a finding too.
           graph.exposure = buildExposure(graph, graph.findings, npmNameGuards(input));
-          graph.findings = sortFindings([...graph.findings, ...comboFindings(graph.exposure, new Map(graph.nodes.map((n) => [n.id, n])))]);
+          graph.findings = sortFindings([...graph.findings, ...comboFindings(graph.exposure, new Map(graph.nodes.map((n) => [n.id, n]))), ...(await this.osUpdatePosture())]);
           this.step('findings', 'done', `${graph.findings.length} finding${graph.findings.length === 1 ? '' : 's'}`);
         } catch (err) {
           void this.logging.warn('topology', `Posture findings failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -294,6 +295,19 @@ export class TopologyService {
         this.progress.finishedAt = new Date().toISOString();
       });
     return this.inflight;
+  }
+
+  /** OS updates the Cerebro agent reports (docs/os-updates.md): security updates / restarts left waiting too long. */
+  private async osUpdatePosture() {
+    try {
+      const rows = await this.prisma.agentUpdateStatus.findMany({
+        where: { OR: [{ security: { gt: 0 } }, { rebootRequired: true }], agent: { status: { notIn: ['pending', 'revoked', 'deleting'] } } },
+        select: { agentId: true, security: true, securitySince: true, rebootRequired: true, rebootSince: true, rebootReason: true, agent: { select: { name: true } } },
+      });
+      return osUpdateFindings(rows.map((r) => ({ ...r, name: r.agent.name })));
+    } catch {
+      return []; // table missing before migration
+    }
   }
 
   /** A type the user set in Cerebro: patch the cached map now instead of rebuilding it. */

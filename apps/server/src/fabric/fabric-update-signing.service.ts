@@ -197,4 +197,27 @@ export class FabricUpdateSigningService {
     const signature = edSign(null, msg, createPrivateKey(pem)).toString('base64');
     return { issuedAt, signature };
   }
+
+  /**
+   * Sign an OS update command (install / restart) for one agent. Same shape as the
+   * uninstall token, but the message also binds the run id and the exact options,
+   * so they can't be changed in flight: "updates:<credHash>:<issuedAt>:<runId>:<action>:<scope>:<reboot>".
+   * Vault mode only; null otherwise (unpinned agents accept unsigned commands).
+   */
+  async signUpdatesToken(
+    credHash: string,
+    runId: string,
+    action: 'install' | 'reboot',
+    scope = '',
+    reboot = '',
+  ): Promise<{ issuedAt: number; signature: string } | null> {
+    const meta = await this.settings.get<SigningMeta>(META_KEY);
+    if (!meta?.publicKey || meta.mode !== 'vault') return null;
+    const pem = await this.settings.getSecret(PRIV_SECRET);
+    if (!pem) return null;
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const msg = Buffer.from(`updates:${credHash}:${issuedAt}:${runId}:${action}:${scope}:${reboot}`, 'utf8');
+    const signature = edSign(null, msg, createPrivateKey(pem)).toString('base64');
+    return { issuedAt, signature };
+  }
 }

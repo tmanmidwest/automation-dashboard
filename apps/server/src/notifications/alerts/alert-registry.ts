@@ -704,6 +704,37 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     defaultChannels: ['email'],
     connectorScoped: false,
   },
+  // ── OS updates (agent-reported pending updates, installs, docs/os-updates.md) ──
+  {
+    key: 'updates.run_failed',
+    label: 'Update install failed',
+    description: 'Installing OS updates (or a restart) on a machine failed, was refused, or a scheduled run was missed because the machine was offline.',
+    category: 'Health',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'updates.run_succeeded',
+    label: 'Updates installed',
+    description: 'An OS update run finished without errors.',
+    category: 'Health',
+    defaultSeverity: 'info',
+    defaultEnabled: false,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
+    key: 'updates.security_waiting',
+    label: 'Security updates waiting',
+    description: 'A server has had security updates waiting for longer than a week. Sent once per machine until they are installed.',
+    category: 'Health',
+    defaultSeverity: 'warning',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
 ];
 
 export function getAlertType(key: string): AlertTypeDef | undefined {

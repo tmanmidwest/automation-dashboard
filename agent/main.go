@@ -11,10 +11,10 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/binary"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,7 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.6.0"
+const agentVersion = "0.7.0"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
@@ -68,6 +68,8 @@ type config struct {
 	// Mode is "endpoint" (proxy only to 127.0.0.1) or "waypoint" (a network
 	// gateway whose allow-list is pushed down from Cerebro). See docs/fabric-waypoints.md.
 	Mode string
+	// OSUpdates is CEREBRO_OS_UPDATES: on (default), report (check only) or off.
+	OSUpdates string
 }
 
 func (c config) isWaypoint() bool { return c.Mode == "waypoint" }
@@ -147,6 +149,9 @@ func agentMain(stop <-chan struct{}) {
 	// Resource health runs independently of the connection so a box that drops
 	// off the network still records what happened and reports it on reconnect.
 	go health.run()
+	// OS update checks (and signed install/restart commands); see updates.go.
+	updates = newUpdater(cfg)
+	go updates.run()
 
 	backoff := time.Second
 	authFails := 0
@@ -279,6 +284,7 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 
 	// Fresh connection: re-send inventory so the broker always has current facts.
 	health.requestInventory()
+	updates.onConnect()
 
 	// Reader goroutine: routes frames and surfaces the first read error.
 	readErr := make(chan error, 1)
@@ -326,6 +332,8 @@ func run(cfg config, cred string, stop <-chan struct{}) (bool, error) {
 				}
 				sess.writeJSON(frame)
 			}
+		case f := <-updates.outbox:
+			sess.writeJSON(f)
 		case d := <-sess.hbReset:
 			// Broker asked for a different heartbeat cadence — adopt it live.
 			log.Printf("heartbeat cadence set to %s by broker", d)
@@ -500,10 +508,10 @@ type session struct {
 
 func newSession(conn *websocket.Conn, allow map[string]bool, cfg config, cred string) *session {
 	return &session{
-		conn:    conn,
-		allow:   allow,
-		cfg:     cfg,
-		cred:    cred,
+		conn:        conn,
+		allow:       allow,
+		cfg:         cfg,
+		cred:        cred,
 		out:         make(chan outMsg, 128),
 		quit:        make(chan struct{}),
 		streams:     map[uint32]net.Conn{},
@@ -681,6 +689,12 @@ type ctrlFrame struct {
 	UninstallIssuedAt  int64        `json:"uninstallIssuedAt"`
 	// Health: reporting cadence in ms (nil = keep current; 0 = disabled).
 	HealthIntervalMs *int64 `json:"healthIntervalMs"`
+	// OS updates: a signed install / restart command (see updatesAuthorized).
+	RunID    string `json:"runId"`
+	Scope    string `json:"scope"`
+	Reboot   string `json:"reboot"`
+	IssuedAt int64  `json:"issuedAt"`
+	Sig      string `json:"sig"`
 	// Remote Desktop (P1 + P3)
 	ID       string `json:"id"`
 	Username string `json:"username"`
@@ -741,7 +755,9 @@ func (s *session) onControl(msg []byte) {
 		if c.UpdateSigningKey != "" {
 			pinUpdateKey(s.cfg, c.UpdateSigningKey)
 		}
-		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() {
+		// Never swap the binary in the middle of an OS update run (it would kill the
+		// package manager); the next hello-ack after the run picks the update up.
+		if c.LatestAgentVersion != "" && versionLess(agentVersion, c.LatestAgentVersion) && !autoUpdateDisabled() && !updates.busy() {
 			log.Printf("agent %s available (have %s) — self-updating", c.LatestAgentVersion, agentVersion)
 			go trySelfUpdate(s.cfg)
 		}
@@ -800,6 +816,22 @@ func (s *session) onControl(msg []byte) {
 		}
 	case "health-now":
 		health.now()
+	case "updates-check":
+		updates.requestCheck()
+	case "updates-install":
+		if !updatesAuthorized(s.cfg, s.cred, c.IssuedAt, c.Sig, c.RunID, "install", c.Scope, c.Reboot) {
+			log.Printf("refusing update install %s: not signed by the pinned update key", c.RunID)
+			updates.emit(map[string]any{"t": "updates-result", "result": updatesRun{RunID: c.RunID, Kind: "install", ExitCode: -1, Message: "Refused: the command wasn't signed by the key this agent trusts. Turn on vault signing (Fabric → Update signing) to install updates from Cerebro.", StartedAt: time.Now().UnixMilli(), FinishedAt: time.Now().UnixMilli()}})
+			return
+		}
+		go updates.install(c.RunID, c.Scope, c.Reboot)
+	case "updates-reboot":
+		if !updatesAuthorized(s.cfg, s.cred, c.IssuedAt, c.Sig, c.RunID, "reboot", "", "") {
+			log.Printf("refusing restart %s: not signed by the pinned update key", c.RunID)
+			updates.emit(map[string]any{"t": "updates-result", "result": updatesRun{RunID: c.RunID, Kind: "reboot", ExitCode: -1, Message: "Refused: the command wasn't signed by the key this agent trusts.", StartedAt: time.Now().UnixMilli(), FinishedAt: time.Now().UnixMilli()}})
+			return
+		}
+		go updates.restart(c.RunID)
 	case "ping":
 		// no action
 	}
@@ -1015,10 +1047,11 @@ func loadConfig() config {
 		stateDir = configDir
 	}
 	return config{
-		URL:      strings.TrimRight(get("CEREBRO_URL"), "/"),
-		Enroll:   get("ENROLL"),
-		StateDir: stateDir,
-		Mode:     mode,
+		URL:       strings.TrimRight(get("CEREBRO_URL"), "/"),
+		Enroll:    get("ENROLL"),
+		StateDir:  stateDir,
+		Mode:      mode,
+		OSUpdates: get("CEREBRO_OS_UPDATES"),
 	}
 }
 
@@ -1245,19 +1278,37 @@ func credHash(cred string) string {
 // "uninstall:<credHash>:<issuedAt>", bound to THIS agent's credential (so a token
 // can't be replayed to another agent) and fresh (±1h) — fail-closed otherwise.
 func uninstallAuthorized(cfg config, cred string, issuedAt int64, sigB64 string) bool {
+	return signedCommandOK(cfg, cred, issuedAt, sigB64, "uninstall", "")
+}
+
+// updatesAuthorized checks an OS update install/restart command the same way: an
+// ed25519 signature over "updates:<credHash>:<issuedAt>:<runId>:<action>:<scope>:<reboot>",
+// so the exact options can't be altered in flight and a token can't be replayed
+// to another agent. Legacy (no pinned key) agents accept it unsigned.
+func updatesAuthorized(cfg config, cred string, issuedAt int64, sigB64, runID, action, scope, reboot string) bool {
+	if runID == "" || strings.ContainsAny(runID+scope+reboot, ":") {
+		return false
+	}
+	return signedCommandOK(cfg, cred, issuedAt, sigB64, "updates", fmt.Sprintf(":%s:%s:%s:%s", runID, action, scope, reboot))
+}
+
+// signedCommandOK: with no pinned key it's the legacy path (allowed). Once a key
+// is pinned the command must carry a valid signature over
+// "<prefix>:<credHash>:<issuedAt><suffix>", fresh (±1h) — fail-closed otherwise.
+func signedCommandOK(cfg config, cred string, issuedAt int64, sigB64, prefix, suffix string) bool {
 	pub := loadPinnedUpdateKey(cfg)
 	if pub == nil {
 		return true // no key pinned — legacy behavior
 	}
 	if len(pub) != ed25519.PublicKeySize {
-		log.Print("pinned update key is malformed — refusing uninstall until re-pinned")
+		log.Printf("pinned update key is malformed — refusing %s until re-pinned", prefix)
 		return false
 	}
 	if sigB64 == "" || issuedAt == 0 {
 		return false
 	}
 	if d := time.Now().Unix() - issuedAt; d > 3600 || d < -3600 {
-		log.Printf("uninstall authorization timestamp out of range (%ds) — refusing", d)
+		log.Printf("%s authorization timestamp out of range (%ds) — refusing", prefix, d)
 		return false
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
@@ -1268,7 +1319,7 @@ func uninstallAuthorized(cfg config, cred string, issuedAt int64, sigB64 string)
 	if ch == "" {
 		return false
 	}
-	return ed25519.Verify(pub, []byte(fmt.Sprintf("uninstall:%s:%d", ch, issuedAt)), sig)
+	return ed25519.Verify(pub, []byte(fmt.Sprintf("%s:%s:%d%s", prefix, ch, issuedAt, suffix)), sig)
 }
 
 // verifyUpdateSignature refuses an update binary that isn't validly signed for a

@@ -11,6 +11,7 @@ export * from './replicator';
 export * from './assistant';
 export * from './fabric';
 export * from './health';
+export * from './os-updates';
 export * from './stack-backup';
 export * from './zuma';
 export * from './agent-catalog';

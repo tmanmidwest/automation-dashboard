@@ -30,6 +30,7 @@ import {
   type Assessment,
   type RecentPoint,
 } from './health-assess';
+import { toUpdateStatus, type StoredStatus } from '../os-updates/os-updates.logic';
 
 const SETTINGS_KEY = 'health.settings';
 /** Samples older than this (a very long offline backlog) are dropped on ingest. */
@@ -43,7 +44,7 @@ function hourStart(t: number): Date {
   return new Date(Math.floor(t / 3_600_000) * 3_600_000);
 }
 
-type AgentWithHealth = Prisma.AgentGetPayload<{ include: { health: true } }>;
+type AgentWithHealth = Prisma.AgentGetPayload<{ include: { health: true; updateStatus: true } }>;
 
 /**
  * Health monitoring (docs/health-monitoring.md): ingests the agent's `health`
@@ -235,7 +236,7 @@ export class HealthService implements OnModuleInit {
     const t = this.settingsCache.thresholds;
     const agents: AgentWithHealth[] = await this.prisma.agent.findMany({
       where: { status: { notIn: ['pending', 'revoked', 'deleting'] }, ...(onlyAgentId ? { id: onlyAgentId } : {}) },
-      include: { health: true },
+      include: { health: true, updateStatus: true },
       orderBy: { name: 'asc' },
     });
     if (!agents.length) return [];
@@ -355,6 +356,7 @@ export class HealthService implements OnModuleInit {
           week: availability(7 * 86_400, (weekBy.get(a.id) ?? 0) + (recentOnlineBy.get(a.id) ?? 0), now, a.createdAt),
           month: availability(30 * 86_400, (monthBy.get(a.id) ?? 0) + (recentOnlineBy.get(a.id) ?? 0), now, a.createdAt),
         },
+        updates: toUpdateStatus(a.updateStatus as StoredStatus | null),
       };
     });
   }
