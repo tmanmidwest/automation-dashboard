@@ -48,11 +48,18 @@ export class TopologyController {
     return this.topology.graph(refresh === '1' || refresh === 'true');
   }
 
+  /** What the running map build is doing, step by step (for the "Checking your connectors" view). */
+  @Get('progress')
+  @RequirePermissions('connectors:read')
+  progress() {
+    return this.topology.buildProgress();
+  }
+
   /** Hide a posture finding for a while (it comes back early if it gains new items). */
   @Post('findings/:id/snooze')
   @RequirePermissions('connectors:action')
   async snooze(@Param('id') id: string, @Body() dto: SnoozeDto, @CurrentUser() user: SessionUser) {
-    const f = await this.topology.snooze(id, dto.days);
+    const f = await this.topology.snooze(id, dto.days, user.displayName || user.email);
     if (!f) throw new NotFoundException('That finding is no longer open.');
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.snoozed', target: f.title, meta: { id, days: dto.days } });
     return f;
@@ -110,7 +117,7 @@ export class TopologyController {
   @Delete('findings/:id/snooze')
   @RequirePermissions('connectors:action')
   async unsnooze(@Param('id') id: string, @CurrentUser() user: SessionUser) {
-    if (!(await this.topology.unsnooze(id))) throw new NotFoundException('That finding is not snoozed.');
+    if (!(await this.topology.unsnooze(id, user.displayName || user.email))) throw new NotFoundException('That finding is not snoozed.');
     await this.audit.record({ actorId: user.id, actorEmail: user.email, action: 'posture.unsnoozed', meta: { id } });
     return { ok: true };
   }

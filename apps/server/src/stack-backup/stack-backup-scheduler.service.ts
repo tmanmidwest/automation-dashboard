@@ -94,6 +94,23 @@ export class StackBackupScheduler {
     return true;
   }
 
+  /**
+   * Run `fn` while holding a repository the way a backup does, so a long
+   * repository check never fights a backup for the lock. Returns false without
+   * running when the repository is busy; queued backups resume afterwards.
+   */
+  async exclusive(targetId: string, fn: () => Promise<void>): Promise<boolean> {
+    if (this.busyTargets.has(targetId)) return false;
+    this.busyTargets.add(targetId);
+    try {
+      await fn();
+    } finally {
+      this.busyTargets.delete(targetId);
+      if (this.queues.get(targetId)?.length) void this.drain(targetId);
+    }
+    return true;
+  }
+
   /** How many stacks are waiting (not yet started) per repository — for the UI. */
   queuedPolicyIds(): string[] {
     return [...this.queued];

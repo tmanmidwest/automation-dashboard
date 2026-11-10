@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { SecretsService, type ActorCtx } from '../secrets/secrets.service';
 import { LoggingService } from '../logging/logging.service';
-import type { BackupTargetKind, SaveBackupTargetInput, StackBackupTarget } from '@cerebro/shared';
+import type { BackupTargetKind, IntegrityFrequency, SaveBackupTargetInput, StackBackupTarget } from '@cerebro/shared';
 import { initRepo, probeRepo, type ResticRepoAuth } from './restic-cli';
 
 /**
@@ -242,6 +242,12 @@ export class BackupTargetService {
       keepWeekly: n(input.keepWeekly),
       keepMonthly: n(input.keepMonthly),
       keepWithinDays: n(input.keepWithinDays),
+      ...(input.integrityFrequency !== undefined && {
+        integrityFrequency: ['off', 'weekly', 'monthly'].includes(input.integrityFrequency) ? input.integrityFrequency : 'monthly',
+      }),
+      ...(input.integrityReadPercent !== undefined && {
+        integrityReadPercent: Math.min(100, Math.max(1, Math.round(Number(input.integrityReadPercent) || 5))),
+      }),
     };
   }
 
@@ -250,6 +256,8 @@ export class BackupTargetService {
       id: string; name: string; kind: string; repository: string; helperImage: string; hostCredKey: string | null;
       keepLast: number | null; keepDaily: number | null; keepWeekly: number | null; keepMonthly: number | null;
       keepWithinDays: number | null; lastStatus: string; lastMessage: string | null; lastCheckedAt: Date | null;
+      integrityFrequency: string; integrityReadPercent: number; integrityStatus: string;
+      integrityMessage: string | null; integrityCheckedAt: Date | null;
       createdAt: Date;
     },
     policyCount: number,
@@ -269,8 +277,31 @@ export class BackupTargetService {
       lastStatus: row.lastStatus,
       lastMessage: row.lastMessage,
       lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
+      integrityFrequency: row.integrityFrequency as IntegrityFrequency,
+      integrityReadPercent: row.integrityReadPercent,
+      integrityStatus: row.integrityStatus,
+      integrityMessage: row.integrityMessage,
+      integrityCheckedAt: row.integrityCheckedAt?.toISOString() ?? null,
+      integrityNextAt: integrityDueAt(row)?.toISOString() ?? null,
       policyCount,
       createdAt: row.createdAt.toISOString(),
     };
   }
+}
+
+/** Days between scheduled integrity checks, or 0 when off. */
+export function integrityIntervalDays(frequency: string): number {
+  return frequency === 'weekly' ? 7 : frequency === 'monthly' ? 30 : 0;
+}
+
+/**
+ * When a target's next integrity check is due. A target that has never been
+ * checked is due now — but checks only start at the nightly slot, so "now" means
+ * "tonight".
+ */
+export function integrityDueAt(row: { integrityFrequency: string; integrityCheckedAt: Date | null; createdAt: Date }): Date | null {
+  const days = integrityIntervalDays(row.integrityFrequency);
+  if (!days) return null;
+  if (!row.integrityCheckedAt) return row.createdAt;
+  return new Date(row.integrityCheckedAt.getTime() + days * 86_400_000);
 }

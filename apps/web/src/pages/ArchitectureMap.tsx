@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle, ChevronRight, Crosshair, HelpCircle, Info, RefreshCw, Search, Share2, X,
 } from 'lucide-react';
@@ -15,7 +15,8 @@ import { NodeDetails } from '@/components/topology/NodeDetails';
 import { FocusMap } from '@/components/topology/FocusMap';
 import { BlockButton, BlockedDevicesRow, DeviceType, NewDevicesRow, type BlockedDevice, type DeviceList } from '@/components/topology/NewDevices';
 import { ExposureSection } from '@/components/topology/Exposure';
-import { FindingsSection, PostureRow, postureSummary, SEV_TINT, SevPill } from '@/components/topology/Posture';
+import { CheckingView, useBuildProgress } from '@/components/topology/CheckingView';
+import { FindingsSection, postureSummary, SEV_TINT, SevPill } from '@/components/topology/Posture';
 
 /**
  * Architecture Map: a scrolling overview of tiles (Edge, Networks, Compute, Apps), where a
@@ -74,6 +75,7 @@ function useColumns<T extends HTMLElement>(): [React.RefObject<T>, number] {
 
 export function ArchitectureMap() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const focus = params.get('focus');
   const path = useMemo(() => (params.get('open') ? params.get('open')!.split(SEP) : []), [params]);
   const setPath = useCallback((p: string[]) => setParams((pp) => {
@@ -133,6 +135,7 @@ export function ArchitectureMap() {
   }, [loadDevices]);
   useEffect(() => { load(); const t = setInterval(() => load(), REFRESH_MS); return () => clearInterval(t); }, [load]);
 
+  const progress = useBuildProgress((!graph && !err) || refreshing);
   const model = useMemo(() => (graph ? new TopoModel(graph, showClients) : null), [graph, showClients]);
   const hits = useMemo(() => (graph && q.trim() ? graph.nodes.filter((n) => matches(n, q)).slice(0, 12) : []), [graph, q]);
 
@@ -145,6 +148,15 @@ export function ArchitectureMap() {
     openPath(model.pathTo(id));
     setQ('');
   };
+
+  // ?node=<id> (from the Posture page's "Show on map"): open the rows down to that item.
+  const nodeParam = params.get('node');
+  useEffect(() => {
+    if (!model || !nodeParam) return;
+    setParams((pp) => { pp.delete('node'); return pp; }, { replace: true });
+    goTo(nodeParam);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, nodeParam]);
 
   const badFeeds = graph?.feeds.filter((f) => !f.ok) ?? [];
 
@@ -170,7 +182,8 @@ export function ArchitectureMap() {
           <span>Partial data from {badFeeds.map((f) => f.name).join(', ')}. {badFeeds[0].message}</span>
         </div>
       )}
-      {!graph && !err && <div className="py-16 text-center text-sm text-muted-foreground">Building the map from your connectors…</div>}
+      {!graph && !err && <CheckingView progress={progress} title="Building the map" />}
+      {graph && refreshing && <div className="mb-4"><CheckingView progress={progress} title="Refreshing the map" compact /></div>}
 
       {model && focus && (
         <FocusMap model={model} focusId={focus} onBack={() => setFocus(null)} onFocus={(id) => setFocus(id)} onOpen={(id) => goTo(id)} />
@@ -227,7 +240,7 @@ export function ArchitectureMap() {
                     ...model.attention(),
                     ...(blocked ? [{ id: 'grp:attn:blocked', count: blocked.length, title: 'Blocked devices', sub: blocked.length ? 'Blocked on the UniFi gateway' : 'Nothing blocked', tone: 'plain' as Tone }] : []),
                   ].map((a) => (
-                    <button key={a.id} id={`tile-${a.id}`} onClick={() => setPath(path[0] === a.id ? [] : [a.id])} disabled={!a.count && !('always' in a && a.always)}
+                    <button key={a.id} id={`tile-${a.id}`} onClick={() => (a.id === 'grp:attn:posture' ? navigate('/posture') : setPath(path[0] === a.id ? [] : [a.id]))} disabled={!a.count && !('always' in a && a.always)}
                       className={cn('rounded-lg border bg-card px-4 py-3 flex items-center gap-3 text-left transition-colors enabled:hover:border-primary/70 disabled:opacity-60',
                         path[0] === a.id ? 'border-primary ring-1 ring-primary' : a.count && a.tone === 'down' ? 'border-red-500/50' : a.count && a.tone === 'warn' ? 'border-amber-400/50' : 'border-border')}>
                       <span className={cn('text-[26px] font-bold tabular-nums leading-none',
@@ -242,9 +255,6 @@ export function ArchitectureMap() {
                 {path[0] === 'grp:attn:new' && newDevices && (
                   <NewDevicesRow list={newDevices} onChanged={afterBlock} onClose={() => setPath([])}
                     onShow={(mac) => model.byId.has(`host:${mac}`) && goTo(`host:${mac}`)} />
-                )}
-                {path[0] === 'grp:attn:posture' && graph?.findings && (
-                  <PostureRow findings={graph.findings} outsideIn={graph.outsideIn} imageScan={graph.imageScan} resolver={graph.publicDnsResolver} onShow={goTo} onChanged={() => load()} onClose={() => setPath([])} />
                 )}
                 {path[0] === 'grp:attn:blocked' && blocked && (
                   <BlockedDevicesRow list={blocked} onChanged={afterBlock} onClose={() => setPath([])} />

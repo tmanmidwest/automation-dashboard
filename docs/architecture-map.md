@@ -94,7 +94,7 @@ The type also replaces the maker in a client's tile subtitle, and new-device ale
 
 Security findings worked out from what the connectors already report (no outside
 lookups). The **Posture findings** tile in Needs attention shows how many are open
-("2 high · 3 medium · 4 low") and opens a ranked list with category filters. Each finding
+("2 high · 3 medium · 4 low") and opens the [Posture page](posture.md). Each finding
 says why it matters, how to fix it, and what it affects; affected items link to the map.
 
 | Check | Severity | Source |
@@ -115,7 +115,7 @@ says why it matters, how to fix it, and what it affects; affected items link to 
 Backup checks only run when a Backblaze connector has a dump folder; without one there
 are no backup findings rather than false "never backed up" ones.
 
-**Outside-in checks** (on by default; *Turn off* in the Posture findings row,
+**Outside-in checks** (on by default; *Turn off* on the Posture page,
 `PUT /api/topology/outside-in {enabled}`, `connectors:write`, audited) add what the
 internet can see, from free public sources with no keys:
 
@@ -168,8 +168,8 @@ is down the last good answer is used and the row says so. Shodan refreshes its s
 every few days, so a port you just closed can linger. Image versions come from the tag
 (`postgres:15-alpine` → 15); `latest` and untagged images are skipped.
 
-**Container image CVE scan** (on by default; *Scan now* and *Turn off* in the Posture
-findings row; `POST /api/topology/image-scan` starts a scan (`connectors:action`),
+**Container image CVE scan** (on by default; *Scan now* and *Turn off* on the Posture
+page; `POST /api/topology/image-scan` starts a scan (`connectors:action`),
 `PUT /api/topology/image-scan {enabled}` switches it (`connectors:write`), both audited).
 Once a night at 3 am Cerebro runs [Trivy](https://trivy.dev), bundled in the Cerebro
 image, against every image a running container uses. It scans the exact image by its
@@ -201,11 +201,12 @@ the image builds without Trivy and the row says the scan is unavailable.
 by its worst finding, shows the top finding on the tile, and marks clean ones. An open row
 starts with a **Findings (n)** section.
 
-**Snooze.** Snooze 7 or 30 days (`POST /api/topology/findings/:id/snooze {days}`,
-`DELETE` to undo; `connectors:action`, audited). Snoozes are stored in settings
-(`posture.snoozes`) and a snoozed finding comes back early if it picks up an item it
-didn't have when you snoozed it (say, a new VM without a backup). Snoozed findings sit
-under the **Snoozed** filter.
+**Working through findings** happens on the [Posture page](posture.md): filters, saved
+views, per-item snooze and accepted risk, first-seen / fixed tracking and history. The
+**Posture findings** tile here opens it, and each finding card in an open row links to it.
+The cards still offer *Snooze 7 days* / *30 days* / *Reopen* for every item of the finding
+(`POST /api/topology/findings/:id/snooze {days}`, `DELETE` to reopen; `connectors:action`,
+audited).
 
 Findings are computed in `apps/server/src/topology/posture.ts` each time the map is
 rebuilt and returned as `findings` on `GET /api/topology`.

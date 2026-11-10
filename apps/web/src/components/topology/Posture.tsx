@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { BellOff, Bell, ExternalLink, ChevronDown, ChevronRight, Crosshair, ShieldCheck, X } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { BellOff, Bell, ExternalLink, ChevronDown, ChevronRight, Crosshair } from 'lucide-react';
 import type { ImageScanSummary, OutsideInSummary, PostureCategory, PostureFinding, PostureSeverity } from '@cerebro/shared';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -7,9 +8,9 @@ import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
 
 /**
- * Security posture findings on the Architecture Map: the "Posture findings" tile's
- * list, the badge tiles carry, and the Findings section in an open row.
- * Findings are computed server-side (apps/server/src/topology/posture.ts).
+ * Security posture findings: the badges map tiles carry, the Findings section in an open
+ * map row, and pieces the Posture page (pages/Posture.tsx) reuses. Findings are computed
+ * server-side (apps/server/src/topology/posture.ts).
  */
 
 export const SEV_LABEL: Record<PostureSeverity, string> = { high: 'High', medium: 'Medium', low: 'Low' };
@@ -31,7 +32,6 @@ export const CATEGORY_LABEL: Record<PostureCategory, string> = {
   patching: 'Patching',
   hygiene: 'Hygiene',
 };
-const CATEGORIES = Object.keys(CATEGORY_LABEL) as PostureCategory[];
 
 export function SevPill({ severity, count, className }: { severity: PostureSeverity; count?: number; className?: string }) {
   return (
@@ -88,7 +88,7 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
         <SevPill severity={f.severity} />
         <span className="text-[11px] uppercase tracking-wider text-muted-foreground shrink-0 hidden sm:inline">{CATEGORY_LABEL[f.category]}</span>
         <span className="text-sm font-medium min-w-0 flex-1">{f.title}</span>
-        {f.snoozedUntil && <span className="text-xs text-muted-foreground shrink-0">snoozed to {until(f.snoozedUntil)}</span>}
+        {f.snoozedUntil && <span className="text-xs text-muted-foreground shrink-0">{f.status === 'accepted' ? 'risk accepted' : `snoozed to ${until(f.snoozedUntil)}`}</span>}
         {open ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
       </button>
       {open && (
@@ -112,10 +112,11 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-muted-foreground">From {f.source}</span>
+            <Link to={`/posture?f=${encodeURIComponent(f.id)}`} className="text-xs text-accent hover:underline">Open in Posture</Link>
             {can('connectors:action') && (
               <span className="ml-auto flex flex-wrap gap-2">
                 {f.snoozedUntil ? (
-                  <Button size="sm" variant="outline" disabled={busy} onClick={unsnooze}><Bell className="h-3.5 w-3.5" /> Unsnooze</Button>
+                  <Button size="sm" variant="outline" disabled={busy} onClick={unsnooze}><Bell className="h-3.5 w-3.5" /> Reopen</Button>
                 ) : (
                   <>
                     <Button size="sm" variant="outline" disabled={busy} onClick={() => snooze(7)} title="Hide for a week; it comes back early if something new is added to it"><BellOff className="h-3.5 w-3.5" /> Snooze 7 days</Button>
@@ -132,56 +133,8 @@ export function FindingCard({ f, onShow, onChanged, open: startOpen = false, com
   );
 }
 
-/** The open row for Needs attention → Posture findings. */
-export function PostureRow({ findings, outsideIn, imageScan, resolver, onShow, onChanged, onClose }: {
-  findings: PostureFinding[];
-  outsideIn?: OutsideInSummary;
-  imageScan?: ImageScanSummary;
-  resolver?: string;
-  onShow: (nodeId: string) => void;
-  onChanged: () => void;
-  onClose: () => void;
-}) {
-  const [cat, setCat] = useState<PostureCategory | 'all' | 'snoozed'>('all');
-  const open = findings.filter((f) => !f.snoozedUntil);
-  const snoozed = findings.filter((f) => f.snoozedUntil);
-  const shown = cat === 'snoozed' ? snoozed : cat === 'all' ? open : open.filter((f) => f.category === cat);
-  const tabs: { key: typeof cat; label: string; n: number }[] = [
-    { key: 'all', label: 'All', n: open.length },
-    ...CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c], n: open.filter((f) => f.category === c).length })).filter((t) => t.n),
-    ...(snoozed.length ? [{ key: 'snoozed' as const, label: 'Snoozed', n: snoozed.length }] : []),
-  ];
-
-  return (
-    <div className="rounded-xl border border-primary/50 bg-primary/[0.04] p-4 flex flex-col gap-3.5">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h3 className="text-base font-semibold">Posture findings</h3>
-        <span className="text-sm text-muted-foreground">Worked out from what your connectors report, worst first. Open one for why it matters and how to fix it.</span>
-        <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
-      </div>
-      <OutsideInLine info={outsideIn} resolver={resolver} onChanged={onChanged} />
-      <ImageScanLine info={imageScan} onChanged={onChanged} />
-      <div className="flex flex-wrap gap-1.5" role="tablist">
-        {tabs.map((t) => (
-          <button key={t.key} role="tab" aria-selected={cat === t.key} onClick={() => setCat(t.key)}
-            className={cn('rounded-full border px-3 py-1 text-sm', cat === t.key ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:text-foreground')}>
-            {t.label} <span className="tabular-nums text-muted-foreground">{t.n}</span>
-          </button>
-        ))}
-      </div>
-      {shown.length === 0 ? (
-        <div className="text-sm text-muted-foreground flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-emerald-500" /> Nothing here.</div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {shown.map((f, i) => <FindingCard key={f.id} f={f} onShow={onShow} onChanged={onChanged} open={i === 0 && cat === 'all' && f.severity === 'high'} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** What the outside-in checks saw, with the on/off switch. */
-function OutsideInLine({ info, resolver, onChanged }: { info?: OutsideInSummary; resolver?: string; onChanged: () => void }) {
+export function OutsideInLine({ info, resolver, onChanged }: { info?: OutsideInSummary; resolver?: string; onChanged: () => void }) {
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -249,7 +202,7 @@ function OutsideInLine({ info, resolver, onChanged }: { info?: OutsideInSummary;
 const hostOf = (u: string) => { try { return new URL(u).host; } catch { return u; } };
 
 /** Status of the nightly container image CVE scan, with Scan now and the on/off switch. */
-function ImageScanLine({ info, onChanged }: { info?: ImageScanSummary; onChanged: () => void }) {
+export function ImageScanLine({ info, onChanged }: { info?: ImageScanSummary; onChanged: () => void }) {
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const running = !!info?.running;

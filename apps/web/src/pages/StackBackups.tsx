@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive, CalendarClock, CheckCircle2, Database, Download, Folder, FolderOpen, HardDriveDownload,
-  HardDriveUpload, KeyRound, Layers, Loader2, Lock, Plus, RefreshCw, ScrollText, ShieldCheck, Trash2,
+  HardDriveUpload, KeyRound, Layers, Loader2, Lock, Plus, RefreshCw, ScrollText, Server, ShieldCheck, Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import type {
@@ -12,6 +12,7 @@ import type {
 } from '@cerebro/shared';
 import { CoverageCard, SetDialog, SetsCard } from '@/components/StackBackupSets';
 import { RestoreWizard } from '@/components/RestoreWizard';
+import { HostRestoreDialog, HostRestoreJobsCard, TestRestoresCard } from '@/components/StackBackupAssurance';
 import { StackSecretsDialog } from '@/components/StackSecretsDialog';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
@@ -58,6 +59,10 @@ function fmtWhen(iso?: string | null): string {
   return new Date(iso).toLocaleString();
 }
 
+function fmtDay(iso?: string | null): string {
+  return iso ? new Date(iso).toLocaleDateString() : '—';
+}
+
 function fmtDuration(ms?: number | null): string {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms} ms`;
@@ -97,6 +102,8 @@ export function StackBackups() {
   const [browseFor, setBrowseFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
   const [secretsFor, setSecretsFor] = useState<StackBackupPolicy | null>(null);
   const [verifyFor, setVerifyFor] = useState<{ targetId: string; snapshot: StackSnapshot } | null>(null);
+  const [hostRestoreOpen, setHostRestoreOpen] = useState(false);
+  const [hostJobsKey, setHostJobsKey] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -118,7 +125,8 @@ export function StackBackups() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   // Follow a run in flight without making the user reload.
-  const hasRunning = runs.some((r) => r.status === 'running') || restores.some((r) => r.status === 'running');
+  const hasRunning = runs.some((r) => r.status === 'running') || restores.some((r) => r.status === 'running')
+    || targets.some((t) => t.integrityStatus === 'running');
   useEffect(() => {
     if (!hasRunning) return;
     const t = setInterval(() => { void refresh(); }, 3000);
@@ -160,6 +168,11 @@ export function StackBackups() {
             <Button variant="outline" onClick={() => void refresh()}>
               <RefreshCw className="h-4 w-4 mr-2" /> Refresh
             </Button>
+            {canRestore && (policies?.length ?? 0) > 0 && (
+              <Button variant="outline" onClick={() => setHostRestoreOpen(true)}>
+                <Server className="h-4 w-4 mr-2" /> Restore a whole host
+              </Button>
+            )}
             {canWrite && (
               <Button onClick={() => { setPreselect(''); setPolicyDialog('new'); }} disabled={!targets.length}>
                 <Plus className="h-4 w-4 mr-2" /> Back up a stack
@@ -298,6 +311,16 @@ export function StackBackups() {
         </CardContent>
       </Card>
 
+      {policies && policies.length > 0 && (
+        <TestRestoresCard
+          policies={policies}
+          hosts={hosts}
+          canRestore={canRestore}
+          onChanged={refresh}
+          onError={setErr}
+        />
+      )}
+
       {/* ── Targets ── */}
       <Card className="mb-6">
         <CardHeader>
@@ -321,6 +344,19 @@ export function StackBackups() {
                     {describeRetention(t) ?? t.lastMessage ?? ''}
                   </div>
                 </div>
+                <div className="text-xs text-right w-48" title={t.integrityMessage ?? undefined}>
+                  <div className={`inline-flex items-center gap-1 ${STATUS_COLOR[t.integrityStatus] ?? ''}`}>
+                    {t.integrityStatus === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+                    data check: {t.integrityStatus === 'ok' ? 'passed' : t.integrityStatus === 'error' ? 'FAILED' : t.integrityStatus}
+                  </div>
+                  <div className="text-muted-foreground truncate">
+                    {t.integrityFrequency === 'off'
+                      ? 'scheduled check off'
+                      : t.integrityCheckedAt
+                        ? `checked ${fmtDay(t.integrityCheckedAt)} · next ${fmtDay(t.integrityNextAt)}`
+                        : `${t.integrityFrequency}, first one tonight`}
+                  </div>
+                </div>
                 {canWrite && (
                   <div className="flex items-center gap-2">
                     <Button
@@ -331,6 +367,15 @@ export function StackBackups() {
                     >
                       {busy === `chk:${t.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-2" />}
                       Check
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      title="Read back part of the stored data and verify it"
+                      disabled={busy === `integ:${t.id}` || t.integrityStatus === 'running'}
+                      onClick={() => act(`integ:${t.id}`, () => api.post(`/api/stack-backup/targets/${t.id}/integrity`))}
+                    >
+                      <ShieldCheck className="h-4 w-4 mr-2" /> Check data
                     </Button>
                     <Button
                       size="sm"
@@ -372,6 +417,8 @@ export function StackBackups() {
           onVerify={(targetId, snapshot) => setVerifyFor({ targetId, snapshot })}
         />
       )}
+
+      <HostRestoreJobsCard refreshKey={hostJobsKey} onChanged={refresh} />
 
       {/* ── Restores ── */}
       {restores.length > 0 && (
@@ -517,6 +564,15 @@ export function StackBackups() {
           </pre>
         </Dialog>
       )}
+      {hostRestoreOpen && (
+        <HostRestoreDialog
+          hosts={hosts}
+          policies={policies ?? []}
+          onClose={() => setHostRestoreOpen(false)}
+          onStarted={() => { setHostRestoreOpen(false); setHostJobsKey((k) => k + 1); void refresh(); }}
+        />
+      )}
+
       {restoreFor && (
         <RestoreWizard
           targetId={restoreFor.targetId}
@@ -762,6 +818,8 @@ function TargetDialog({ target, onClose, onSaved }: {
     keepWeekly: target?.keepWeekly ?? null,
     keepMonthly: target?.keepMonthly ?? null,
     keepWithinDays: target?.keepWithinDays ?? null,
+    integrityFrequency: target?.integrityFrequency ?? 'monthly',
+    integrityReadPercent: target?.integrityReadPercent ?? 5,
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -873,6 +931,39 @@ function TargetDialog({ target, onClose, onSaved }: {
                 />
               </div>
             ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-border p-3">
+          <div className="text-sm font-medium">Data check</div>
+          <p className="text-xs text-muted-foreground mt-1 mb-2">
+            Reads back part of the stored data and checks it against its checksums (restic check), so damaged
+            or missing data is found before a restore needs it. Runs overnight; each check reads a different slice.
+            Downloads that share of the repository, which some providers bill for.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="text-xs">How often</Label>
+              <select
+                className={selectCls}
+                value={form.integrityFrequency ?? 'monthly'}
+                onChange={(e) => set('integrityFrequency', e.target.value as SaveBackupTargetInput['integrityFrequency'])}
+              >
+                <option value="monthly">Monthly</option>
+                <option value="weekly">Weekly</option>
+                <option value="off">Off</option>
+              </select>
+            </div>
+            <div>
+              <Label className="text-xs">Data read each time (%)</Label>
+              <Input
+                type="number"
+                min={1}
+                max={100}
+                value={form.integrityReadPercent ?? 5}
+                disabled={form.integrityFrequency === 'off'}
+                onChange={(e) => set('integrityReadPercent', Number(e.target.value) || 5)}
+              />
+            </div>
           </div>
         </div>
         <div>

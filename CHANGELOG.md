@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (battery, macOS, desktop Windows ⇒ workstation; VMs ⇒ server) and changeable per machine. The Fabric
   "agent offline / back online" alerts now skip workstations.
 - Cerebro agent **0.6.0** — adds health reporting. Existing agents update themselves on their next connect.
+- **Live progress while Cerebro checks** — the Posture page and the Architecture Map show a radar
+  with a blip per step and the step list while a check runs: each connector (with what it returned or
+  its error), then the outside-in, CVE, certificate and image-scan steps, with a percentage and how
+  long the last check took. *Check now* shows a compact version above the page.
+- **Posture page** — a sidebar page just for security findings. Summary tiles (open High / Medium /
+  Low, new since your last visit, fixed this week, snoozed or accepted), a filter bar (search,
+  severity, category, host, source, status, group by) kept in the URL, built-in and saved views, and a
+  list with the selected finding beside it. Each affected item is one line with its own **Snooze**,
+  **Accept risk** (with a note) and **Reopen**. Cerebro now remembers when each finding and item was
+  first seen and when it was fixed, and shows a history per finding. *Exposed to the internet* and
+  *Unknown addresses* have their own tabs. The map's Posture findings tile opens the page.
 - **Stack backup sets** — group stack backups under one repository, schedule and set of settings
   (for example everything on a Raspberry Pi). A set can be tied to one host and auto-include every
   stack found there (hourly, or "Scan host"). Each stack can keep any setting for itself; bind paths
@@ -41,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Undo for stack restores** — a restore that overwrites existing volumes or folders now asks you to
   type the stack name, then saves a safety copy of exactly what it will overwrite before writing.
   **Undo** in the Restores list puts it back. Safety copies are kept 30 days.
+- **Restore a whole host** — Stack Backups → "Restore a whole host" restores every backed-up stack from one
+  Docker host onto another (or the same one after a rebuild). It checks every stack against the
+  destination first, restores them one at a time with their folders, starts them, and carries on if one
+  fails. Overwriting existing data needs the host name typed once; each stack can still be undone.
+- **Scheduled test restores** — a daily or weekly rotation brings the latest backup of the stacks tested
+  longest ago up in a throwaway copy, on their own host or a spare one, and records pass/fail per stack.
+  New alert **"Test restore failed"**.
+- **Backup repository data checks** — each repository reads back part of its stored data monthly (or
+  weekly) with `restic check` and alerts (**"Backup repository check failed"**) if anything is damaged.
+  "Check data" runs one now.
 
 ### Fixed
 - **Scheduled stack backups sharing a repository were skipped** — when two stacks were due in the
@@ -180,6 +201,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker compose exec app cerebro-admin local-login allow-all`. See
   `docs/local-login-policy.md`.
 ### Changed
+- **Users, Logs and About moved under Settings** to declutter the sidebar. They now live at
+  `/settings/users`, `/settings/logs` and `/settings/about` (Settings page, "Users & system" group);
+  the old `/users`, `/logs` and `/about` links redirect. Each keeps its own permission, and Settings is
+  now visible to every signed-in user so About is always reachable (the cards shown follow permissions).
 - **Fabric session header names the endpoint** — a session tab now leads with the
   endpoint's label (a Waypoint route's label, or its host when it has none), then the
   address, with the Waypoint shown as a separate "via pi-gateway01" chip instead of

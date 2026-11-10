@@ -49,6 +49,7 @@ import { ZumaSettings } from '@/pages/settings/ZumaSettings';
 
 // The map pulls in React Flow + ELK; load it only when someone opens it.
 const ArchitectureMap = lazy(() => import('@/pages/ArchitectureMap'));
+const Posture = lazy(() => import('@/pages/Posture'));
 
 function FullscreenBrand() {
   return (
@@ -91,6 +92,12 @@ function Gate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Old top-level path → its new home under Settings, keeping any ?query and #hash so bookmarks still land. */
+function MovedTo({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={`${to}${search}${hash}`} replace />;
+}
+
 function Router() {
   const { needsSetup, loading } = useAuth();
   return (
@@ -113,10 +120,10 @@ function Router() {
       <Route path="/monitors/new" element={<Protected><RequirePerm perm="monitors:write"><MonitorForm /></RequirePerm></Protected>} />
       <Route path="/monitors/:id" element={<Protected><RequirePerm perm="monitors:read"><MonitorDetail /></RequirePerm></Protected>} />
       <Route path="/monitors/:id/edit" element={<Protected><RequirePerm perm="monitors:write"><MonitorForm /></RequirePerm></Protected>} />
-      <Route path="/users" element={<Protected><RequirePerm perm="users:read"><Users /></RequirePerm></Protected>} />
       <Route path="/timeline" element={<Protected><RequirePerm perm="logs:read"><Timeline /></RequirePerm></Protected>} />
       <Route path="/automations" element={<Protected><RequirePerm perm="automations:read"><Automations /></RequirePerm></Protected>} />
       <Route path="/map" element={<Protected><RequirePerm perm="connectors:read"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading map…</p>}><ArchitectureMap /></Suspense></RequirePerm></Protected>} />
+      <Route path="/posture" element={<Protected><RequirePerm perm="connectors:read"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading posture…</p>}><Posture /></Suspense></RequirePerm></Protected>} />
       <Route path="/docker-fleet" element={<Protected><RequirePerm perm="connectors:read"><DockerFleet /></RequirePerm></Protected>} />
       <Route path="/replicator" element={<Protected><RequirePerm perm="replicator:read"><Replicator /></RequirePerm></Protected>} />
       <Route path="/backups" element={<Protected><RequirePerm perm="backup:read"><StackBackups /></RequirePerm></Protected>} />
@@ -126,8 +133,10 @@ function Router() {
       <Route path="/health/:agentId" element={<Protected><RequirePerm perm="fabric:read"><HealthDetail /></RequirePerm></Protected>} />
       <Route path="/fabric/session" element={<ProtectedBare><FabricSession /></ProtectedBare>} />
       <Route path="/computer" element={<Protected><RequirePerm perm="assistant:use"><Computer /></RequirePerm></Protected>} />
-      <Route path="/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />
-      <Route path="/settings" element={<Protected><RequirePerm perm="settings:read"><SettingsHome /></RequirePerm></Protected>} />
+      <Route path="/settings" element={<Protected><SettingsHome /></Protected>} />
+      <Route path="/settings/users" element={<Protected><RequirePerm perm="users:read"><Users /></RequirePerm></Protected>} />
+      <Route path="/settings/logs" element={<Protected><RequirePerm perm="logs:read"><Logs /></RequirePerm></Protected>} />
+      <Route path="/settings/about" element={<Protected><About /></Protected>} />
       <Route path="/settings/authentication" element={<Protected><RequirePerm perm="settings:read"><Authentication /></RequirePerm></Protected>} />
       <Route path="/settings/email" element={<Protected><RequirePerm perm="settings:read"><Email /></RequirePerm></Protected>} />
       <Route path="/settings/notifications" element={<Protected><RequirePerm perm="settings:read"><Notifications /></RequirePerm></Protected>} />
@@ -141,7 +150,10 @@ function Router() {
       <Route path="/settings/mcp-servers" element={<Protected><RequirePerm perm="agents:manage"><McpServers /></RequirePerm></Protected>} />
       <Route path="/settings/zuma" element={<Protected><RequirePerm perm="agents:manage"><ZumaSettings /></RequirePerm></Protected>} />
       <Route path="/account" element={<Protected><Account /></Protected>} />
-      <Route path="/about" element={<Protected><About /></Protected>} />
+      {/* Users, Logs and About used to be top-level; old links redirect to their Settings home. */}
+      <Route path="/users" element={<MovedTo to="/settings/users" />} />
+      <Route path="/logs" element={<MovedTo to="/settings/logs" />} />
+      <Route path="/about" element={<MovedTo to="/settings/about" />} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

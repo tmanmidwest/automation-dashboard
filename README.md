@@ -139,7 +139,7 @@ docs/        Feature deep-dives (see the index below)
 | Area | Docs |
 | --- | --- |
 | Connectors | [Proxmox](docs/connectors/proxmox.md) · [Docker](docs/connectors/docker.md) · [AWS](docs/connectors/aws.md) · [UniFi](docs/connectors/unifi.md) · [Cloudflare](docs/connectors/cloudflare.md) · [Home Assistant](docs/connectors/home-assistant.md) · [Jellyfin](docs/connectors/jellyfin.md) · [Nginx Proxy Manager](docs/connectors/nginx-proxy-manager.md) · [Technitium](docs/connectors/technitium.md) · [Azure + Microsoft 365](docs/azure-o365-connectors.md) · [Backblaze](docs/connectors/backblaze-backup.md) · [Pi-hole (planned, not built)](docs/connectors/pihole.md) |
-| Map & posture | [Architecture Map, posture findings, new devices](docs/architecture-map.md) |
+| Map & posture | [Architecture Map, posture findings, new devices](docs/architecture-map.md) · [Posture page](docs/posture.md) |
 | Dashboard & UI | [Telemetry snapshots + connector status](docs/dashboard-telemetry-snapshots.md) · [Command palette](docs/command-palette.md) · [LCARS theme](docs/lcars-ui.md) |
 | Apps & stacks | [Docker Fleet](docs/docker-fleet.md) · [App Replicator](docs/app-replicator.md) · [ECS target](docs/app-replicator-ecs-target.md) · [ECS live test](docs/app-replicator-ecs-live-test.md) · [Stack Backup](docs/stack-backup.md) · [Stack Migrator](docs/stack-migrator.md) |
 | Health | [Machine health (CPU, memory, disks, uptime) from the Cerebro agent](docs/health-monitoring.md) |

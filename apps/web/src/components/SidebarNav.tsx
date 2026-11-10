@@ -3,11 +3,8 @@ import {
   LayoutDashboard,
   Puzzle,
   Activity,
-  Users,
-  ScrollText,
   History,
   Settings,
-  Info,
   LogOut,
   MonitorPlay,
   Video,
@@ -20,6 +17,7 @@ import {
   HardDriveUpload,
   Network,
   HeartPulse,
+  ShieldAlert,
 } from 'lucide-react';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
@@ -39,6 +37,7 @@ const NAV: NavItem[] = [
   { to: '/computer', label: 'Computer', icon: Cpu, perm: 'assistant:use', code: '01-CMP' },
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
   { to: '/map', label: 'Architecture Map', icon: Network, perm: 'connectors:read', code: '02-MAP' },
+  { to: '/posture', label: 'Posture', icon: ShieldAlert, perm: 'connectors:read', code: '02-SEC' },
   { to: '/docker-fleet', label: 'Docker Fleet', icon: Ship, perm: 'connectors:read', code: '02-DKR' },
   { to: '/replicator', label: 'App Replicator', icon: Boxes, perm: 'replicator:read', code: '02-REP' },
   { to: '/backups', label: 'Stack Backups', icon: Archive, perm: 'backup:read', code: '02-BAK' },
@@ -47,12 +46,10 @@ const NAV: NavItem[] = [
   { to: '/fabric', label: 'Fabric', icon: Radio, perm: 'fabric:read', code: '02-FAB' },
   { to: '/viewscreen', label: 'Viewscreen', icon: Video, perm: 'connectors:read', code: '03-CAM' },
   { to: '/monitors', label: 'Monitors', icon: Activity, perm: 'monitors:read', code: '04-256' },
-  { to: '/users', label: 'Users', icon: Users, perm: 'users:read', code: '05-378' },
   { to: '/timeline', label: "Ship's Log", icon: History, perm: 'logs:read', code: '06-LOG' },
   { to: '/automations', label: 'Automations', icon: Zap, perm: 'automations:read', code: '06-AUT' },
-  { to: '/logs', label: 'Logs', icon: ScrollText, perm: 'logs:read', code: '06-512' },
-  { to: '/settings', label: 'Settings', icon: Settings, perm: 'settings:read', code: '07-640' },
-  { to: '/about', label: 'About', icon: Info, code: '08-777' },
+  // Users, Logs and About live under Settings; everyone can open Settings (About needs no permission).
+  { to: '/settings', label: 'Settings', icon: Settings, code: '07-640' },
   { to: '/panel', label: 'Panel', icon: MonitorPlay, code: '09-KSK' },
 ];
 

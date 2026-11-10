@@ -5,10 +5,13 @@ import { BackupTargetService } from './backup-target.service';
 import { StackBackupService } from './stack-backup.service';
 import { StackRestoreService } from './stack-restore.service';
 import { StackBackupSetService } from './stack-backup-set.service';
+import { StackBackupAssuranceService } from './stack-backup-assurance.service';
+import { StackHostRestoreService } from './stack-host-restore.service';
 import type {
   AddSetMembersInput, IgnoreStackInput, SaveBackupSetInput,
   BindSecretInput, ExecuteRestoreInput, RestorePlanInput, RunBackupInput, SaveBackupPolicyInput,
   SaveBackupTargetInput, SessionUser, VerifyRestoreInput,
+  HostRestoreInput, HostRestorePlanInput, VerifySchedule,
 } from '@cerebro/shared';
 
 /**
@@ -23,7 +26,76 @@ export class StackBackupController {
     private readonly backups: StackBackupService,
     private readonly restores: StackRestoreService,
     private readonly sets: StackBackupSetService,
+    private readonly assurance: StackBackupAssuranceService,
+    private readonly hostRestores: StackHostRestoreService,
   ) {}
+
+  // ── Assurance: repository integrity checks + scheduled test restores ──
+
+  /** Read back a slice of the repository's data now (`restic check --read-data-subset`). */
+  @Post('targets/:id/integrity')
+  @RequirePermissions('backup:write')
+  @SessionOnly()
+  checkIntegrity(@Param('id') id: string) {
+    return this.assurance.startIntegrity(id);
+  }
+
+  @Get('verify-schedule')
+  @RequirePermissions('backup:read')
+  verifySchedule() {
+    return this.assurance.verifySchedule();
+  }
+
+  @Put('verify-schedule')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  saveVerifySchedule(@Body() body: Partial<VerifySchedule>) {
+    return this.assurance.saveVerifySchedule(body);
+  }
+
+  /** Run the test-restore rotation now. backup:restore — it brings up real containers. */
+  @Post('verify-schedule/run')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  runVerifySchedule() {
+    return this.assurance.startRotation();
+  }
+
+  /** Test-restore one stack's latest backup now. */
+  @Post('policies/:id/verify')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  verifyPolicy(@Param('id') id: string) {
+    return this.assurance.startPolicyVerify(id);
+  }
+
+  // ── Whole-host restore ──
+
+  @Post('host-restore/plan')
+  @RequirePermissions('backup:read')
+  @SessionOnly()
+  hostRestorePlan(@Body() body: HostRestorePlanInput) {
+    return this.hostRestores.plan(body);
+  }
+
+  @Post('host-restore')
+  @RequirePermissions('backup:restore')
+  @SessionOnly()
+  hostRestore(@Body() body: HostRestoreInput) {
+    return this.hostRestores.start(body);
+  }
+
+  @Get('host-restores')
+  @RequirePermissions('backup:read')
+  hostRestoreList() {
+    return this.hostRestores.list();
+  }
+
+  @Get('host-restores/:id')
+  @RequirePermissions('backup:read')
+  hostRestoreGet(@Param('id') id: string) {
+    return this.hostRestores.get(id);
+  }
 
   // ── Coverage ──
   /** Every compose stack on every Docker host, and how well each one is backed up. */
