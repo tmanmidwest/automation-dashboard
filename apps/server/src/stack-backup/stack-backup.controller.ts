@@ -279,7 +279,8 @@ export class StackBackupController {
   @RequirePermissions('backup:restore')
   @SessionOnly()
   restore(@Body() body: ExecuteRestoreInput) {
-    return this.restores.start(body);
+    // guarded: overwriting existing data needs the name typed back, and a safety copy is taken first.
+    return this.restores.start(body, { guarded: true });
   }
 
   /**

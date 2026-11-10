@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   architecture, and bind paths a stack uses that its backup does not capture. Stacks can be marked as
   not needing a backup. New alert **"New stack with no backup"** fires once for a stack that appears and
   still has no backup an hour later (stacks already there when Cerebro first looks don't alert).
+- **Stack restores bring back the exact image version** — backups now record each image's registry
+  digest and CPU platform, and a full restore runs the backed-up version (`image@sha256:…`) instead of
+  whatever the tag points at today. "Image versions → current tag" keeps the old behaviour.
+- **CPU checks before a restore** — the restore plan shows the source and destination CPU (e.g.
+  `linux/arm64` → `linux/amd64`) and, per image, whether the registry has a build for the destination,
+  whether it was built locally and must be rebuilt, or whether only the tag can be used.
+- **Undo for stack restores** — a restore that overwrites existing volumes or folders now asks you to
+  type the stack name, then saves a safety copy of exactly what it will overwrite before writing.
+  **Undo** in the Restores list puts it back. Safety copies are kept 30 days.
 
 ### Fixed
 - **Scheduled stack backups sharing a repository were skipped** — when two stacks were due in the

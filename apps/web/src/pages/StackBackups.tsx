@@ -132,6 +132,18 @@ export function StackBackups() {
     finally { setBusy(null); }
   }
 
+  /** Open the restore wizard on the safety copy a restore took before overwriting. */
+  async function undoRestore(run: StackRestoreRun) {
+    try {
+      const snaps = await api.get<StackSnapshot[]>(`/api/stack-backup/targets/${run.targetId}/snapshots`);
+      const snap = snaps.find((x) => x.id === run.safetySnapshotId);
+      if (!snap) { setErr('That safety copy is no longer in the repository (retention may have removed it).'); return; }
+      setRestoreFor({ targetId: run.targetId, snapshot: snap });
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not load the safety copy.');
+    }
+  }
+
   function startBackup(policy: StackBackupPolicy) {
     // A stored passphrase covers manual runs too — don't ask for what Cerebro holds.
     if (policy.secretMode === 'embed' && !policy.hasSealPassphrase) { setRunPrompt(policy); return; }
@@ -385,6 +397,17 @@ export function StackBackups() {
                   </div>
                   <div className="text-xs text-muted-foreground hidden sm:block">{r.volumes} vol · {r.binds} bind</div>
                   <div className="text-xs text-muted-foreground hidden sm:block">{r.deployed ? 'deployed' : 'not started'}</div>
+                  {r.safetySnapshotId && canRestore && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      className="text-xs underline text-sky-400 hover:text-sky-300"
+                      title="Restore the safety copy taken just before this restore overwrote the data"
+                      onClick={(e) => { e.stopPropagation(); void undoRestore(r); }}
+                    >
+                      Undo
+                    </span>
+                  )}
                   <div className="text-xs text-right w-40">
                     <div className={`inline-flex items-center gap-1 ${STATUS_COLOR[r.status] ?? ''}`}>
                       {r.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -612,6 +635,11 @@ function SnapshotBrowser({ targets, canRestore, onRestore, onBrowse, onVerify }:
                   <div className="font-medium truncate">
                     {s.stackName ?? 'unknown stack'}
                     <span className="text-muted-foreground font-normal font-mono text-xs"> {s.shortId}</span>
+                    {s.preRestore && (
+                      <span className="ml-2 text-xs font-normal text-sky-400" title="Taken automatically just before a restore overwrote this data — restore it to undo that restore">
+                        safety copy before restore
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {fmtWhen(s.time)}{s.hostLabel ? ` · from ${s.hostLabel}` : s.hostname ? ` · from ${s.hostname}` : ''}

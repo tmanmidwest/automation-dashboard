@@ -190,6 +190,19 @@ export class StackBackupScheduler {
           }
         }
 
+        // Safety copies a restore took of what it overwrote belong to no policy, so
+        // the per-policy pass never touches them. They are undo points, not history:
+        // keep 30 days of them on any repository that has retention at all.
+        try {
+          await runResticLocal(
+            auth,
+            ['forget', '--tag', 'kind:pre-restore', '--group-by', 'host,paths', '--keep-within', '30d'],
+            30 * 60_000,
+          );
+        } catch (err) {
+          void this.logging.warn('stack-backup', `Retention for restore safety copies failed on "${target.name}": ${msg(err)}`);
+        }
+
         await runResticLocal(auth, ['prune'], 4 * 60 * 60 * 1000);
         void this.logging.info(
           'stack-backup',

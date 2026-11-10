@@ -256,12 +256,19 @@ export async function listFiles(
 }
 
 /** Pull `stack:` / `host:` / `policy:` / `run:` back out of a snapshot's tags. */
-export function decodeTags(tags: string[]): { stackName?: string; hostId?: string; policyId?: string; runId?: string } {
+export function decodeTags(tags: string[]): {
+  stackName?: string; hostId?: string; policyId?: string; runId?: string; preRestore: boolean; restoreRunId?: string;
+} {
   const find = (prefix: string) => tags.find((t) => t.startsWith(prefix))?.slice(prefix.length);
   return {
     stackName: find('stack:'),
     hostId: find('host:'),
     policyId: find('policy:'),
     runId: find('run:'),
+    preRestore: tags.includes(PRE_RESTORE_TAG),
+    restoreRunId: find('restore:'),
   };
 }
+
+/** Tag on the safety copy a restore takes of what it is about to overwrite. */
+export const PRE_RESTORE_TAG = 'kind:pre-restore';

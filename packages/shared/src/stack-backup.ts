@@ -362,6 +362,10 @@ export interface StackSnapshot {
   hostLabel?: string;
   policyId?: string;
   runId?: string;
+  /** A safety copy a restore took of what it was about to overwrite (undo point). */
+  preRestore?: boolean;
+  /** For a safety copy: the restore run it was taken for. */
+  restoreRunId?: string;
 }
 
 /** One entry when browsing a snapshot's contents. */
@@ -448,6 +452,31 @@ export interface RestorePortPlan {
   suggested?: number;
 }
 
+/**
+ * How one image would come back on the destination:
+ * - `pinned`       the exact version backed up is available for the destination's CPU
+ * - `tag-only`     the backed-up version has no build for this CPU, but the tag does (newer version)
+ * - `unsupported`  neither the backed-up version nor the tag has a build for this CPU
+ * - `local`        built on the source host, in no registry — it cannot be pulled
+ * - `unknown`      the registry could not be asked (offline, private, or an old snapshot)
+ */
+export type RestoreImageStatus = 'pinned' | 'tag-only' | 'unsupported' | 'local' | 'unknown';
+
+export interface RestoreImagePlan {
+  ref: string;
+  services: string[];
+  /** `sha256:…` the image was pulled as when backed up. */
+  digest?: string | null;
+  /** Platform of the image that was running, e.g. linux/arm64. */
+  backedUpPlatform: string;
+  /** Platforms the backed-up version is published for, when the registry answered. */
+  availablePlatforms?: string[];
+  status: RestoreImageStatus;
+  /** A full restore will pin this image to `digest`. */
+  pinnable: boolean;
+  note?: string;
+}
+
 /** The reviewable plan. Nothing is written until it is executed. */
 export interface RestorePlan {
   snapshot: StackSnapshot;
@@ -466,6 +495,13 @@ export interface RestorePlan {
   secrets: RestoreSecret[];
   /** Host ports the restored stack would publish, checked against the destination. */
   ports: RestorePortPlan[];
+  /** Images the stack runs, and whether each can come back on the destination's CPU. */
+  images: RestoreImagePlan[];
+  /** CPU platform of the host the snapshot came from, and of the destination. */
+  sourcePlatform?: string | null;
+  destPlatform?: string | null;
+  /** Existing volumes/bind paths this restore would overwrite — a safety copy is taken of them first. */
+  overwrites: string[];
   /** Credential files held in this snapshot (sealed), and whether they can be written back. */
   credentialFiles: { path: string; writable: boolean }[];
   /** Where the snapshot's tree is rooted — '/data' for a direct capture, a staging
@@ -494,6 +530,16 @@ export interface ExecuteRestoreInput extends RestorePlanInput {
   deploy?: boolean;
   /** Proceed despite conflicts (existing volumes, a stack already running there). */
   force?: boolean;
+  /**
+   * 'full' only: which image versions the restored stack runs. `pinned` (default)
+   * rewrites each `image:` to the exact version backed up, where that version has a
+   * build for the destination CPU; `tag` keeps the tags, so they pull whatever is current.
+   */
+  imageVersion?: 'pinned' | 'tag';
+  /** Skip the safety copy of existing data before overwriting it. Off by default. */
+  skipSafetyCopy?: boolean;
+  /** Required when the restore overwrites existing data: the destination stack name, typed. */
+  confirmName?: string;
 }
 
 /** One restore attempt. */
@@ -512,6 +558,8 @@ export interface StackRestoreRun {
   volumes: number;
   binds: number;
   deployed: boolean;
+  /** Snapshot of what this restore overwrote, taken just before — restore it to undo. */
+  safetySnapshotId?: string | null;
   durationMs?: number | null;
   /** Only returned by the single-run endpoint. */
   log?: string | null;
