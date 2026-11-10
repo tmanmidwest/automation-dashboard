@@ -9,6 +9,9 @@ import { Label } from '@/components/ui/label';
 
 interface BackupInfo { version: string; migration: string | null; pgTools: boolean; signalDir: string }
 
+// Must match the server check in system-backup.service.ts (createBackup).
+const MIN_PASSPHRASE = 16;
+
 export function BackupRestore() {
   const [info, setInfo] = useState<BackupInfo | null>(null);
 
@@ -29,7 +32,7 @@ export function BackupRestore() {
 
   async function createBackup() {
     setBackupMsg(null);
-    if (pass.length < 8) { setBackupMsg({ ok: false, text: 'Use a passphrase of at least 8 characters.' }); return; }
+    if (pass.length < MIN_PASSPHRASE) { setBackupMsg({ ok: false, text: `Use a passphrase of at least ${MIN_PASSPHRASE} characters (this file contains all your secrets).` }); return; }
     if (pass !== pass2) { setBackupMsg({ ok: false, text: 'The passphrases do not match.' }); return; }
     setCreating(true);
     try {
@@ -96,7 +99,7 @@ export function BackupRestore() {
           <CardContent className="space-y-3">
             <div>
               <Label>Passphrase</Label>
-              <Input type="password" autoComplete="new-password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="At least 8 characters" />
+              <Input type="password" autoComplete="new-password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder={`At least ${MIN_PASSPHRASE} characters`} minLength={MIN_PASSPHRASE} />
             </div>
             <div>
               <Label>Confirm passphrase</Label>
