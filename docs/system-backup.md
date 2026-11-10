@@ -9,9 +9,28 @@ another machine — a true "move it and go." Admin + session-only; never reachab
 | --- | --- | --- |
 | **Database** | `pg_dump` of the whole Postgres DB | Every table: connectors, the encrypted vault, users, monitors, automations, timeline, OAuth, tokens. |
 | **Signal state** | `/data/signal` (signal-cli registration/keys) | So Signal notifications keep working on the new box with no re-linking. |
-| **Manifest** | generated | App version, latest applied migration, timestamp, and the source `APP_ENCRYPTION_KEY` (+ its fingerprint). |
+| **Manifest** | generated | App version, latest applied migration, timestamp, the source `APP_URL`, and the source `APP_ENCRYPTION_KEY` (+ its fingerprint). |
 
 Redis sessions and restic caches are **not** backed up — they're ephemeral (users just log in again).
+
+### Not in the backup: your `.env` and some volumes
+
+The backup is the database + Signal state. It does **not** include:
+
+- **The `.env` / compose environment** — `APP_URL`, `SESSION_SECRET`, `POSTGRES_*`, `APP_ENCRYPTION_KEY`
+  (the key travels in the manifest only so secrets can be re-keyed; the new box keeps its own).
+  Copy `.env` across yourself, or re-create it.
+- **Fabric RDP session recordings** (`/recordings`) and the **Trivy DB cache** (`/data/trivy`, re-downloads).
+
+**Single sign-on after a restore.** SSO (Google, etc.) callback URLs are built from `APP_URL`:
+`<APP_URL>/api/auth/sso/<slug>/callback`. The provider's client ID and secret come back with the
+database, but if the restored machine's `APP_URL` is different (or unset, which defaults to
+`http://localhost:3000`), Google rejects sign-in with **"redirect_uri_mismatch / invalid redirect
+URI"**. Fix: set `APP_URL` to the address you browse to and restart, and if that address is new,
+add its callback URL as an *Authorised redirect URI* on the OAuth client in Google Cloud Console →
+APIs & Services → Credentials. The manifest records the source `APP_URL`, and the restore result
+spells out the callback URL in use whenever SSO is enabled and the URL changed (or the backup
+predates that field). Password sign-in is unaffected, so you can always get in that way first.
 
 ## The encryption-key problem (why the manifest carries the key)
 

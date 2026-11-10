@@ -22,6 +22,8 @@ interface BackupManifest {
   createdAt: string;
   /** Source APP_ENCRYPTION_KEY, so a restore onto a machine with a different key can re-key. */
   encryptionKey: string;
+  /** Source APP_URL (env, not in the DB). SSO callback URLs are built from it. Absent in older backups. */
+  appUrl?: string;
 }
 
 interface Bundle {
@@ -37,6 +39,11 @@ interface Bundle {
  * passphrase-encrypts it, and on restore reloads the DB and re-keys the vault to this
  * machine's own APP_ENCRYPTION_KEY. Admin + session-only. See docs/system-backup.md.
  */
+/** This server's public URL as SSO callbacks see it (mirrors IdentityProviderService.redirectUri). */
+function currentAppUrl(): string {
+  return (process.env.APP_URL ?? 'http://localhost:3000').replace(/\/$/, '');
+}
+
 @Injectable()
 export class SystemBackupService {
   constructor(
@@ -109,6 +116,7 @@ export class SystemBackupService {
         migration: await this.currentMigration(),
         createdAt: new Date().toISOString(),
         encryptionKey: this.crypto.rawKey,
+        appUrl: currentAppUrl(),
       },
       database: stdout,
       signal: await this.readSignal(),
@@ -169,11 +177,35 @@ export class SystemBackupService {
 
     await this.writeSignal(bundle.signal ?? {});
 
-    void this.logging.warn('system-backup', `System restored from backup (${bundle.manifest.createdAt}); re-keyed ${rekeyed} secret(s).`);
+    const ssoNote = await this.ssoUrlNote(bundle.manifest.appUrl);
+    void this.logging.warn('system-backup', `System restored from backup (${bundle.manifest.createdAt}); re-keyed ${rekeyed} secret(s).${ssoNote ? ` ${ssoNote}` : ''}`);
     return {
       ok: true,
-      message: `Restore complete${rekeyed ? ` (re-keyed ${rekeyed} secret${rekeyed === 1 ? '' : 's'} to this machine's key)` : ''}. Restart the Cerebro container to finish, then sign in again.`,
+      message: `Restore complete${rekeyed ? ` (re-keyed ${rekeyed} secret${rekeyed === 1 ? '' : 's'} to this machine's key)` : ''}. Restart the Cerebro container to finish, then sign in again.${ssoNote ? ` ${ssoNote}` : ''}`,
     };
+  }
+
+  /**
+   * SSO (Google, etc.) callback URLs come from the APP_URL env var, which a backup can't carry
+   * into the new machine's environment. If SSO is set up and this server's APP_URL differs from
+   * the source's (or the backup predates recording it), say exactly which callback URL the
+   * identity provider will now be sent, so a "redirect_uri mismatch" isn't a mystery.
+   */
+  private async ssoUrlNote(sourceAppUrl: string | undefined): Promise<string | null> {
+    let slugs: string[] = [];
+    try {
+      slugs = (await this.prisma.identityProvider.findMany({ where: { enabled: true }, select: { slug: true } })).map((p) => p.slug);
+    } catch {
+      return null;
+    }
+    if (!slugs.length) return null;
+    const here = currentAppUrl();
+    if (sourceAppUrl && sourceAppUrl === here) return null;
+    const callbacks = slugs.map((s) => `${here}/api/auth/sso/${s}/callback`).join(', ');
+    const lead = sourceAppUrl
+      ? `Single sign-on: the backup came from ${sourceAppUrl} but this server's APP_URL is ${here}.`
+      : `Single sign-on: this server's APP_URL is ${here}.`;
+    return `${lead} Sign-in will send ${callbacks} as the redirect URI — set APP_URL in .env to the address you browse to, and make sure that callback is an authorised redirect URI in the provider's console (e.g. Google Cloud → Credentials).`;
   }
 
   /** Decrypt every encrypted field with the backup's key and re-encrypt with the current key. */
