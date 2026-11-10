@@ -116,5 +116,5 @@ how much time one sample can claim.
   `health-alerts.service.ts`. Fabric hands health frames over through hooks set on
   `AgentRegistryService`, so Fabric doesn't depend on Health.
 - Tables: `AgentHealth` (latest snapshot + inventory), `AgentHealthSample` (raw) and
-  `AgentHealthRollup` (5m/1h). Migration `0054_agent_health`.
+  `AgentHealthRollup` (5m/1h). Migration `0055_agent_health`.
 - Web: `apps/web/src/pages/Health.tsx`, `HealthDetail.tsx`, `components/health/`.
