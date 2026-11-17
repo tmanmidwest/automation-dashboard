@@ -18,8 +18,10 @@ import type {
   RawConsoleUpstream,
   TestConnectionResult,
 } from '@cerebro/shared';
+import { hostname } from 'os';
 import {
   DockerApi,
+  DockerApiError,
   DockerContainer,
   cleanContainerName,
   healthFromStatus,
@@ -248,7 +250,7 @@ const OPERATIONS: ConnectorOperation[] = [
   {
     id: 'recreate-container',
     label: 'Recreate',
-    description: 'Stop and recreate this container from its current configuration — optionally pulling a newer image first. Best for updating a standalone container (compose stacks: use redeploy).',
+    description: 'Stop and recreate this container from its current configuration — optionally pulling a newer image first. Settings you set (ports, volumes, env, networks, restart policy, compose labels) carry over; the new image supplies its own defaults. If the new container will not stay up, the previous one is restored. Containers sharing its network are re-attached.',
     scope: 'resource',
     kind: CONTAINER_KIND,
     icon: 'refresh-cw',
@@ -370,6 +372,38 @@ const HOST_TTL_MS = 15 * 1000;
 export class DockerConnector implements Connector {
   /** Injected so stack deploys (Phase 5) can store compose + run SSH. */
   constructor(private readonly stacks: DockerStackService) {}
+
+  /** Per-instance queue so container recreates on one Docker host run one at a time. */
+  private readonly recreateQueue = new Map<string, Promise<unknown>>();
+  private serializeRecreate<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.recreateQueue.get(key) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(fn);
+    const tail = run.catch(() => undefined);
+    this.recreateQueue.set(key, tail);
+    void tail.then(() => { if (this.recreateQueue.get(key) === tail) this.recreateQueue.delete(key); });
+    return run;
+  }
+
+  /**
+   * Containers Cerebro must not swap out from under itself: the socket proxy this
+   * connector talks through (stopping the old one cuts the connection before the new
+   * one can be started — the host is left with no proxy) and Cerebro's own container.
+   */
+  private async recreateBlockedReason(api: DockerApi, ctx: ConnectorContext, id: string): Promise<string | null> {
+    const info = await api.inspectContainerFull(id);
+    const name = (info.Name ?? '').replace(/^\//, '');
+    const image = String(info.Config?.Image ?? '');
+    const endpoint = String(ctx.config.endpoint ?? '');
+    const viaTcp = /^(tcp|https?):\/\//i.test(endpoint);
+    if (viaTcp && /socket-?proxy/i.test(`${image} ${name}`)) {
+      return `"${name}" looks like the Docker socket proxy Cerebro uses to reach this host. Updating it from Cerebro would cut Cerebro off halfway through, so update it on the host instead: docker compose pull && docker compose up -d in its folder.`;
+    }
+    const self = hostname();
+    if (self && (info.Id ?? '').startsWith(self)) {
+      return `"${name}" is Cerebro itself. Update it on the host (docker compose pull && docker compose up -d) — it can't replace its own container while running in it.`;
+    }
+    return null;
+  }
 
   /** Image-update cache, keyed by `${ref}@@${localDigest}`. hasUpdate null = unknown/unchecked. */
   private readonly updateCache = new Map<string, { at: number; hasUpdate: boolean | null }>();
@@ -801,10 +835,25 @@ export class DockerConnector implements Connector {
       if (operationId === 'recreate-container') {
         if (!_resourceId) return { ok: false, message: 'Missing container reference.' };
         if (values.confirm !== true) return { ok: false, message: 'Please confirm before recreating.' };
-        onProgress(bool(values.pullLatest) ? 'Pulling the latest image and recreating…' : 'Recreating container…');
-        const res = await api.recreateContainer(_resourceId, { pull: bool(values.pullLatest) });
-        ctx.log('info', `Docker recreated container ${_resourceId}.`);
-        return { ok: true, message: res.message };
+        const pull = bool(values.pullLatest);
+        // One recreate at a time per Docker host: "Update outdated" starts many jobs at once,
+        // and parallel swaps on one host fight over ports, shared networks and the daemon.
+        return await this.serializeRecreate(ctx.instanceId ?? '', async () => {
+          onProgress(pull ? 'Pulling the latest image and recreating…' : 'Recreating container…');
+          try {
+            const blocked = await this.recreateBlockedReason(api, ctx, _resourceId);
+            if (blocked) return { ok: false, message: blocked };
+            const res = await api.recreateContainer(_resourceId, { pull, onProgress });
+            ctx.log('info', `Docker recreated container ${_resourceId}: ${res.message}`);
+            return { ok: true, message: res.message };
+          } catch (err) {
+            // Already replaced — e.g. it shared a network with a container updated just before it.
+            if (err instanceof DockerApiError && err.status === 404) {
+              return { ok: true, message: 'This container was already replaced (it was re-attached when the container it shares a network with was updated), so there was nothing left to do.' };
+            }
+            throw err;
+          }
+        });
       }
 
       if (operationId === 'pull-image') {

@@ -288,10 +288,28 @@ more than `/info` + `/system/df` deliver.
 - **Stack drift check** — `stack-check-drift` operation (managed stacks): compares the compose on the
   host vs. Cerebro's stored copy, and expected services (`compose config --services`) vs. what's
   actually up (`compose ps`), reporting missing / not-running / orphan services. `DockerStackService.checkDrift`.
-- **Container recreate** — `recreate-container` operation: inspects the container, optionally pulls a
-  newer image, renames the old one aside, creates a new one from the same Config/HostConfig (+ networks),
-  swaps them, and removes the old — rolling back on failure. `DockerApi.recreateContainer`. Best for
-  standalone containers; compose-managed ones should use a stack redeploy.
+- **Container recreate / Update** — `recreate-container` operation (Docker Fleet's Update, Update stack and
+  Update outdated buttons): inspects the container, optionally pulls a newer image, renames the old one
+  aside, creates a new one, stops the old one **and waits until it has really stopped** (honoring its own
+  `stop_grace_period`), starts the new one and checks it stays up for ~8 s, then removes the old one.
+  `DockerApi.recreateContainer`.
+  - Only what the operator set is carried over (HostConfig: ports, volumes, restart policy, devices…;
+    networks + aliases; env, labels incl. compose labels). Defaults that came from the **old image**
+    (its Env such as PATH/version vars, Entrypoint/Cmd, WorkingDir, User, healthcheck, labels, exposed
+    ports, volumes) are dropped so the **new image's** defaults apply.
+  - If anything fails after the swap starts — including the new container exiting or restart-looping —
+    the old container is renamed back, started, and checked to be running. The job's message says
+    which happened and includes the new container's last log lines.
+  - Containers that share its network (`network_mode: container:…` / compose `service:…`, e.g. apps
+    behind a VPN container) are recreated against the new container so they don't lose networking.
+  - Recreates on one Docker host run one at a time (a per-connector-instance queue), so "Update
+    outdated" no longer swaps many containers on one host in parallel. The Fleet page waits for each job
+    and shows a result banner listing any failures with their reason.
+  - Refused (with a message saying to update on the host): the Docker socket proxy the connector talks
+    through on a tcp endpoint (swapping it cuts Cerebro off mid-update) and Cerebro's own container.
+  - Compose-managed containers keep their compose labels, so `docker compose` still owns them. The
+    compose-native path (`compose pull` + `up -d <service>`) was deliberately not used here: it has no
+    rollback, and `up -d <service>` leaves `service:`-networked dependents without a network.
 - **Stack & container image-update status** — the same cached registry-digest check that powers the
   overview "Updates" tile now surfaces on stacks and containers (`DockerConnector.updatesByContainerId`):
   the stacks **and** containers lists show an **amber "updates" chip** on any row with an outdated image,

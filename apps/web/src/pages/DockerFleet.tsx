@@ -4,7 +4,7 @@ import {
   Loader2, RefreshCw, Server, ChevronRight, ChevronDown, Play, Square, RotateCw,
   Boxes, Terminal, ScrollText, ArrowUpCircle, Search, X, Rocket, History, GitCompare, Pencil, Hammer,
 } from 'lucide-react';
-import type { DockerFleet, FleetHost, FleetStack, FleetMember, ConnectorManifest, ConnectorOperation } from '@cerebro/shared';
+import type { DockerFleet, FleetHost, FleetStack, FleetMember, ConnectorManifest, ConnectorOperation, ConnectorJobStatus } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -99,6 +99,8 @@ export function DockerFleet() {
 
   const [fleet, setFleet] = useState<DockerFleet | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /** Result of the last Update run — kept until dismissed (the background poll clears `err`). */
+  const [updateReport, setUpdateReport] = useState<{ summary: string; failures: { name: string; message: string }[] } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -199,8 +201,51 @@ export function DockerFleet() {
   };
   const containerAction = (m: FleetMember, actionId: string) =>
     withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/resources/container/${encodeURIComponent(m.id)}/actions/${actionId}`, {}), `${actionId} ${m.name}`);
-  const containerRecreate = (m: FleetMember) =>
-    withBusy([memberKey(m)], () => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } }), `Recreating ${m.name}…`);
+  // Updates run as background jobs (one at a time per host, server-side). Wait for each
+  // to finish and report what actually happened — a failed update says why, and whether
+  // the previous container was restored.
+  const waitForJob = async (instanceId: string, jobId: string): Promise<ConnectorJobStatus | null> => {
+    const until = Date.now() + 60 * 60_000;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const j = await api.get<ConnectorJobStatus>(`/api/connectors/instances/${instanceId}/jobs/${jobId}`);
+        if (j.status !== 'running') return j;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null;
+      }
+    }
+    return null;
+  };
+  const runUpdates = async (items: FleetMember[], label: string) => {
+    if (!items.length) return;
+    const keys = items.map(memberKey);
+    setBusy((b) => new Set([...b, ...keys])); setMsg(null); setErr(null); setUpdateReport(null);
+    try {
+      setMsg(`${label}: updating ${items.length} container${items.length === 1 ? '' : 's'} (one at a time per host)…`);
+      const results = await Promise.all(items.map(async (m) => {
+        try {
+          const { jobId } = await api.post<{ jobId: string }>(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } });
+          const job = await waitForJob(m.instanceId, jobId);
+          setBusy((b) => { const n = new Set(b); n.delete(memberKey(m)); return n; });
+          if (!job) return { m, ok: true, message: 'started (result not available)' };
+          return { m, ok: job.status === 'success', message: job.message ?? '' };
+        } catch (e) {
+          return { m, ok: false, message: e instanceof ApiError ? e.message : 'Could not start the update.' };
+        }
+      }));
+      const failed = results.filter((r) => !r.ok);
+      setMsg(null);
+      setUpdateReport({
+        summary: `${label}: ${results.length - failed.length} of ${results.length} updated${failed.length ? `, ${failed.length} failed` : ''}.`,
+        failures: failed.map((r) => ({ name: r.m.name, message: r.message })),
+      });
+      await load();
+    } finally {
+      setBusy((b) => { const n = new Set(b); keys.forEach((k) => n.delete(k)); return n; });
+    }
+  };
+  const containerRecreate = (m: FleetMember) => runUpdates([m], `Update ${m.name}`);
   // Stack-level lifecycle (start/stop/restart the whole stack) — works on ANY stack, managed or not.
   const stackAction = (s: FleetStack, actionId: string) => {
     if (actionId === 'stop' && !confirm(`Stop all containers in stack "${s.name}"?`)) return;
@@ -215,14 +260,7 @@ export function DockerFleet() {
   const stackUpdate = (s: FleetStack) => {
     if (!s.members.length) return;
     if (!confirm(`Update all ${s.members.length} container${s.members.length === 1 ? '' : 's'} in "${s.name}"?\nPulls the latest image and recreates each.`)) return;
-    const keys = s.members.map((m) => `${m.instanceId}::${m.id}`);
-    return withBusy(keys, async () => {
-      const res = await Promise.allSettled(
-        s.members.map((m) => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } })),
-      );
-      const failed = res.filter((r) => r.status === 'rejected').length;
-      setMsg(`Updating "${s.name}": ${s.members.length - failed} started${failed ? `, ${failed} failed` : ''}.`);
-    });
+    return runUpdates(s.members, `Update "${s.name}"`);
   };
   // One-click force-rebuild (managed stacks): git pull + `build --no-cache --pull` + recreate.
   const stackForceRebuild = (s: FleetStack) => {
@@ -276,6 +314,21 @@ export function DockerFleet() {
 
       {err && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
       {msg && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-primary/30 bg-primary/10 text-foreground">{msg}</div>}
+      {updateReport && (
+        <div className={cn('mb-4 text-sm rounded-md px-3 py-2 border', updateReport.failures.length ? 'border-destructive/40 bg-destructive/10' : 'border-emerald-500/40 bg-emerald-500/10')}>
+          <div className="flex items-start justify-between gap-2">
+            <span className={updateReport.failures.length ? 'text-destructive' : 'text-emerald-400'}>{updateReport.summary}</span>
+            <button type="button" className="text-muted-foreground hover:text-foreground" title="Dismiss" onClick={() => setUpdateReport(null)}><X className="h-4 w-4" /></button>
+          </div>
+          {updateReport.failures.length > 0 && (
+            <ul className="mt-2 space-y-1.5">
+              {updateReport.failures.map((f) => (
+                <li key={f.name}><span className="font-medium">{f.name}</span>: <span className="whitespace-pre-wrap text-muted-foreground">{f.message}</span></li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Summary strip */}
       <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
@@ -327,7 +380,7 @@ export function DockerFleet() {
           <Button variant="outline" size="sm" disabled={!unhealthy.length} onClick={() => bulk(unhealthy, (m) => containerAction(m, 'restart'), 'Restart')}>
             <RotateCw className="h-4 w-4" /> Restart unhealthy ({unhealthy.length})
           </Button>
-          <Button variant="outline" size="sm" disabled={!outdated.length} onClick={() => bulk(outdated, (m) => api.post(`/api/connectors/instances/${m.instanceId}/operations/recreate-container`, { resourceId: m.id, values: { pullLatest: true, confirm: true } }), 'Update')}>
+          <Button variant="outline" size="sm" disabled={!outdated.length} onClick={() => { if (confirm(`Update ${outdated.length} container${outdated.length === 1 ? '' : 's'} across the fleet?`)) void runUpdates(outdated.map((x) => x.m), 'Update outdated'); }}>
             <ArrowUpCircle className="h-4 w-4 text-amber-400" /> Update outdated ({outdated.length})
           </Button>
           {selected.size > 0 && (
