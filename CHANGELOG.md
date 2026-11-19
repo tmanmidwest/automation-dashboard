@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Check data" runs one now.
 
 ### Fixed
+- **Docker Fleet updates leaving containers offline** — Update / Update stack / Update outdated only
+  waited 20 s for the old container to stop. A container slower to stop still held its ports, the new one
+  failed ("port is already allocated"), and the rollback restarted the old one while it was still
+  stopping — so it ended up stopped, and `restart: unless-stopped` never brought it back. Recreate now
+  waits for the container's own stop grace period, checks the new container stays up, and otherwise
+  restores the old one and confirms it's running. It also stops copying the old image's defaults
+  (entrypoint, PATH/version env, workdir…) onto the new image, re-attaches containers that share the
+  updated container's network (VPN setups), runs one update at a time per host, and the Fleet page now
+  reports each update's real result instead of "ok" as soon as the jobs start. Updating the socket proxy or
+  Cerebro itself from Cerebro is refused with a note to do it on the host. Stop/restart actions get
+  a longer timeout for slow-stopping containers.
 - **Scheduled stack backups sharing a repository were skipped** — when two stacks were due in the
   same minute on the same repository, only the first ran and the rest waited until their next slot
   (the next day for a daily backup). They now queue and run one after another.

@@ -37,6 +37,8 @@ export interface DockerAuth {
 // supported version, which every daemon accepts. Our reads use optional fields,
 // so version drift is safe. See docs/connectors/docker.md.
 const TIMEOUT_MS = 20000;
+/** Stop/restart: a container may take its full stop grace period (up to minutes) to exit. */
+const STOP_TIMEOUT_MS = 180_000;
 
 export class DockerApiError extends Error {
   status?: number;
@@ -125,8 +127,11 @@ export interface RawEndpoint {
 }
 /** The complete inspect payload recreate needs (Config/HostConfig kept opaque and passed through). */
 export interface RawInspect {
+  Id?: string;
   Name?: string;
-  State?: { Running?: boolean };
+  /** The image id the container runs. */
+  Image?: string;
+  State?: { Running?: boolean; Restarting?: boolean; Status?: string; ExitCode?: number; Error?: string };
   Config?: Record<string, unknown> & { Image?: string };
   HostConfig?: Record<string, unknown> & { NetworkMode?: string };
   NetworkSettings?: { Networks?: Record<string, RawEndpoint> };
@@ -384,11 +389,13 @@ export class DockerApi {
   startContainer(id: string): Promise<void> {
     return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/start`);
   }
+  // Stop/restart wait for the container's own grace period (compose `stop_grace_period`
+  // can be well over the default request timeout), so they get a longer one.
   stopContainer(id: string): Promise<void> {
-    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/stop`);
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/stop`, undefined, STOP_TIMEOUT_MS);
   }
   restartContainer(id: string): Promise<void> {
-    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/restart`);
+    return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/restart`, undefined, STOP_TIMEOUT_MS);
   }
   pauseContainer(id: string): Promise<void> {
     return this.request<void>('POST', `/containers/${encodeURIComponent(id)}/pause`);
@@ -420,63 +427,230 @@ export class DockerApi {
   }
 
   /**
-   * Recreate a container from its own live config (Portainer-style): inspect →
-   * rename the old one aside → create a new one with the same Config/HostConfig
-   * (+ networks) → swap them running → remove the old. Optionally pulls a newer
-   * image first. Rolls back on any failure. Best for standalone containers;
-   * compose-managed ones are better recreated via a stack redeploy.
+   * Recreate a container from its own live config (Portainer/Watchtower-style),
+   * optionally pulling a newer image first:
+   *
+   *   inspect → (pull) → rename the old one aside → create the new one → stop the
+   *   old one AND WAIT until it has really stopped → start the new one → check it
+   *   stays up → remove the old one → re-attach containers that shared its network.
+   *
+   * Anything failing after the rename rolls back to the old container and checks
+   * it is running again, so a failed update never leaves the app offline.
+   *
+   * Settings the old image supplied (its Env, Cmd/Entrypoint, WorkingDir, labels,
+   * healthcheck…) are NOT copied onto the new container, so the new image's own
+   * defaults apply — only what the operator set is carried over. Copying them
+   * pinned the old image's entrypoint/PATH onto a new version and could keep it
+   * from starting.
    */
-  async recreateContainer(id: string, opts: { pull?: boolean } = {}): Promise<{ id: string; message: string }> {
+  async recreateContainer(
+    id: string,
+    opts: { pull?: boolean; onProgress?: (line: string) => void; networkModeOverride?: string; verifyMs?: number } = {},
+  ): Promise<{ id: string; message: string }> {
+    const say = opts.onProgress ?? (() => { /* silent */ });
     const info = await this.inspectContainerFull(id);
     const name = (info.Name ?? '').replace(/^\//, '');
     const image = info.Config?.Image;
     if (!name || !image) throw new DockerApiError('Could not read the container name/image to recreate.');
+    const oldId = info.Id ?? id;
     const wasRunning = !!info.State?.Running;
+    const stopSecs = stopTimeoutOf(info);
 
-    if (opts.pull) await this.pullImage(image, () => { /* progress is surfaced by the caller */ });
+    // The old image's own config, so its defaults can be left for the new image to supply.
+    // Read it BEFORE pulling: once the tag moves to the new image the old one can become
+    // unreachable by id (containerd image store).
+    const oldImageConfig = info.Image
+      ? await this.inspectImageConfig(info.Image).catch(() => null)
+      : null;
+
+    if (opts.pull) {
+      say(`Pulling ${image}…`);
+      await this.pullImage(image, () => { /* progress is surfaced by the caller */ });
+    }
+
+    // Containers that share this one's network namespace (`network_mode: container:<id>` /
+    // compose `service:<name>`). They lose networking when this one is replaced, so they are
+    // recreated against the new container afterwards.
+    const dependents = await this.networkDependents(oldId, name).catch(() => [] as string[]);
 
     const networks = info.NetworkSettings?.Networks ?? {};
     const netNames = Object.keys(networks);
-    const mode = typeof info.HostConfig?.NetworkMode === 'string' ? info.HostConfig.NetworkMode : '';
+    const hostConfig: Record<string, unknown> = { ...(info.HostConfig ?? {}) };
+    if (opts.networkModeOverride) hostConfig.NetworkMode = opts.networkModeOverride;
+    const mode = typeof hostConfig.NetworkMode === 'string' ? hostConfig.NetworkMode : '';
+    const sharesNetns = mode.startsWith('container:');
     // The primary named network to attach at create; host/none/default/bridge are handled by HostConfig.
     const skipExplicit = new Set(['host', 'none', 'default', 'bridge', '']);
-    const primary = networks[mode] ? mode : netNames.find((n) => !skipExplicit.has(n)) ?? '';
+    const primary = sharesNetns ? '' : networks[mode] ? mode : netNames.find((n) => !skipExplicit.has(n)) ?? '';
 
     const sanitizeEndpoint = (ep: RawEndpoint | undefined): Record<string, unknown> => {
       const out: Record<string, unknown> = {};
-      const aliases = (ep?.Aliases ?? []).filter((a) => a && !id.startsWith(a));
+      const aliases = (ep?.Aliases ?? []).filter((a) => a && !oldId.startsWith(a) && !id.startsWith(a));
       if (aliases.length) out.Aliases = aliases;
       if (ep?.IPAMConfig && (ep.IPAMConfig.IPv4Address || ep.IPAMConfig.IPv6Address)) out.IPAMConfig = ep.IPAMConfig;
       return out;
     };
 
-    const body: Record<string, unknown> = { ...(info.Config ?? {}), HostConfig: info.HostConfig ?? {} };
+    const body: Record<string, unknown> = { ...userConfig(info.Config ?? {}, oldImageConfig, oldId), HostConfig: hostConfig };
+    // A container on another container's network takes that one's hostname; Docker rejects both.
+    if (sharesNetns) { delete body.Hostname; delete body.Domainname; delete body.MacAddress; }
     if (primary && !skipExplicit.has(primary)) {
       body.NetworkingConfig = { EndpointsConfig: { [primary]: sanitizeEndpoint(networks[primary]) } };
     }
 
     const tmpName = `${name}-cerebro-old-${Date.now().toString(36)}`;
-    await this.renameContainer(id, tmpName);
+    await this.renameContainer(oldId, tmpName);
     let newId: string | undefined;
+    let oldStopped = false;
     try {
+      say('Creating the new container…');
       newId = await this.createContainer(name, body);
       // Reconnect any additional named networks the container was on.
-      for (const n of netNames) {
-        if (n === primary || skipExplicit.has(n)) continue;
-        await this.connectNetwork(n, newId, sanitizeEndpoint(networks[n])).catch(() => { /* best-effort */ });
+      if (!sharesNetns) {
+        for (const n of netNames) {
+          if (n === primary || skipExplicit.has(n)) continue;
+          await this.connectNetwork(n, newId, sanitizeEndpoint(networks[n])).catch(() => { /* best-effort */ });
+        }
       }
-      // Free the old container's ports/resources before starting the new one.
-      if (wasRunning) { await this.stopContainer(tmpName).catch(() => { /* may already be stopped */ }); await this.startContainer(newId); }
-      await this.removeContainer(tmpName);
-      return { id: newId, message: `Recreated "${name}"${opts.pull ? ' with the latest image' : ''}.` };
+      if (wasRunning) {
+        // Free the old container's ports/resources before starting the new one — and
+        // wait until it has REALLY stopped (a slow-stopping app can take longer than a
+        // single API call's timeout; starting early fails with "port is already allocated").
+        say(`Stopping the old container (up to ${stopSecs}s)…`);
+        await this.stopAndWait(oldId, stopSecs);
+        oldStopped = true;
+        say('Starting the new container…');
+        await this.startContainer(newId);
+        await this.verifyStaysUp(newId, opts.verifyMs ?? 8000);
+      }
+      await this.removeContainer(oldId);
     } catch (err) {
-      // Roll back: drop the half-built new container and restore the old one.
+      const reason = err instanceof Error ? err.message : 'error';
+      say('Update failed — restoring the previous container…');
+      // Roll back: drop the half-built new container and bring the old one back running.
       if (newId) await this.removeContainer(newId).catch(() => { /* ignore */ });
-      await this.renameContainer(tmpName, name).catch(() => { /* ignore */ });
-      if (wasRunning) await this.startContainer(name).catch(() => { /* ignore */ });
-      throw new DockerApiError(`Recreate failed and was rolled back: ${err instanceof Error ? err.message : 'error'}`);
+      await this.renameContainer(oldId, name).catch(() => { /* ignore */ });
+      let restored = !wasRunning;
+      if (wasRunning) {
+        try {
+          if (oldStopped || (await this.isRunning(oldId)) === false) {
+            await this.waitStopped(oldId, stopSecs + 30).catch(() => { /* try to start regardless */ });
+            await this.startContainer(oldId);
+          } else {
+            // The stop may still be in flight: let it finish, then start it again.
+            await this.waitStopped(oldId, stopSecs + 30).catch(() => { /* still running is fine */ });
+            if ((await this.isRunning(oldId)) === false) await this.startContainer(oldId);
+          }
+          restored = (await this.isRunning(oldId)) === true;
+        } catch { restored = false; }
+      }
+      throw new DockerApiError(
+        `Update of "${name}" failed: ${reason}. ` +
+        (restored
+          ? 'The previous container was restored and is running.'
+          : `Could not restart the previous container — start "${name}" on the host.`),
+      );
+    }
+
+    // Re-attach containers that were sharing the old container's network namespace.
+    const reattached: string[] = [];
+    for (const dep of dependents) {
+      try {
+        say(`Re-attaching ${dep} to the new container's network…`);
+        const r = await this.recreateContainer(dep, { networkModeOverride: `container:${newId}`, onProgress: say, verifyMs: opts.verifyMs });
+        reattached.push(r.message);
+      } catch (err) {
+        reattached.push(err instanceof Error ? err.message : `Could not re-attach ${dep}.`);
+      }
+    }
+
+    const extra = reattached.length ? ` ${reattached.join(' ')}` : '';
+    return { id: newId, message: `Recreated "${name}"${opts.pull ? ' with the latest image' : ''}.${extra}` };
+  }
+
+  /** The old image's Config (for leaving its defaults to the new image). */
+  private async inspectImageConfig(ref: string): Promise<Record<string, unknown> | null> {
+    const img = await this.request<{ Config?: Record<string, unknown> | null }>('GET', `/images/${encodeURIComponent(ref)}/json`);
+    return img?.Config ?? null;
+  }
+
+  /** Names of containers whose network mode is `container:<this one>`. */
+  private async networkDependents(containerId: string, name: string): Promise<string[]> {
+    const all = await this.listContainers(true);
+    const out: string[] = [];
+    for (const c of all) {
+      if (c.Id === containerId) continue;
+      const full = await this.inspectContainerFull(c.Id).catch(() => null);
+      const nm = typeof full?.HostConfig?.NetworkMode === 'string' ? full.HostConfig.NetworkMode : '';
+      if (nm === `container:${containerId}` || nm === `container:${name}`) out.push((c.Names?.[0] ?? '').replace(/^\//, '') || c.Id);
+    }
+    return out;
+  }
+
+  private async isRunning(id: string): Promise<boolean | null> {
+    try {
+      const i = await this.inspectContainerFull(id);
+      return !!i.State?.Running;
+    } catch {
+      return null;
     }
   }
+
+  /** Stop a container, honoring its own stop timeout, and wait until it is really stopped. */
+  async stopAndWait(id: string, stopSecs: number): Promise<void> {
+    await this.request<void>('POST', `/containers/${encodeURIComponent(id)}/stop?t=${stopSecs}`, undefined, (stopSecs + 30) * 1000)
+      .catch((err) => {
+        // 304 = already stopped. A timeout here is not final — the stop carries on in the daemon.
+        if (err instanceof DockerApiError && err.status === 304) return;
+        if (err instanceof DockerApiError && /timed out/i.test(err.message)) return;
+        throw err;
+      });
+    await this.waitStopped(id, stopSecs + 30);
+  }
+
+  private async waitStopped(id: string, maxSecs: number): Promise<void> {
+    const until = Date.now() + maxSecs * 1000;
+    for (;;) {
+      if ((await this.isRunning(id)) !== true) return;
+      if (Date.now() > until) throw new DockerApiError(`the old container did not stop within ${maxSecs}s`);
+      await sleep(500);
+    }
+  }
+
+  /** After start: fail if the new container exits or starts restart-looping within `ms`. */
+  private async verifyStaysUp(id: string, ms: number): Promise<void> {
+    const until = Date.now() + ms;
+    for (;;) {
+      const i = await this.inspectContainerFull(id);
+      const st = i.State ?? {};
+      if (st.Restarting || (!st.Running && st.Status !== 'created')) {
+        const logs = await this.containerLogTail(id).catch(() => '');
+        throw new DockerApiError(
+          `the new container ${st.Restarting ? 'kept restarting' : `exited (code ${st.ExitCode ?? '?'})`}` +
+          `${st.Error ? ` — ${st.Error}` : ''}${logs ? `. Last log lines:\n${logs}` : ''}`,
+        );
+      }
+      if (Date.now() > until) return;
+      await sleep(1000);
+    }
+  }
+
+  /** Last few log lines of a (non-TTY or TTY) container, as plain text. */
+  private async containerLogTail(id: string, lines = 15): Promise<string> {
+    const { mod, options } = this.requestOptions('GET', `/containers/${encodeURIComponent(id)}/logs?stdout=1&stderr=1&tail=${lines}`, {}, TIMEOUT_MS);
+    const raw = await new Promise<Buffer>((resolve, reject) => {
+      const req = mod.request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      req.on('timeout', () => req.destroy(new DockerApiError('logs timed out')));
+      req.on('error', reject);
+      req.end();
+    });
+    return demuxDockerLog(raw).trim().split('\n').slice(-lines).join('\n').slice(-2000);
+  }
+
   /** Remove an image (force untags even if referenced by stopped containers). */
   removeImage(id: string): Promise<void> {
     return this.request<void>('DELETE', `/images/${encodeURIComponent(id)}?force=1`);
@@ -741,7 +915,7 @@ export class DockerApi {
     });
   }
 
-  private request<T>(method: string, path: string, body?: string): Promise<T> {
+  private request<T>(method: string, path: string, body?: string, timeoutMs = TIMEOUT_MS): Promise<T> {
     // Unversioned path → the daemon uses its own max supported API version.
     const fullPath = path;
     const t = this.transport;
@@ -755,7 +929,7 @@ export class DockerApi {
       method,
       path: fullPath,
       headers,
-      timeout: TIMEOUT_MS,
+      timeout: timeoutMs,
     };
 
     let mod: typeof http | typeof https = http;
@@ -985,4 +1159,71 @@ export function healthFromStatus(status?: string): 'healthy' | 'unhealthy' | 'st
   if (/\(unhealthy\)/i.test(status)) return 'unhealthy';
   if (/\(health: starting\)/i.test(status)) return 'starting';
   return null;
+}
+
+// ── Recreate helpers ──────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** A container's own stop grace period in seconds (compose `stop_grace_period`), default 10. */
+export function stopTimeoutOf(info: RawInspect): number {
+  const t = Number((info.Config as { StopTimeout?: unknown } | undefined)?.StopTimeout);
+  return Number.isFinite(t) && t >= 0 ? Math.min(Math.round(t), 600) : 10;
+}
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/**
+ * The part of a container's Config the operator actually set: everything the OLD
+ * image supplied by default is removed, so the NEW image's defaults apply when the
+ * container is recreated from it (Watchtower's approach). Without this an update
+ * pinned the old version's Entrypoint/Cmd/PATH/WorkingDir onto the new image —
+ * which can stop the new version from starting at all.
+ */
+export function userConfig(
+  cfg: Record<string, unknown>,
+  img: Record<string, unknown> | null,
+  containerId = '',
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...cfg };
+  // Docker defaults the hostname to the short container id — let the new one get its own.
+  if (typeof out.Hostname === 'string' && out.Hostname && containerId.startsWith(out.Hostname)) delete out.Hostname;
+  if (!img) return out;
+
+  if (Array.isArray(out.Env)) {
+    const imgEnv = new Set(Array.isArray(img.Env) ? (img.Env as string[]) : []);
+    out.Env = (out.Env as string[]).filter((e) => !imgEnv.has(e));
+  }
+  // Entrypoint and Cmd go together: a custom entrypoint means Docker won't fill Cmd from the image.
+  const entrySame = sameJson(out.Entrypoint, img.Entrypoint);
+  if (entrySame) {
+    delete out.Entrypoint;
+    if (sameJson(out.Cmd, img.Cmd)) { delete out.Cmd; delete out.ArgsEscaped; }
+  }
+  for (const k of ['WorkingDir', 'User', 'Healthcheck', 'StopSignal', 'Shell', 'OnBuild']) {
+    if (k in out && sameJson(out[k], img[k])) delete out[k];
+  }
+  for (const k of ['ExposedPorts', 'Volumes', 'Labels']) {
+    const mine = out[k] as Record<string, unknown> | null | undefined;
+    const theirs = (img[k] ?? {}) as Record<string, unknown>;
+    if (!mine || typeof mine !== 'object') continue;
+    const kept = Object.fromEntries(
+      Object.entries(mine).filter(([key, v]) => !(key in theirs) || (k === 'Labels' && theirs[key] !== v)),
+    );
+    if (Object.keys(kept).length) out[k] = kept; else delete out[k];
+  }
+  return out;
+}
+
+/** Docker's multiplexed log stream (8-byte frame headers) → text; TTY logs pass through. */
+export function demuxDockerLog(buf: Buffer): string {
+  if (buf.length < 8 || buf[1] !== 0 || buf[2] !== 0 || buf[3] !== 0 || buf[0] > 2) return buf.toString('utf8');
+  const parts: Buffer[] = [];
+  let i = 0;
+  while (i + 8 <= buf.length) {
+    const len = buf.readUInt32BE(i + 4);
+    parts.push(buf.subarray(i + 8, i + 8 + len));
+    i += 8 + len;
+  }
+  return Buffer.concat(parts).toString('utf8');
 }
