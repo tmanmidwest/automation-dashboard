@@ -92,7 +92,7 @@ export class EcsBuilderService {
       const raw = await this.secrets.reveal(input.source.credKey).catch(() => null);
       if (raw) { try { cred = JSON.parse(raw) as GitCredential; } catch { cred = { secret: raw }; } }
     }
-    const helper = cred ? `-c credential.helper='store --file=${credFile}'` : '';
+    const helper = cred ? `-c 'credential.helper=store --file=${sq(credFile)}'` : '';
     const redact = (s: string) => (cred?.secret ? (s || '').split(cred.secret).join('***') : s);
 
     try {
@@ -100,15 +100,15 @@ export class EcsBuilderService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(input.source.gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        const w = await runSsh(ssh, `cat > '${credFile}' && chmod 600 '${credFile}'`, line);
+        const w = await runSsh(ssh, `cat > '${sq(credFile)}' && chmod 600 '${sq(credFile)}'`, line);
         if (w.code !== 0) throw new Error('Failed to write git credentials on the builder host.');
       }
 
-      const isRepo = (await runSsh(ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
+      const isRepo = (await runSsh(ssh, `test -d '${sq(dir)}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
       onPhase(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
-        : await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(input.source.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
+        ? await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} git -C '${sq(dir)}' ${helper} fetch --all --prune && git -C '${sq(dir)}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${sq(dir)}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${sq(dir)}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${sq(dir)}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(input.source.gitUrl)}' '${sq(dir)}'`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) throw new Error(`Git ${isRepo ? 'update' : 'clone'} failed: ${redact(tail(g.stderr || g.stdout, 2000))}`);
 
       onPhase('Logging in to ECR…');
@@ -117,17 +117,17 @@ export class EcsBuilderService {
 
       onPhase('Building image…');
       const noCache = input.forceRebuild ? '--no-cache --pull ' : '';
-      const b = await runSsh(ssh, `docker build ${noCache}-t '${sq(input.imageRef)}' '${contextDir}'`, undefined, BUILD_TIMEOUT_MS);
+      const b = await runSsh(ssh, `docker build ${noCache}-t '${sq(input.imageRef)}' '${sq(contextDir)}'`, undefined, BUILD_TIMEOUT_MS);
       if (b.code !== 0) throw new Error(`Image build failed: ${tail(b.stderr || b.stdout, 3000)}`);
 
       onPhase('Pushing to ECR…');
       const p = await runSsh(ssh, `docker push '${sq(input.imageRef)}'`, undefined, PUSH_TIMEOUT_MS);
       if (p.code !== 0) throw new Error(`docker push failed: ${tail(p.stderr || p.stdout, 2000)}`);
 
-      const commit = (await runSsh(ssh, `git -C '${dir}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
+      const commit = (await runSsh(ssh, `git -C '${sq(dir)}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
       return { commit: commit && /^[0-9a-f]{40}$/i.test(commit) ? commit : null };
     } finally {
-      await runSsh(ssh, `rm -f '${credFile}'`).catch(() => { /* best-effort */ });
+      await runSsh(ssh, `rm -f '${sq(credFile)}'`).catch(() => { /* best-effort */ });
       // Reclaim the local build image so the builder host doesn't accumulate layers.
       await runSsh(ssh, `docker image rm '${sq(input.imageRef)}' 2>/dev/null || true`).catch(() => {});
     }
