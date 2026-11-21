@@ -117,6 +117,34 @@ export interface SecretMetaInput {
 export interface SecretUpsertInput extends SecretMetaInput {
   /** New plaintext value. Omit to edit metadata only. Never returned by any read. */
   value?: string;
+  /**
+   * Typed credentials (git/ssh/rdp/vnc/web) only: change the non-secret fields kept
+   * alongside the password. Omitted fields keep their stored value; an empty
+   * `domain` clears it. Can be sent with or without a new `value`.
+   */
+  fields?: SecretCredentialFields;
+}
+
+/**
+ * The non-secret parts of a typed credential, shown (and editable) in the Rotate
+ * dialog without revealing the password/key/token. GET /api/secrets/:key/fields.
+ */
+export interface SecretCredentialFields {
+  username?: string;
+  /** RDP only. */
+  domain?: string | null;
+  /** Git only. */
+  host?: string;
+  /** SSH only, write-only: passphrase for a new private key sent as `value`. Never returned. */
+  passphrase?: string;
+}
+
+/** Response for GET /api/secrets/:key/fields. */
+export interface SecretCredentialFieldsResult extends Omit<SecretCredentialFields, 'passphrase'> {
+  /** False when the stored value isn't a JSON object (e.g. overwritten with a bare password). */
+  valid: boolean;
+  /** SSH only: whether the credential authenticates with a password or a private key. */
+  sshMethod?: 'password' | 'key';
 }
 
 /**

@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Put } from '@nestjs/common';
 import { SecretsService } from './secrets.service';
 import { CurrentUser, RequirePermissions, SessionOnly } from '../auth/decorators';
-import type { SecretSummary, SecretUpsertInput, SessionUser } from '@cerebro/shared';
+import type { SecretCredentialFieldsResult, SecretSummary, SecretUpsertInput, SessionUser } from '@cerebro/shared';
 
 /**
  * The secrets vault management API. Metadata in, metadata out — a value can be
@@ -21,6 +21,16 @@ export class SecretsController {
     return this.secrets.list();
   }
 
+  /**
+   * The non-secret fields of a typed credential (username, RDP domain, git host) so the
+   * Rotate dialog can show and edit them. The password/key/token is never returned.
+   */
+  @Get(':key/fields')
+  @RequirePermissions('secrets:write')
+  fields(@Param('key') key: string): Promise<SecretCredentialFieldsResult> {
+    return this.secrets.credentialFields(key);
+  }
+
   /** Set/rotate a secret's value and/or edit its metadata. */
   @Put(':key')
   @RequirePermissions('secrets:write')
@@ -30,9 +40,9 @@ export class SecretsController {
     @CurrentUser() user: SessionUser,
   ): Promise<{ ok: true }> {
     const ctx = { actorId: user.id, actorEmail: user.email };
-    const { value, ...meta } = body ?? {};
-    if (typeof value === 'string' && value.length > 0) {
-      await this.secrets.rotate(key, value, meta, ctx);
+    const { value, fields, ...meta } = body ?? {};
+    if ((typeof value === 'string' && value.length > 0) || fields) {
+      await this.secrets.rotate(key, value, fields, meta, ctx);
     } else {
       await this.secrets.updateMeta(key, meta, ctx);
     }
