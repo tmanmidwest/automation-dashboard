@@ -32,7 +32,7 @@ export class SecretsController {
     const ctx = { actorId: user.id, actorEmail: user.email };
     const { value, ...meta } = body ?? {};
     if (typeof value === 'string' && value.length > 0) {
-      await this.secrets.set(key, value, meta, ctx);
+      await this.secrets.rotate(key, value, meta, ctx);
     } else {
       await this.secrets.updateMeta(key, meta, ctx);
     }

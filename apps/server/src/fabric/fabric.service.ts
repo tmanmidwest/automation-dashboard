@@ -636,7 +636,22 @@ export class FabricService implements OnModuleInit {
     }
     const raw = await this.secrets.reveal(key);
     if (!raw) throw new BadRequestException('The credential is missing from the vault.');
-    return JSON.parse(raw) as FabricCredValue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+    // A typed credential is one JSON object. A bare string here means the value was
+    // overwritten with just a password (e.g. rotated before the vault merged rotations
+    // into the stored credential) — say so instead of a SyntaxError surfacing as a 500.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new BadRequestException(
+        `The vault credential "${key}" isn't a complete ${kind.toUpperCase()} credential (it holds only a bare value, no username). ` +
+          `Re-create it in Settings → Secrets with "New secret", same key, type ${kind.toUpperCase()}.`,
+      );
+    }
+    return parsed as FabricCredValue;
   }
 
   /** Save a named, reusable credential (not tied to one machine) in the vault.
