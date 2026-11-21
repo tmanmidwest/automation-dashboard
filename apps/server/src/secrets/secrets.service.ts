@@ -4,7 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../common/crypto.service';
 import { AuditService } from '../logging/audit.service';
 import { LoggingService } from '../logging/logging.service';
-import type { ConnectorManifest, SecretCategory, SecretHealth, SecretMetaInput, SecretSummary } from '@cerebro/shared';
+import type { ConnectorManifest, SecretCategory, SecretCredentialFields, SecretCredentialFieldsResult, SecretHealth, SecretMetaInput, SecretSummary } from '@cerebro/shared';
 import { ConnectorRegistry } from '../connectors/connector-registry.service';
 
 /** Who is performing an administrative secret write, for the audit trail. */
@@ -16,6 +16,16 @@ export interface ActorCtx {
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Secret kinds whose value is one JSON object (username + password/key/…), not a bare string. */
 const STRUCTURED_KINDS = new Set<string>(['git', 'ssh', 'rdp', 'vnc', 'web']);
+
+function parseObject(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 function isJsonObject(value: string): boolean {
   const t = value.trim();
@@ -177,43 +187,89 @@ export class SecretsService implements OnModuleInit {
 
   /**
    * Rotate from the vault UI. Typed credentials (git/ssh/rdp/vnc/web) are stored as one
-   * JSON object, but the Rotate dialog has a single "new value" box. A plain string
-   * typed there used to overwrite the whole JSON, leaving a credential every consumer
-   * then failed to parse (e.g. a Fabric Remote Browser autofill 500'd). So a non-JSON
-   * value for a typed credential replaces just its secret part — password (or the
-   * private key, for a key-based SSH credential; `secret` for git) — and keeps the
-   * username and the other fields. A full JSON object still replaces the value as-is.
+   * JSON object, but the Rotate dialog edits it piecewise: a non-JSON `value` replaces
+   * just the secret part (password; the private key for a key-based SSH credential;
+   * `secret` for git) and `fields` replaces the username/domain/host, keeping every
+   * other stored field. A full JSON object `value` still replaces the whole value.
+   * If the stored value is no longer a JSON object (e.g. it was overwritten with a bare
+   * password), it can be rebuilt here from a username + new password.
    */
-  async rotate(key: string, value: string, meta?: SecretMetaInput, ctx?: ActorCtx): Promise<void> {
+  async rotate(
+    key: string,
+    value: string | undefined,
+    fields: SecretCredentialFields | undefined,
+    meta?: SecretMetaInput,
+    ctx?: ActorCtx,
+  ): Promise<void> {
     const existing = await this.prisma.secretMeta.findUnique({ where: { key }, select: { kind: true } });
     const kind = meta?.kind ?? existing?.kind ?? 'generic';
-    if (!existing || !STRUCTURED_KINDS.has(kind) || isJsonObject(value)) {
-      return this.set(key, value, meta, ctx);
+    const hasValue = typeof value === 'string' && value.length > 0;
+    if (!existing || !STRUCTURED_KINDS.has(kind) || (hasValue && isJsonObject(value!))) {
+      if (hasValue) return this.set(key, value!, meta, ctx);
+      return this.updateMeta(key, meta ?? {}, ctx);
     }
-    const current = await this.reveal(key);
-    let parsed: Record<string, unknown> | null = null;
-    try {
-      const v = current ? JSON.parse(current) : null;
-      if (v && typeof v === 'object' && !Array.isArray(v)) parsed = v as Record<string, unknown>;
-    } catch {
-      parsed = null;
+    const parsed = parseObject(await this.reveal(key));
+    const merged: Record<string, unknown> = { ...(parsed ?? {}) };
+    if (fields) {
+      if (typeof fields.username === 'string') {
+        const u = fields.username.trim();
+        if (!u && kind !== 'vnc') throw new BadRequestException('A username is required.');
+        if (u) merged.username = u;
+        else delete merged.username;
+      }
+      if (kind === 'rdp' && fields.domain !== undefined) {
+        const d = (fields.domain ?? '').trim();
+        if (d) merged.domain = d;
+        else delete merged.domain;
+      }
+      if (kind === 'git' && typeof fields.host === 'string' && fields.host.trim()) merged.host = fields.host.trim();
+    }
+    if (hasValue) {
+      if (kind === 'git') {
+        merged.secret = value;
+      } else if (kind === 'ssh' && /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value!)) {
+        merged.privateKey = value;
+        delete merged.password;
+        if (fields?.passphrase) merged.passphrase = fields.passphrase;
+        else delete merged.passphrase;
+      } else {
+        merged.password = value;
+        if (kind === 'ssh') {
+          delete merged.privateKey;
+          delete merged.passphrase;
+        }
+      }
     }
     if (!parsed) {
-      throw new BadRequestException(
-        `The stored value is no longer a valid ${kind.toUpperCase()} credential (only a bare value is saved, no username). ` +
-          `Re-create it with "New secret" using the same key and type ${kind.toUpperCase()} — anything that uses this key will pick it up.`,
-      );
+      // Rebuilding a broken credential: it must end up complete, not half-filled.
+      const secretField = kind === 'git' ? 'secret' : 'password';
+      const missing = (kind !== 'vnc' && !merged.username) || (!hasValue);
+      if (missing) {
+        throw new BadRequestException(
+          `The stored value is no longer a valid ${kind.toUpperCase()} credential. ` +
+            `Enter the ${kind === 'vnc' ? '' : 'username and the '}${secretField === 'secret' ? 'token' : 'password'} to rebuild it.`,
+        );
+      }
     }
-    const merged = { ...parsed };
-    if (kind === 'git') {
-      merged.secret = value;
-    } else if (kind === 'ssh' && /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value)) {
-      merged.privateKey = value;
-      delete merged.password;
-    } else {
-      merged.password = value;
-    }
+    if (!hasValue && !fields) return this.updateMeta(key, meta ?? {}, ctx);
     return this.set(key, JSON.stringify(merged), meta, ctx);
+  }
+
+  /**
+   * The non-secret fields of a typed credential (username, RDP domain, git host),
+   * for the Rotate dialog. Never returns the password, key, passphrase, token or TOTP seed.
+   */
+  async credentialFields(key: string): Promise<SecretCredentialFieldsResult> {
+    const meta = await this.prisma.secretMeta.findUnique({ where: { key }, select: { kind: true } });
+    if (!meta || !STRUCTURED_KINDS.has(meta.kind)) throw new BadRequestException('Not a typed credential.');
+    const parsed = parseObject(await this.reveal(key));
+    if (!parsed) return { valid: false };
+    const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+    const out: SecretCredentialFieldsResult = { valid: true, username: str(parsed.username) ?? '' };
+    if (meta.kind === 'rdp') out.domain = str(parsed.domain) ?? '';
+    if (meta.kind === 'git') out.host = str(parsed.host) ?? '';
+    if (meta.kind === 'ssh') out.sshMethod = str(parsed.privateKey) ? 'key' : 'password';
+    return out;
   }
 
   /** Edit metadata only — never touches the value or rotatedAt. */

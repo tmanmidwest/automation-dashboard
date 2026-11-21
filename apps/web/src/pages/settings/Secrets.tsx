@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { KeyRound, Trash2, RotateCcw, Puzzle, Bell, ShieldCheck, Lock, Eye, Copy, Check, Radio } from 'lucide-react';
-import type { RevealSecretResult, SecretCategory, SecretHealth, SecretSummary, SecretUpsertInput, SecretUsage } from '@cerebro/shared';
+import type { RevealSecretResult, SecretCategory, SecretCredentialFieldsResult, SecretHealth, SecretSummary, SecretUpsertInput, SecretUsage } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -81,6 +81,9 @@ function canCreateSecret(n: NewSecret): boolean {
   return n.value !== '';
 }
 
+/** Kinds stored as one JSON credential; Rotate edits their fields piecewise. */
+const TYPED_KINDS: string[] = ['git', 'ssh', 'rdp', 'vnc', 'web'];
+
 const emptyNewSecret = (): NewSecret => ({
   key: '',
   label: '',
@@ -125,6 +128,13 @@ export function Secrets() {
   const [editing, setEditing] = useState<SecretSummary | null>(null);
   const [form, setForm] = useState<SecretUpsertInput>({});
   const [busy, setBusy] = useState(false);
+  // Typed credentials (ssh/rdp/vnc/web/git): the stored non-secret fields (username,
+  // domain, host) loaded for the Rotate dialog, and the operator's edits to them.
+  const [credOrig, setCredOrig] = useState<SecretCredentialFieldsResult | null>(null);
+  const [cred, setCred] = useState<{ username: string; domain: string; host: string; passphrase: string; sshMethod: 'password' | 'key' }>(
+    { username: '', domain: '', host: '', passphrase: '', sshMethod: 'password' },
+  );
+  const [credErr, setCredErr] = useState<string | null>(null);
 
   // Create-new-secret dialog state.
   const [creating, setCreating] = useState(false);
@@ -161,6 +171,24 @@ export function Secrets() {
       value: '',
     });
     setErr(null);
+    setCredOrig(null);
+    setCredErr(null);
+    setCred({ username: '', domain: '', host: '', passphrase: '', sshMethod: 'password' });
+    if (canWrite && TYPED_KINDS.includes(s.kind)) {
+      api
+        .get<SecretCredentialFieldsResult>(`/api/secrets/${encodeURIComponent(s.key)}/fields`)
+        .then((f) => {
+          setCredOrig(f);
+          setCred({
+            username: f.username ?? '',
+            domain: f.domain ?? '',
+            host: f.host ?? '',
+            passphrase: '',
+            sshMethod: f.sshMethod ?? 'password',
+          });
+        })
+        .catch((e) => setCredErr(e instanceof ApiError ? e.message : 'Could not load the current username.'));
+    }
   }
 
   async function submitEdit() {
@@ -175,6 +203,14 @@ export function Secrets() {
         expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
       };
       if (form.value && form.value.length > 0) body.value = form.value;
+      if (TYPED_KINDS.includes(editing.kind) && credOrig) {
+        const fields: NonNullable<SecretUpsertInput['fields']> = {};
+        if ((!credOrig.valid && cred.username.trim()) || (credOrig.valid && cred.username.trim() !== (credOrig.username ?? ''))) fields.username = cred.username;
+        if (editing.kind === 'rdp' && cred.domain.trim() !== (credOrig.domain ?? '')) fields.domain = cred.domain;
+        if (editing.kind === 'git' && cred.host.trim() && cred.host.trim() !== (credOrig.host ?? '')) fields.host = cred.host;
+        if (editing.kind === 'ssh' && cred.sshMethod === 'key' && body.value && cred.passphrase) fields.passphrase = cred.passphrase;
+        if (Object.keys(fields).length > 0) body.fields = fields;
+      }
       await api.put(`/api/secrets/${encodeURIComponent(editing.key)}`, body);
       setEditing(null);
       await load();
@@ -847,21 +883,100 @@ export function Secrets() {
               />
             </div>
           </div>
+          {editing && TYPED_KINDS.includes(editing.kind) && (
+            <>
+              {credErr && <p className="text-xs text-destructive">{credErr}</p>}
+              {credOrig && !credOrig.valid && (
+                <div className="text-xs rounded-md px-3 py-2 border border-amber-500/40 bg-amber-500/10 text-amber-400">
+                  This credential's stored value is incomplete (no username). Enter the username and a new{' '}
+                  {editing.kind === 'git' ? 'token' : 'password'} to repair it.
+                </div>
+              )}
+              {editing.kind === 'git' && (
+                <div>
+                  <Label>Host</Label>
+                  <Input value={cred.host} disabled={!credOrig} onChange={(e) => setCred((c) => ({ ...c, host: e.target.value }))} />
+                </div>
+              )}
+              <div className={cn(editing.kind === 'rdp' && 'grid grid-cols-2 gap-3')}>
+                <div>
+                  <Label>
+                    Username{editing.kind === 'vnc' && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                  </Label>
+                  <Input
+                    autoComplete="off"
+                    value={cred.username}
+                    disabled={!credOrig}
+                    placeholder={credOrig ? undefined : 'Loading…'}
+                    onChange={(e) => setCred((c) => ({ ...c, username: e.target.value }))}
+                  />
+                </div>
+                {editing.kind === 'rdp' && (
+                  <div>
+                    <Label>Domain <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                    <Input value={cred.domain} disabled={!credOrig} onChange={(e) => setCred((c) => ({ ...c, domain: e.target.value }))} />
+                  </div>
+                )}
+              </div>
+              {editing.kind === 'ssh' && (
+                <div>
+                  <Label>Sign in with</Label>
+                  <select
+                    className="mt-1 w-full h-9 rounded-md border border-input bg-background/60 px-2 text-sm"
+                    value={cred.sshMethod}
+                    onChange={(e) => {
+                      setCred((c) => ({ ...c, sshMethod: e.target.value as 'password' | 'key' }));
+                      setForm((f) => ({ ...f, value: '' }));
+                    }}
+                  >
+                    <option value="password">Password</option>
+                    <option value="key">Private key</option>
+                  </select>
+                </div>
+              )}
+            </>
+          )}
           <div>
             <Label>
-              {editing?.kind === 'git' ? 'New token / password' : editing && ['ssh', 'rdp', 'vnc', 'web'].includes(editing.kind) ? 'New password' : 'New value'}{' '}
+              {editing?.kind === 'git'
+                ? 'New token / password'
+                : editing?.kind === 'ssh' && cred.sshMethod === 'key'
+                  ? 'New private key (PEM)'
+                  : editing && TYPED_KINDS.includes(editing.kind)
+                    ? 'New password'
+                    : 'New value'}{' '}
               <span className="text-muted-foreground font-normal">(leave blank to keep current)</span>
             </Label>
-            <Input
-              type="password"
-              autoComplete="new-password"
-              placeholder="••••••••"
-              value={form.value ?? ''}
-              onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
-            />
+            {editing?.kind === 'ssh' && cred.sshMethod === 'key' ? (
+              <textarea
+                className="mt-1 w-full h-28 rounded-md border border-input bg-background/60 px-2 py-1 text-xs font-mono"
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                value={form.value ?? ''}
+                onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
+              />
+            ) : (
+              <Input
+                type="password"
+                autoComplete="new-password"
+                placeholder="••••••••"
+                value={form.value ?? ''}
+                onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
+              />
+            )}
+            {editing?.kind === 'ssh' && cred.sshMethod === 'key' && (form.value ?? '') !== '' && (
+              <div className="mt-2">
+                <Label>Key passphrase <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={cred.passphrase}
+                  onChange={(e) => setCred((c) => ({ ...c, passphrase: e.target.value }))}
+                />
+              </div>
+            )}
             <p className="mt-1 text-xs text-muted-foreground">
-              {editing && ['git', 'ssh', 'rdp', 'vnc', 'web'].includes(editing.kind)
-                ? `Only the ${editing.kind === 'git' ? 'token' : editing.kind === 'ssh' ? 'password (or paste a new private key)' : 'password'} changes — the username and other fields are kept. To change the username, re-create it with New secret using the same key.`
+              {editing && TYPED_KINDS.includes(editing.kind)
+                ? 'The current password is never displayed. Change the username on its own, or enter a new password too — other saved fields are kept.'
                 : 'The current value is never displayed. Entering a new one replaces it and resets the rotation clock.'}
             </p>
           </div>
