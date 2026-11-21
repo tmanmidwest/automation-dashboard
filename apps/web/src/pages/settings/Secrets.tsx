@@ -848,7 +848,10 @@ export function Secrets() {
             </div>
           </div>
           <div>
-            <Label>New value <span className="text-muted-foreground font-normal">(leave blank to keep current)</span></Label>
+            <Label>
+              {editing?.kind === 'git' ? 'New token / password' : editing && ['ssh', 'rdp', 'vnc', 'web'].includes(editing.kind) ? 'New password' : 'New value'}{' '}
+              <span className="text-muted-foreground font-normal">(leave blank to keep current)</span>
+            </Label>
             <Input
               type="password"
               autoComplete="new-password"
@@ -857,7 +860,9 @@ export function Secrets() {
               onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
             />
             <p className="mt-1 text-xs text-muted-foreground">
-              The current value is never displayed. Entering a new one replaces it and resets the rotation clock.
+              {editing && ['git', 'ssh', 'rdp', 'vnc', 'web'].includes(editing.kind)
+                ? `Only the ${editing.kind === 'git' ? 'token' : editing.kind === 'ssh' ? 'password (or paste a new private key)' : 'password'} changes — the username and other fields are kept. To change the username, re-create it with New secret using the same key.`
+                : 'The current value is never displayed. Entering a new one replaces it and resets the rotation clock.'}
             </p>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../common/crypto.service';
@@ -14,6 +14,19 @@ export interface ActorCtx {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Secret kinds whose value is one JSON object (username + password/key/…), not a bare string. */
+const STRUCTURED_KINDS = new Set<string>(['git', 'ssh', 'rdp', 'vnc', 'web']);
+
+function isJsonObject(value: string): boolean {
+  const t = value.trim();
+  if (!t.startsWith('{')) return false;
+  try {
+    const v = JSON.parse(t);
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+  } catch {
+    return false;
+  }
+}
 /** Only re-stamp lastUsedAt if the stored value is older than this (throttle polls). */
 const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
 /** A secret with an expiry is "due" once it is within this window of expiring. */
@@ -160,6 +173,47 @@ export class SecretsService implements OnModuleInit {
         meta: { category: (patch.category ?? existing?.category ?? inferMeta(key).category) as string },
       });
     }
+  }
+
+  /**
+   * Rotate from the vault UI. Typed credentials (git/ssh/rdp/vnc/web) are stored as one
+   * JSON object, but the Rotate dialog has a single "new value" box. A plain string
+   * typed there used to overwrite the whole JSON, leaving a credential every consumer
+   * then failed to parse (e.g. a Fabric Remote Browser autofill 500'd). So a non-JSON
+   * value for a typed credential replaces just its secret part — password (or the
+   * private key, for a key-based SSH credential; `secret` for git) — and keeps the
+   * username and the other fields. A full JSON object still replaces the value as-is.
+   */
+  async rotate(key: string, value: string, meta?: SecretMetaInput, ctx?: ActorCtx): Promise<void> {
+    const existing = await this.prisma.secretMeta.findUnique({ where: { key }, select: { kind: true } });
+    const kind = meta?.kind ?? existing?.kind ?? 'generic';
+    if (!existing || !STRUCTURED_KINDS.has(kind) || isJsonObject(value)) {
+      return this.set(key, value, meta, ctx);
+    }
+    const current = await this.reveal(key);
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      const v = current ? JSON.parse(current) : null;
+      if (v && typeof v === 'object' && !Array.isArray(v)) parsed = v as Record<string, unknown>;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      throw new BadRequestException(
+        `The stored value is no longer a valid ${kind.toUpperCase()} credential (only a bare value is saved, no username). ` +
+          `Re-create it with "New secret" using the same key and type ${kind.toUpperCase()} — anything that uses this key will pick it up.`,
+      );
+    }
+    const merged = { ...parsed };
+    if (kind === 'git') {
+      merged.secret = value;
+    } else if (kind === 'ssh' && /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value)) {
+      merged.privateKey = value;
+      delete merged.password;
+    } else {
+      merged.password = value;
+    }
+    return this.set(key, JSON.stringify(merged), meta, ctx);
   }
 
   /** Edit metadata only — never touches the value or rotatedAt. */
