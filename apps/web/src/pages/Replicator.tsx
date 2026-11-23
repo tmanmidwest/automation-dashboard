@@ -282,6 +282,9 @@ function AppCard({ app, expanded, onToggle, deployments, canWrite, hasIngress, h
   /** How many operator-added env entries an instance carries (shown on its row). */
   const extraCount = (d: ReplicatorDeployment) => Object.keys(d.extraEnv ?? {}).length + (d.extraSecretVars?.length ?? 0);
 
+  /** The deployment whose Redeploy button was clicked, awaiting Confirm (guards against stray clicks). */
+  const [confirmUpdate, setConfirmUpdate] = useState<ReplicatorDeployment | null>(null);
+
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id); setErr(null);
     try { await fn(); onChanged(); }
@@ -414,7 +417,7 @@ function AppCard({ app, expanded, onToggle, deployments, canWrite, hasIngress, h
                         onClick={() => onEdit(d)}><Pencil className="h-4 w-4" /></Button>
                       <Button variant={d.updateAvailable ? 'default' : 'ghost'} size="icon" aria-label="Redeploy" disabled={busy === d.id || isInFlight(d)}
                         title={d.updateAvailable ? 'Update available — pull latest & redeploy' : 'Pull latest & redeploy'}
-                        onClick={() => act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }))}>
+                        onClick={() => setConfirmUpdate(d)}>
                         {busy === d.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
                       </Button>
                       <Button variant="ghost" size="icon" aria-label="Delete deployment" disabled={busy === d.id || isInFlight(d)}
@@ -443,6 +446,37 @@ function AppCard({ app, expanded, onToggle, deployments, canWrite, hasIngress, h
           )}
         </CardContent>
       )}
+      {confirmUpdate && (() => {
+        const d = confirmUpdate;
+        const where = d.targetKind === 'ecs'
+          ? (d.ecs?.cluster ? `ECS cluster ${d.ecs.cluster}` : 'ECS')
+          : (d.dockerInstanceName ?? d.dockerInstanceId);
+        const close = () => setConfirmUpdate(null);
+        return (
+          <Dialog open onClose={close} title={`Update ${d.project}?`}
+            footer={<>
+              <Button variant="ghost" onClick={close}>Cancel</Button>
+              <Button autoFocus onClick={() => {
+                close();
+                void act(d.id, () => api.post(`/api/replicator/deployments/${d.id}/redeploy`, { forceRebuild: true }));
+              }}><RotateCw className="h-4 w-4" /> Confirm</Button>
+            </>}>
+            <div className="space-y-2 text-sm">
+              <p>
+                You are about to update <span className="font-semibold">{d.project}</span>
+                {d.project !== app.name && <> ({app.name})</>} on <span className="font-semibold">{where}</span>.
+              </p>
+              <p className="text-muted-foreground">
+                {app.compose
+                  ? 'Cerebro pulls the latest images and recreates the stack.'
+                  : `Cerebro pulls the latest from ${app.gitRef}${d.updateAvailable && d.availableCommit ? ` (${d.deployedCommit?.slice(0, 7) ?? '?'} → ${d.availableCommit.slice(0, 7)})` : ''}, rebuilds, and recreates the stack.`}
+                {' '}The app may be briefly unavailable while it restarts.
+              </p>
+              <p>Click <span className="font-semibold">Confirm</span> to proceed.</p>
+            </div>
+          </Dialog>
+        );
+      })()}
     </Card>
   );
 }
