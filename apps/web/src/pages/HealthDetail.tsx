@@ -105,6 +105,20 @@ export function HealthDetail() {
           </div>
         } />
       {err && <div className="mb-4 text-sm rounded-md px-3 py-2 border border-destructive/40 bg-destructive/10 text-destructive">{err}</div>}
+      {m.deferredTo && (
+        <div className="mb-4 text-sm rounded-md px-3 py-2 border border-sky-500/40 bg-sky-500/10">
+          This Waypoint runs on the same machine as the agent{' '}
+          <Link to={`/health/${m.deferredTo.agentId}`} className="underline font-medium">{m.deferredTo.name}</Link>.
+          That agent reports this machine's health and OS updates, so this Waypoint has stopped sampling and isn't listed on Health. Figures below are from before that.
+        </div>
+      )}
+      {!!m.alsoRunning?.length && (
+        <div className="mb-4 text-xs text-muted-foreground">
+          Also running on this machine: {m.alsoRunning.map((p, i) => (
+            <span key={p.agentId}>{i ? ', ' : ''}<Link to={`/health/${p.agentId}`} className="underline">{p.name}</Link> ({p.mode === 'waypoint' ? 'Waypoint' : 'agent'})</span>
+          ))}. This agent reports the machine's health and updates for both.
+        </div>
+      )}
 
       {/* Status strip */}
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] mb-4">

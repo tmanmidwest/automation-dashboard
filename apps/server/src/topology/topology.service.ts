@@ -18,6 +18,7 @@ import { buildExposure, comboFindings } from './exposure';
 
 const INTERNAL_KEY = 'posture.internalNames';
 import { HibpService } from './hibp.service';
+import { SameBoxService } from '../fabric/same-box.service';
 
 /** Serve a built graph this long before rebuilding in the background. */
 const SERVE_MAX_MS = 2 * 60_000;
@@ -72,6 +73,7 @@ export class TopologyService {
     private readonly ctLog: CtLogService,
     private readonly hibp: HibpService,
     private readonly tracking: PostureTrackingService,
+    private readonly sameBox: SameBoxService,
   ) {}
 
   private cache: { at: number; graph: TopologyGraph } | null = null;
@@ -304,7 +306,9 @@ export class TopologyService {
         where: { OR: [{ security: { gt: 0 } }, { rebootRequired: true }], agent: { status: { notIn: ['pending', 'revoked', 'deleting'] } } },
         select: { agentId: true, security: true, securitySince: true, rebootRequired: true, rebootSince: true, rebootReason: true, agent: { select: { name: true } } },
       });
-      return osUpdateFindings(rows.map((r) => ({ ...r, name: r.agent.name })));
+      // A Waypoint deferring to an agent on the same machine would repeat that machine's findings.
+      const skip = this.sameBox.deferringIds();
+      return osUpdateFindings(rows.filter((r) => !skip.has(r.agentId)).map((r) => ({ ...r, name: r.agent.name })));
     } catch {
       return []; // table missing before migration
     }

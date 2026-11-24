@@ -54,7 +54,7 @@ export function Health() {
   const visible = (fleet?.machines ?? []).filter((m) =>
     (os === 'all' || (m.os ?? 'unknown') === os) &&
     (!filter || (filter === 'attention' ? m.status === 'warning' || m.status === 'critical' : m.status === filter)) &&
-    (!query || [m.name, m.hostname, m.localIp, ...m.tags].some((v) => v?.toLowerCase().includes(query))),
+    (!query || [m.name, m.hostname, m.localIp, ...m.tags, ...(m.alsoRunning ?? []).map((p) => p.name)].some((v) => v?.toLowerCase().includes(query))),
   );
 
   const tot = fleet?.totals;
@@ -186,6 +186,11 @@ function Identity({ m }: { m: HealthMachine }) {
           {osLabel(m.os)}{m.hostname && m.hostname !== m.name ? ` · ${m.hostname}` : ''}{m.localIp ? ` · ${m.localIp}` : ''}
           {!m.online && ` · seen ${fmtAgo(m.lastSeenAt)}`}
         </div>
+        {!!m.alsoRunning?.length && (
+          <div className="text-[11px] text-muted-foreground truncate" title="A Waypoint runs on this same machine. This agent reports its health, so the Waypoint isn't listed separately.">
+            Also running: {m.alsoRunning.map((p) => `${p.name} (${p.mode === 'waypoint' ? 'Waypoint' : 'agent'})`).join(', ')}
+          </div>
+        )}
       </div>
     </div>
   );

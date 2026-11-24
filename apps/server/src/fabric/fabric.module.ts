@@ -14,6 +14,7 @@ import { FabricCaService } from './fabric-ca.service';
 import { FabricUpdateSigningService } from './fabric-update-signing.service';
 import { RemoteBrowserService } from './remote-browser.service';
 import { FabricApprovalService } from './fabric-approval.service';
+import { SameBoxService } from './same-box.service';
 
 /**
  * Fabric — agent-brokered remote access (RDP / SSH). Phase 1: control plane.
@@ -24,7 +25,7 @@ import { FabricApprovalService } from './fabric-approval.service';
 @Module({
   imports: [PrismaModule, LoggingModule, NotificationsModule, SettingsModule],
   controllers: [FabricController],
-  providers: [FabricService, FabricSftpService, FabricCaService, FabricUpdateSigningService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricApprovalService],
-  exports: [AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricUpdateSigningService],
+  providers: [FabricService, FabricSftpService, FabricCaService, FabricUpdateSigningService, FabricEnrollmentService, AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricApprovalService, SameBoxService],
+  exports: [AgentRegistryService, FabricSessionService, FabricGuacService, RemoteBrowserService, FabricUpdateSigningService, SameBoxService],
 })
 export class FabricModule {}

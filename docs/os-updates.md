@@ -77,6 +77,9 @@ the window stays open, what to install, and whether to restart and snapshot.
   comes back before the window closes. Otherwise the run is marked **missed**.
 - Each machine has at most one open run, so overlapping schedules don't stack up.
 - **Run now** opens the window immediately, which is handy for testing.
+- A Waypoint that shares its machine with an endpoint agent isn't listed. If a schedule names it,
+  the run goes to that endpoint agent instead. See *Waypoint and agent on one machine* in
+  [health-monitoring.md](health-monitoring.md).
 
 ## Safety
 
