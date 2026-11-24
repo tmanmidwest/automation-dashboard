@@ -30,6 +30,7 @@ import { AuditService } from '../logging/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService } from '../settings/settings.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
+import { SameBoxService } from '../fabric/same-box.service';
 import { detectRole, normalizeRole } from '../health/health-assess';
 import {
   describeTiming,
@@ -101,6 +102,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     private readonly notifications: NotificationsService,
     private readonly settings: SettingsService,
     private readonly instances: ConnectorInstanceService,
+    private readonly sameBox: SameBoxService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -279,6 +281,9 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       orderBy: { name: 'asc' },
     });
     if (onlyAgentId && !agents.length) throw new NotFoundException('Machine not found.');
+    // A Waypoint sharing its machine with an endpoint agent is covered by that agent:
+    // list (and alert on) the machine once. Its own detail page still opens.
+    if (!onlyAgentId) agents.splice(0, agents.length, ...agents.filter((a) => !this.sameBox.isDeferring(a.id)));
     const ids = agents.map((a) => a.id);
     const [lastRuns, names, guests] = await Promise.all([
       this.prisma.agentUpdateRun.findMany({
@@ -403,6 +408,13 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     const skipped: { agentId: string; name: string; reason: string }[] = [];
     const names = await this.scheduleNames();
     for (const id of [...new Set(agentIds)].slice(0, 200)) {
+      const peer = this.sameBox.deferredTo(id);
+      if (peer) {
+        // Two package managers on one box would fight over the apt/dpkg lock.
+        const own = await this.prisma.agent.findUnique({ where: { id }, select: { name: true } }).catch(() => null);
+        skipped.push({ agentId: id, name: own?.name ?? id, reason: `This Waypoint shares its machine with the agent "${peer.name}"; run updates from that agent instead.` });
+        continue;
+      }
       const m = byId.get(id);
       if (!m) {
         skipped.push({ agentId: id, name: id, reason: 'Not found.' });
@@ -749,7 +761,10 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     let n = 0;
     for (const [ring, r] of sched.rings.entries()) {
       const at = new Date(start.getTime() + r.delayHours * 3_600_000);
-      for (const agentId of r.agentIds) {
+      for (const listed of r.agentIds) {
+        // A Waypoint deferring to an agent on the same machine (e.g. picked for this
+        // schedule before that agent was installed): update the box through that agent.
+        const agentId = this.sameBox.deferredTo(listed)?.agentId ?? listed;
         if (!known.has(agentId)) continue;
         // One open run per machine: skip if something is already queued or going.
         const open = await this.prisma.agentUpdateRun.count({ where: { agentId, status: { in: OS_UPDATE_RUN_ACTIVE } } });

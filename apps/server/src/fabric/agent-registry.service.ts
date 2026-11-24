@@ -56,7 +56,8 @@ export class AgentRegistryService {
    */
   private health: {
     ingest: (agentId: string, frame: FabricHealthFrame) => Promise<void>;
-    intervalMs: () => number;
+    /** Health cadence for this agent (0 = off, e.g. a Waypoint deferring to an agent on the same box). */
+    intervalMs: (agentId: string) => number;
     /** True when this agent's offline should NOT alert (a workstation). */
     quietOffline: (agentId: string) => Promise<boolean>;
   } | null = null;
@@ -106,9 +107,16 @@ export class AgentRegistryService {
     this.health = hooks;
   }
 
-  /** Push the health reporting cadence to every connected agent. */
+  /** Push the health reporting cadence to every connected agent (each gets its own, via the hook). */
   broadcastHealthInterval(intervalMs: number): void {
-    for (const id of this.live.keys()) this.send(id, { t: 'health-config', healthIntervalMs: intervalMs });
+    for (const id of this.live.keys()) {
+      this.send(id, { t: 'health-config', healthIntervalMs: this.health ? this.health.intervalMs(id) : intervalMs });
+    }
+  }
+
+  /** Push one agent's health cadence (no-op when it isn't connected). */
+  sendHealthInterval(agentId: string, intervalMs: number): void {
+    if (this.live.has(agentId)) this.send(agentId, { t: 'health-config', healthIntervalMs: intervalMs });
   }
 
   /** Install the OS Updates module's hooks (called once by OsUpdatesService on init). */
@@ -422,7 +430,7 @@ export class AgentRegistryService {
       agentId,
       heartbeatMs: fabricConfig.heartbeatMs,
       latestAgentVersion: FABRIC_AGENT_VERSION,
-      ...(this.health ? { healthIntervalMs: this.health.intervalMs() } : {}),
+      ...(this.health ? { healthIntervalMs: this.health.intervalMs(agentId) } : {}),
       ...(updateSigningPublicKey ? { updateSigningPublicKey } : {}),
       ...(allow ? { allow, egressCidrs: before.egressCidrs ?? [] } : {}),
     });

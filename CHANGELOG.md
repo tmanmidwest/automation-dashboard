@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Check data" runs one now.
 
 ### Fixed
+- **A machine running both a Waypoint and the Cerebro agent showed twice on Health** (and alerted
+  twice, and was offered twice for OS updates). When both run on the same machine (same hostname and a
+  shared physical MAC), the Waypoint now defers to the agent: it stops sampling, drops off Health,
+  alerts and Updates, and the agent's row shows "Also running: <Waypoint>". A Waypoint on its own
+  reports as before. See `docs/health-monitoring.md`.
 - **Docker Fleet updates leaving containers offline** — Update / Update stack / Update outdated only
   waited 20 s for the old container to stop. A container slower to stop still held its ports, the new one
   failed ("port is already allocated"), and the rollback restarted the old one while it was still

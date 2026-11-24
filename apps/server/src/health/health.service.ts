@@ -19,6 +19,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { AgentRegistryService } from '../fabric/agent-registry.service';
+import { SameBoxService } from '../fabric/same-box.service';
 import {
   assess,
   availability,
@@ -62,15 +63,30 @@ export class HealthService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly registry: AgentRegistryService,
+    private readonly sameBox: SameBoxService,
   ) {}
 
   async onModuleInit(): Promise<void> {
     await this.loadSettings().catch(() => undefined);
     this.registry.setHealthHooks({
       ingest: (agentId, frame) => this.ingest(agentId, frame),
-      intervalMs: () => this.settingsCache.intervalSec * 1000,
+      intervalMs: (agentId) => this.intervalFor(agentId),
       quietOffline: async (agentId) => (await this.roleOf(agentId)) === 'workstation',
     });
+    // A Waypoint that starts (or stops) deferring to an agent on the same box gets
+    // its new cadence right away: 0 = off while it defers.
+    this.sameBox.onChange((ids) => {
+      for (const id of ids) this.registry.sendHealthInterval(id, this.intervalFor(id));
+    });
+  }
+
+  /**
+   * Health cadence for one agent. A Waypoint sharing its machine with an endpoint
+   * agent reports nothing (the endpoint agent covers the box), so the machine isn't
+   * sampled, listed or alerted on twice. See docs/health-monitoring.md.
+   */
+  private intervalFor(agentId: string): number {
+    return this.sameBox.isDeferring(agentId) ? 0 : this.settingsCache.intervalSec * 1000;
   }
 
   // ── Settings ──────────────────────────────────────────────────────────────
@@ -134,6 +150,9 @@ export class HealthService implements OnModuleInit {
       .map((s) => ({ ...s, at: s.at > now + 60_000 ? now : s.at, spanSec: Math.min(s.spanSec, maxSpan) }))
       .filter((s) => s.at >= now - MAX_BACKLOG_MS);
     const inventory = sanitizeInventory(frame.inventory);
+    // A Waypoint deferring to an agent on the same machine: keep its inventory (so the
+    // pairing stays current) but drop samples an older agent may still send.
+    if (this.sameBox.isDeferring(agentId)) samples.length = 0;
 
     if (samples.length) {
       await this.prisma.agentHealthSample.createMany({
@@ -171,6 +190,8 @@ export class HealthService implements OnModuleInit {
       // Inventory can arrive before the first sample: store an empty sample at epoch.
       create: { agentId, at: new Date(0), sample: {}, ...sampleData, ...invData },
     });
+    // New inventory can pair (or unpair) a Waypoint with an agent on the same box.
+    if (inventory) void this.sameBox.refresh().catch(() => undefined);
   }
 
   // ── Roles ─────────────────────────────────────────────────────────────────
@@ -239,6 +260,10 @@ export class HealthService implements OnModuleInit {
       include: { health: true, updateStatus: true },
       orderBy: { name: 'asc' },
     });
+    // One row per machine: a Waypoint deferring to an endpoint agent on the same box
+    // is left out of the list (and so out of alerts). Its own page still opens.
+    const visible = onlyAgentId ? agents : agents.filter((a) => !this.sameBox.isDeferring(a.id));
+    agents.splice(0, agents.length, ...visible);
     if (!agents.length) return [];
     const ids = agents.map((a) => a.id);
     const idFilter = { agentId: { in: ids } };
@@ -357,6 +382,9 @@ export class HealthService implements OnModuleInit {
           month: availability(30 * 86_400, (monthBy.get(a.id) ?? 0) + (recentOnlineBy.get(a.id) ?? 0), now, a.createdAt),
         },
         updates: toUpdateStatus(a.updateStatus as StoredStatus | null),
+        mode: a.mode,
+        alsoRunning: this.sameBox.companionsOf(a.id),
+        deferredTo: this.sameBox.deferredTo(a.id),
       };
     });
   }

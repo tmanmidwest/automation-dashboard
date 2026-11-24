@@ -67,6 +67,36 @@ The kind is detected automatically: a battery, macOS, or desktop Windows means w
 Windows Server means server; anything else is a server. Change it per machine on its Health page.
 The change is stored in `Agent.healthRole`, and "Auto" clears it.
 
+## Waypoint and agent on one machine
+
+A Waypoint and an endpoint agent can run on the same machine. They are separate services with
+separate credentials, and both carry the health and OS-update modules. Without a rule, that machine
+would show twice on Health, alert twice and be offered twice for installs.
+
+When an endpoint agent runs on the same machine, the Waypoint **defers** to it:
+
+- **Same machine** means the same OS hostname (case-insensitive, domain dropped) **and** at least one
+  shared physical MAC from the agents' inventory. Random or virtual MACs (locally administered) never
+  count, and a name alone is never enough.
+- The deferring Waypoint is left off the Health list, alerts and Health → Updates. The endpoint
+  agent's row says *Also running: pi-gateway01 (Waypoint)*. The Waypoint's own page still opens, with
+  a note pointing to the agent that covers the machine.
+- Cerebro sets the Waypoint's health cadence to 0 (`health-config`), so it stops sampling. It still
+  sends inventory, which keeps the pairing current. Its Fabric routes are untouched.
+- Installs and restarts aimed at the Waypoint are refused, because two package managers on one box
+  would fight over the apt/dpkg lock. A schedule that lists the Waypoint runs on the endpoint agent
+  instead.
+- A Waypoint with no endpoint agent beside it reports as before. If the endpoint agent is removed,
+  or goes silent for over an hour while the Waypoint stays online, the Waypoint takes health back
+  within a minute.
+
+The pairing is recomputed every minute and whenever an agent sends inventory
+(`apps/server/src/fabric/same-box.ts`, `same-box.service.ts`). Nothing is stored and no history is
+deleted.
+
+The Waypoint's agent still runs its own background OS-update *check* every 6 hours. Its result is
+hidden. To stop it, set `CEREBRO_OS_UPDATES=off` in the Waypoint's `config.env`.
+
 ## Alerts
 
 `HealthAlertsService` checks every minute, using the same assessment the page shows:
@@ -116,7 +146,8 @@ how much time one sample can claim.
 - Server: `apps/server/src/health/`, including `health-assess.ts` (pure scoring and role logic),
   `health.service.ts` (ingest and read side), `health-retention.service.ts` and
   `health-alerts.service.ts`. Fabric hands health frames over through hooks set on
-  `AgentRegistryService`, so Fabric doesn't depend on Health.
+  `AgentRegistryService`, so Fabric doesn't depend on Health. Same-machine pairing of a Waypoint
+  with an endpoint agent: `apps/server/src/fabric/same-box.ts` + `same-box.service.ts`.
 - Tables: `AgentHealth` (latest snapshot + inventory), `AgentHealthSample` (raw) and
   `AgentHealthRollup` (5m/1h). Migration `0055_agent_health`.
 - Web: `apps/web/src/pages/Health.tsx`, `HealthDetail.tsx`, `components/health/`.

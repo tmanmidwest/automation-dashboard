@@ -172,6 +172,22 @@ export interface HealthMachine {
   availability: { day: HealthAvailability; week: HealthAvailability; month: HealthAvailability };
   /** OS updates the agent found (agent 0.7+); null before its first report. */
   updates: OsUpdateStatus | null;
+  /** Fabric mode of this agent: "endpoint" or "waypoint". */
+  mode?: string;
+  /**
+   * Waypoints running on this same machine that defer to this agent (same hostname
+   * + a shared physical MAC). Their health is hidden and switched off.
+   */
+  alsoRunning?: HealthPeer[];
+  /** Set on a Waypoint that defers to an endpoint agent on the same machine. */
+  deferredTo?: HealthPeer | null;
+}
+
+/** Another Cerebro agent on the same machine. */
+export interface HealthPeer {
+  agentId: string;
+  name: string;
+  mode: string;
 }
 
 export interface HealthFleet {
