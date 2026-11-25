@@ -1,7 +1,12 @@
 // OS updates — pending updates found by the Cerebro agent, installs, restarts and
 // update schedules. See docs/os-updates.md.
 
-export type OsUpdateScope = 'security' | 'all';
+/**
+ * security / all: what a regular upgrade installs. full (apt only, agent 0.8+): also
+ * the held-back packages, with a full upgrade (dist-upgrade) that can add or remove
+ * packages. Schedules use security / all only.
+ */
+export type OsUpdateScope = 'security' | 'all' | 'full';
 export type OsUpdateReboot = 'never' | 'if-needed' | 'always';
 /** The box's CEREBRO_OS_UPDATES: on (default), report (check only) or off. */
 export type OsUpdateMode = 'on' | 'report' | 'off';
@@ -21,6 +26,11 @@ export interface OsUpdatePackage {
   restart?: boolean;
   /** Can't be installed unattended (macOS on Apple silicon). */
   needsUser?: boolean;
+  /**
+   * apt: held back. A regular upgrade ("All updates") won't install it because it
+   * needs other packages added or removed; only a full upgrade does.
+   */
+  heldBack?: boolean;
 }
 
 /** What the agent reports about its last install / restart command. */
@@ -46,8 +56,13 @@ export interface OsUpdateReport {
   error?: string;
   note?: string;
   packages: OsUpdatePackage[];
+  /** What "All updates" / "Security only" would install (agent 0.8+: held-back packages excluded). */
   total: number;
   security: number;
+  /** apt, agent 0.8+: packages only a full upgrade installs. */
+  heldBack?: number;
+  /** apt, agent 0.8+: packages a full upgrade would remove. */
+  fullUpgradeRemoves?: string[];
   securityKnown: boolean;
   rebootRequired: boolean;
   rebootReason?: string;
@@ -120,6 +135,10 @@ export interface OsUpdateStatus {
   note: string | null;
   total: number;
   security: number;
+  /** Held-back packages (apt): only "Include held-back (full upgrade)" installs them. Not in total. */
+  heldBack: number;
+  /** Packages that full upgrade would remove. */
+  fullUpgradeRemoves: string[];
   securityKnown: boolean;
   rebootRequired: boolean;
   rebootReason: string | null;
@@ -227,6 +246,8 @@ export interface OsUpdateMachine extends OsUpdateStatus {
   agentVersion: string | null;
   /** Agent too old to report updates (before 0.7). */
   agentTooOld: boolean;
+  /** Can take scope "full" (apt, not Proxmox, agent 0.8+). */
+  canFullUpgrade: boolean;
   proxmoxGuest: OsUpdateProxmoxGuest | null;
   lastRun: OsUpdateRun | null;
 }

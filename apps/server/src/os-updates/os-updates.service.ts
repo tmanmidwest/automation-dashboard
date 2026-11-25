@@ -35,6 +35,7 @@ import { detectRole, normalizeRole } from '../health/health-assess';
 import {
   describeTiming,
   isReboot,
+  isScheduleScope,
   isScope,
   isWindowStart,
   mergeReport,
@@ -50,6 +51,8 @@ import {
 
 /** Oldest agent that reports updates. */
 const MIN_AGENT = [0, 7, 0];
+/** Oldest agent that reports held-back packages and takes scope "full". */
+const MIN_AGENT_FULL = [0, 8, 0];
 /** Output kept per run. */
 const MAX_LOG_LINES = 5000;
 /** A command the agent never acknowledged. */
@@ -303,7 +306,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       const guest = (inv?.macs ?? []).map((m) => guests.get(m.toLowerCase())).find(Boolean) ?? null;
       const last = lastBy.get(a.id);
       const base = st ?? {
-        checkedAt: null, manager: null, supported: false, error: null, note: null, total: 0, security: 0, securityKnown: false,
+        checkedAt: null, manager: null, supported: false, error: null, note: null, total: 0, security: 0, heldBack: 0, fullUpgradeRemoves: [], securityKnown: false,
         rebootRequired: false, rebootReason: null, securitySince: null, rebootSince: null, canInstall: false, proxmox: false,
         mode: 'on' as const, installing: null, checking: false,
       };
@@ -316,6 +319,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         role,
         agentVersion: a.agentVersion,
         agentTooOld: !!a.agentVersion && !versionAtLeast(a.agentVersion, MIN_AGENT),
+        canFullUpgrade: base.manager === 'apt' && !base.proxmox && versionAtLeast(a.agentVersion, MIN_AGENT_FULL),
         proxmoxGuest: guest,
         lastRun: last ? this.toRun(last, names) : null,
       };
@@ -374,7 +378,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   /** Queue installs; machines that can't take one are reported back, not queued. */
   async requestInstall(body: OsUpdateInstallRequest, user: SessionUser | undefined): Promise<{ runs: OsUpdateRun[]; skipped: { agentId: string; name: string; reason: string }[] }> {
     if (!body || !Array.isArray(body.agentIds) || !body.agentIds.length) throw new BadRequestException('Pick at least one machine.');
-    if (!isScope(body.scope)) throw new BadRequestException('scope must be security or all.');
+    if (!isScope(body.scope)) throw new BadRequestException('scope must be security, all or full.');
     if (!isReboot(body.reboot)) throw new BadRequestException('reboot must be never, if-needed or always.');
     return this.queue('install', body.agentIds, { scope: body.scope, reboot: body.reboot, snapshot: !!body.snapshot, at: body.at }, user);
   }
@@ -420,7 +424,13 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         skipped.push({ agentId: id, name: id, reason: 'Not found.' });
         continue;
       }
-      const why = this.cannotRun(m, kind, later);
+      const why =
+        this.cannotRun(m, kind, later) ??
+        (kind === 'install' && opts.scope === 'full' && !m.canFullUpgrade
+          ? m.manager !== 'apt' || m.proxmox
+            ? 'Full upgrade is only for apt machines (Proxmox already gets one with "All updates"); use All updates.'
+            : `Full upgrade needs agent ${MIN_AGENT_FULL.join('.')} or newer; it updates itself shortly after Cerebro is redeployed.`
+          : null);
       if (why) {
         skipped.push({ agentId: id, name: m.name, reason: why });
         continue;
@@ -438,7 +448,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
           scheduledFor: at,
           windowEnd: new Date(at.getTime() + (later ? LATER_WINDOW_MS : NOW_WINDOW_MS)),
           requestedBy: user?.email ?? null,
-          pendingBefore: kind === 'install' ? (opts.scope === 'security' ? m.security : m.total) : null,
+          pendingBefore: kind === 'install' ? (opts.scope === 'security' ? m.security : opts.scope === 'full' ? m.total + m.heldBack : m.total) : null,
         },
         include: { agent: { select: { name: true } } },
       });
@@ -688,7 +698,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       hour: s.hour,
       minute: s.minute,
       windowHours: s.windowHours,
-      scope: isScope(s.scope) ? s.scope : 'security',
+      scope: isScheduleScope(s.scope) ? s.scope : 'security',
       reboot: isReboot(s.reboot) ? s.reboot : 'if-needed',
       snapshot: s.snapshot,
       rings,

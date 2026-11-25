@@ -6,7 +6,7 @@ package main
 // manager (apt, dnf/yum, zypper, pacman, apk, Windows Update, softwareupdate),
 // reports them to Cerebro, and — when Cerebro sends a signed command — installs
 // them and optionally restarts the machine. Cerebro never sends a command line:
-// it sends "install, scope=security|all, reboot=never|if-needed|always", and the
+// it sends "install, scope=security|all|full, reboot=never|if-needed|always", and the
 // agent runs its own fixed commands for that (updates_<os>.go).
 //
 // The box can opt out with CEREBRO_OS_UPDATES in config.env (or the environment):
@@ -57,6 +57,9 @@ type pkgUpdate struct {
 	Restart bool `json:"restart,omitempty"`
 	// NeedsUser: can't be installed unattended (macOS system updates on Apple silicon).
 	NeedsUser bool `json:"needsUser,omitempty"`
+	// HeldBack (apt): only a full upgrade installs it, because it needs another
+	// package added or removed. "All updates" leaves it; scope "full" installs it.
+	HeldBack bool `json:"heldBack,omitempty"`
 }
 
 type updatesRun struct {
@@ -78,8 +81,13 @@ type updatesReport struct {
 	Error     string      `json:"error,omitempty"`
 	Note      string      `json:"note,omitempty"`
 	Packages  []pkgUpdate `json:"packages"`
-	Total     int         `json:"total"`
-	Security  int         `json:"security"`
+	// Total / Security count what "All updates" / "Security only" will install;
+	// HeldBack counts packages only a full upgrade installs (not in Total).
+	Total    int `json:"total"`
+	Security int `json:"security"`
+	HeldBack int `json:"heldBack,omitempty"`
+	// FullUpgradeRemoves: packages a full upgrade would remove (apt), shown before opting in.
+	FullUpgradeRemoves []string `json:"fullUpgradeRemoves,omitempty"`
 	// SecurityKnown: the package manager tells security fixes apart (pacman/apk don't).
 	SecurityKnown  bool        `json:"securityKnown"`
 	RebootRequired bool        `json:"rebootRequired"`
@@ -289,7 +297,7 @@ func (u *updater) install(runID, scope, reboot string) {
 		fail(fmt.Sprintf("Installs are turned off on this machine (CEREBRO_OS_UPDATES=%s).", u.mode))
 		return
 	}
-	if scope != "security" && scope != "all" {
+	if scope != "security" && scope != "all" && scope != "full" {
 		fail("Unknown scope.")
 		return
 	}
@@ -318,7 +326,7 @@ func (u *updater) install(runID, scope, reboot string) {
 	log.Printf("installing updates (run %s, scope %s, restart %s)", runID, scope, reboot)
 
 	lw := newRunLog(u, runID)
-	lw.line(fmt.Sprintf("Cerebro agent %s: installing %s updates on %s", agentVersion, map[string]string{"security": "security", "all": "all"}[scope], hostname()))
+	lw.line(fmt.Sprintf("Cerebro agent %s: installing %s on %s", agentVersion, map[string]string{"security": "security updates", "all": "all updates", "full": "all updates, including held-back ones (full upgrade)"}[scope], hostname()))
 	ctx, cancel := context.WithTimeout(context.Background(), updatesInstallTimeout)
 	installed, err := safeInstall(ctx, u.impl, scope, lw.line)
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
@@ -414,6 +422,12 @@ func safeInstall(ctx context.Context, impl osUpdater, scope string, logf func(st
 			n, err = -1, fmt.Errorf("install crashed: %v", r)
 		}
 	}()
+	if scope == "full" {
+		// Only apt holds packages back; every other manager installs everything with "all".
+		if f, ok := impl.(interface{ hasFullUpgrade() bool }); !ok || !f.hasFullUpgrade() {
+			scope = "all"
+		}
+	}
 	return impl.install(ctx, scope, logf)
 }
 

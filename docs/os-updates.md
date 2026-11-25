@@ -13,7 +13,7 @@ The agent asks the machine's own package manager, and changes nothing while it c
 
 | System | How it checks | Security updates marked | Restart needed |
 | --- | --- | --- | --- |
-| Debian, Ubuntu, Raspberry Pi OS, Proxmox VE | `apt-get update`, then a simulated `dist-upgrade` | Yes (from `*-security` origins) | `/var/run/reboot-required`, or a newer kernel in `/boot` than the one running |
+| Debian, Ubuntu, Raspberry Pi OS, Proxmox VE | `apt-get update`, then a simulated `dist-upgrade` and a simulated `upgrade --with-new-pkgs` (see *Held back* below) | Yes (from `*-security` origins) | `/var/run/reboot-required`, or a newer kernel in `/boot` than the one running |
 | RHEL, Rocky, Alma, Fedora | `dnf` / `yum check-update` plus `updateinfo --security` | Yes, with severity | `needs-restarting -r`, or the newer-kernel check |
 | openSUSE / SLES | `zypper list-updates` plus security patches | Yes (patches) | `zypper needs-rebooting` |
 | Arch | `checkupdates` (from pacman-contrib) | No | Newer-kernel check |
@@ -26,12 +26,33 @@ The agent asks the machine's own package manager, and changes nothing while it c
 - Cerebro remembers when security updates first appeared on a machine and when a restart first
   became necessary, so it can say how long they have been waiting.
 - The agent sends at most 400 packages per machine, security updates first.
+- **Newer kernel** means a higher kernel version of the same build as the running one. A Raspberry
+  Pi has several builds of each kernel installed (`+rpt-rpi-2712` for a Pi 5, `+rpt-rpi-v8` for
+  older Pis) and boots only one, so another build of the same version never asks for a restart
+  (agent 0.8+; older agents could show a restart that never cleared on a Pi 5).
+
+### Held back (apt)
+
+Some upgrades need another package added or removed, for example when a library is renamed
+(`libcamera0.6` → `libcamera0.8`). A regular upgrade (`apt-get upgrade --with-new-pkgs`, what
+*All updates* runs) leaves those alone; only a full upgrade (`apt-get dist-upgrade`) installs them.
+The agent (0.8+) simulates both and marks the difference as **held back**:
+
+- The count and *security* count show what *All updates* / *Security only* will actually install.
+  Held-back packages are counted apart ("9 held back") and tagged in the package list, so they don't
+  look like updates that failed to install.
+- To install them, tick **Include held-back (full upgrade)** in the Install dialog (with *All
+  updates*). The dialog lists any packages the full upgrade would remove first. It's never on by
+  default and schedules never do it.
+- Proxmox VE always installs with `dist-upgrade`, so nothing is held back there.
+- Agents before 0.8 count held-back packages in the total, as before; they update themselves.
 
 ## Installing
 
 Select machines on the Updates tab, or open one machine's page, and pick **Install…**:
 
-- **What to install:** *Security only* or *All updates*.
+- **What to install:** *Security only* or *All updates*, plus *Include held-back (full upgrade)*
+  on apt machines that have held-back packages (see above).
 - **Afterwards:** *Restart if needed* (the default), *Don't restart*, or *Always restart*. A restart
   happens about a minute after the install finishes, and only if the install succeeded.
 - **Proxmox snapshot first:** shown for machines Cerebro can match to a Proxmox VM or container (by
@@ -47,7 +68,7 @@ What runs on each system:
 
 | System | Security only | All updates |
 | --- | --- | --- |
-| apt | `apt-get install --only-upgrade <the security packages>` | `apt-get upgrade --with-new-pkgs`. On **Proxmox VE** this is `apt-get dist-upgrade`, which Proxmox requires. |
+| apt | `apt-get install --only-upgrade <the security packages that aren't held back>` | `apt-get upgrade --with-new-pkgs`. On **Proxmox VE** this is `apt-get dist-upgrade`, which Proxmox requires. With *Include held-back*: `apt-get dist-upgrade`. |
 | dnf / yum | `dnf upgrade --security` | `dnf upgrade` |
 | zypper | `zypper patch --category security` | `zypper update` |
 | pacman | Not possible (pick All) | `pacman -Syu` |
@@ -83,7 +104,8 @@ the window stays open, what to install, and whether to restart and snapshot.
 
 ## Safety
 
-- **Cerebro sends options, never commands.** The command says install with scope security or all,
+- **Cerebro sends options, never commands.** The command says install with scope security, all or
+  full (apt full upgrade, agent 0.8+),
   plus a restart choice, and the agent runs its own fixed commands for that. Cerebro can't make the
   agent run arbitrary shell.
 - **Signed commands.** With update signing in **vault** mode (Fabric → Update signing), every

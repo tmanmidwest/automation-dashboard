@@ -899,6 +899,10 @@ model AgentUpdateStatus {
   note           String?
   total          Int       @default(0)
   security       Int       @default(0)
+  /// apt: packages only a full upgrade installs (not in total). Agent 0.8+.
+  heldBack       Int       @default(0)
+  /// apt: packages a full upgrade would remove.
+  fullUpgradeRemoves String[] @default([])
   /// False when the package manager can't tell security fixes apart (pacman, apk).
   securityKnown  Boolean   @default(false)
   rebootRequired Boolean   @default(false)

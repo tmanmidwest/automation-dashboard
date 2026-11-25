@@ -50,12 +50,15 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 		if out, code, err := runOut(ctx, aptEnv, "apt-get", append(aptOpts, "update")...); err != nil || code != 0 {
 			rep.Note = "Couldn't refresh the package lists, so this may be out of date: " + lastLines(out, 2)
 		}
-		out, code, err := runOut(ctx, aptEnv, "apt-get", "-s", "-q", "-o", "Debug::NoLocking=1", "dist-upgrade")
-		if err != nil || code != 0 {
-			rep.Error = "apt-get couldn't work out the upgrade: " + lastLines(out, 3)
+		plan, err := aptPlan(ctx)
+		if err != nil {
+			rep.Error = err.Error()
 			break
 		}
-		rep.Packages = parseAptSim(out)
+		rep.Packages = plan.packages
+		if plan.heldBack > 0 {
+			rep.FullUpgradeRemoves = plan.removes
+		}
 	case "dnf", "yum":
 		out, code, err := runOut(ctx, nil, mgr, "-q", "check-update")
 		if err != nil || (code != 0 && code != 100) {
@@ -121,8 +124,18 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 	if mgr == "zypper" {
 		rep.Total = len(rep.Packages) - rep.Security
 	} else {
-		rep.Total = len(rep.Packages)
-		rep.Security = countSecurity(rep.Packages)
+		// Total / Security count what an install will actually do; packages only a
+		// full upgrade installs are counted apart, so they don't look stuck.
+		for _, p := range rep.Packages {
+			if p.HeldBack {
+				rep.HeldBack++
+				continue
+			}
+			rep.Total++
+			if p.Security {
+				rep.Security++
+			}
+		}
 	}
 	rep.RebootRequired, rep.RebootReason = linuxRebootRequired(ctx, mgr)
 	return rep
@@ -182,7 +195,7 @@ func linuxRebootRequired(ctx context.Context, mgr string) (bool, string) {
 	// Only judge when the running kernel is one of the installed ones (Pi firmware
 	// kernels, containers and custom kernels don't show up there).
 	if found {
-		if newest := newestKernel(vers); newest != "" && newest != running && naturalLess(running, newest) {
+		if newest := newerKernelInstalled(running, vers); newest != "" {
 			return true, fmt.Sprintf("Kernel %s is installed; %s is running", newest, running)
 		}
 	}
@@ -196,12 +209,14 @@ func (linuxUpdater) install(ctx context.Context, scope string, logf func(string)
 		if err := runStream(ctx, aptEnv, logf, "apt-get", append(aptOpts, "update")...); err != nil {
 			logf("Package lists didn't refresh; carrying on with what's cached.")
 		}
-		sim, _, _ := runOut(ctx, aptEnv, "apt-get", "-s", "-q", "-o", "Debug::NoLocking=1", "dist-upgrade")
-		pending := parseAptSim(sim)
+		plan, perr := aptPlan(ctx)
+		if perr != nil {
+			return -1, perr
+		}
 		if scope == "security" {
 			var names []string
-			for _, p := range pending {
-				if p.Security && p.Current != "" { // only upgrade what's installed
+			for _, p := range plan.packages {
+				if p.Security && p.Current != "" && !p.HeldBack { // only upgrade what's installed
 					names = append(names, p.Name)
 				}
 			}
@@ -213,18 +228,38 @@ func (linuxUpdater) install(ctx context.Context, scope string, logf func(string)
 			args := append(append([]string{}, aptOpts...), "-y", "install", "--only-upgrade")
 			return len(names), runStream(ctx, aptEnv, logf, "apt-get", append(args, names...)...)
 		}
-		if len(pending) == 0 {
-			logf("Everything is already up to date.")
+		n := 0
+		for _, p := range plan.packages {
+			if scope == "full" || !p.HeldBack {
+				n++
+			}
+		}
+		if n == 0 {
+			if plan.heldBack > 0 {
+				logf(fmt.Sprintf("Nothing to install with a regular upgrade; %d held-back package(s) need a full upgrade.", plan.heldBack))
+			} else {
+				logf("Everything is already up to date.")
+			}
 			return 0, nil
 		}
 		args := append(append([]string{}, aptOpts...), "-y")
-		if isProxmox() {
+		switch {
+		case plan.proxmox:
 			logf("Proxmox VE: using dist-upgrade, as Proxmox requires.")
 			args = append(args, "dist-upgrade")
-		} else {
+		case scope == "full":
+			logf("Full upgrade (dist-upgrade): includes held-back packages; may add or remove packages.")
+			if len(plan.removes) > 0 {
+				logf("It will remove: " + strings.Join(plan.removes, ", "))
+			}
+			args = append(args, "dist-upgrade")
+		default:
+			if plan.heldBack > 0 {
+				logf(fmt.Sprintf("Leaving %d held-back package(s); choose \"Include held-back\" to install them with a full upgrade.", plan.heldBack))
+			}
 			args = append(args, "--with-new-pkgs", "upgrade")
 		}
-		return len(pending), runStream(ctx, aptEnv, logf, "apt-get", args...)
+		return n, runStream(ctx, aptEnv, logf, "apt-get", args...)
 	case "dnf":
 		if scope == "security" {
 			return -1, runStream(ctx, nil, logf, "dnf", "-y", "upgrade", "--security")
@@ -286,3 +321,46 @@ func (linuxUpdater) reboot() error {
 	}
 	return fmt.Errorf("no shutdown, systemctl or reboot command found")
 }
+
+// aptPlanResult is what apt would do, from two simulations: the full upgrade
+// (dist-upgrade, everything with a newer version) and the plain upgrade
+// (`upgrade --with-new-pkgs`, what "All updates" runs off Proxmox). Packages only
+// in the first are held back: they need another package added or removed.
+type aptPlanResult struct {
+	packages []pkgUpdate
+	heldBack int
+	removes  []string // what a full upgrade would remove
+	proxmox  bool
+}
+
+func aptPlan(ctx context.Context) (aptPlanResult, error) {
+	sim := func(args ...string) (string, error) {
+		out, code, err := runOut(ctx, aptEnv, "apt-get", append([]string{"-s", "-q", "-o", "Debug::NoLocking=1"}, args...)...)
+		if err != nil || code != 0 {
+			return "", fmt.Errorf("apt-get couldn't work out the upgrade: %s", lastLines(out, 3))
+		}
+		return out, nil
+	}
+	full, err := sim("dist-upgrade")
+	if err != nil {
+		return aptPlanResult{}, err
+	}
+	res := aptPlanResult{packages: parseAptSim(full), removes: parseAptRemovals(full), proxmox: isProxmox()}
+	if res.proxmox {
+		return res, nil // Proxmox always installs with dist-upgrade: nothing is held back
+	}
+	plain, err := sim("--with-new-pkgs", "upgrade")
+	if err != nil {
+		return aptPlanResult{}, err
+	}
+	res.packages = markHeldBack(res.packages, parseAptSim(plain))
+	for _, p := range res.packages {
+		if p.HeldBack {
+			res.heldBack++
+		}
+	}
+	return res, nil
+}
+
+// hasFullUpgrade: apt is the only manager here with a held-back / full-upgrade split.
+func (linuxUpdater) hasFullUpgrade() bool { return linuxManager() == "apt-get" }
