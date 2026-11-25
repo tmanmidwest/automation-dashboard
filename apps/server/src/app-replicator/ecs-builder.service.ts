@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { runSsh } from '../connectors/docker/docker-ssh';
+import { runSsh, shellQuote } from '../connectors/docker/docker-ssh';
 import { dockerHostVerifier } from '../connectors/docker/docker-hostkey';
 import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../common/git-safety';
 import { dockerTargetFrom, type DockerTarget } from './docker-target';
@@ -96,40 +96,40 @@ export class EcsBuilderService {
     const redact = (s: string) => (cred?.secret ? (s || '').split(cred.secret).join('***') : s);
 
     try {
-      await runSsh(ssh, `mkdir -p '${sq(base)}'`);
+      await runSsh(ssh, `mkdir -p ${shellQuote(base)}`);
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(input.source.gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        const w = await runSsh(ssh, `cat > '${sq(credFile)}' && chmod 600 '${sq(credFile)}'`, line);
+        const w = await runSsh(ssh, `cat > ${shellQuote(credFile)} && chmod 600 ${shellQuote(credFile)}`, line);
         if (w.code !== 0) throw new Error('Failed to write git credentials on the builder host.');
       }
 
-      const isRepo = (await runSsh(ssh, `test -d '${sq(dir)}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
+      const isRepo = (await runSsh(ssh, `test -d ${shellQuote(`${dir}/.git`)} && echo yes || echo no`)).stdout.trim() === 'yes';
       onPhase(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} git -C '${sq(dir)}' ${helper} fetch --all --prune && git -C '${sq(dir)}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${sq(dir)}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${sq(dir)}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
-        : await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${sq(dir)}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(input.source.gitUrl)}' '${sq(dir)}'`, undefined, GIT_TIMEOUT_MS);
+        ? await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} git -C ${shellQuote(dir)} ${helper} fetch --all --prune && git -C ${shellQuote(dir)} checkout ${ref ? shellQuote(ref) : 'HEAD'} && git -C ${shellQuote(dir)} ${helper} reset --hard ${ref ? shellQuote(`origin/${ref}`) : '@{u}'} 2>/dev/null || git -C ${shellQuote(dir)} ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(ssh, `${GIT_SAFE_SH_PREFIX} rm -rf ${shellQuote(dir)} && git ${helper} clone ${ref ? `--branch ${shellQuote(ref)}` : ''} -- ${shellQuote(input.source.gitUrl)} ${shellQuote(dir)}`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) throw new Error(`Git ${isRepo ? 'update' : 'clone'} failed: ${redact(tail(g.stderr || g.stdout, 2000))}`);
 
       onPhase('Logging in to ECR…');
-      const login = await runSsh(ssh, `docker login --username '${sq(input.username)}' --password-stdin '${sq(input.registryEndpoint)}'`, `${input.password}\n`);
+      const login = await runSsh(ssh, `docker login --username ${shellQuote(input.username)} --password-stdin ${shellQuote(input.registryEndpoint)}`, `${input.password}\n`);
       if (login.code !== 0) throw new Error(`docker login to ECR failed: ${tail(login.stderr || login.stdout, 1000)}`);
 
       onPhase('Building image…');
       const noCache = input.forceRebuild ? '--no-cache --pull ' : '';
-      const b = await runSsh(ssh, `docker build ${noCache}-t '${sq(input.imageRef)}' '${sq(contextDir)}'`, undefined, BUILD_TIMEOUT_MS);
+      const b = await runSsh(ssh, `docker build ${noCache}-t ${shellQuote(input.imageRef)} ${shellQuote(contextDir)}`, undefined, BUILD_TIMEOUT_MS);
       if (b.code !== 0) throw new Error(`Image build failed: ${tail(b.stderr || b.stdout, 3000)}`);
 
       onPhase('Pushing to ECR…');
-      const p = await runSsh(ssh, `docker push '${sq(input.imageRef)}'`, undefined, PUSH_TIMEOUT_MS);
+      const p = await runSsh(ssh, `docker push ${shellQuote(input.imageRef)}`, undefined, PUSH_TIMEOUT_MS);
       if (p.code !== 0) throw new Error(`docker push failed: ${tail(p.stderr || p.stdout, 2000)}`);
 
-      const commit = (await runSsh(ssh, `git -C '${sq(dir)}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
+      const commit = (await runSsh(ssh, `git -C ${shellQuote(dir)} rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
       return { commit: commit && /^[0-9a-f]{40}$/i.test(commit) ? commit : null };
     } finally {
-      await runSsh(ssh, `rm -f '${sq(credFile)}'`).catch(() => { /* best-effort */ });
+      await runSsh(ssh, `rm -f ${shellQuote(credFile)}`).catch(() => { /* best-effort */ });
       // Reclaim the local build image so the builder host doesn't accumulate layers.
-      await runSsh(ssh, `docker image rm '${sq(input.imageRef)}' 2>/dev/null || true`).catch(() => {});
+      await runSsh(ssh, `docker image rm ${shellQuote(input.imageRef)} 2>/dev/null || true`).catch(() => {});
     }
   }
 }

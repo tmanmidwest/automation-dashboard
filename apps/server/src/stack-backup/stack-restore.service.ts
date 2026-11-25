@@ -1305,7 +1305,7 @@ export class StackRestoreService {
 /** Does a path exist on the destination host? Best-effort; false on any doubt. */
 async function pathExists(ssh: SshConfig, path: string): Promise<boolean> {
   if (!path.startsWith('/') || path.includes("'")) return false;
-  const res = await runSsh(ssh, `test -e '${path}' && echo yes || echo no`).catch(() => null);
+  const res = await runSsh(ssh, `test -e ${shellQuote(path)} && echo yes || echo no`).catch(() => null);
   return res?.stdout.trim() === 'yes';
 }
 
