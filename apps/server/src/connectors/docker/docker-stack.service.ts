@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SecretsService } from '../../secrets/secrets.service';
-import { runSsh, type SshConfig } from './docker-ssh';
+import { runSsh, shellQuote, type SshConfig } from './docker-ssh';
 import { dockerHostVerifier, dockerHostKeyPinKey } from './docker-hostkey';
 import { assertSafeGitUrl, assertSafeGitRef, GIT_SAFE_SH_PREFIX } from '../../common/git-safety';
 import type { GitCredential } from '@cerebro/shared';
@@ -181,7 +181,7 @@ export class DockerStackService {
     const dir = `${trimSlash(target.stacksDir)}/${project}`;
     // Guard against a stray empty stacksDir wiping something unexpected.
     if (!dir.includes(`/${project}`)) return;
-    await runSsh(target.ssh, `rm -rf '${dir}'`).catch(() => { /* best-effort */ });
+    await runSsh(target.ssh, `rm -rf ${shellQuote(dir)}`).catch(() => { /* best-effort */ });
   }
 
   /**
@@ -213,25 +213,25 @@ export class DockerStackService {
     try {
       // 1) write the compose + .env (stdin → cat, so no shell-escaping of contents).
       //    Always write .env (even empty) so stale variables don't linger.
-      const w1 = await runSsh(target.ssh, `mkdir -p '${dir}' && cat > '${file}'`, compose);
+      const w1 = await runSsh(target.ssh, `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(file)}`, compose);
       if (w1.code !== 0) throw new Error(w1.stderr.trim() || 'Failed to write the compose file on the host.');
-      const w2 = await runSsh(target.ssh, `cat > '${envFile}'`, env);
+      const w2 = await runSsh(target.ssh, `cat > ${shellQuote(envFile)}`, env);
       if (w2.code !== 0) throw new Error(w2.stderr.trim() || 'Failed to write the .env file on the host.');
 
       // Cerebro's override (mounts / extra env) beside the compose, or remove a stale one.
       const overrideFile = `${dir}/cerebro.override.yml`;
-      let fileArgs = `-f '${file}'`;
+      let fileArgs = `-f ${shellQuote(file)}`;
       if (overrideCompose != null && overrideCompose.trim() !== '') {
-        const wo = await runSsh(target.ssh, `cat > '${overrideFile}'`, overrideCompose);
+        const wo = await runSsh(target.ssh, `cat > ${shellQuote(overrideFile)}`, overrideCompose);
         if (wo.code !== 0) throw new Error('Failed to write the compose override file on the host.');
-        fileArgs += ` -f '${overrideFile}'`;
+        fileArgs += ` -f ${shellQuote(overrideFile)}`;
       } else {
-        await runSsh(target.ssh, `rm -f '${overrideFile}'`).catch(() => { /* best-effort */ });
+        await runSsh(target.ssh, `rm -f ${shellQuote(overrideFile)}`).catch(() => { /* best-effort */ });
       }
 
       // 2) validate before applying, so a YAML/compose error fails cleanly.
       onProgress?.('Validating compose…');
-      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} config -q`);
+      const cfg = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${fileArgs} config -q`);
       if (cfg.code !== 0) {
         const detail = tail(cfg.stderr || cfg.stdout, 2000);
         await this.record(instanceId, project, 'error', detail);
@@ -240,7 +240,7 @@ export class DockerStackService {
 
       // 3) optional forced rebuild of locally-built images, then docker compose up -d [flags]
       if (opts.forceRebuild) {
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
+        const b = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${fileArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
@@ -249,7 +249,7 @@ export class DockerStackService {
       }
       const flags = composeUpFlags(opts);
       onProgress?.('Pulling images and starting containers…');
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' ${fileArgs} up -d ${flags}`.trim(), undefined, UP_TIMEOUT_MS);
+      const up = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${fileArgs} up -d ${flags}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);
@@ -308,21 +308,21 @@ export class DockerStackService {
 
     await this.saveGit(instanceId, name, src);
     try {
-      await runSsh(target.ssh, `mkdir -p '${base}'`);
+      await runSsh(target.ssh, `mkdir -p ${shellQuote(base)}`);
       // Write the credential file over stdin so the token never appears in a command line.
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(src.gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        const w = await runSsh(target.ssh, `cat > '${credFile}' && chmod 600 '${credFile}'`, line);
+        const w = await runSsh(target.ssh, `cat > ${shellQuote(credFile)} && chmod 600 ${shellQuote(credFile)}`, line);
         if (w.code !== 0) throw new Error('Failed to write git credentials on the host.');
       }
 
       // Clone (first time) or fetch + hard-reset to the ref.
-      const isRepo = (await runSsh(target.ssh, `test -d '${dir}/.git' && echo yes || echo no`)).stdout.trim() === 'yes';
+      const isRepo = (await runSsh(target.ssh, `test -d ${shellQuote(`${dir}/.git`)} && echo yes || echo no`)).stdout.trim() === 'yes';
       onProgress?.(isRepo ? 'Updating repository…' : 'Cloning repository…');
       const g = isRepo
-        ? await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ${helper} fetch --all --prune && git -C '${dir}' checkout ${ref ? `'${sq(ref)}'` : 'HEAD'} && git -C '${dir}' ${helper} reset --hard ${ref ? `'origin/${sq(ref)}'` : '@{u}'} 2>/dev/null || git -C '${dir}' ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
-        : await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${dir}' && git ${helper} clone ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(src.gitUrl)}' '${dir}'`, undefined, GIT_TIMEOUT_MS);
+        ? await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C ${shellQuote(dir)} ${helper} fetch --all --prune && git -C ${shellQuote(dir)} checkout ${ref ? shellQuote(ref) : 'HEAD'} && git -C ${shellQuote(dir)} ${helper} reset --hard ${ref ? shellQuote(`origin/${ref}`) : '@{u}'} 2>/dev/null || git -C ${shellQuote(dir)} ${helper} pull --ff-only`, undefined, GIT_TIMEOUT_MS)
+        : await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf ${shellQuote(dir)} && git ${helper} clone ${ref ? `--branch ${shellQuote(ref)}` : ''} -- ${shellQuote(src.gitUrl)} ${shellQuote(dir)}`, undefined, GIT_TIMEOUT_MS);
       if (g.code !== 0) {
         const detail = redact(tail(g.stderr || g.stdout, 2000), cred);
         await this.record(instanceId, project, 'error', detail);
@@ -333,7 +333,7 @@ export class DockerStackService {
       // actually has (e.g. `compose.yaml`) rather than assuming docker-compose.yml,
       // and remember it on the stack so down/drift/backup find the same file.
       if (!generated && !src.gitPath?.trim()) {
-        const probe = ROOT_COMPOSE_NAMES.map((f) => `[ -f '${dir}/${f}' ] && { echo '${f}'; exit 0; }`).join('; ');
+        const probe = ROOT_COMPOSE_NAMES.map((f) => `[ -f ${shellQuote(`${dir}/${f}`)} ] && { echo ${shellQuote(f)}; exit 0; }`).join('; ');
         const found = (await runSsh(target.ssh, `${probe}; true`).catch(() => null))?.stdout.trim();
         if (found && ROOT_COMPOSE_NAMES.includes(found) && found !== relCompose) {
           relCompose = found;
@@ -349,49 +349,49 @@ export class DockerStackService {
 
       // A generated compose is (re)written on every deploy, after the checkout is current.
       if (generated) {
-        const wg = await runSsh(target.ssh, `cat > '${composeFile}'`, src.generatedCompose);
+        const wg = await runSsh(target.ssh, `cat > ${shellQuote(composeFile)}`, src.generatedCompose);
         if (wg.code !== 0) throw new Error('Failed to write the generated compose file on the host.');
       } else {
-        await runSsh(target.ssh, `rm -f '${base}/${GENERATED_COMPOSE_FILE}'`).catch(() => { /* best-effort */ });
+        await runSsh(target.ssh, `rm -f ${shellQuote(`${base}/${GENERATED_COMPOSE_FILE}`)}`).catch(() => { /* best-effort */ });
       }
 
       // A per-deployment rewrite of the repo's compose (e.g. a moved hardcoded
       // port): read it from the fresh checkout, rewrite, and use the copy instead.
       const rewrittenName = `.cerebro-${composeFile.replace(/^.*\//, '')}`;
       if (!generated && src.rewriteCompose) {
-        const orig = await runSsh(target.ssh, `cat '${composeFile}'`);
+        const orig = await runSsh(target.ssh, `cat ${shellQuote(composeFile)}`);
         if (orig.code !== 0) throw new Error(`Could not read ${relCompose} from the checkout to adjust its ports.`);
         const next = src.rewriteCompose(orig.stdout);
         const copy = `${composeDir}/${rewrittenName}`;
-        const wr = await runSsh(target.ssh, `cat > '${copy}'`, next);
+        const wr = await runSsh(target.ssh, `cat > ${shellQuote(copy)}`, next);
         if (wr.code !== 0) throw new Error('Failed to write the adjusted compose file on the host.');
         composeFile = copy;
       } else {
-        await runSsh(target.ssh, `rm -f '${composeDir}/${rewrittenName}'`).catch(() => { /* best-effort */ });
+        await runSsh(target.ssh, `rm -f ${shellQuote(`${composeDir}/${rewrittenName}`)}`).catch(() => { /* best-effort */ });
       }
 
       // Write the .env beside the compose (only if provided).
       if (src.env != null && src.env !== '') {
-        const we = await runSsh(target.ssh, `mkdir -p '${composeDir}' && cat > '${composeDir}/.env'`, src.env);
+        const we = await runSsh(target.ssh, `mkdir -p ${shellQuote(composeDir)} && cat > ${shellQuote(`${composeDir}/.env`)}`, src.env);
         if (we.code !== 0) throw new Error('Failed to write the .env file on the host.');
       }
 
       // Write (or clear) the Cerebro-generated compose override, and build the
       // `-f` list — the base repo compose first (sets the project directory), then
       // the override merged over it.
-      let composeArgs = `-f '${composeFile}'`;
+      let composeArgs = `-f ${shellQuote(composeFile)}`;
       if (src.overrideCompose != null && src.overrideCompose.trim() !== '') {
-        const wo = await runSsh(target.ssh, `mkdir -p '${base}' && cat > '${overrideFile}'`, src.overrideCompose);
+        const wo = await runSsh(target.ssh, `mkdir -p ${shellQuote(base)} && cat > ${shellQuote(overrideFile)}`, src.overrideCompose);
         if (wo.code !== 0) throw new Error('Failed to write the compose override file on the host.');
-        composeArgs += ` -f '${overrideFile}'`;
+        composeArgs += ` -f ${shellQuote(overrideFile)}`;
       } else {
         // No override now — remove any stale one so a removed mount actually goes away.
-        await runSsh(target.ssh, `rm -f '${overrideFile}'`).catch(() => { /* best-effort */ });
+        await runSsh(target.ssh, `rm -f ${shellQuote(overrideFile)}`).catch(() => { /* best-effort */ });
       }
 
       // Validate, then optional force-rebuild, then up.
       onProgress?.('Validating compose…');
-      const cfg = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} config -q`);
+      const cfg = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${composeArgs} config -q`);
       if (cfg.code !== 0) {
         const detail = tail(cfg.stderr || cfg.stdout, 2000);
         await this.record(instanceId, project, 'error', detail);
@@ -399,7 +399,7 @@ export class DockerStackService {
       }
       if (opts.forceRebuild) {
         onProgress?.('Building images…');
-        const b = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
+        const b = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${composeArgs} build --no-cache --pull`, undefined, BUILD_TIMEOUT_MS);
         if (b.code !== 0) {
           const detail = tail(b.stderr || b.stdout, 3000);
           await this.record(instanceId, project, 'error', detail);
@@ -407,14 +407,14 @@ export class DockerStackService {
         }
       }
       onProgress?.('Starting containers…');
-      const up = await runSsh(target.ssh, `docker compose -p '${project}' ${composeArgs} up -d ${composeUpFlags(opts)}`.trim(), undefined, UP_TIMEOUT_MS);
+      const up = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} ${composeArgs} up -d ${composeUpFlags(opts)}`.trim(), undefined, UP_TIMEOUT_MS);
       const out = tail(up.stderr || up.stdout, 4000);
       if (up.code !== 0) {
         await this.record(instanceId, project, 'error', out);
         return { ok: false, message: out || `docker compose exited ${up.code}.` };
       }
 
-      const commit = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
+      const commit = (await runSsh(target.ssh, `git -C ${shellQuote(dir)} rev-parse HEAD`).catch(() => null))?.stdout.trim() || null;
       await this.record(instanceId, project, 'success', out);
       await this.recordRevision(instanceId, project, {
         compose: src.generatedCompose || '', env: src.env ?? '', source: 'git',
@@ -427,7 +427,7 @@ export class DockerStackService {
       return { ok: false, message };
     } finally {
       // Never leave credentials on disk.
-      await runSsh(target.ssh, `rm -f '${credFile}'`).catch(() => { /* best-effort */ });
+      await runSsh(target.ssh, `rm -f ${shellQuote(credFile)}`).catch(() => { /* best-effort */ });
     }
   }
 
@@ -457,7 +457,7 @@ export class DockerStackService {
     // A dedicated scratch dir under the stacks root, so a failed build never touches
     // a real stack's checkout. `mktemp -d` keeps concurrent builds from colliding.
     const base = `${trimSlash(target.stacksDir)}/.cerebro-build`;
-    const mk = await runSsh(target.ssh, `mkdir -p '${base}' && mktemp -d '${base}/XXXXXXXX'`);
+    const mk = await runSsh(target.ssh, `mkdir -p ${shellQuote(base)} && mktemp -d ${shellQuote(`${base}/XXXXXXXX`)}`);
     if (mk.code !== 0 || !mk.stdout.trim()) throw new Error('Could not create a build directory on the target.');
     const workdir = mk.stdout.trim();
     const repoDir = `${workdir}/repo`;
@@ -474,20 +474,20 @@ export class DockerStackService {
       if (cred?.secret) {
         const host = cred.host?.trim() || hostFromUrl(src.gitUrl);
         const line = `https://${encodeURIComponent(cred.username || 'x-access-token')}:${encodeURIComponent(cred.secret)}@${host}\n`;
-        const w = await runSsh(target.ssh, `cat > '${credFile}' && chmod 600 '${credFile}'`, line);
+        const w = await runSsh(target.ssh, `cat > ${shellQuote(credFile)} && chmod 600 ${shellQuote(credFile)}`, line);
         if (w.code !== 0) throw new Error('Failed to write git credentials on the target.');
       }
 
       onProgress?.('Cloning the repository on the target…');
       const clone = await runSsh(
         target.ssh,
-        `${GIT_SAFE_SH_PREFIX} git ${helper} clone --depth 1 ${ref ? `--branch '${sq(ref)}'` : ''} -- '${sq(src.gitUrl)}' '${repoDir}'`,
+        `${GIT_SAFE_SH_PREFIX} git ${helper} clone --depth 1 ${ref ? `--branch ${shellQuote(ref)}` : ''} -- ${shellQuote(src.gitUrl)} ${shellQuote(repoDir)}`,
         undefined, GIT_TIMEOUT_MS,
       );
       if (clone.code !== 0) {
         // A SHA ref can't be --branch'd — fall back to a full clone + checkout.
         if (!ref) throw new Error(`Git clone failed: ${redact(tail(clone.stderr || clone.stdout, 2000), cred)}`);
-        const full = await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf '${repoDir}' && git ${helper} clone -- '${sq(src.gitUrl)}' '${repoDir}' && git -C '${repoDir}' checkout '${sq(ref)}'`, undefined, GIT_TIMEOUT_MS);
+        const full = await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} rm -rf ${shellQuote(repoDir)} && git ${helper} clone -- ${shellQuote(src.gitUrl)} ${shellQuote(repoDir)} && git -C ${shellQuote(repoDir)} checkout ${shellQuote(ref)}`, undefined, GIT_TIMEOUT_MS);
         if (full.code !== 0) throw new Error(`Git clone failed: ${redact(tail(full.stderr || full.stdout, 2000), cred)}`);
       }
 
@@ -504,14 +504,14 @@ export class DockerStackService {
         onProgress?.(`Building ${image} on the target (${i + 1}/${builds.length})…`);
         const build = await runSsh(
           target.ssh,
-          `docker build --pull -t '${sq(image)}' -f '${sq(dfPath)}' '${sq(ctxDir)}'`,
+          `docker build --pull -t ${shellQuote(image)} -f ${shellQuote(dfPath)} ${shellQuote(ctxDir)}`,
           undefined, BUILD_TIMEOUT_MS,
         );
         if (build.code !== 0) throw new Error(`Build of ${image} failed: ${tail(build.stderr || build.stdout, 3000)}`);
         onProgress?.(`Built ${image} natively on the target.`);
       }
     } finally {
-      await runSsh(target.ssh, `rm -rf '${workdir}'`).catch(() => { /* best-effort */ });
+      await runSsh(target.ssh, `rm -rf ${shellQuote(workdir)}`).catch(() => { /* best-effort */ });
     }
   }
 
@@ -539,14 +539,14 @@ export class DockerStackService {
         // Defend legacy stored refs (deploy now validates on write); a bad one → HEAD.
         let ref = '';
         try { ref = assertSafeGitRef(stored.gitRef); } catch { ref = ''; }
-        const local = (await runSsh(target.ssh, `git -C '${dir}' rev-parse HEAD 2>/dev/null || true`)).stdout.trim();
-        const remote = (await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C '${dir}' ls-remote origin ${ref ? `'${sq(ref)}'` : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
+        const local = (await runSsh(target.ssh, `git -C ${shellQuote(dir)} rev-parse HEAD 2>/dev/null || true`)).stdout.trim();
+        const remote = (await runSsh(target.ssh, `${GIT_SAFE_SH_PREFIX} git -C ${shellQuote(dir)} ls-remote origin ${ref ? shellQuote(ref) : 'HEAD'} 2>/dev/null | awk '{print $1}' | head -1`)).stdout.trim();
         if (local && remote && local !== remote) { lines.push(`⚠ Repo has moved: deployed ${local.slice(0, 7)}, ${ref || 'HEAD'} is now ${remote.slice(0, 7)}. Redeploy to update.`); drift = true; }
         else if (local) lines.push(`✓ On the latest commit for ${ref || 'the default branch'} (${local.slice(0, 7)}).`);
         else lines.push('⚠ No git checkout found on the host.');
       } else {
         // Compose stacks: the compose on the host vs. the version Cerebro deployed.
-        const read = await runSsh(target.ssh, `cat '${file}' 2>/dev/null || true`);
+        const read = await runSsh(target.ssh, `cat ${shellQuote(file)} 2>/dev/null || true`);
         const hostFile = read.stdout;
         if (!hostFile.trim()) {
           lines.push(`⚠ No compose file found on the host at ${file}.`); drift = true;
@@ -559,8 +559,8 @@ export class DockerStackService {
 
       // 2) Runtime drift — expected services vs. what's actually up.
       const [svc, ps] = await Promise.all([
-        runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' config --services 2>/dev/null || true`),
-        runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' ps -a --format json 2>/dev/null || true`),
+        runSsh(target.ssh, `docker compose -p ${shellQuote(project)} -f ${shellQuote(file)} config --services 2>/dev/null || true`),
+        runSsh(target.ssh, `docker compose -p ${shellQuote(project)} -f ${shellQuote(file)} ps -a --format json 2>/dev/null || true`),
       ]);
       const expected = svc.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       const running = parseComposePs(ps.stdout);
@@ -597,7 +597,7 @@ export class DockerStackService {
     const project = projectName(name);
     const file = await this.composeFileFor(target, instanceId, name);
     try {
-      const res = await runSsh(target.ssh, `docker compose -p '${project}' -f '${file}' down`);
+      const res = await runSsh(target.ssh, `docker compose -p ${shellQuote(project)} -f ${shellQuote(file)} down`);
       const out = tail(res.stderr || res.stdout);
       if (res.code !== 0) return { ok: false, message: out || `docker compose down exited ${res.code}.` };
       await this.record(instanceId, project, 'stopped', out);
@@ -744,10 +744,6 @@ function composeUpFlags(opts: StackDeployOpts): string {
   ].filter(Boolean).join(' ');
 }
 
-/** Escape a string for safe embedding inside single quotes in a shell command. */
-function sq(s: string): string {
-  return (s || '').replace(/'/g, `'\\''`);
-}
 
 /** A repo-relative path that's safe to embed in a single-quoted remote command. */
 function safeRelPath(p?: string | null): string {

@@ -941,14 +941,14 @@ export class StackBackupService {
     const parts: string[] = [];
     for (const path of paths) {
       if (!path.startsWith('/') || path.includes("'")) continue;
-      const res = await runSsh(ssh, `cat '${path}'`).catch(() => null);
+      const res = await runSsh(ssh, `cat ${shellQuote(path)}`).catch(() => null);
       if (res?.code === 0 && res.stdout) parts.push(`# ── ${path}\n${res.stdout}`);
     }
 
     let envFile: string | undefined;
     const dir = inspection.workingDir;
     if (dir && dir.startsWith('/') && !dir.includes("'")) {
-      const res = await runSsh(ssh, `cat '${dir}/.env' 2>/dev/null || true`).catch(() => null);
+      const res = await runSsh(ssh, `cat ${shellQuote(`${dir}/.env`)} 2>/dev/null || true`).catch(() => null);
       if (res?.code === 0 && res.stdout.trim()) envFile = res.stdout;
     }
     return {
@@ -1114,8 +1114,8 @@ async function readHostFile(ssh: SshConfig, path: string, inspection: StackInspe
 
   const owner = inspection.containers.find((c) => Object.values(c.env).includes(path));
   const cmd = owner
-    ? `docker exec '${owner.name}' cat '${path}' 2>/dev/null`
-    : `cat '${path}' 2>/dev/null`;
+    ? `docker exec ${shellQuote(owner.name)} cat ${shellQuote(path)} 2>/dev/null`
+    : `cat ${shellQuote(path)} 2>/dev/null`;
   const res = await runSsh(ssh, cmd).catch(() => null);
   return res && res.code === 0 && res.stdout ? res.stdout : null;
 }
