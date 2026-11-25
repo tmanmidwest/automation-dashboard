@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **MCP / assistant: OS update tools** — `list_os_updates`, `get_os_update_machine` and
+  `get_os_update_run` (read-only, `fabric:read`) show update status, packages, runs and a run's
+  output and failure message (e.g. why a Proxmox snapshot failed).
 - **OS updates** (Health → Updates) — the Cerebro agent finds pending updates with the machine's own
   package manager (apt, dnf/yum, zypper, pacman, apk, Windows Update, macOS Software Update), marks
   security updates and tells you when a restart is needed. Install them on one or many machines

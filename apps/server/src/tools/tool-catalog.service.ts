@@ -25,6 +25,7 @@ import { IngressService } from '../app-replicator/ingress.service';
 import { StackBackupService } from '../stack-backup/stack-backup.service';
 import { StackBackupSetService } from '../stack-backup/stack-backup-set.service';
 import { StackRestoreService } from '../stack-backup/stack-restore.service';
+import { OsUpdatesService } from '../os-updates/os-updates.service';
 
 /**
  * One tool in the shared catalog: a name, an LLM-facing description, a zod input shape,
@@ -78,6 +79,7 @@ export class ToolCatalogService {
     private readonly stackBackups: StackBackupService,
     private readonly stackRestores: StackRestoreService,
     private readonly stackBackupSets: StackBackupSetService,
+    private readonly osUpdates: OsUpdatesService,
   ) {}
 
   /** Every tool the given user is permitted to use. */
@@ -374,6 +376,49 @@ export class ToolCatalogService {
             before: args.before as string | undefined,
             limit: args.limit as number | undefined,
           });
+        },
+      });
+    }
+
+    // ── OS updates (fabric:read) — docs/os-updates.md ──
+    if (has('fabric:read')) {
+      read({
+        name: 'list_os_updates',
+        description:
+          'OS updates across every machine running the Cerebro agent (Health → Updates): per machine the pending, security and held-back counts, restart needed and why, package manager, agent version and last run; plus the most recent install/restart runs (status, message, who started it), update schedules and totals. Use get_os_update_machine for one machine\'s packages and get_os_update_run for a run\'s full output.',
+        permission: 'fabric:read',
+        inputSchema: {
+          runs: z.number().optional().describe('How many recent runs to include (default 20, max 100)'),
+        },
+        run: async ({ runs }) => {
+          const o = await this.osUpdates.overview();
+          return { ...o, runs: o.runs.slice(0, Math.min(Math.max(Number(runs) || 20, 1), 100)) };
+        },
+      });
+
+      read({
+        name: 'get_os_update_machine',
+        description:
+          'One machine\'s OS updates: status (counts, restart reason, errors, Proxmox guest for snapshots), every pending package (version, security, held back) and its last 30 install/restart runs with their result messages (e.g. why a Proxmox snapshot failed). Pass the agent id or the machine name.',
+        permission: 'fabric:read',
+        inputSchema: { machine: z.string().describe('Agent id, or the machine name as shown on Health (case-insensitive)') },
+        run: async ({ machine }) => this.osUpdates.machineDetail(await this.osUpdateAgentId(String(machine ?? ''))),
+      });
+
+      read({
+        name: 'get_os_update_run',
+        description:
+          'One OS update install/restart run: status, options (scope, restart, snapshot), result message, snapshot note, installed / pending counts, timings, and the package manager output the agent streamed (last `lines` lines). Run ids come from list_os_updates or get_os_update_machine.',
+        permission: 'fabric:read',
+        inputSchema: {
+          runId: z.string().describe('Run id'),
+          lines: z.number().optional().describe('How many output lines to return, from the end (default 300, max 5000)'),
+        },
+        run: async ({ runId, lines }) => {
+          const r = await this.osUpdates.run(String(runId));
+          const n = Math.min(Math.max(Number(lines) || 300, 1), 5000);
+          const log = r.log ?? [];
+          return { ...r, log: log.slice(-n), logTruncated: log.length > n ? log.length - n : 0 };
         },
       });
     }
@@ -878,6 +923,19 @@ export class ToolCatalogService {
   }
 
   /** Mirror of ConnectorsController.summary — keeps tool output identical to the REST API. */
+  /** Agent id from an id or a machine name (exact id first, then case-insensitive name). */
+  private async osUpdateAgentId(machine: string): Promise<string> {
+    const q = machine.trim();
+    if (!q) throw new Error('Pass a machine name or agent id.');
+    const { machines } = await this.osUpdates.overview();
+    const hit = machines.find((m) => m.agentId === q) ?? machines.find((m) => m.name.toLowerCase() === q.toLowerCase());
+    if (hit) return hit.agentId;
+    const close = machines.filter((m) => m.name.toLowerCase().includes(q.toLowerCase())).map((m) => m.name);
+    if (close.length === 1) return machines.find((m) => m.name === close[0])!.agentId;
+    // Not in the list (e.g. a Waypoint covered by an agent on the same box): try it as an id.
+    if (!close.length) return q;
+    throw new Error(`"${q}" matches several machines: ${close.join(', ')}. Use the full name or the agent id.`);
+  }
   private summary(inst: ConnectorInstance): ConnectorInstanceSummary {
     const manifest = this.registry.get(inst.connectorId)?.manifest;
     return {
@@ -965,4 +1023,5 @@ function toAutomationInput(a: Record<string, unknown>): AutomationRuleInput {
     if (a[key] !== undefined) out[key] = a[key];
   }
   return out as unknown as AutomationRuleInput;
+
 }
