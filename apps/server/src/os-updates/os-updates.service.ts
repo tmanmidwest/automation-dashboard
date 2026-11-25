@@ -100,6 +100,8 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   private readonly busyRuns = new Set<string>();
   private guestCache: { at: number; byMac: Map<string, OsUpdateProxmoxGuest> } | null = null;
   private alertState: Record<string, string> = {};
+  /** Per-agent tail of the frame chain: frames from one agent are handled one at a time, in order. */
+  private readonly frameChains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -114,9 +116,9 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     this.registry.setUpdatesHooks({
-      report: (agentId, frame) => this.onReport(agentId, frame),
-      log: (agentId, frame) => this.onLog(agentId, frame),
-      result: (agentId, frame) => this.onResult(agentId, frame),
+      report: (agentId, frame) => this.inOrder(agentId, () => this.onReport(agentId, frame)),
+      log: (agentId, frame) => this.inOrder(agentId, () => this.onLog(agentId, frame)),
+      result: (agentId, frame) => this.inOrder(agentId, () => this.onResult(agentId, frame)),
     });
     this.flushTimer = setInterval(() => void this.flushLogs(), 2000);
     this.alertState = (await this.settings.get<Record<string, string>>(ALERT_STATE_KEY).catch(() => null)) ?? {};
@@ -133,9 +135,33 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
 
   // ── Agent frames ──────────────────────────────────────────────────────────
 
+  /**
+   * Run one agent's frame handlers strictly in arrival order. The relay doesn't wait
+   * for a frame to be handled before taking the next, and an install ends with two
+   * reports milliseconds apart (the post-install check, still "installing", then the
+   * final one). Handled side by side, the stale one could be written last and leave
+   * the machine showing "Installing" until the next check, hours later.
+   */
+  private inOrder(agentId: string, fn: () => Promise<void>): Promise<void> {
+    const prev = this.frameChains.get(agentId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    const tail = next.catch(() => undefined);
+    this.frameChains.set(agentId, tail);
+    void tail.then(() => {
+      if (this.frameChains.get(agentId) === tail) this.frameChains.delete(agentId);
+    });
+    return next;
+  }
+
   private async onReport(agentId: string, frame: FabricUpdatesFrame): Promise<void> {
     const rep = sanitizeReport(frame.report);
     if (!rep) return;
+    // A report that still names a run Cerebro already has the result for is stale
+    // (it was sent before the result): don't bring back "Installing" for it.
+    if (rep.installing) {
+      const run = await this.prisma.agentUpdateRun.findFirst({ where: { id: rep.installing, agentId }, select: { status: true } });
+      if (run && !OS_UPDATE_RUN_ACTIVE.includes(run.status as OsUpdateRunStatus)) rep.installing = undefined;
+    }
     const now = new Date();
     const prev = (await this.prisma.agentUpdateStatus.findUnique({ where: { agentId } })) as StoredStatus | null;
     const next = mergeReport(prev, rep, now);
