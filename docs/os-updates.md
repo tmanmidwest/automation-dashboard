@@ -78,7 +78,27 @@ What runs on each system:
 | macOS | Updates with "Security" in the title | Everything that can be installed unattended |
 
 apt always keeps your existing config files (`--force-confold`), and it waits up to 10 minutes when
-another apt process holds the lock (for example unattended-upgrades).
+another apt process holds the lock (for example unattended-upgrades). The run's output names the
+process holding the lock (PID, command line, how long it has been running).
+
+**Stuck apt (agent 0.9+).** If the lock holder has been running for 30 minutes or more, it's almost
+always stuck (a package script waiting on something that never comes), so the install fails at once
+with a message that names it instead of waiting 10 minutes and failing with "exit 100". The machine's
+Updates card says so too, and also when dpkg was interrupted and left work unfinished.
+**Repair…** on the card fixes both without SSH:
+
+1. stops any `apt`, `apt-get`, `aptitude`, `dpkg` or unattended-upgrades process that has held the
+   lock for 10 minutes or more, and its child processes (SIGTERM, then SIGKILL after 30 s). It refuses
+   when the holder is newer than that, or isn't a package-manager process;
+2. runs `dpkg --configure -a` (keeping config files) to finish half-done package setup;
+3. runs `apt-get -f install` to fix broken dependencies, then checks again.
+
+Every install and check command runs in its own process group. When the 3-hour install limit is hit,
+the whole group (apt, dpkg and package scripts) is stopped, not just apt-get, so nothing is left
+holding the lock. If a package script starts a service that keeps the output open, the agent stops
+waiting 90 seconds after apt itself exits.
+
+A failed run no longer reports an "installed" count; only finished installs do.
 
 **macOS on Apple silicon:** Apple requires an owner's password to install macOS itself, so those
 updates are shown as *needs someone at the Mac* and skipped. Safari, Command Line Tools and other
@@ -147,6 +167,7 @@ Everything is under `/api/os-updates`:
 | POST | `/machines/:agentId/check` | `fabric:read` |
 | POST | `/install` `{ agentIds, scope, reboot, snapshot?, at? }` | `fabric:manage` |
 | POST | `/reboot` `{ agentIds, at? }` | `fabric:manage` |
+| POST | `/repair` `{ agentIds }` | `fabric:manage` (apt, agent 0.9+; runs now) |
 | GET | `/runs/:id` | `fabric:read` (includes the output) |
 | POST | `/runs/:id/cancel` | `fabric:manage` (runs that haven't started) |
 | GET, POST | `/schedules` | read `fabric:read`, create `fabric:manage` |
@@ -166,6 +187,7 @@ The Health fleet API (`/api/machine-health`) also includes each machine's update
 | broker → agent | `{ t: "updates-check" }` | Check now |
 | broker → agent | `{ t: "updates-install", runId, scope, reboot, issuedAt?, sig? }` | Install. The signature covers `updates:<credHash>:<issuedAt>:<runId>:install:<scope>:<reboot>` |
 | broker → agent | `{ t: "updates-reboot", runId, issuedAt?, sig? }` | Restart. The signature covers `updates:<credHash>:<issuedAt>:<runId>:reboot::` |
+| broker → agent | `{ t: "updates-repair", runId, issuedAt?, sig? }` | Repair apt. The signature covers `updates:<credHash>:<issuedAt>:<runId>:repair::` |
 
 Types are in `packages/shared/src/os-updates.ts`.
 

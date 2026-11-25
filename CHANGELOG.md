@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **A stuck apt no longer blocks OS updates silently.** When another apt or dpkg process holds the
+  package lock, the run's output now names it (PID, command, how long it has run). If it has been
+  running for 30+ minutes the install fails at once and says so, instead of waiting 10 minutes and
+  failing with "apt-get exited with code 100". On timeout the agent now stops apt's whole process
+  tree, so no dpkg is left holding the lock, and failed runs no longer show an "installed" count.
+  Needs agent 0.9.0 (agents update themselves).
 - **OS updates on a Raspberry Pi 5 no longer ask for a restart forever.** The newer-kernel check
   compared the Pi 5 kernel (`+rpt-rpi-2712`) with the Pi 4 build of the same version (`+rpt-rpi-v8`)
   that's installed beside it; it now compares only higher versions of the running build.
@@ -18,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **Repair… on a machine's Updates card** (apt, agent 0.9+) — stops an apt/dpkg that has held the
+  package lock for 10+ minutes, runs `dpkg --configure -a` and `apt-get -f install`, then checks
+  again, with the output streamed live. The card says when apt looks stuck or an install was
+  interrupted. Signed like installs, `fabric:manage`, audited.
 - **Edit API tokens** (Settings → API Tokens) — rename a token or change its scopes without
   replacing it; the token keeps working and new scopes apply on its next request. Audited.
 - **MCP / assistant: OS update tools** — `list_os_updates`, `get_os_update_machine` and

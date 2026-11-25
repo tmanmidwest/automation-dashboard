@@ -110,6 +110,7 @@ export function runWhen(r: OsUpdateRun): string {
 
 export function runWhat(r: OsUpdateRun): string {
   if (r.kind === 'reboot') return 'Restart';
+  if (r.kind === 'repair') return 'Repair package manager';
   return `${SCOPE_LABEL[r.scope]}${r.reboot !== 'never' ? ` · ${REBOOT_LABEL[r.reboot].toLowerCase()}` : ''}`;
 }
 
@@ -305,6 +306,48 @@ export function RebootDialog({ machines, onClose, onDone }: { machines: OsUpdate
   );
 }
 
+/** Repair apt on one machine: stop a stuck apt/dpkg and finish half-done package setup. */
+export function RepairDialog({ machine, onClose, onDone }: { machine: OsUpdateMachine; onClose: () => void; onDone: (runs: OsUpdateRun[]) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<Skipped | null>(null);
+  async function go() {
+    setBusy(true); setErr(null);
+    try {
+      const res = await api.post<{ runs: OsUpdateRun[]; skipped: Skipped }>('/api/os-updates/repair', { agentIds: [machine.agentId] });
+      if (res.runs.length) onDone(res.runs);
+      if (res.skipped.length) { setSkipped(res.skipped); return; }
+      onClose();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Request failed.');
+    } finally { setBusy(false); }
+  }
+  return (
+    <Dialog open onClose={onClose} title={`Repair package manager on ${machine.name}`}
+      description="For when installs keep failing because apt is stuck or a package install was interrupted."
+      footer={skipped ? <Button onClick={onClose}>Close</Button> : <><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy && <Loader2 className="h-4 w-4 animate-spin" />} Repair now</Button></>}>
+      <div className="space-y-3 text-sm">
+        <Err msg={err} />
+        {skipped ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 space-y-1">
+            {skipped.map((s) => <p key={s.agentId} className="text-xs"><span className="font-medium">{s.name}:</span> {s.reason}</p>)}
+          </div>
+        ) : (
+          <>
+            <p>The agent will:</p>
+            <ol className="list-decimal pl-5 space-y-1 text-muted-foreground">
+              <li>Stop any apt or dpkg process that has held the package lock for 10 minutes or more. It leaves a newer one alone, and never stops anything that isn't apt or dpkg.</li>
+              <li>Finish any half-done package setup (<span className="font-mono">dpkg --configure -a</span>, keeping your config files).</li>
+              <li>Fix broken dependencies (<span className="font-mono">apt-get -f install</span>), then check for updates again.</li>
+            </ol>
+            <p className="text-xs text-muted-foreground">Nothing new is installed beyond what dpkg had already started. Install updates again afterwards.</p>
+          </>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 /** One run: status, options and the live output while it's going. */
 export function RunDialog({ runId, canManage, onClose, onChanged }: { runId: string; canManage: boolean; onClose: () => void; onChanged?: () => void }) {
   const [run, setRun] = useState<OsUpdateRun | null>(null);
@@ -342,7 +385,7 @@ export function RunDialog({ runId, canManage, onClose, onChanged }: { runId: str
   }
 
   return (
-    <Dialog open onClose={onClose} size="lg" title={run ? `${run.kind === 'reboot' ? 'Restart' : 'Updates'} · ${run.agentName}` : 'Update run'}
+    <Dialog open onClose={onClose} size="lg" title={run ? `${run.kind === 'reboot' ? 'Restart' : run.kind === 'repair' ? 'Repair' : 'Updates'} · ${run.agentName}` : 'Update run'}
       description={run ? `${runWhat(run)}${run.scheduleName ? ` · ${run.scheduleName}${run.ring != null ? `, ring ${run.ring + 1}` : ''}` : run.requestedBy ? ` · by ${run.requestedBy}` : ''}` : undefined}
       footer={<>{canManage && run?.status === 'scheduled' && <Button variant="outline" onClick={cancel} disabled={busy}>Cancel run</Button>}<Button onClick={onClose}>Close</Button></>}>
       <div className="space-y-3 text-sm">
@@ -359,7 +402,7 @@ export function RunDialog({ runId, canManage, onClose, onChanged }: { runId: str
             </div>
             {run.message && <p className={cn(['failed', 'refused'].includes(run.status) ? 'text-red-300' : 'text-foreground')}>{run.message}</p>}
             {(run.snapshotNote || run.snapshotName) && <p className="text-xs text-muted-foreground flex items-center gap-1"><Camera className="h-3.5 w-3.5" /> {run.snapshotNote ?? run.snapshotName}</p>}
-            {run.kind === 'install' && (
+            {run.kind !== 'reboot' && (
               <pre ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
                 className="h-80 overflow-auto rounded-md border border-border bg-black/40 p-3 text-xs font-mono whitespace-pre-wrap break-words">
                 {run.log && run.log.length ? run.log.join('\n') : run.status === 'scheduled' ? 'Waiting to start…' : ACTIVE.includes(run.status) ? 'Waiting for output…' : 'No output.'}

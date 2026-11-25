@@ -16,6 +16,8 @@ import {
   type OsUpdatePackage,
   type OsUpdateProxmoxGuest,
   type OsUpdateRebootRequest,
+  type OsUpdateRepairRequest,
+  type OsUpdateRunKind,
   type OsUpdateRing,
   type OsUpdateRun,
   type OsUpdateRunStatus,
@@ -53,6 +55,8 @@ import {
 const MIN_AGENT = [0, 7, 0];
 /** Oldest agent that reports held-back packages and takes scope "full". */
 const MIN_AGENT_FULL = [0, 8, 0];
+/** Oldest agent that takes Repair (apt). */
+const MIN_AGENT_REPAIR = [0, 9, 0];
 /** Output kept per run. */
 const MAX_LOG_LINES = 5000;
 /** A command the agent never acknowledged. */
@@ -190,7 +194,8 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         status,
         message: r.message ?? (r.ok ? 'Done.' : 'Failed.'),
         exitCode: r.exitCode,
-        installed: r.installed ?? null,
+        // A failed install didn't install what it set out to (older agents sent the planned count).
+        installed: r.ok ? (r.installed ?? null) : null,
         rebooting: !!r.rebooting,
         startedAt: run.startedAt ?? (r.startedAt ? new Date(r.startedAt) : new Date()),
         finishedAt: r.finishedAt ? new Date(r.finishedAt) : new Date(),
@@ -204,9 +209,9 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async notifyRun(run: RunWithAgent): Promise<void> {
-    const what = run.kind === 'reboot' ? 'Restart' : 'Updates';
+    const what = run.kind === 'reboot' ? 'Restart' : run.kind === 'repair' ? 'Repair' : 'Updates';
     if (run.status === 'succeeded') {
-      if (run.kind === 'reboot') return;
+      if (run.kind !== 'install') return;
       await this.notifications
         .dispatchAlert('updates.run_succeeded', {
           title: `Updates installed on ${run.agent.name}`,
@@ -245,7 +250,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       id: r.id,
       agentId: r.agentId,
       agentName: r.agent.name,
-      kind: r.kind === 'reboot' ? 'reboot' : 'install',
+      kind: r.kind === 'reboot' ? 'reboot' : r.kind === 'repair' ? 'repair' : 'install',
       trigger: r.trigger === 'schedule' ? 'schedule' : 'manual',
       scheduleId: r.scheduleId,
       scheduleName: r.scheduleId ? (scheduleNames.get(r.scheduleId) ?? 'Deleted schedule') : null,
@@ -320,6 +325,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         agentVersion: a.agentVersion,
         agentTooOld: !!a.agentVersion && !versionAtLeast(a.agentVersion, MIN_AGENT),
         canFullUpgrade: base.manager === 'apt' && !base.proxmox && versionAtLeast(a.agentVersion, MIN_AGENT_FULL),
+        canRepair: base.manager === 'apt' && versionAtLeast(a.agentVersion, MIN_AGENT_REPAIR),
         proxmoxGuest: guest,
         lastRun: last ? this.toRun(last, names) : null,
       };
@@ -388,8 +394,14 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     return this.queue('reboot', body.agentIds, { scope: 'all', reboot: 'always', snapshot: false, at: body.at }, user);
   }
 
+  /** apt: stop a stuck apt/dpkg (10+ minutes on the lock) and finish half-done package setup. Runs now. */
+  async requestRepair(body: OsUpdateRepairRequest, user: SessionUser | undefined) {
+    if (!body || !Array.isArray(body.agentIds) || !body.agentIds.length) throw new BadRequestException('Pick at least one machine.');
+    return this.queue('repair', body.agentIds, { scope: 'all', reboot: 'never', snapshot: false }, user);
+  }
+
   private async queue(
-    kind: 'install' | 'reboot',
+    kind: OsUpdateRunKind,
     agentIds: string[],
     opts: { scope: string; reboot: string; snapshot: boolean; at?: string },
     user: SessionUser | undefined,
@@ -458,7 +470,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       await this.audit.record({
         actorId: user?.id ?? null,
         actorEmail: user?.email ?? null,
-        action: kind === 'install' ? 'updates.install_requested' : 'updates.reboot_requested',
+        action: `updates.${kind}_requested`,
         target: created.map((r) => r.agentName).join(', ').slice(0, 300),
         meta: { runs: created.map((r) => r.id), scope: opts.scope, reboot: opts.reboot, snapshot: opts.snapshot, at: later ? at.toISOString() : 'now' },
       });
@@ -468,8 +480,13 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Why a machine can't take this command now (null = it can). */
-  private cannotRun(m: OsUpdateMachine, kind: 'install' | 'reboot', later: boolean): string | null {
+  private cannotRun(m: OsUpdateMachine, kind: OsUpdateRunKind, later: boolean): string | null {
     if (m.agentTooOld) return `Agent ${m.agentVersion} is too old; it updates itself to 0.7 on its next connect.`;
+    if (kind === 'repair' && !m.canRepair) {
+      return m.manager && m.manager !== 'apt'
+        ? 'Repair is only for apt machines (Debian, Ubuntu, Raspberry Pi OS, Proxmox).'
+        : `Repair needs agent ${MIN_AGENT_REPAIR.join('.')} or newer; it updates itself shortly after Cerebro is redeployed.`;
+    }
     if (m.mode !== 'on') return `Installs are turned off on this machine (CEREBRO_OS_UPDATES=${m.mode}).`;
     if (kind === 'install' && m.checkedAt && !m.supported) return m.error ?? 'Updates aren\'t supported on this machine.';
     if (!later && !m.online) return 'The machine is offline.';
@@ -538,7 +555,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         machines ??= new Map((await this.machines()).map((m) => [m.agentId, m]));
         const m = machines.get(run.agentId);
         if (!m) continue;
-        const why = this.cannotRun(m, run.kind === 'reboot' ? 'reboot' : 'install', false);
+        const why = this.cannotRun(m, run.kind as OsUpdateRunKind, false);
         if (why) {
           await this.finish(run, 'failed', why);
           continue;
@@ -592,8 +609,8 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         data: { status: 'sent', startedAt: run.startedAt ?? new Date(), snapshotName: snapName, snapshotNote: note },
       });
       const res =
-        run.kind === 'reboot'
-          ? await this.registry.sendUpdatesCommand(run.agentId, { runId: run.id, action: 'reboot' })
+        run.kind === 'reboot' || run.kind === 'repair'
+          ? await this.registry.sendUpdatesCommand(run.agentId, { runId: run.id, action: run.kind })
           : await this.registry.sendUpdatesCommand(run.agentId, {
               runId: run.id,
               action: 'install',

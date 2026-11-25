@@ -37,7 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.8.0"
+const agentVersion = "0.9.0"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means
@@ -825,6 +825,13 @@ func (s *session) onControl(msg []byte) {
 			return
 		}
 		go updates.install(c.RunID, c.Scope, c.Reboot)
+	case "updates-repair":
+		if !updatesAuthorized(s.cfg, s.cred, c.IssuedAt, c.Sig, c.RunID, "repair", "", "") {
+			log.Printf("refusing repair %s: not signed by the pinned update key", c.RunID)
+			updates.emit(map[string]any{"t": "updates-result", "result": updatesRun{RunID: c.RunID, Kind: "repair", ExitCode: -1, Message: "Refused: the command wasn't signed by the key this agent trusts.", StartedAt: time.Now().UnixMilli(), FinishedAt: time.Now().UnixMilli()}})
+			return
+		}
+		go updates.repair(c.RunID)
 	case "updates-reboot":
 		if !updatesAuthorized(s.cfg, s.cred, c.IssuedAt, c.Sig, c.RunID, "reboot", "", "") {
 			log.Printf("refusing restart %s: not signed by the pinned update key", c.RunID)

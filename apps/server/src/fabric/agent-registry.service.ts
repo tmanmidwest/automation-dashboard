@@ -138,7 +138,7 @@ export class AgentRegistryService {
    */
   async sendUpdatesCommand(
     agentId: string,
-    cmd: { runId: string; action: 'install'; scope: OsUpdateScope; reboot: OsUpdateReboot } | { runId: string; action: 'reboot' },
+    cmd: { runId: string; action: 'install'; scope: OsUpdateScope; reboot: OsUpdateReboot } | { runId: string; action: 'reboot' | 'repair' },
   ): Promise<{ signed: boolean }> {
     if (!this.live.has(agentId)) throw new Error('The machine is offline.');
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId }, select: { credHash: true } });
@@ -148,8 +148,8 @@ export class AgentRegistryService {
       this.send(agentId, { t: 'updates-install', runId: cmd.runId, scope: cmd.scope, reboot: cmd.reboot, ...(token ? { issuedAt: token.issuedAt, sig: token.signature } : {}) });
       return { signed: !!token };
     }
-    const token = await this.updateSigning.signUpdatesToken(agent.credHash, cmd.runId, 'reboot').catch(() => null);
-    this.send(agentId, { t: 'updates-reboot', runId: cmd.runId, ...(token ? { issuedAt: token.issuedAt, sig: token.signature } : {}) });
+    const token = await this.updateSigning.signUpdatesToken(agent.credHash, cmd.runId, cmd.action).catch(() => null);
+    this.send(agentId, { t: cmd.action === 'repair' ? 'updates-repair' : 'updates-reboot', runId: cmd.runId, ...(token ? { issuedAt: token.issuedAt, sig: token.signature } : {}) });
     return { signed: !!token };
   }
 

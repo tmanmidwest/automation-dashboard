@@ -4,6 +4,7 @@ import type {
   OsUpdateMachineDetail,
   OsUpdateOverview,
   OsUpdateRebootRequest,
+  OsUpdateRepairRequest,
   OsUpdateRun,
   OsUpdateSchedule,
   SessionUser,
@@ -45,6 +46,13 @@ export class OsUpdatesController {
   @RequirePermissions('fabric:manage')
   reboot(@Body() body: OsUpdateRebootRequest, @CurrentUser() user: SessionUser) {
     return this.updates.requestReboot(body, user);
+  }
+
+  /** apt: stop a stuck apt/dpkg and finish half-done package setup. */
+  @Post('repair')
+  @RequirePermissions('fabric:manage')
+  repair(@Body() body: OsUpdateRepairRequest, @CurrentUser() user: SessionUser) {
+    return this.updates.requestRepair(body, user);
   }
 
   @Get('runs/:id')

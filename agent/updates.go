@@ -64,7 +64,7 @@ type pkgUpdate struct {
 
 type updatesRun struct {
 	RunID      string `json:"runId"`
-	Kind       string `json:"kind"` // install | reboot
+	Kind       string `json:"kind"` // install | reboot | repair
 	OK         bool   `json:"ok"`
 	ExitCode   int    `json:"exitCode"`
 	Message    string `json:"message,omitempty"`
@@ -332,7 +332,11 @@ func (u *updater) install(runID, scope, reboot string) {
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	cancel()
 
-	res := updatesRun{RunID: runID, Kind: "install", OK: err == nil, StartedAt: started.UnixMilli(), Installed: installed}
+	res := updatesRun{RunID: runID, Kind: "install", OK: err == nil, StartedAt: started.UnixMilli()}
+	if err == nil {
+		// Only a finished install counts: a failed one installed nothing we can count.
+		res.Installed = installed
+	}
 	switch {
 	case timedOut:
 		res.OK = false
@@ -387,6 +391,83 @@ func (u *updater) install(runID, scope, reboot string) {
 			u.emit(map[string]any{"t": "updates-result", "result": res})
 		}
 	}
+}
+
+// repairer: package managers that can be unstuck (apt: stop a stuck apt/dpkg, then
+// dpkg --configure -a and apt-get -f install).
+type repairer interface {
+	repair(ctx context.Context, logf func(string)) error
+}
+
+// repair handles a verified repair command.
+func (u *updater) repair(runID string) {
+	started := time.Now()
+	res := updatesRun{RunID: runID, Kind: "repair", StartedAt: started.UnixMilli(), ExitCode: -1}
+	done := func() {
+		res.FinishedAt = time.Now().UnixMilli()
+		u.mu.Lock()
+		u.lastRun = &res
+		u.saveLastRunLocked()
+		u.mu.Unlock()
+		u.emit(map[string]any{"t": "updates-result", "result": res})
+		log.Printf("repair run %s finished: ok=%v %s", runID, res.OK, res.Message)
+	}
+	rp, ok := u.impl.(repairer)
+	switch {
+	case u.mode != "on":
+		res.Message = fmt.Sprintf("Repairs are turned off on this machine (CEREBRO_OS_UPDATES=%s).", u.mode)
+		done()
+		return
+	case !ok:
+		res.Message = "Repair is only available for apt machines."
+		done()
+		return
+	}
+	u.mu.Lock()
+	if u.installing != "" {
+		cur := u.installing
+		u.mu.Unlock()
+		res.Message = fmt.Sprintf("Another update run (%s) is still going on this machine.", cur)
+		done()
+		return
+	}
+	u.installing = runID
+	rep := u.snapshotLocked()
+	u.mu.Unlock()
+	if rep != nil {
+		u.emit(map[string]any{"t": "updates", "report": rep})
+	}
+	lw := newRunLog(u, runID)
+	lw.line(fmt.Sprintf("Cerebro agent %s: repairing the package manager on %s", agentVersion, hostname()))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("repair crashed: %v", r)
+			}
+		}()
+		return rp.repair(ctx, lw.line)
+	}()
+	cancel()
+	if err != nil {
+		res.ExitCode = exitCodeOf(err)
+		res.Message = err.Error()
+	} else {
+		res.OK = true
+		res.ExitCode = 0
+		res.Message = "Package manager repaired. Install updates again when you're ready."
+	}
+	lw.line("Checking what's still pending…")
+	lw.flush()
+	u.mu.Lock()
+	u.installing = ""
+	u.mu.Unlock()
+	u.checkOnce(true)
+	done()
+	u.mu.Lock()
+	final := u.snapshotLocked()
+	u.mu.Unlock()
+	u.emit(map[string]any{"t": "updates", "report": final})
 }
 
 // restart handles a verified restart command.
@@ -520,10 +601,14 @@ func exitCodeOf(err error) int {
 // couldn't start). Used for checks.
 func runOut(ctx context.Context, env []string, name string, args ...string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	stopTreeOnCancel(cmd)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
 	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		err = nil
+	}
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
@@ -539,6 +624,7 @@ func runOut(ctx context.Context, env []string, name string, args ...string) (str
 func runStream(ctx context.Context, env []string, logf func(string), name string, args ...string) error {
 	logf("$ " + name + " " + strings.Join(args, " "))
 	cmd := exec.CommandContext(ctx, name, args...)
+	stopTreeOnCancel(cmd)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
@@ -564,6 +650,11 @@ func runStream(ctx context.Context, env []string, logf func(string), name string
 	err := cmd.Wait()
 	pw.Close()
 	<-done
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		// The command exited fine but something it started (a service a package
+		// script launched) kept its output open; WaitDelay let us stop waiting.
+		err = nil
+	}
 	if err != nil {
 		code := -1
 		var ee *exec.ExitError

@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, Download, Loader2, RotateCw, Search, ShieldAlert } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Loader2, RotateCw, Search, ShieldAlert, Wrench } from 'lucide-react';
 import type { OsUpdateMachineDetail } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { fmtAgo } from './health-ui';
-import { ACTIVE, HELD_BACK_HELP, InstallDialog, RebootDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, runWhat, runWhen } from './updates-ui';
+import { ACTIVE, HELD_BACK_HELP, InstallDialog, RebootDialog, RepairDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, runWhat, runWhen } from './updates-ui';
 
 /** The Updates card on a machine's Health page. docs/os-updates.md */
 export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage: boolean }) {
@@ -16,6 +16,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
   const [checking, setChecking] = useState(false);
   const [install, setInstall] = useState(false);
   const [reboot, setReboot] = useState(false);
+  const [repair, setRepair] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
 
   async function load() {
@@ -67,6 +68,11 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
             <>
               <Button size="sm" onClick={() => setInstall(true)} disabled={m.agentTooOld || m.mode !== 'on' || !!m.installing}><Download className="h-4 w-4" /> Install…</Button>
               <Button variant="outline" size="sm" onClick={() => setReboot(true)} disabled={m.agentTooOld || m.mode !== 'on' || !!m.installing}><RotateCw className="h-4 w-4" /> Restart…</Button>
+              {m.canRepair && (
+                <Button variant="outline" size="sm" onClick={() => setRepair(true)} disabled={m.mode !== 'on' || !!m.installing || !m.online} title="Stop a stuck apt and finish half-done package setup">
+                  <Wrench className="h-4 w-4" /> Repair…
+                </Button>
+              )}
             </>
           )}
         </div>
@@ -140,6 +146,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
         )}
       </CardContent>
       {install && <InstallDialog machines={[m]} onClose={() => setInstall(false)} onDone={(runs) => { load(); if (runs[0]) setRunId(runs[0].id); }} />}
+      {repair && <RepairDialog machine={m} onClose={() => setRepair(false)} onDone={(runs) => { load(); if (runs[0]) setRunId(runs[0].id); }} />}
       {reboot && <RebootDialog machines={[m]} onClose={() => setReboot(false)} onDone={() => load()} />}
       {runId && <RunDialog runId={runId} canManage={canManage} onClose={() => setRunId(null)} onChanged={load} />}
     </Card>

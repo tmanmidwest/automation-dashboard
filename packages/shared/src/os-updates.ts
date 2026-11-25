@@ -34,9 +34,12 @@ export interface OsUpdatePackage {
 }
 
 /** What the agent reports about its last install / restart command. */
+/** install / reboot, or repair (apt, agent 0.9+): stop a stuck apt/dpkg and finish half-done package setup. */
+export type OsUpdateRunKind = 'install' | 'reboot' | 'repair';
+
 export interface OsUpdateAgentRun {
   runId: string;
-  kind: 'install' | 'reboot';
+  kind: OsUpdateRunKind;
   ok: boolean;
   exitCode: number;
   message?: string;
@@ -116,6 +119,18 @@ export interface FabricUpdatesRebootFrame {
   sig?: string;
 }
 
+/**
+ * broker → agent: repair the package manager (apt): stop an apt/dpkg that has held
+ * the lock for 10+ minutes, then dpkg --configure -a and apt-get -f install.
+ * Signed over "updates:<credHash>:<issuedAt>:<runId>:repair::".
+ */
+export interface FabricUpdatesRepairFrame {
+  t: 'updates-repair';
+  runId: string;
+  issuedAt?: number;
+  sig?: string;
+}
+
 /** The Proxmox guest a machine was matched to (by MAC), for snapshots before patching. */
 export interface OsUpdateProxmoxGuest {
   instanceId: string;
@@ -171,7 +186,7 @@ export interface OsUpdateRun {
   id: string;
   agentId: string;
   agentName: string;
-  kind: 'install' | 'reboot';
+  kind: OsUpdateRunKind;
   trigger: 'manual' | 'schedule';
   scheduleId: string | null;
   scheduleName: string | null;
@@ -248,6 +263,8 @@ export interface OsUpdateMachine extends OsUpdateStatus {
   agentTooOld: boolean;
   /** Can take scope "full" (apt, not Proxmox, agent 0.8+). */
   canFullUpgrade: boolean;
+  /** Can take Repair (apt, agent 0.9+). */
+  canRepair: boolean;
   proxmoxGuest: OsUpdateProxmoxGuest | null;
   lastRun: OsUpdateRun | null;
 }
@@ -279,6 +296,10 @@ export interface OsUpdateInstallRequest {
 export interface OsUpdateRebootRequest {
   agentIds: string[];
   at?: string;
+}
+
+export interface OsUpdateRepairRequest {
+  agentIds: string[];
 }
 
 /** Posture/alerts: security updates waiting longer than this are flagged. */
