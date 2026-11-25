@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { fmtAgo } from './health-ui';
-import { ACTIVE, InstallDialog, RebootDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, runWhat, runWhen } from './updates-ui';
+import { ACTIVE, HELD_BACK_HELP, InstallDialog, RebootDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, runWhat, runWhen } from './updates-ui';
 
 /** The Updates card on a machine's Health page. docs/os-updates.md */
 export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage: boolean }) {
@@ -46,6 +46,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
   const secDays = daysSince(m.securitySince);
   const pkgs = d.packages;
   const sec = pkgs.filter((p) => p.security);
+  const heldPkgs = pkgs.filter((p) => p.heldBack).length;
   return (
     <Card className="mb-4">
       <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
@@ -76,8 +77,14 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
           <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
             <UpdatesChip u={m} className="text-base" />
             {m.security > 0 && secDays != null && <span className={cn('text-xs', secDays >= 7 ? 'text-red-300' : 'text-muted-foreground')}>security updates waiting {secDays === 0 ? 'since today' : `${secDays} day${secDays === 1 ? '' : 's'}`}</span>}
-            {m.rebootRequired && <span className="text-xs text-amber-300">{m.rebootReason ?? 'Restart needed'}{m.rebootSince ? ` · since ${fmtAgo(m.rebootSince)}` : ''}</span>}
+            {m.rebootRequired && <span className="text-xs text-amber-300">{m.rebootReason ?? 'Restart needed'}{m.rebootSince ? ` · since ${fmtAgo(m.rebootSince)}` : ''}. Restart to finish; this clears once the machine is back.</span>}
           </div>
+        )}
+        {m.heldBack > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {m.heldBack} held back: {HELD_BACK_HELP.replace(/^Held back: /, '').replace(/^these/, 'they')}
+            {!m.canFullUpgrade && ' (Available once the agent has updated itself to 0.8.)'}
+          </p>
         )}
         {m.error && <p className="text-xs text-amber-300 flex gap-1"><ShieldAlert className="h-3.5 w-3.5 shrink-0 mt-px" /> {m.error}</p>}
         {m.note && <p className="text-xs text-muted-foreground">{m.note}</p>}
@@ -87,7 +94,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
           <div>
             <button onClick={() => setOpen(!open)} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-              {open ? 'Hide' : 'Show'} {pkgs.length} pending{sec.length ? ` (${sec.length} security first)` : ''}
+              {open ? 'Hide' : 'Show'} {pkgs.length} pending{sec.length ? ` (${sec.length} security first)` : ''}{heldPkgs ? `, ${heldPkgs} held back` : ''}
             </button>
             {open && (
               <div className="mt-2 max-h-80 overflow-auto rounded-md border border-border">
@@ -105,6 +112,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
                           {p.security && <span className="text-amber-300">security{p.severity ? ` · ${p.severity}` : ''}</span>}
                           {p.restart && <span className="text-muted-foreground">{p.security ? ' · ' : ''}restart</span>}
                           {p.needsUser && <span className="text-sky-300"> · needs someone at the Mac</span>}
+                          {p.heldBack && <span className="text-muted-foreground" title={HELD_BACK_HELP}>{p.security || p.restart || p.needsUser ? ' · ' : ''}held back</span>}
                         </td>
                       </tr>
                     ))}

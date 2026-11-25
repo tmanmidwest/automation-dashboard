@@ -150,6 +150,61 @@ func TestNewestKernel(t *testing.T) {
 	}
 }
 
+func TestNewerKernelInstalled(t *testing.T) {
+	pi := []string{"6.18.60+rpt-rpi-2712", "6.18.60+rpt-rpi-v8"}
+	if k := newerKernelInstalled("6.18.60+rpt-rpi-2712", pi); k != "" {
+		t.Errorf("Pi 5 on its own flavor: want no restart, got %q", k)
+	}
+	if k := newerKernelInstalled("6.18.60+rpt-rpi-v8", pi); k != "" {
+		t.Errorf("Pi 4: want no restart, got %q", k)
+	}
+	pi = append(pi, "6.18.61+rpt-rpi-2712", "6.18.61+rpt-rpi-v8")
+	if k := newerKernelInstalled("6.18.60+rpt-rpi-2712", pi); k != "6.18.61+rpt-rpi-2712" {
+		t.Errorf("Pi 5 with newer kernel: got %q", k)
+	}
+	ub := []string{"6.8.0-150-generic", "6.8.0-151-generic"}
+	if k := newerKernelInstalled("6.8.0-150-generic", ub); k != "6.8.0-151-generic" {
+		t.Errorf("ubuntu: got %q", k)
+	}
+	if k := newerKernelInstalled("6.8.0-151-generic", ub); k != "" {
+		t.Errorf("ubuntu current: got %q", k)
+	}
+	if k := newerKernelInstalled("6.8.12-4-pve", []string{"6.8.12-4-pve", "6.8.12-10-pve"}); k != "6.8.12-10-pve" {
+		t.Errorf("pve: got %q", k)
+	}
+	if k := newerKernelInstalled("6.11.4-301.fc41.x86_64", []string{"6.11.4-301.fc41.x86_64", "6.11.5-300.fc41.x86_64"}); k != "6.11.5-300.fc41.x86_64" {
+		t.Errorf("fedora: got %q", k)
+	}
+}
+
+func TestHeldBack(t *testing.T) {
+	full := `Inst libcamera-ipa [0.6.0] (0.8.0 Raspberry Pi Foundation:stable [arm64])
+Inst libcamera0.8 (0.8.0 Raspberry Pi Foundation:stable [arm64])
+Remv libcamera0.6 [0.6.0]
+Inst curl [8.5.0-2] (8.5.0-2ubuntu10.6 Ubuntu:24.04/noble-security [arm64])
+Conf curl (8.5.0-2ubuntu10.6 Ubuntu:24.04/noble-security [arm64])`
+	plain := `Inst curl [8.5.0-2] (8.5.0-2ubuntu10.6 Ubuntu:24.04/noble-security [arm64])`
+	pk := markHeldBack(parseAptSim(full), parseAptSim(plain))
+	if len(pk) != 3 {
+		t.Fatalf("want 3 packages, got %d", len(pk))
+	}
+	held := 0
+	for _, p := range pk {
+		if p.HeldBack {
+			held++
+		}
+		if p.Name == "curl" && p.HeldBack {
+			t.Errorf("curl isn't held back")
+		}
+	}
+	if held != 2 {
+		t.Errorf("want 2 held back, got %d", held)
+	}
+	if r := parseAptRemovals(full); len(r) != 1 || r[0] != "libcamera0.6" {
+		t.Errorf("removals: %v", r)
+	}
+}
+
 func TestScanLinesCR(t *testing.T) {
 	sc := bufio.NewScanner(strings.NewReader("a\r\nb\rc\nd"))
 	sc.Split(scanLinesCR)

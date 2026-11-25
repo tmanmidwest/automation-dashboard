@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **OS updates on a Raspberry Pi 5 no longer ask for a restart forever.** The newer-kernel check
+  compared the Pi 5 kernel (`+rpt-rpi-2712`) with the Pi 4 build of the same version (`+rpt-rpi-v8`)
+  that's installed beside it; it now compares only higher versions of the running build.
+- **Updates that "All updates" can't install are now shown as held back**, not as pending. apt holds
+  back upgrades that need packages added or removed; they were counted as pending, so they never
+  went away after an install. They're now counted apart with a plain note, and **Include held-back
+  (full upgrade)** in the Install dialog installs them (`apt-get dist-upgrade`), listing anything it
+  would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
+
 ### Added
 - **OS updates** (Health → Updates) — the Cerebro agent finds pending updates with the machine's own
   package manager (apt, dnf/yum, zypper, pacman, apk, Windows Update, macOS Software Update), marks

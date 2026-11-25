@@ -19,12 +19,17 @@ import { OS_UPDATE_REBOOT_GRACE_DAYS, OS_UPDATE_SECURITY_GRACE_DAYS } from '@cer
 
 const DAY_MS = 86_400_000;
 export const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const SCOPES: OsUpdateScope[] = ['security', 'all'];
+const SCOPES: OsUpdateScope[] = ['security', 'all', 'full'];
+const SCHEDULE_SCOPES: OsUpdateScope[] = ['security', 'all'];
 const REBOOTS: OsUpdateReboot[] = ['never', 'if-needed', 'always'];
 const MODES: OsUpdateMode[] = ['on', 'report', 'off'];
 
 export function isScope(v: unknown): v is OsUpdateScope {
   return SCOPES.includes(v as OsUpdateScope);
+}
+/** Schedules never run a full upgrade: it can remove packages, so it's started by hand. */
+export function isScheduleScope(v: unknown): v is OsUpdateScope {
+  return SCHEDULE_SCOPES.includes(v as OsUpdateScope);
 }
 export function isReboot(v: unknown): v is OsUpdateReboot {
   return REBOOTS.includes(v as OsUpdateReboot);
@@ -66,6 +71,7 @@ export function sanitizeReport(raw: unknown): OsUpdateReport | null {
       if (src) pkg.source = src;
       if (x.restart === true) pkg.restart = true;
       if (x.needsUser === true) pkg.needsUser = true;
+      if (x.heldBack === true) pkg.heldBack = true;
       pkgs.push(pkg);
     }
   }
@@ -79,6 +85,10 @@ export function sanitizeReport(raw: unknown): OsUpdateReport | null {
     packages: pkgs,
     total: int(r.total),
     security: int(r.security),
+    heldBack: int(r.heldBack),
+    fullUpgradeRemoves: Array.isArray(r.fullUpgradeRemoves)
+      ? r.fullUpgradeRemoves.map((x) => str(x, 200)).filter((x): x is string => !!x).slice(0, 200)
+      : [],
     securityKnown: r.securityKnown === true,
     rebootRequired: r.rebootRequired === true,
     rebootReason: str(r.rebootReason, 300),
@@ -117,6 +127,8 @@ export interface StoredStatus {
   note: string | null;
   total: number;
   security: number;
+  heldBack: number;
+  fullUpgradeRemoves: string[];
   securityKnown: boolean;
   rebootRequired: boolean;
   rebootReason: string | null;
@@ -142,7 +154,7 @@ export function mergeReport(prev: StoredStatus | null, rep: OsUpdateReport, now:
       ? { ...prev, ...live }
       : {
           checkedAt: null, manager: rep.manager ?? null, supported: rep.supported, error: null, note: null, total: 0, security: 0,
-          securityKnown: false, rebootRequired: false, rebootReason: null, rebootSince: null, securitySince: null,
+          heldBack: 0, fullUpgradeRemoves: [], securityKnown: false, rebootRequired: false, rebootReason: null, rebootSince: null, securitySince: null,
           canInstall: rep.canInstall, proxmox: !!rep.proxmox, packages: [], ...live,
         };
   }
@@ -160,6 +172,8 @@ export function mergeReport(prev: StoredStatus | null, rep: OsUpdateReport, now:
     note: rep.note ?? null,
     total: rep.total,
     security,
+    heldBack: rep.heldBack ?? 0,
+    fullUpgradeRemoves: rep.fullUpgradeRemoves ?? [],
     securityKnown: rep.securityKnown,
     rebootRequired: rep.rebootRequired,
     rebootReason: rep.rebootReason ?? null,
@@ -182,6 +196,8 @@ export function toUpdateStatus(row: StoredStatus | null | undefined): OsUpdateSt
     note: row.note,
     total: row.total,
     security: row.security,
+    heldBack: row.heldBack ?? 0,
+    fullUpgradeRemoves: row.fullUpgradeRemoves ?? [],
     securityKnown: row.securityKnown,
     rebootRequired: row.rebootRequired,
     rebootReason: row.rebootReason,
@@ -255,7 +271,7 @@ export function sanitizeSchedule(body: unknown): { ok: true; value: OsUpdateSche
   if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) return { ok: false, error: 'Pick a valid time.' };
   const windowHours = Number(b.windowHours ?? 4);
   if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 24) return { ok: false, error: 'The window must be 1 to 24 hours.' };
-  if (!isScope(b.scope)) return { ok: false, error: 'scope must be security or all.' };
+  if (!isScheduleScope(b.scope)) return { ok: false, error: 'scope must be security or all.' };
   if (!isReboot(b.reboot)) return { ok: false, error: 'reboot must be never, if-needed or always.' };
   const rings = sanitizeRings(b.rings).filter((r, i) => i === 0 || r.agentIds.length);
   if (!rings.length || !rings.some((r) => r.agentIds.length)) return { ok: false, error: 'Add at least one machine.' };

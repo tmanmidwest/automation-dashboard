@@ -37,7 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const agentVersion = "0.7.0"
+const agentVersion = "0.8.0"
 
 // Connection-loop sentinels. errAgentGone means the broker positively reported
 // this agent was removed (HTTP 410) — we self-uninstall. errAuthRejected means

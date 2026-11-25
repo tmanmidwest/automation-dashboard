@@ -37,7 +37,11 @@ export const RUN_STYLE: Record<OsUpdateRunStatus, { label: string; text: string 
 
 export const ACTIVE: OsUpdateRunStatus[] = ['scheduled', 'snapshot', 'sent', 'running'];
 
-export const SCOPE_LABEL: Record<OsUpdateScope, string> = { security: 'Security only', all: 'All updates' };
+export const SCOPE_LABEL: Record<OsUpdateScope, string> = { security: 'Security only', all: 'All updates', full: 'All updates + held back (full upgrade)' };
+
+/** Plain explanation of held-back packages, shared by the chip tooltip and the card. */
+export const HELD_BACK_HELP =
+  'Held back: these need other packages added or removed, so a regular upgrade ("All updates") leaves them. Install them with "Include held-back (full upgrade)".';
 export const REBOOT_LABEL: Record<OsUpdateReboot, string> = { never: "Don't restart", 'if-needed': 'Restart if needed', always: 'Always restart' };
 
 export function managerLabel(m: string | null | undefined): string {
@@ -66,7 +70,7 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
       {u.installing ? (
         <span className="text-sky-300 inline-flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Installing</span>
       ) : u.total === 0 && u.security === 0 ? (
-        <span className="text-emerald-400">Up to date</span>
+        u.heldBack > 0 ? null : <span className="text-emerald-400">Up to date</span>
       ) : (
         <>
           <span className="tabular-nums">{u.total}</span>
@@ -76,6 +80,9 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
             </span>
           )}
         </>
+      )}
+      {!u.installing && u.heldBack > 0 && (
+        <span className="text-muted-foreground tabular-nums" title={HELD_BACK_HELP}>{u.total > 0 || u.security > 0 ? '· ' : ''}{u.heldBack} held back</span>
       )}
       {u.rebootRequired && <span className="text-amber-400 inline-flex items-center gap-0.5" title={u.rebootReason ?? 'Restart needed'}><RotateCw className="h-3 w-3" /> restart</span>}
     </span>
@@ -135,7 +142,14 @@ type Skipped = { agentId: string; name: string; reason: string }[];
 /** Install updates on one or more machines. */
 export function InstallDialog({ machines, onClose, onDone }: { machines: OsUpdateMachine[]; onClose: () => void; onDone: (runs: OsUpdateRun[]) => void }) {
   const anySecurity = machines.some((m) => m.security > 0);
+  const held = machines.filter((m) => m.heldBack > 0);
+  const anyRegular = machines.some((m) => m.total > 0);
   const [scope, setScope] = useState<OsUpdateScope>(anySecurity ? 'security' : 'all');
+  // Off by default even when only held-back packages are waiting: a full upgrade can remove packages.
+  const [includeHeld, setIncludeHeld] = useState(false);
+  const sendScope: OsUpdateScope = scope === 'all' && includeHeld ? 'full' : scope;
+  const heldCant = held.filter((m) => !m.canFullUpgrade);
+  const removes = held.filter((m) => m.canFullUpgrade && m.fullUpgradeRemoves.length);
   const [reboot, setReboot] = useState<OsUpdateReboot>('if-needed');
   const guests = machines.filter((m) => m.proxmoxGuest);
   const [snapshot, setSnapshot] = useState(guests.length > 0);
@@ -151,7 +165,7 @@ export function InstallDialog({ machines, onClose, onDone }: { machines: OsUpdat
     setBusy(true); setErr(null);
     try {
       const res = await api.post<{ runs: OsUpdateRun[]; skipped: Skipped }>('/api/os-updates/install', {
-        agentIds: machines.map((m) => m.agentId), scope, reboot, snapshot, ...(later ? { at: new Date(at).toISOString() } : {}),
+        agentIds: machines.map((m) => m.agentId), scope: sendScope, reboot, snapshot, ...(later ? { at: new Date(at).toISOString() } : {}),
       });
       if (res.skipped.length) {
         setSkipped(res.skipped);
@@ -187,6 +201,30 @@ export function InstallDialog({ machines, onClose, onDone }: { machines: OsUpdat
                   <label key={s} className="flex items-center gap-1.5"><input type="radio" checked={scope === s} onChange={() => setScope(s)} /> {SCOPE_LABEL[s]}</label>
                 ))}
               </div>
+              {held.length > 0 && (
+                <div className="mt-2 rounded-md border border-border px-3 py-2 space-y-1.5">
+                  <label className={cn('flex items-start gap-2', scope !== 'all' && 'opacity-50')}>
+                    <input type="checkbox" checked={includeHeld && scope === 'all'} disabled={scope !== 'all'} onChange={(e) => setIncludeHeld(e.target.checked)} className="mt-1" />
+                    <span>
+                      <span className="block">Include held-back (full upgrade)</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {held.length === 1 && machines.length === 1 ? `${held[0].heldBack} package${held[0].heldBack === 1 ? ' is' : 's are'}` : `${held.map((m) => `${m.name} (${m.heldBack})`).join(', ')}:`} held back.
+                        {' '}They need other packages added or removed, so {SCOPE_LABEL.all} leaves them. A full upgrade installs them and can add or remove packages.
+                        {scope !== 'all' && ` Pick ${SCOPE_LABEL.all} to include them.`}
+                      </span>
+                    </span>
+                  </label>
+                  {includeHeld && scope === 'all' && removes.length > 0 && (
+                    <p className="text-xs text-amber-300 flex gap-1"><AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px" /> <span>This will remove: {removes.map((m) => `${machines.length > 1 ? `${m.name}: ` : ''}${m.fullUpgradeRemoves.join(', ')}`).join('; ')}.</span></p>
+                  )}
+                  {includeHeld && scope === 'all' && heldCant.length > 0 && (
+                    <p className="text-xs text-amber-300">{heldCant.map((m) => m.name).join(', ')} can't do a full upgrade yet (the agent updates itself to 0.8 shortly after Cerebro is redeployed), so {heldCant.length === 1 ? 'it' : 'they'} will be skipped.</p>
+                  )}
+                  {!anyRegular && !includeHeld && scope === 'all' && (
+                    <p className="text-xs text-muted-foreground">Only held-back packages are waiting, so {SCOPE_LABEL.all} alone won't install anything.</p>
+                  )}
+                </div>
+              )}
               {scope === 'security' && noSecurityKnown.length > 0 && (
                 <p className="text-xs text-amber-300 mt-1">{noSecurityKnown.map((m) => m.name).join(', ')} can't tell security updates apart (Arch / Alpine), so nothing will be installed there. Pick All updates for {noSecurityKnown.length === 1 ? 'it' : 'them'}.</p>
               )}
@@ -314,7 +352,7 @@ export function RunDialog({ runId, canManage, onClose, onChanged }: { runId: str
               <span><RunStatus r={run} /></span>
               <span className="text-muted-foreground">{runWhen(run)}</span>
               {run.installed != null && run.installed > 0 && <span>{run.installed} installed</span>}
-              {run.pendingBefore != null && <span className="text-muted-foreground">{run.pendingBefore} pending before</span>}
+              {run.pendingBefore != null && <span className="text-muted-foreground">{run.pendingBefore} pending when started</span>}
               {run.rebooting && <span className="text-amber-300 inline-flex items-center gap-1"><RotateCw className="h-3.5 w-3.5" /> restarting</span>}
             </div>
             {run.message && <p className={cn(['failed', 'refused'].includes(run.status) ? 'text-red-300' : 'text-foreground')}>{run.message}</p>}

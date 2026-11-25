@@ -20,6 +20,34 @@ import (
 //	Inst linux-image-6.8.0-49-generic (6.8.0-49.49 Ubuntu:24.04/noble-security [amd64])   ← new package
 var aptInstRe = regexp.MustCompile(`^Inst (\S+)(?: \[([^\]]*)\])? \((\S+)(?: (.*?))?(?: \[[^\]]*\])?\)`)
 
+// `Remv <name> [<version>]` lines: what the simulated upgrade would remove.
+var aptRemvRe = regexp.MustCompile(`^Remv (\S+)`)
+
+func parseAptRemovals(out string) []string {
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if m := aptRemvRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
+
+// markHeldBack flags each package from the full-upgrade simulation that the plain
+// upgrade simulation (`upgrade --with-new-pkgs`, what "All updates" runs) leaves out.
+func markHeldBack(full, plain []pkgUpdate) []pkgUpdate {
+	in := make(map[string]bool, len(plain))
+	for _, p := range plain {
+		in[p.Name] = true
+	}
+	out := make([]pkgUpdate, len(full))
+	for i, p := range full {
+		p.HeldBack = !in[p.Name]
+		out[i] = p
+	}
+	return out
+}
+
 func parseAptSim(out string) []pkgUpdate {
 	var pkgs []pkgUpdate
 	for _, line := range strings.Split(out, "\n") {
@@ -316,6 +344,42 @@ func parseWinCheck(out string) (pkgs []pkgUpdate, rebootPending bool, reason str
 // --- kernels -----------------------------------------------------------------
 
 // newestKernel picks the highest version among /boot/vmlinuz-<ver> names.
+// splitKernel splits a kernel release into its version number and its flavor:
+// "6.8.0-151-generic" → ("6.8.0-151-", "generic"), "6.18.60+rpt-rpi-2712" →
+// ("6.18.60", "+rpt-rpi-2712"), "6.11.4-301.fc41.x86_64" → ("6.11.4-301.", "fc41.x86_64").
+func splitKernel(release string) (version, flavor string) {
+	i := 0
+	for i < len(release) && (release[i] >= '0' && release[i] <= '9' || release[i] == '.' || release[i] == '-') {
+		i++
+	}
+	return release[:i], release[i:]
+}
+
+// newerKernelInstalled returns an installed kernel with a higher version number
+// than the running one, else "". A kernel of the same version in another flavor
+// doesn't count: a Raspberry Pi has rpi-2712 (Pi 5) and rpi-v8 (older Pis) builds
+// of every kernel installed and boots only one, so comparing names across flavors
+// asked for a restart that could never clear it. Same-flavor kernels are preferred
+// for the message.
+func newerKernelInstalled(running string, installed []string) string {
+	runVer, runFlavor := splitKernel(running)
+	var newer, sameFlavor []string
+	for _, v := range installed {
+		ver, flavor := splitKernel(v)
+		if ver == "" || !naturalLess(runVer, ver) {
+			continue
+		}
+		newer = append(newer, v)
+		if flavor == runFlavor {
+			sameFlavor = append(sameFlavor, v)
+		}
+	}
+	if len(sameFlavor) > 0 {
+		return newestKernel(sameFlavor)
+	}
+	return newestKernel(newer)
+}
+
 func newestKernel(versions []string) string {
 	if len(versions) == 0 {
 		return ""
