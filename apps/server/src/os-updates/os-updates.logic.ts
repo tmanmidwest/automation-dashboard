@@ -108,7 +108,7 @@ export function sanitizeAgentRun(raw: unknown): OsUpdateAgentRun | null {
   if (!runId) return null;
   return {
     runId,
-    kind: r.kind === 'reboot' ? 'reboot' : 'install',
+    kind: r.kind === 'reboot' ? 'reboot' : r.kind === 'repair' ? 'repair' : 'install',
     ok: r.ok === true,
     exitCode: typeof r.exitCode === 'number' && Number.isFinite(r.exitCode) ? Math.round(r.exitCode) : -1,
     message: str(r.message, 1000),

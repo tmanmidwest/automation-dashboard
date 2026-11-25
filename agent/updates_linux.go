@@ -40,6 +40,7 @@ func isProxmox() bool {
 func (linuxUpdater) check(ctx context.Context) updatesReport {
 	mgr := linuxManager()
 	rep := updatesReport{Manager: strings.TrimSuffix(mgr, "-get"), Supported: mgr != "", CanInstall: mgr != "", SecurityKnown: true}
+	aptNote := "" // apt stuck / interrupted: shown ahead of any other note
 	if mgr == "" {
 		rep.Error = "No supported package manager found (apt, dnf, yum, zypper, pacman or apk)."
 		return rep
@@ -47,6 +48,7 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 	switch mgr {
 	case "apt-get":
 		rep.Proxmox = isProxmox()
+		aptNote = aptHealthNote()
 		if out, code, err := runOut(ctx, aptEnv, "apt-get", append(aptOpts, "update")...); err != nil || code != 0 {
 			rep.Note = "Couldn't refresh the package lists, so this may be out of date: " + lastLines(out, 2)
 		}
@@ -138,6 +140,9 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 		}
 	}
 	rep.RebootRequired, rep.RebootReason = linuxRebootRequired(ctx, mgr)
+	if aptNote != "" {
+		rep.Note = strings.TrimSpace(aptNote + " " + rep.Note)
+	}
 	return rep
 }
 
@@ -206,6 +211,9 @@ func (linuxUpdater) install(ctx context.Context, scope string, logf func(string)
 	mgr := linuxManager()
 	switch mgr {
 	case "apt-get":
+		if err := aptPreflight(logf); err != nil {
+			return 0, err
+		}
 		if err := runStream(ctx, aptEnv, logf, "apt-get", append(aptOpts, "update")...); err != nil {
 			logf("Package lists didn't refresh; carrying on with what's cached.")
 		}
@@ -226,7 +234,7 @@ func (linuxUpdater) install(ctx context.Context, scope string, logf func(string)
 			}
 			logf(fmt.Sprintf("Upgrading %d package(s) with security fixes.", len(names)))
 			args := append(append([]string{}, aptOpts...), "-y", "install", "--only-upgrade")
-			return len(names), runStream(ctx, aptEnv, logf, "apt-get", append(args, names...)...)
+			return len(names), lockFailure(runStream(ctx, aptEnv, logf, "apt-get", append(args, names...)...))
 		}
 		n := 0
 		for _, p := range plan.packages {
@@ -259,7 +267,7 @@ func (linuxUpdater) install(ctx context.Context, scope string, logf func(string)
 			}
 			args = append(args, "--with-new-pkgs", "upgrade")
 		}
-		return n, runStream(ctx, aptEnv, logf, "apt-get", args...)
+		return n, lockFailure(runStream(ctx, aptEnv, logf, "apt-get", args...))
 	case "dnf":
 		if scope == "security" {
 			return -1, runStream(ctx, nil, logf, "dnf", "-y", "upgrade", "--security")

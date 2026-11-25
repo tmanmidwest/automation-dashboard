@@ -207,7 +207,7 @@ export class FabricUpdateSigningService {
   async signUpdatesToken(
     credHash: string,
     runId: string,
-    action: 'install' | 'reboot',
+    action: 'install' | 'reboot' | 'repair',
     scope = '',
     reboot = '',
   ): Promise<{ issuedAt: number; signature: string } | null> {
