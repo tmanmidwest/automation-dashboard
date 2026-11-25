@@ -82,7 +82,7 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
         )}
         {m.heldBack > 0 && (
           <p className="text-xs text-muted-foreground">
-            {m.heldBack} held back: {HELD_BACK_HELP.replace(/^Held back: /, '').replace(/^these/, 'they')}
+            {m.total === 0 && m.security === 0 ? 'Up to date. ' : ''}{m.heldBack} optional held back: {HELD_BACK_HELP.replace(/^Held back \(optional\): /, '').replace(/^these/, 'they')}
             {!m.canFullUpgrade && ' (Available once the agent has updated itself to 0.8.)'}
           </p>
         )}

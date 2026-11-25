@@ -39,8 +39,9 @@ Some upgrades need another package added or removed, for example when a library 
 The agent (0.8+) simulates both and marks the difference as **held back**:
 
 - The count and *security* count show what *All updates* / *Security only* will actually install.
-  Held-back packages are counted apart ("9 held back") and tagged in the package list, so they don't
-  look like updates that failed to install.
+  Held-back packages are optional: they're counted apart ("9 held back (optional)") and tagged in the
+  package list, and a machine with only held-back packages shows **Up to date** and doesn't count in
+  *Have updates*.
 - To install them, tick **Include held-back (full upgrade)** in the Install dialog (with *All
   updates*). The dialog lists any packages the full upgrade would remove first. It's never on by
   default and schedules never do it.

@@ -41,7 +41,7 @@ export const SCOPE_LABEL: Record<OsUpdateScope, string> = { security: 'Security 
 
 /** Plain explanation of held-back packages, shared by the chip tooltip and the card. */
 export const HELD_BACK_HELP =
-  'Held back: these need other packages added or removed, so a regular upgrade ("All updates") leaves them. Install them with "Include held-back (full upgrade)".';
+  'Held back (optional): these need other packages added or removed, so a regular upgrade ("All updates") leaves them. Install them with "Include held-back (full upgrade)".';
 export const REBOOT_LABEL: Record<OsUpdateReboot, string> = { never: "Don't restart", 'if-needed': 'Restart if needed', always: 'Always restart' };
 
 export function managerLabel(m: string | null | undefined): string {
@@ -70,7 +70,9 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
       {u.installing ? (
         <span className="text-sky-300 inline-flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Installing</span>
       ) : u.total === 0 && u.security === 0 ? (
-        u.heldBack > 0 ? null : <span className="text-emerald-400">Up to date</span>
+        // Held-back packages alone don't make a machine out of date: a regular upgrade has
+        // nothing left to do. They show as a small optional note.
+        <span className="text-emerald-400">Up to date</span>
       ) : (
         <>
           <span className="tabular-nums">{u.total}</span>
@@ -82,7 +84,7 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
         </>
       )}
       {!u.installing && u.heldBack > 0 && (
-        <span className="text-muted-foreground tabular-nums" title={HELD_BACK_HELP}>{u.total > 0 || u.security > 0 ? '· ' : ''}{u.heldBack} held back</span>
+        <span className="text-xs text-muted-foreground/70 tabular-nums" title={HELD_BACK_HELP}>· {u.heldBack} held back (optional)</span>
       )}
       {u.rebootRequired && <span className="text-amber-400 inline-flex items-center gap-0.5" title={u.rebootReason ?? 'Restart needed'}><RotateCw className="h-3 w-3" /> restart</span>}
     </span>
