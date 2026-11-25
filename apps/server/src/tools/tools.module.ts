@@ -6,6 +6,7 @@ import { AutomationsModule } from '../automations/automations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AppReplicatorModule } from '../app-replicator/app-replicator.module';
 import { StackBackupModule } from '../stack-backup/stack-backup.module';
+import { OsUpdatesModule } from '../os-updates/os-updates.module';
 import { ToolCatalogService } from './tool-catalog.service';
 
 /**
@@ -14,7 +15,7 @@ import { ToolCatalogService } from './tool-catalog.service';
  * bodies call into. See docs/assistant-computer.md.
  */
 @Module({
-  imports: [ConnectorsModule, MonitorsModule, TimelineModule, AutomationsModule, NotificationsModule, AppReplicatorModule, StackBackupModule],
+  imports: [ConnectorsModule, MonitorsModule, TimelineModule, AutomationsModule, NotificationsModule, AppReplicatorModule, StackBackupModule, OsUpdatesModule],
   providers: [ToolCatalogService],
   exports: [ToolCatalogService],
 })

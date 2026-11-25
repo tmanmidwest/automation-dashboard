@@ -342,6 +342,11 @@ things had no agent-reachable surface. Added, all scope-gated as usual:
   app logs, notifications, jobs, monitor transitions), newest first, with kind/severity/source/
   actor/text filters and `before` paging. Mirrors the REST controller's **audit gate** — a
   caller without `audit:read` never sees `audit` events (dropped from the requested kinds).
+- **OS updates** — `list_os_updates`, `get_os_update_machine`, `get_os_update_run` (`fabric:read`,
+  read-only): every agent machine's pending / security / held-back counts, restart reason and last
+  run; one machine's packages and last 30 runs (by agent id or name); one run's result message,
+  snapshot note and the agent's streamed output (last `lines` lines, default 300). Same data as
+  Health → Updates. See `docs/os-updates.md`.
   Lets an agent answer "what happened recently?" / investigate incidents.
 - **`delete_resource`** (`connectors:action`, destructive + confirm): the one generic connector
   verb MCP lacked. Calls `ConnectorInstanceService.deleteResource` — the same path the UI's
