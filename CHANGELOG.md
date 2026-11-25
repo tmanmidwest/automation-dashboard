@@ -7,11 +7,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-### Added
-- **MCP / assistant: OS update tools** — `list_os_updates`, `get_os_update_machine` and
-  `get_os_update_run` (read-only, `fabric:read`) show update status, packages, runs and a run's
-  output and failure message (e.g. why a Proxmox snapshot failed).
-
 ### Fixed
 - **OS updates on a Raspberry Pi 5 no longer ask for a restart forever.** The newer-kernel check
   compared the Pi 5 kernel (`+rpt-rpi-2712`) with the Pi 4 build of the same version (`+rpt-rpi-v8`)
@@ -23,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **MCP / assistant: OS update tools** — `list_os_updates`, `get_os_update_machine` and
+  `get_os_update_run` (read-only, `fabric:read`) show update status, packages, runs and a run's
+  output and failure message (e.g. why a Proxmox snapshot failed).
 - **OS updates** (Health → Updates) — the Cerebro agent finds pending updates with the machine's own
   package manager (apt, dnf/yum, zypper, pacman, apk, Windows Update, macOS Software Update), marks
   security updates and tells you when a restart is needed. Install them on one or many machines
