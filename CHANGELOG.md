@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that's installed beside it; it now compares only higher versions of the running build.
 - **Updates that "All updates" can't install are now shown as held back**, not as pending. apt holds
   back upgrades that need packages added or removed; they were counted as pending, so they never
-  went away after an install. They're now counted apart with a plain note, and **Include held-back
+  went away after an install. They're now counted apart as optional (a machine with only held-back packages shows Up to date), and **Include held-back
   (full upgrade)** in the Install dialog installs them (`apt-get dist-upgrade`), listing anything it
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
