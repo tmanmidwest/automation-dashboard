@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Copy, Check, Trash2, KeyRound } from 'lucide-react';
+import { Copy, Check, Trash2, KeyRound, Pencil } from 'lucide-react';
 import type { ApiTokenCreated, ApiTokenSummary, Permission } from '@cerebro/shared';
+import { GRANTABLE_TOKEN_SCOPES } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
@@ -20,8 +21,9 @@ const SCOPES: { scope: Permission; label: string; desc: string; write?: boolean 
   { scope: 'settings:read', label: 'Settings', desc: 'Read application settings.' },
   { scope: 'automations:read', label: 'Automations', desc: 'Read automation rules and their run history.' },
   { scope: 'replicator:read', label: 'App Replicator', desc: 'Read registered apps, deployments, and update status.' },
+  { scope: 'backup:read', label: 'Backups', desc: 'Read backup jobs, snapshots, and stack backups.' },
   { scope: 'agents:read', label: 'Agent catalog', desc: 'Read every Computer agent with its owners, labels, status and model (GET /api/v1/agents).' },
-  { scope: 'fabric:read', label: 'Fabric', desc: 'List Fabric machines, targets, and sessions (needed by the cerebro CLI).' },
+  { scope: 'fabric:read', label: 'Fabric', desc: 'List Fabric machines, targets, and sessions (needed by the cerebro CLI), plus Health and OS updates (MCP update tools).' },
   { scope: 'fabric:connect', label: 'Fabric connect', desc: 'Open SSH/RDP/VNC sessions and get CA certs signed via the cerebro CLI.', write: true },
   { scope: 'connectors:action', label: 'Connector actions', desc: 'Start/stop/reboot resources, run operations, delete resources.', write: true },
   { scope: 'monitors:write', label: 'Monitor management', desc: 'Pause, resume, and trigger monitors.', write: true },
@@ -42,13 +44,15 @@ function relative(iso: string | null): string {
 
 export function ApiTokens() {
   const { can } = useAuth();
-  const available = useMemo(() => SCOPES.filter((s) => can(s.scope)), [can]);
+  // Only scopes the server will grant a token (automations:write stays session-only), that the user holds.
+  const available = useMemo(() => SCOPES.filter((s) => GRANTABLE_TOKEN_SCOPES.includes(s.scope) && can(s.scope)), [can]);
 
   const [tokens, setTokens] = useState<ApiTokenSummary[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Create dialog state.
+  // Create / edit dialog state (editing = the token being edited).
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<ApiTokenSummary | null>(null);
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<Set<Permission>>(new Set());
   const [expiresAt, setExpiresAt] = useState('');
@@ -72,7 +76,33 @@ export function ApiTokens() {
     setScopes(new Set());
     setExpiresAt('');
     setErr(null);
+    setEditing(null);
     setCreating(true);
+  }
+
+  function openEdit(t: ApiTokenSummary) {
+    setName(t.name);
+    // Scopes the user can't grant any more are dropped (the server would refuse them); the dialog says so.
+    setScopes(new Set(t.scopes.filter((sc) => available.some((x) => x.scope === sc))));
+    setErr(null);
+    setEditing(t);
+    setCreating(true);
+  }
+
+  async function submitEdit() {
+    if (!editing) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.patch<ApiTokenSummary>(`/api/tokens/${editing.id}`, { name: name.trim(), scopes: [...scopes] });
+      setCreating(false);
+      setEditing(null);
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Failed to update token');
+    } finally {
+      setBusy(false);
+    }
   }
 
   function toggleScope(s: Permission) {
@@ -136,7 +166,7 @@ export function ApiTokens() {
         <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
           <div>
             <CardTitle className="text-base">Your tokens</CardTitle>
-            <CardDescription>Read-only access, scoped to permissions you already hold.</CardDescription>
+            <CardDescription>Scoped to permissions you already hold. Edit a token to change its name or scopes; the token itself stays the same.</CardDescription>
           </div>
           <Button onClick={openCreate} disabled={available.length === 0}>Create token</Button>
         </CardHeader>
@@ -164,6 +194,9 @@ export function ApiTokens() {
                     <p>Used {relative(t.lastUsedAt)}</p>
                     <p>{t.expiresAt ? `Expires ${new Date(t.expiresAt).toLocaleDateString()}` : 'No expiry'}</p>
                   </div>
+                  <Button variant="ghost" size="icon" onClick={() => openEdit(t)} aria-label={`Edit ${t.name}`}>
+                    <Pencil className="h-4 w-4" />
+                  </Button>
                   <Button variant="ghost" size="icon" onClick={() => revoke(t)} aria-label={`Revoke ${t.name}`}>
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
@@ -177,14 +210,16 @@ export function ApiTokens() {
       {/* Create dialog */}
       <Dialog
         open={creating}
-        onClose={() => setCreating(false)}
-        title="Create API token"
-        description="Pick a name and the read scopes this token may access."
+        onClose={() => { setCreating(false); setEditing(null); }}
+        title={editing ? `Edit ${editing.name}` : 'Create API token'}
+        description={editing
+          ? `cbro_${editing.prefix}… keeps working; changes apply on its next request.`
+          : 'Pick a name and the scopes this token may access.'}
         footer={
           <>
-            <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
-            <Button onClick={submitCreate} disabled={busy || !name.trim() || scopes.size === 0}>
-              {busy ? 'Creating…' : 'Create token'}
+            <Button variant="outline" onClick={() => { setCreating(false); setEditing(null); }}>Cancel</Button>
+            <Button onClick={editing ? submitEdit : submitCreate} disabled={busy || !name.trim() || scopes.size === 0}>
+              {busy ? (editing ? 'Saving…' : 'Creating…') : editing ? 'Save' : 'Create token'}
             </Button>
           </>
         }
@@ -227,10 +262,17 @@ export function ApiTokens() {
               </p>
             )}
           </div>
-          <div>
-            <Label>Expiry <span className="text-muted-foreground font-normal">(optional)</span></Label>
-            <Input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
-          </div>
+          {editing && editing.scopes.some((sc) => !available.some((a) => a.scope === sc)) && (
+            <p className="text-xs text-muted-foreground">
+              This token also has {editing.scopes.filter((sc) => !available.some((a) => a.scope === sc)).join(', ')}, which you can't grant now; saving removes {editing.scopes.filter((sc) => !available.some((a) => a.scope === sc)).length === 1 ? 'it' : 'them'}.
+            </p>
+          )}
+          {!editing && (
+            <div>
+              <Label>Expiry <span className="text-muted-foreground font-normal">(optional)</span></Label>
+              <Input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
+            </div>
+          )}
         </div>
       </Dialog>
 

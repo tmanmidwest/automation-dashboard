@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **Edit API tokens** (Settings → API Tokens) — rename a token or change its scopes without
+  replacing it; the token keeps working and new scopes apply on its next request. Audited.
 - **MCP / assistant: OS update tools** — `list_os_updates`, `get_os_update_machine` and
   `get_os_update_run` (read-only, `fabric:read`) show update status, packages, runs and a run's
   output and failure message (e.g. why a Proxmox snapshot failed).

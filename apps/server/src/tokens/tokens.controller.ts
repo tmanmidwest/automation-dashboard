@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
 import { ArrayNotEmpty, IsArray, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
 import type { ApiTokenCreated, ApiTokenSummary, SessionUser } from '@cerebro/shared';
 import { CurrentUser, SessionOnly } from '../auth/decorators';
@@ -10,8 +10,13 @@ class CreateTokenDto {
   @IsOptional() @IsISO8601() expiresAt?: string;
 }
 
+class UpdateTokenDto {
+  @IsOptional() @IsString() @MaxLength(80) name?: string;
+  @IsOptional() @IsArray() @ArrayNotEmpty() @IsString({ each: true }) scopes?: string[];
+}
+
 // @SessionOnly — you manage your OWN tokens from an interactive session; a bearer
-// token can never mint or revoke tokens. No @RequirePermissions: any signed-in user
+// token can never mint, edit or revoke tokens. No @RequirePermissions: any signed-in user
 // may manage their own tokens, and scopes are clamped to their own permissions.
 @SessionOnly()
 @Controller('api/tokens')
@@ -26,6 +31,12 @@ export class TokensController {
   @Post()
   create(@Body() dto: CreateTokenDto, @CurrentUser() user: SessionUser): Promise<ApiTokenCreated> {
     return this.tokens.create(user, dto);
+  }
+
+  /** Rename / change scopes. The secret stays the same. */
+  @Patch(':id')
+  update(@Param('id') id: string, @Body() dto: UpdateTokenDto, @CurrentUser() user: SessionUser): Promise<ApiTokenSummary> {
+    return this.tokens.update(user, id, dto);
   }
 
   @Delete(':id')
