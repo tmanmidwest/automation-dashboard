@@ -4,7 +4,7 @@ Status: **All phases built. Phase 1 deployed & verified; Phases 2, 3 (a/b/c), 4 
 
 > **Phase 1 is live and smoke-tested.** Backend: `ApiToken` model + migration
 > `0005_api_tokens`, `auth/token-auth.service.ts`, combined `auth.guard.ts` (session or
-> bearer), `@SessionOnly()` decorator, `tokens/` module (`GET/POST/DELETE /api/tokens`).
+> bearer), `@SessionOnly()` decorator, `tokens/` module (`GET/POST/PATCH/DELETE /api/tokens`). `PATCH /api/tokens/:id` `{ name?, scopes? }` renames a token or changes its scopes in place (same secret; same grantable ⊆ owner rules; audited `tokens.updated` with added/removed).
 > Frontend: `settings/ApiTokens.tsx` + route + Settings card. Verified on the dev box:
 > valid token → 200 on a real route, bogus/no-auth → 401, token hitting `/api/tokens` → 403
 > (`@SessionOnly`). NestJS gotcha confirmed along the way: **guards run only on a matched

@@ -72,6 +72,39 @@ export class TokensService {
     return { token: this.toSummary(row), secret: plaintext };
   }
 
+  /**
+   * Rename a token and/or change its scopes. The secret is unchanged, so clients keep
+   * working; new scopes apply on the token's next request (scopes are read per request).
+   * Same rules as create: grantable scopes the owner holds.
+   */
+  async update(user: SessionUser, id: string, input: { name?: string; scopes?: string[] }): Promise<ApiTokenSummary> {
+    const token = await this.prisma.apiToken.findFirst({ where: { id, userId: user.id, revokedAt: null } });
+    if (!token) throw new NotFoundException('Token not found.');
+    const data: { name?: string; scopes?: string[] } = {};
+    if (input.name !== undefined) {
+      const name = input.name.trim();
+      if (!name) throw new BadRequestException('A token name is required.');
+      if (name !== token.name) data.name = name;
+    }
+    if (input.scopes !== undefined) {
+      const scopes = this.validateScopes(user, input.scopes);
+      const before = new Set(token.scopes);
+      if (scopes.length !== before.size || scopes.some((s) => !before.has(s))) data.scopes = scopes;
+    }
+    if (!Object.keys(data).length) return this.toSummary(token);
+    const row = await this.prisma.apiToken.update({ where: { id }, data });
+    const added = data.scopes ? data.scopes.filter((s) => !token.scopes.includes(s)) : [];
+    const removed = data.scopes ? token.scopes.filter((s) => !data.scopes!.includes(s)) : [];
+    await this.audit.record({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'tokens.updated',
+      target: row.name,
+      meta: { prefix: token.prefix, ...(data.name ? { renamedFrom: token.name } : {}), ...(data.scopes ? { added, removed, scopes: data.scopes } : {}) },
+    });
+    return this.toSummary(row);
+  }
+
   async revoke(user: SessionUser, id: string): Promise<void> {
     const token = await this.prisma.apiToken.findFirst({
       where: { id, userId: user.id, revokedAt: null },
