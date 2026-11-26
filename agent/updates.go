@@ -37,6 +37,7 @@ const (
 	updatesFirstCheck = 90 * time.Second
 	// Package lists can be long (a stale box may have hundreds); cap what's sent.
 	updatesMaxPackages    = 400
+	updatesMaxCVEs        = 60 // per package; a kernel can list hundreds
 	updatesCheckTimeout   = 20 * time.Minute
 	updatesInstallTimeout = 3 * time.Hour
 	// Log lines are batched onto the socket at this cadence while an install runs.
@@ -60,6 +61,22 @@ type pkgUpdate struct {
 	// HeldBack (apt): only a full upgrade installs it, because it needs another
 	// package added or removed. "All updates" leaves it; scope "full" installs it.
 	HeldBack bool `json:"heldBack,omitempty"`
+	// SourcePackage (apt, agent 0.10+): the source package it's built from, which is
+	// what Debian / Ubuntu advisories are filed under. Cerebro looks up CVEs by it.
+	SourcePackage string `json:"sourcePackage,omitempty"`
+	// CVEs this update fixes, when the package manager says (dnf updateinfo, Windows Update).
+	CVEs []string `json:"cves,omitempty"`
+	// Advisory ids (RHSA-2024:1234, FEDORA-2024-…, MS bulletin) the update belongs to.
+	Advisories []string `json:"advisories,omitempty"`
+}
+
+// distroInfo is /etc/os-release (Linux): Cerebro uses it to look up advisories for
+// the right release (Ubuntu 22.04, Debian 12, …).
+type distroInfo struct {
+	ID        string `json:"id"`
+	VersionID string `json:"versionId,omitempty"`
+	Codename  string `json:"codename,omitempty"`
+	IDLike    string `json:"idLike,omitempty"`
 }
 
 type updatesRun struct {
@@ -77,6 +94,7 @@ type updatesRun struct {
 type updatesReport struct {
 	CheckedAt int64       `json:"checkedAt"` // unix ms
 	Manager   string      `json:"manager,omitempty"`
+	Distro    *distroInfo `json:"distro,omitempty"`
 	Supported bool        `json:"supported"`
 	Error     string      `json:"error,omitempty"`
 	Note      string      `json:"note,omitempty"`
@@ -262,6 +280,11 @@ func (u *updater) checkOnce(force bool) *updatesReport {
 	}
 	if rep.Packages == nil {
 		rep.Packages = []pkgUpdate{}
+	}
+	for i := range rep.Packages {
+		if len(rep.Packages[i].CVEs) > updatesMaxCVEs {
+			rep.Packages[i].CVEs = rep.Packages[i].CVEs[:updatesMaxCVEs]
+		}
 	}
 
 	u.mu.Lock()

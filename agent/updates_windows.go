@@ -34,6 +34,8 @@ try {
       severity = [string]$u.MsrcSeverity
       categories = $cats
       reboot = ($u.InstallationBehavior.RebootBehavior -ne 0)
+      cves = @($u.CveIDs)
+      bulletins = @($u.SecurityBulletinIDs)
     }
   }
 } catch { $out.error = $_.Exception.Message }

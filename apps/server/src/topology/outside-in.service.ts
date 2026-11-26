@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { SettingsService } from '../settings/settings.service';
 import { LoggingService } from '../logging/logging.service';
 import { cpeRelease } from './posture';
+import { KevService, type KevEntry } from '../vuln-intel/kev.service';
 
 /**
  * Outside-in data for posture findings, from free public sources (no keys):
@@ -16,7 +17,6 @@ import { cpeRelease } from './posture';
 export const OUTSIDE_IN_KEY = 'posture.outsideIn';
 const TIMEOUT_MS = 8_000;
 const IDB_TTL = 6 * 3600_000;
-const KEV_TTL = 24 * 3600_000;
 const EOL_TTL = 24 * 3600_000;
 /** After a failure, wait this long before trying the same source again. */
 const RETRY_MS = 15 * 60_000;
@@ -30,15 +30,7 @@ export interface InternetDbHost {
   vulns: string[];
   checkedAt: string;
 }
-export interface KevEntry {
-  cveID: string;
-  vendorProject?: string;
-  product?: string;
-  vulnerabilityName?: string;
-  dateAdded?: string;
-  requiredAction?: string;
-  knownRansomwareCampaignUse?: string;
-}
+export type { KevEntry } from '../vuln-intel/kev.service';
 export interface EolCycle {
   cycle: string;
   eol: string | boolean;
@@ -64,10 +56,10 @@ export class OutsideInService {
   constructor(
     private readonly settings: SettingsService,
     private readonly logging: LoggingService,
+    private readonly kevs: KevService,
   ) {}
 
   private idb = new Map<string, Cached<InternetDbHost>>();
-  private kevCache: Cached<Map<string, KevEntry>> = { at: 0, value: null };
   private eolCache = new Map<string, Cached<EolCycle[]>>();
 
   async enabled(): Promise<boolean> {
@@ -138,10 +130,7 @@ export class OutsideInService {
   }
 
   private kev(errors: string[]): Promise<Map<string, KevEntry> | null> {
-    return this.cached(this.kevCache, KEV_TTL, 'CISA KEV', errors, async () => {
-      const j = (await this.getJson('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json')) as { vulnerabilities?: KevEntry[] } | null;
-      return new Map((j?.vulnerabilities ?? []).filter((v) => v?.cveID).map((v) => [v.cveID.toUpperCase(), v]));
-    });
+    return this.kevs.get(errors);
   }
 
   private eol(product: string, errors: string[]): Promise<EolCycle[] | null> {

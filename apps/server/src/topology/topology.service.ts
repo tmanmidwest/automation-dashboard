@@ -303,8 +303,11 @@ export class TopologyService {
   private async osUpdatePosture() {
     try {
       const rows = await this.prisma.agentUpdateStatus.findMany({
-        where: { OR: [{ security: { gt: 0 } }, { rebootRequired: true }], agent: { status: { notIn: ['pending', 'revoked', 'deleting'] } } },
-        select: { agentId: true, security: true, securitySince: true, rebootRequired: true, rebootSince: true, rebootReason: true, agent: { select: { name: true } } },
+        where: { OR: [{ security: { gt: 0 } }, { rebootRequired: true }, { kevCount: { gt: 0 } }], agent: { status: { notIn: ['pending', 'revoked', 'deleting'] } } },
+        select: {
+          agentId: true, security: true, securitySince: true, rebootRequired: true, rebootSince: true, rebootReason: true,
+          kevCount: true, kevCves: true, patchNowSince: true, restartPriority: true, agent: { select: { name: true } },
+        },
       });
       // A Waypoint deferring to an agent on the same machine would repeat that machine's findings.
       const skip = this.sameBox.deferringIds();

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Camera, CheckCircle2, Clock, Loader2, Plus, RotateCw, ShieldAlert, Trash2, XCircle } from 'lucide-react';
 import type {
   OsUpdateMachine,
+  OsUpdatePriority,
   OsUpdateReboot,
   OsUpdateRun,
   OsUpdateRunStatus,
@@ -10,6 +11,7 @@ import type {
   OsUpdateScope,
   OsUpdateStatus,
 } from '@cerebro/shared';
+import { OS_UPDATE_PRIORITY_LABEL } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -58,6 +60,36 @@ export function daysSince(iso: string | null | undefined): number | null {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
 }
 
+/** Colours per update priority (Patch now = fixes a CISA known-exploited CVE). */
+export const PRIORITY_STYLE: Record<OsUpdatePriority, { chip: string; text: string; help: string }> = {
+  'patch-now': { chip: 'bg-red-500/20 text-red-300 border-red-500/50', text: 'text-red-400', help: "Fixes a CVE on CISA's Known Exploited Vulnerabilities list: attackers are using it now." },
+  critical: { chip: 'bg-red-500/10 text-red-300 border-red-500/30', text: 'text-red-400', help: 'CVSS 9 or higher, or the vendor rates it Critical.' },
+  important: { chip: 'bg-amber-500/10 text-amber-300 border-amber-500/30', text: 'text-amber-400', help: 'CVSS 7 to 8.9, or the vendor rates it Important / High.' },
+  security: { chip: 'bg-yellow-500/10 text-yellow-200 border-yellow-500/25', text: 'text-yellow-300', help: 'A security fix of lower or unknown severity.' },
+  regular: { chip: 'bg-muted text-muted-foreground border-border', text: 'text-muted-foreground', help: 'Not a security fix.' },
+};
+
+export function PriorityBadge({ p, className }: { p: OsUpdatePriority | null | undefined; className?: string }) {
+  if (!p) return null;
+  const s = PRIORITY_STYLE[p];
+  return (
+    <span className={cn('inline-flex items-center rounded border px-1.5 py-px text-[11px] font-medium whitespace-nowrap', s.chip, className)} title={s.help}>
+      {p === 'patch-now' && <ShieldAlert className="h-3 w-3 mr-0.5" />}{OS_UPDATE_PRIORITY_LABEL[p]}
+    </span>
+  );
+}
+
+/** "2 fix known-exploited CVEs (CVE-…, CVE-…) · 31 CVEs" — the line that says why a machine matters. */
+export function priorityLine(u: OsUpdateStatus, max = 2): string | null {
+  const parts: string[] = [];
+  if (u.kevCount > 0) {
+    const list = u.kevCves.slice(0, max).join(', ') + (u.kevCves.length > max ? ` +${u.kevCves.length - max}` : '');
+    parts.push(`${u.kevCount} update${u.kevCount === 1 ? ' fixes' : 's fix'} known-exploited CVE${u.kevCves.length === 1 ? '' : 's'}${list ? ` (${list})` : ''}`);
+  }
+  if (u.cveCount > 0) parts.push(`${u.cveCount} CVE${u.cveCount === 1 ? '' : 's'} fixed`);
+  return parts.length ? parts.join(' · ') : null;
+}
+
 /** Compact "12 · 3 security" chip with a restart marker. */
 export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undefined; className?: string }) {
   if (!u) return <span className={cn('text-muted-foreground', className)}>—</span>;
@@ -65,8 +97,11 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
   if (!u.checkedAt) return <span className={cn('text-muted-foreground', className)}>{u.checking ? 'Checking…' : 'Not checked yet'}</span>;
   if (u.error && !u.total) return <span className={cn('text-amber-400', className)} title={u.error}>Check failed</span>;
   const secDays = daysSince(u.securitySince);
+  const urgent = u.priority === 'patch-now' || u.priority === 'critical' || u.priority === 'important';
+  const restartUrgent = u.restartPriority === 'patch-now' || u.restartPriority === 'critical';
   return (
     <span className={cn('inline-flex items-center gap-1.5 flex-wrap', className)}>
+      {!u.installing && urgent && <PriorityBadge p={u.priority} />}
       {u.installing ? (
         <span className="text-sky-300 inline-flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Installing</span>
       ) : u.total === 0 && u.security === 0 ? (
@@ -86,7 +121,12 @@ export function UpdatesChip({ u, className }: { u: OsUpdateStatus | null | undef
       {!u.installing && u.heldBack > 0 && (
         <span className="text-xs text-muted-foreground/70 tabular-nums" title={HELD_BACK_HELP}>· {u.heldBack} held back (optional)</span>
       )}
-      {u.rebootRequired && <span className="text-amber-400 inline-flex items-center gap-0.5" title={u.rebootReason ?? 'Restart needed'}><RotateCw className="h-3 w-3" /> restart</span>}
+      {u.rebootRequired && (
+        <span className={cn('inline-flex items-center gap-0.5', restartUrgent ? 'text-red-400' : 'text-amber-400')}
+          title={`${u.rebootReason ?? 'Restart needed'}${restartUrgent ? '. Installed fixes for serious CVEs only take effect after the restart.' : ''}`}>
+          <RotateCw className="h-3 w-3" /> restart
+        </span>
+      )}
     </span>
   );
 }

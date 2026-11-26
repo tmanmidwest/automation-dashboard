@@ -48,6 +48,49 @@ The agent (0.8+) simulates both and marks the difference as **held back**:
 - Proxmox VE always installs with `dist-upgrade`, so nothing is held back there.
 - Agents before 0.8 count held-back packages in the total, as before; they update themselves.
 
+## Severity and CVEs
+
+Each pending update gets a **priority**, the CVEs it fixes with links to the advisories, and a
+**known exploited** flag. The Updates list sorts machines worst-first and says why
+("2 updates fix known-exploited CVEs (CVE-…) · 31 CVEs fixed").
+
+| Priority | When |
+| --- | --- |
+| **Patch now** | Fixes a CVE on CISA's [Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) list |
+| **Critical** | CVSS 9.0+, or the vendor / distro rates it Critical (MSRC, Red Hat, Ubuntu priority) |
+| **Important** | CVSS 7.0–8.9, or vendor Important / High |
+| **Security** | A security fix of lower or unknown severity |
+| **Regular** | Not a security fix |
+
+A machine takes the highest priority among its updates. Within a priority, packages sort by EPSS
+(FIRST.org's chance of exploitation in the next 30 days), then CVSS. After a Patch now or Critical
+update installs, the **restart** marker turns red until the machine restarts, because the old
+kernel or library keeps running until then.
+
+Where the CVEs come from:
+
+| Manager | Source |
+| --- | --- |
+| dnf / yum | The agent runs `updateinfo list --security --with-cve` (agent 0.10+) |
+| Windows Update | `CveIDs` and `SecurityBulletinIDs` on each update (agent 0.10+) |
+| apt (Ubuntu, Debian, Raspberry Pi OS, Proxmox) | Cerebro asks [OSV.dev](https://osv.dev) which advisories affect the installed version and which affect the new one; the difference is what the update fixes. Needs the agent's distro and source package names (agent 0.10+). |
+| zypper, pacman, apk, macOS | Not yet: security vs regular only |
+
+Scores: CVSS and vendor priority come from the advisory (Ubuntu's per-CVE OSV records carry a CVSS
+vector and Ubuntu's priority; Cerebro uses those for Debian, RHEL and Windows CVEs too). There is
+no NVD lookup: its rate limit can't keep up with a fleet's CVEs.
+
+Caching and privacy: OSV lookups are cached a day per (release, package, version), so machines on
+the same release share them; advisory records and CVE scores a week; EPSS and KEV a day. Enrichment
+runs in the background after each report and hourly; the page shows what's stored. A failed source
+backs off for 3 hours (*Check now* retries at once) and the card says what's missing. Cerebro sends
+only the release (e.g. `Ubuntu:22.04:LTS`), package names, versions and CVE ids: never hostnames
+or addresses. All of it follows the **outside-in checks** toggle in Posture; with it off, you get
+the CVEs dnf and Windows report and an already-downloaded KEV list, and no apt CVEs.
+
+Known gaps: new packages (a new `linux-image-…`) have no installed version to compare, so a kernel
+that arrives as a new package shows no CVEs on apt. Raspberry Pi archive packages aren't in OSV.
+
 ## Installing
 
 Select machines on the Updates tab, or open one machine's page, and pick **Install…**:
@@ -151,9 +194,13 @@ the window stays open, what to install, and whether to restart and snapshot.
 - **Updates installed** (`updates.run_succeeded`) is off by default.
 - **Security updates waiting** (`updates.security_waiting`, on by default) fires once per server when
   its security updates have waited more than 7 days.
-- **Posture** adds two findings:
+- **Known-exploited CVE updates waiting** (`updates.known_exploited`, on by default, critical) fires
+  once per machine (servers and workstations) when a Patch now update has waited more than 2 days.
+- **Posture** adds three findings:
+  - *Updates waiting that fix known-exploited vulnerabilities*: High, after 2 days.
   - *Security updates waiting over 7 days*: Medium, or High after 30 days.
-  - *Restart needed to finish installing updates*: Low, after 7 days.
+  - *Restart needed to finish installing updates*: Low after 7 days, Medium when the installed
+    fixes were Patch now or Critical.
   Each affected machine links to its Health page.
 
 ## API
@@ -204,8 +251,13 @@ Types are in `packages/shared/src/os-updates.ts`.
   - `apps/server/src/os-updates/os-updates.logic.ts`: pure logic (sanitizing, "waiting since",
     schedule timing, posture findings).
   - `apps/server/src/fabric/fabric-update-signing.service.ts`: `signUpdatesToken`.
-- **Tables:** `AgentUpdateStatus`, `AgentUpdateRun` and `UpdateSchedule`. Migration `0056_os_updates`.
+  - `apps/server/src/os-updates/os-update-enrich.service.ts` + `os-updates.enrich.ts`: CVEs,
+    scores and priority per update.
+  - `apps/server/src/vuln-intel/`: shared CISA KEV (also used by Posture), OSV.dev, CVE scores + EPSS.
+- **Tables:** `AgentUpdateStatus`, `AgentUpdateRun` and `UpdateSchedule`. Migration `0056_os_updates`; `0058_os_update_cves` adds the
+  priority summary and the `OsVulnLookup` / `OsAdvisory` / `OsCve` caches.
 - **Web:**
   - `apps/web/src/components/health/UpdatesTab.tsx`
   - `apps/web/src/components/health/UpdatesCard.tsx`, the card on a machine's page
   - `apps/web/src/components/health/updates-ui.tsx`, the dialogs
+  - `apps/web/src/components/health/UpdatesPackages.tsx`, the package table with CVEs

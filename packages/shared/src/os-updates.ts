@@ -31,6 +31,100 @@ export interface OsUpdatePackage {
    * needs other packages added or removed; only a full upgrade does.
    */
   heldBack?: boolean;
+  /** apt (agent 0.10+): the source package it's built from (what advisories are filed under). */
+  sourcePackage?: string;
+  /** CVEs this update fixes: from the package manager (dnf, Windows) or Cerebro's OSV.dev lookup (apt). */
+  cves?: string[];
+  /** Advisories it belongs to (USN-…, DSA-…, RHSA-…, FEDORA-…, MS bulletins). */
+  advisories?: string[];
+  /** Cerebro: how much it matters (see OS_UPDATE_PRIORITY_ORDER). Absent until worked out. */
+  priority?: OsUpdatePriority;
+  /** Cerebro: highest CVSS among its CVEs. */
+  maxCvss?: number;
+  /** Cerebro: fixes a CVE on CISA's Known Exploited Vulnerabilities list. */
+  kev?: boolean;
+  /** Cerebro: highest EPSS (0–1, chance of exploitation in the next 30 days) among its CVEs. */
+  epss?: number;
+}
+
+/**
+ * How much an update matters, highest first:
+ *  patch-now  fixes a CVE CISA lists as exploited in the wild (KEV)
+ *  critical   CVSS 9+, or the vendor / distro calls it critical
+ *  important  CVSS 7–8.9, or vendor Important / High
+ *  security   a security fix of lower or unknown severity
+ *  regular    not a security fix
+ */
+export type OsUpdatePriority = 'patch-now' | 'critical' | 'important' | 'security' | 'regular';
+export const OS_UPDATE_PRIORITY_ORDER: OsUpdatePriority[] = ['patch-now', 'critical', 'important', 'security', 'regular'];
+export const OS_UPDATE_PRIORITY_LABEL: Record<OsUpdatePriority, string> = {
+  'patch-now': 'Patch now',
+  critical: 'Critical',
+  important: 'Important',
+  security: 'Security',
+  regular: 'Regular',
+};
+/** 0 = most urgent; unknown / null sorts after regular. */
+export function osUpdatePriorityRank(p: OsUpdatePriority | null | undefined): number {
+  const i = p ? OS_UPDATE_PRIORITY_ORDER.indexOf(p) : -1;
+  return i < 0 ? OS_UPDATE_PRIORITY_ORDER.length : i;
+}
+
+/** /etc/os-release facts the agent reports (Linux, agent 0.10+). */
+export interface OsUpdateDistro {
+  id: string;
+  versionId?: string;
+  codename?: string;
+  idLike?: string;
+}
+
+/** One CVE on the machine detail view. */
+export interface OsUpdateCve {
+  id: string;
+  cvss: number | null;
+  /** Vendor priority (e.g. Ubuntu "high"). */
+  priority: string | null;
+  summary: string | null;
+  epss: number | null;
+  epssPercentile: number | null;
+  /** On CISA KEV. */
+  kev: { dateAdded: string | null; dueDate: string | null; name: string | null; ransomware: boolean } | null;
+}
+
+export interface OsUpdateLink {
+  label: string;
+  url: string;
+}
+
+const RHEL_LIKE = ['rhel', 'centos', 'rocky', 'almalinux', 'ol', 'fedora'];
+
+/** Where to read about a CVE for this machine: the distro / vendor page first, then NVD. */
+export function osUpdateCveLinks(cve: string, manager: string | null | undefined, distroId: string | null | undefined): OsUpdateLink[] {
+  const id = encodeURIComponent(cve);
+  const d = (distroId ?? '').toLowerCase();
+  const out: OsUpdateLink[] = [];
+  if (manager === 'windows-update') out.push({ label: 'Microsoft', url: `https://msrc.microsoft.com/update-guide/vulnerability/${id}` });
+  else if (d === 'ubuntu') out.push({ label: 'Ubuntu', url: `https://ubuntu.com/security/${id}` });
+  else if (d === 'debian' || d === 'raspbian') out.push({ label: 'Debian', url: `https://security-tracker.debian.org/tracker/${id}` });
+  else if (RHEL_LIKE.includes(d) || manager === 'dnf' || manager === 'yum') out.push({ label: 'Red Hat', url: `https://access.redhat.com/security/cve/${id}` });
+  else if (manager === 'zypper') out.push({ label: 'SUSE', url: `https://www.suse.com/security/cve/${id}/` });
+  out.push({ label: 'NVD', url: `https://nvd.nist.gov/vuln/detail/${id}` });
+  return out;
+}
+
+/** Link for an advisory id (USN, DSA/DLA, RHSA, Rocky, Alma, Oracle, Fedora) or a Windows KB; null when unknown. */
+export function osUpdateAdvisoryLink(advisory: string): string | null {
+  const a = advisory.trim();
+  const e = encodeURIComponent(a);
+  if (/^USN-\d+-\d+$/.test(a)) return `https://ubuntu.com/security/notices/${e}`;
+  if (/^(DSA|DLA)-\d+(-\d+)?$/.test(a)) return `https://security-tracker.debian.org/tracker/${e}`;
+  if (/^RH[SBE]A-\d{4}:\d+$/.test(a)) return `https://access.redhat.com/errata/${e}`;
+  if (/^RLSA-\d{4}:\d+$/.test(a)) return `https://errata.rockylinux.org/${e}`;
+  if (/^ALSA-\d{4}:\d+$/.test(a)) return `https://errata.almalinux.org/`;
+  if (/^ELSA-\d{4}-\d+$/.test(a)) return `https://linux.oracle.com/errata/${e}.html`;
+  if (/^FEDORA(-EPEL)?-\d{4}-[0-9a-f]+$/i.test(a)) return `https://bodhi.fedoraproject.org/updates/${e}`;
+  if (/^KB\d+$/i.test(a)) return `https://support.microsoft.com/help/${a.slice(2)}`;
+  return null;
 }
 
 /** What the agent reports about its last install / restart command. */
@@ -55,6 +149,8 @@ export interface OsUpdateReport {
   /** Unix ms; 0 before the first check finished. */
   checkedAt: number;
   manager?: string;
+  /** Linux, agent 0.10+. */
+  distro?: OsUpdateDistro;
   supported: boolean;
   error?: string;
   note?: string;
@@ -166,6 +262,22 @@ export interface OsUpdateStatus {
   /** Run id of an install in progress. */
   installing: string | null;
   checking: boolean;
+  /** Highest priority among pending updates (null: none, or not worked out yet). */
+  priority: OsUpdatePriority | null;
+  /** Distinct CVEs the pending updates fix. */
+  cveCount: number;
+  /** Updates that fix a known-exploited (CISA KEV) CVE, and those CVEs. */
+  kevCount: number;
+  kevCves: string[];
+  /** ISO: since when a patch-now update has been waiting. */
+  patchNowSince: string | null;
+  /** Installed updates of this priority need the restart to take effect. */
+  restartPriority: OsUpdatePriority | null;
+  /** ISO: when CVE / priority detail was last worked out. */
+  enrichedAt: string | null;
+  /** Why CVE detail is missing or partial. */
+  enrichNote: string | null;
+  distro: OsUpdateDistro | null;
 }
 
 export type OsUpdateRunStatus =
@@ -274,12 +386,14 @@ export interface OsUpdateOverview {
   runs: OsUpdateRun[];
   schedules: OsUpdateSchedule[];
   signing: OsUpdateSigning;
-  totals: { machines: number; withUpdates: number; withSecurity: number; needRestart: number; failedRuns: number };
+  totals: { machines: number; withUpdates: number; withSecurity: number; needRestart: number; failedRuns: number; knownExploited: number };
 }
 
 export interface OsUpdateMachineDetail {
   machine: OsUpdateMachine;
   packages: OsUpdatePackage[];
+  /** Details for every CVE in packages[].cves. */
+  cves: Record<string, OsUpdateCve>;
   runs: OsUpdateRun[];
 }
 
@@ -305,3 +419,5 @@ export interface OsUpdateRepairRequest {
 /** Posture/alerts: security updates waiting longer than this are flagged. */
 export const OS_UPDATE_SECURITY_GRACE_DAYS = 7;
 export const OS_UPDATE_REBOOT_GRACE_DAYS = 7;
+/** Posture/alerts: a patch-now (known exploited) update waiting longer than this is flagged. */
+export const OS_UPDATE_PATCH_NOW_GRACE_DAYS = 2;

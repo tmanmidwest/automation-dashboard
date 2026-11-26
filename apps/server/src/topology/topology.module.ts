@@ -3,6 +3,7 @@ import { ConnectorsModule } from '../connectors/connectors.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SettingsModule } from '../settings/settings.module';
 import { FabricModule } from '../fabric/fabric.module';
+import { VulnIntelModule } from '../vuln-intel/vuln-intel.module';
 import { TopologyService } from './topology.service';
 import { TopologyController } from './topology.controller';
 import { NewDevicesService } from './new-devices.service';
@@ -17,7 +18,7 @@ import { PostureController } from './posture.controller';
 
 /** Architecture map: one graph joined across connectors (topology.builder.ts), plus new-device detection. */
 @Module({
-  imports: [ConnectorsModule, NotificationsModule, SettingsModule, FabricModule],
+  imports: [ConnectorsModule, NotificationsModule, SettingsModule, FabricModule, VulnIntelModule],
   controllers: [TopologyController, NewDevicesController, PostureController],
   providers: [TopologyService, NewDevicesService, OutsideInService, ImageScanService, VersionCveService, CtLogService, HibpService, PostureTrackingService],
 })

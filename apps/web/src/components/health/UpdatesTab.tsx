@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CalendarClock, Camera, Download, Loader2, Pencil, Play, RefreshCw, RotateCw, Search, X } from 'lucide-react';
 import type { OsUpdateMachine, OsUpdateOverview, OsUpdateRun, OsUpdateSchedule } from '@cerebro/shared';
+import { osUpdatePriorityRank } from '@cerebro/shared';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -10,11 +11,17 @@ import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { RoleIcon, fmtAgo, osLabel } from './health-ui';
 import {
-  InstallDialog, RebootDialog, REBOOT_LABEL, RunDialog, RunStatus, SCOPE_LABEL, ScheduleDialog, SigningNote, UpdatesChip, daysSince, managerLabel, runWhat, runWhen,
+  InstallDialog, RebootDialog, REBOOT_LABEL, RunDialog, RunStatus, SCOPE_LABEL, ScheduleDialog, SigningNote, UpdatesChip, daysSince, managerLabel, priorityLine, runWhat, runWhen,
 } from './updates-ui';
 
 const REFRESH_MS = 15_000;
-type Filter = 'updates' | 'security' | 'restart' | null;
+type Filter = 'updates' | 'security' | 'restart' | 'kev' | null;
+
+/** Sort key: priority, falling back to "security" for machines whose CVE detail isn't worked out yet. */
+function machineRank(m: OsUpdateMachine): number {
+  if (m.total === 0 && m.security === 0 && m.heldBack === 0) return 99;
+  return osUpdatePriorityRank(m.priority ?? (m.security > 0 ? 'security' : 'regular'));
+}
 
 /** Health → Updates: pending OS updates on every agent machine, installs, restarts and schedules. docs/os-updates.md */
 export function UpdatesTab() {
@@ -46,9 +53,11 @@ export function UpdatesTab() {
 
   const query = q.trim().toLowerCase();
   const visible = useMemo(() => (data?.machines ?? [])
-    .filter((m) => (!filter || (filter === 'updates' ? m.total > 0 : filter === 'security' ? m.security > 0 : m.rebootRequired)))
+    .filter((m) => (!filter || (filter === 'updates' ? m.total > 0 : filter === 'security' ? m.security > 0 : filter === 'kev' ? m.kevCount > 0 : m.rebootRequired)))
     .filter((m) => !query || m.name.toLowerCase().includes(query))
-    .sort((a, b) => b.security - a.security || Number(b.rebootRequired) - Number(a.rebootRequired) || b.total - a.total || a.name.localeCompare(b.name)), [data, filter, query]);
+    // Worst first: priority (patch now → regular), then how many known-exploited fixes, how long security has waited, the rest.
+    .sort((a, b) => machineRank(a) - machineRank(b) || b.kevCount - a.kevCount || (daysSince(b.securitySince) ?? -1) - (daysSince(a.securitySince) ?? -1)
+      || b.security - a.security || Number(b.rebootRequired) - Number(a.rebootRequired) || b.total - a.total || a.name.localeCompare(b.name)), [data, filter, query]);
   const selected = (data?.machines ?? []).filter((m) => sel.has(m.agentId));
 
   async function checkNow(m: OsUpdateMachine) {
@@ -70,6 +79,7 @@ export function UpdatesTab() {
   const tot = data?.totals;
   const tiles: { label: string; value: number; key: Filter; tone?: string }[] = tot ? [
     { label: 'Machines', value: tot.machines, key: null },
+    { label: 'Known exploited', value: tot.knownExploited ?? 0, key: 'kev', tone: tot.knownExploited ? 'text-red-400' : undefined },
     { label: 'Have updates', value: tot.withUpdates, key: 'updates' },
     { label: 'Security', value: tot.withSecurity, key: 'security', tone: tot.withSecurity ? 'text-amber-400' : undefined },
     { label: 'Need restart', value: tot.needRestart, key: 'restart', tone: tot.needRestart ? 'text-amber-400' : undefined },
@@ -89,7 +99,7 @@ export function UpdatesTab() {
 
       {data && (
         <>
-          <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 mb-4">
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
             {tiles.map((tile) => {
               const active = filter === tile.key && tile.key !== null;
               return (
@@ -152,6 +162,7 @@ export function UpdatesTab() {
                     <td className="px-3 py-2 text-xs">
                       {m.agentTooOld ? <span className="text-muted-foreground">Agent {m.agentVersion} (updating itself)</span> : <UpdatesChip u={m} />}
                       {m.security > 0 && (daysSince(m.securitySince) ?? 0) > 0 && <div className="text-[11px] text-muted-foreground">security waiting {daysSince(m.securitySince)}d</div>}
+                      {priorityLine(m) && <div className={cn('text-[11px]', m.kevCount > 0 ? 'text-red-300' : 'text-muted-foreground')}>{priorityLine(m)}</div>}
                     </td>
                     <td className="px-3 py-2 text-xs text-muted-foreground">{m.checking ? 'checking…' : m.checkedAt ? fmtAgo(m.checkedAt) : '—'}</td>
                     <td className="px-3 py-2 text-xs">
@@ -186,6 +197,7 @@ export function UpdatesTab() {
                   </button>
                 </div>
                 <div className="mt-2 text-xs">{m.agentTooOld ? <span className="text-muted-foreground">Agent {m.agentVersion} (updating itself)</span> : <UpdatesChip u={m} />}</div>
+                {priorityLine(m) && <div className={cn('mt-0.5 text-[11px]', m.kevCount > 0 ? 'text-red-300' : 'text-muted-foreground')}>{priorityLine(m)}</div>}
                 {m.lastRun && (
                   <button onClick={() => setRunId(m.lastRun!.id)} className="mt-1 text-xs text-left"><RunStatus r={m.lastRun} /> <span className="text-muted-foreground">{runWhen(m.lastRun)}</span></button>
                 )}
