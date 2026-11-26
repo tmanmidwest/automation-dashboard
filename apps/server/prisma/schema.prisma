@@ -917,9 +917,64 @@ model AgentUpdateStatus {
   /// Run id of an install in progress on the box.
   installing     String?
   checking       Boolean   @default(false)
-  /// OsUpdatePackage[] (capped at 400 by the agent).
+  /// OsUpdatePackage[] (capped at 400 by the agent). Cerebro adds CVEs / priority to each.
   packages       Json?
+  /// /etc/os-release id / versionId / codename (agent 0.10+), for advisory lookups.
+  distro         Json?
+  /// Highest update priority: patch-now | critical | important | security | regular (null = none / not worked out yet).
+  priority       String?
+  /// Distinct CVEs the pending updates fix, and how many updates fix a CISA KEV one.
+  cveCount       Int       @default(0)
+  kevCount       Int       @default(0)
+  kevCves        String[]  @default([])
+  /// When a known-exploited (patch now) update first showed up; cleared when it's gone.
+  patchNowSince  DateTime?
+  /// Priority of updates installed but waiting on a restart to take effect.
+  restartPriority String?
+  enrichedAt     DateTime?
+  /// Why CVE detail is missing or partial (lookups off, source down, distro not covered).
+  enrichNote     String?
   updatedAt      DateTime  @updatedAt
+}
+
+/// OSV.dev: advisories affecting one distro package version (vuln-intel/osv.service.ts). Cached a day.
+model OsVulnLookup {
+  id        String   @id @default(cuid())
+  /// e.g. "Ubuntu:22.04:LTS", "Debian:12".
+  ecosystem String
+  name      String
+  version   String
+  vulnIds   String[] @default([])
+  fetchedAt DateTime
+
+  @@unique([ecosystem, name, version])
+}
+
+/// OSV.dev advisory record (USN-…, DSA-…, UBUNTU-CVE-…). Cached a week.
+model OsAdvisory {
+  id         String    @id
+  cves       String[]  @default([])
+  summary    String?
+  cvss       Float?
+  cvssVector String?
+  priority   String?
+  published  DateTime?
+  /// OSV has no record by this id.
+  missing    Boolean   @default(false)
+  fetchedAt  DateTime
+}
+
+/// Scores per CVE for OS updates: CVSS / vendor priority (a week) and FIRST EPSS (a day).
+model OsCve {
+  id             String    @id
+  cvss           Float?
+  cvssVector     String?
+  priority       String?
+  summary        String?
+  scoredAt       DateTime?
+  epss           Float?
+  epssPercentile Float?
+  epssAt         DateTime?
 }
 
 /// One install or restart, started by hand or by an update schedule.

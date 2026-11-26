@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'crypto';
 import type { AgentUpdateRun, Prisma, UpdateSchedule } from '@prisma/client';
 import {
+  OS_UPDATE_PATCH_NOW_GRACE_DAYS,
   OS_UPDATE_RUN_ACTIVE,
   OS_UPDATE_SECURITY_GRACE_DAYS,
   type FabricUpdatesFrame,
@@ -34,6 +35,8 @@ import { SettingsService } from '../settings/settings.service';
 import { ConnectorInstanceService } from '../connectors/connector-instance.service';
 import { SameBoxService } from '../fabric/same-box.service';
 import { detectRole, normalizeRole } from '../health/health-assess';
+import { OsUpdateEnrichService } from './os-update-enrich.service';
+import { sortPackages } from './os-updates.enrich';
 import {
   describeTiming,
   isReboot,
@@ -68,6 +71,7 @@ const NOW_WINDOW_MS = 15 * 60_000;
 /** Manual "later" runs: same window as schedules. */
 const LATER_WINDOW_MS = 4 * 3_600_000;
 const ALERT_STATE_KEY = 'updates.alertState';
+const KEV_ALERT_STATE_KEY = 'updates.kevAlertState';
 const GUEST_CACHE_MS = 10 * 60_000;
 const SNAPSHOTS_KEPT = 2;
 const FINAL: OsUpdateRunStatus[] = ['succeeded', 'failed', 'refused', 'missed', 'cancelled', 'unknown'];
@@ -100,6 +104,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   private readonly busyRuns = new Set<string>();
   private guestCache: { at: number; byMac: Map<string, OsUpdateProxmoxGuest> } | null = null;
   private alertState: Record<string, string> = {};
+  private kevAlertState: Record<string, string> = {};
   /** Per-agent tail of the frame chain: frames from one agent are handled one at a time, in order. */
   private readonly frameChains = new Map<string, Promise<void>>();
 
@@ -112,6 +117,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     private readonly settings: SettingsService,
     private readonly instances: ConnectorInstanceService,
     private readonly sameBox: SameBoxService,
+    private readonly enrich: OsUpdateEnrichService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -122,6 +128,10 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     });
     this.flushTimer = setInterval(() => void this.flushLogs(), 2000);
     this.alertState = (await this.settings.get<Record<string, string>>(ALERT_STATE_KEY).catch(() => null)) ?? {};
+    this.kevAlertState = (await this.settings.get<Record<string, string>>(KEV_ALERT_STATE_KEY).catch(() => null)) ?? {};
+    this.enrich.onEnriched = () => this.knownExploitedAlerts().catch((e) => this.logger.warn(`Known-exploited alerts: ${e instanceof Error ? e.message : e}`));
+    // Work out CVE detail for what's stored (also fills in machines from before this feature).
+    setTimeout(() => void this.enrich.refreshAll().catch(() => undefined), 30_000).unref?.();
     // Runs a restart of Cerebro interrupted mid-snapshot can't resume: send them again.
     await this.prisma.agentUpdateRun
       .updateMany({ where: { status: 'snapshot' }, data: { status: 'scheduled', snapshotNote: 'Cerebro restarted while taking the snapshot; trying again.' } })
@@ -166,7 +176,13 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     const prev = (await this.prisma.agentUpdateStatus.findUnique({ where: { agentId } })) as StoredStatus | null;
     const next = mergeReport(prev, rep, now);
     const data = { ...next, packages: (next.packages ?? []) as Prisma.InputJsonValue };
-    await this.prisma.agentUpdateStatus.upsert({ where: { agentId }, create: { agentId, ...data }, update: data });
+    await this.prisma.agentUpdateStatus.upsert({
+      where: { agentId },
+      create: { agentId, ...data, distro: (next.distro ?? undefined) as Prisma.InputJsonValue | undefined },
+      update: { ...data, distro: (next.distro ?? undefined) as Prisma.InputJsonValue | undefined },
+    });
+    // A finished check (not just a live-state ping) gets its CVE detail worked out.
+    if (rep.checkedAt) this.enrich.schedule(agentId);
     // The agent is working on a run → it's running.
     if (rep.installing) {
       await this.prisma.agentUpdateRun.updateMany({ where: { id: rep.installing, agentId, status: { in: ['sent', 'scheduled'] } }, data: { status: 'running' } });
@@ -340,6 +356,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         checkedAt: null, manager: null, supported: false, error: null, note: null, total: 0, security: 0, heldBack: 0, fullUpgradeRemoves: [], securityKnown: false,
         rebootRequired: false, rebootReason: null, securitySince: null, rebootSince: null, canInstall: false, proxmox: false,
         mode: 'on' as const, installing: null, checking: false,
+        priority: null, cveCount: 0, kevCount: 0, kevCves: [], patchNowSince: null, restartPriority: null, enrichedAt: null, enrichNote: null, distro: null,
       };
       return {
         ...base,
@@ -378,6 +395,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
         withSecurity: machines.filter((m) => m.security > 0).length,
         needRestart: machines.filter((m) => m.rebootRequired).length,
         failedRuns: runs.filter((r) => ['failed', 'refused', 'missed', 'unknown'].includes(r.status) && r.createdAt.getTime() > weekAgo).length,
+        knownExploited: machines.filter((m) => m.kevCount > 0).length,
       },
     };
   }
@@ -389,9 +407,9 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       this.prisma.agentUpdateRun.findMany({ where: { agentId }, orderBy: { createdAt: 'desc' }, take: 30, include: { agent: { select: { name: true } } } }),
       this.scheduleNames(),
     ]);
-    const packages = (Array.isArray(row?.packages) ? (row!.packages as unknown as OsUpdatePackage[]) : []).slice();
-    packages.sort((a, b) => Number(!!b.security) - Number(!!a.security) || a.name.localeCompare(b.name));
-    return { machine, packages, runs: runs.map((r) => this.toRun(r, names)) };
+    const packages = sortPackages(Array.isArray(row?.packages) ? (row!.packages as unknown as OsUpdatePackage[]) : []);
+    const cves = await this.enrich.cveDetails(packages.flatMap((p) => p.cves ?? []));
+    return { machine, packages, cves, runs: runs.map((r) => this.toRun(r, names)) };
   }
 
   async run(id: string): Promise<OsUpdateRun> {
@@ -404,6 +422,8 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   // ── Commands ──────────────────────────────────────────────────────────────
 
   check(agentId: string): { requested: boolean } {
+    // "Check now" also retries CVE sources that failed, instead of waiting out the back-off.
+    this.enrich.schedule(agentId, true);
     return { requested: this.registry.requestUpdatesCheck(agentId) };
   }
 
@@ -540,6 +560,7 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
   @Cron(CronExpression.EVERY_HOUR)
   async hourly(): Promise<void> {
     await this.securityAlerts().catch((e) => this.logger.warn(`Security update alerts: ${e instanceof Error ? e.message : e}`));
+    await this.knownExploitedAlerts().catch((e) => this.logger.warn(`Known-exploited alerts: ${e instanceof Error ? e.message : e}`));
     // Keep a year of run history.
     await this.prisma.agentUpdateRun.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 366 * 86_400_000) } } }).catch(() => undefined);
   }
@@ -877,5 +898,40 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
       }
     }
     if (changed) await this.settings.set(ALERT_STATE_KEY, this.alertState).catch(() => undefined);
+  }
+
+  /**
+   * Once per machine and episode: an update that fixes a CISA known-exploited CVE has
+   * waited longer than OS_UPDATE_PATCH_NOW_GRACE_DAYS. Servers and workstations alike:
+   * these are being used by attackers now.
+   */
+  private async knownExploitedAlerts(): Promise<void> {
+    const machines = await this.machines();
+    const cutoff = Date.now() - OS_UPDATE_PATCH_NOW_GRACE_DAYS * 86_400_000;
+    let changed = false;
+    const seen = new Set<string>();
+    for (const m of machines) {
+      if (!m.patchNowSince || m.kevCount <= 0) continue;
+      seen.add(m.agentId);
+      if (new Date(m.patchNowSince).getTime() > cutoff || this.kevAlertState[m.agentId] === m.patchNowSince) continue;
+      this.kevAlertState[m.agentId] = m.patchNowSince;
+      changed = true;
+      const days = Math.floor((Date.now() - new Date(m.patchNowSince).getTime()) / 86_400_000);
+      const list = m.kevCves.slice(0, 3).join(', ') + (m.kevCves.length > 3 ? ` and ${m.kevCves.length - 3} more` : '');
+      await this.notifications
+        .dispatchAlert('updates.known_exploited', {
+          title: `${m.name}: update${m.kevCount === 1 ? '' : 's'} for known-exploited CVEs waiting ${days} days`,
+          body: `${m.name} has ${m.kevCount} pending update${m.kevCount === 1 ? '' : 's'} fixing ${list}, which CISA lists as exploited in the wild. Install from Health → Updates (Security only covers them).`,
+          dedupeKey: `updates:kev:${m.agentId}:${m.patchNowSince}`,
+        })
+        .catch(() => undefined);
+    }
+    for (const k of Object.keys(this.kevAlertState)) {
+      if (!seen.has(k)) {
+        delete this.kevAlertState[k];
+        changed = true;
+      }
+    }
+    if (changed) await this.settings.set(KEV_ALERT_STATE_KEY, this.kevAlertState).catch(() => undefined);
   }
 }

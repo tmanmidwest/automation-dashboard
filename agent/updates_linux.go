@@ -39,7 +39,7 @@ func isProxmox() bool {
 
 func (linuxUpdater) check(ctx context.Context) updatesReport {
 	mgr := linuxManager()
-	rep := updatesReport{Manager: strings.TrimSuffix(mgr, "-get"), Supported: mgr != "", CanInstall: mgr != "", SecurityKnown: true}
+	rep := updatesReport{Manager: strings.TrimSuffix(mgr, "-get"), Supported: mgr != "", CanInstall: mgr != "", SecurityKnown: true, Distro: linuxDistro()}
 	aptNote := "" // apt stuck / interrupted: shown ahead of any other note
 	if mgr == "" {
 		rep.Error = "No supported package manager found (apt, dnf, yum, zypper, pacman or apk)."
@@ -58,6 +58,7 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 			break
 		}
 		rep.Packages = plan.packages
+		aptSourcePackages(ctx, rep.Packages)
 		if plan.heldBack > 0 {
 			rep.FullUpgradeRemoves = plan.removes
 		}
@@ -74,11 +75,20 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 		}
 		if sout, scode, serr := runOut(ctx, nil, mgr, args...); serr == nil && scode == 0 {
 			sec := parseDnfSecurity(sout)
+			adv := parseDnfAdvisories(sout)
+			// The CVEs each advisory fixes (agent 0.10+). Best effort: older yum lacks --with-cve.
+			var cves map[string][]string
+			if cout, ccode, cerr := runOut(ctx, nil, mgr, append(args, "--with-cve")...); cerr == nil && ccode == 0 {
+				cves = parseDnfAdvisories(cout)
+			}
 			for i := range rep.Packages {
-				if sev, ok := sec[rep.Packages[i].Name]; ok {
+				name := rep.Packages[i].Name
+				if sev, ok := sec[name]; ok {
 					rep.Packages[i].Security = true
 					rep.Packages[i].Severity = sev
 				}
+				rep.Packages[i].Advisories = onlyAdvisoryIDs(adv[name])
+				rep.Packages[i].CVEs = onlyCVEs(cves[name])
 			}
 		} else {
 			rep.SecurityKnown = false
@@ -144,6 +154,32 @@ func (linuxUpdater) check(ctx context.Context) updatesReport {
 		rep.Note = strings.TrimSpace(aptNote + " " + rep.Note)
 	}
 	return rep
+}
+
+func linuxDistro() *distroInfo {
+	m := readEnvFile("/etc/os-release")
+	if m["ID"] == "" {
+		return nil
+	}
+	return &distroInfo{ID: m["ID"], VersionID: m["VERSION_ID"], Codename: m["VERSION_CODENAME"], IDLike: m["ID_LIKE"]}
+}
+
+// aptSourcePackages fills in each installed package's source package (what Debian
+// and Ubuntu file advisories under). New packages aren't installed yet and keep "".
+func aptSourcePackages(ctx context.Context, pkgs []pkgUpdate) {
+	if len(pkgs) == 0 {
+		return
+	}
+	out, _, err := runOut(ctx, aptEnv, "dpkg-query", "-W", "-f=${Package}\t${source:Package}\n")
+	if err != nil {
+		return
+	}
+	src := parseDpkgSources(out)
+	for i := range pkgs {
+		if s, ok := src[pkgs[i].Name]; ok && s != "" {
+			pkgs[i].SourcePackage = s
+		}
+	}
 }
 
 // linuxRebootRequired: the distro's own flag when it has one, else "a newer kernel

@@ -6,13 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { fmtAgo } from './health-ui';
-import { ACTIVE, HELD_BACK_HELP, InstallDialog, RebootDialog, RepairDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, runWhat, runWhen } from './updates-ui';
+import { ACTIVE, HELD_BACK_HELP, InstallDialog, RebootDialog, RepairDialog, RunDialog, RunStatus, UpdatesChip, daysSince, managerLabel, priorityLine, runWhat, runWhen } from './updates-ui';
+import { UpdatesPackages } from './UpdatesPackages';
 
 /** The Updates card on a machine's Health page. docs/os-updates.md */
 export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage: boolean }) {
   const [d, setD] = useState<OsUpdateMachineDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
+  const [openPref, setOpenPref] = useState<boolean | null>(null);
   const [checking, setChecking] = useState(false);
   const [install, setInstall] = useState(false);
   const [reboot, setReboot] = useState(false);
@@ -44,9 +45,14 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
     return <Card className="mb-4"><CardContent className="pt-5 text-sm text-muted-foreground">{err ?? <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading updates…</span>}</CardContent></Card>;
   }
   const m = d.machine;
+  // Opens by itself when something on it is urgent.
+  const open = openPref ?? (m.priority === 'patch-now' || m.priority === 'critical');
+  const setOpen = (v: boolean) => setOpenPref(v);
   const secDays = daysSince(m.securitySince);
   const pkgs = d.packages;
   const sec = pkgs.filter((p) => p.security);
+  const why = priorityLine(m, 4);
+  const lookingUp = m.checkedAt && pkgs.length > 0 && (!m.enrichedAt || new Date(m.enrichedAt) < new Date(m.checkedAt));
   const heldPkgs = pkgs.filter((p) => p.heldBack).length;
   return (
     <Card className="mb-4">
@@ -86,6 +92,16 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
             {m.rebootRequired && <span className="text-xs text-amber-300">{m.rebootReason ?? 'Restart needed'}{m.rebootSince ? ` · since ${fmtAgo(m.rebootSince)}` : ''}. Restart to finish; this clears once the machine is back.</span>}
           </div>
         )}
+        {why && (
+          <p className={cn('text-xs', m.kevCount > 0 ? 'text-red-300' : 'text-muted-foreground')}>
+            {why}{m.kevCount > 0 && '. CISA lists these as exploited in the wild, so install them first (Security only covers them).'}
+          </p>
+        )}
+        {m.rebootRequired && (m.restartPriority === 'patch-now' || m.restartPriority === 'critical') && (
+          <p className="text-xs text-red-300">Fixes for {m.restartPriority === 'patch-now' ? 'known-exploited' : 'critical'} CVEs are installed but only take effect after a restart.</p>
+        )}
+        {lookingUp && <p className="text-xs text-muted-foreground flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Checking which CVEs these fix…</p>}
+        {m.enrichNote && <p className="text-xs text-muted-foreground">{m.enrichNote}</p>}
         {m.heldBack > 0 && (
           <p className="text-xs text-muted-foreground">
             {m.total === 0 && m.security === 0 ? 'Up to date. ' : ''}{m.heldBack} optional held back: {HELD_BACK_HELP.replace(/^Held back \(optional\): /, '').replace(/^these/, 'they')}
@@ -100,32 +116,9 @@ export function UpdatesCard({ agentId, canManage }: { agentId: string; canManage
           <div>
             <button onClick={() => setOpen(!open)} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-              {open ? 'Hide' : 'Show'} {pkgs.length} pending{sec.length ? ` (${sec.length} security first)` : ''}{heldPkgs ? `, ${heldPkgs} held back` : ''}
+              {open ? 'Hide' : 'Show'} {pkgs.length} pending{sec.length ? ` (${sec.length} security, most urgent first)` : ''}{heldPkgs ? `, ${heldPkgs} held back` : ''}
             </button>
-            {open && (
-              <div className="mt-2 max-h-80 overflow-auto rounded-md border border-border">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted/40 text-muted-foreground sticky top-0">
-                    <tr><th className="text-left font-medium px-2 py-1.5">Name</th><th className="text-left font-medium px-2 py-1.5">Installed</th><th className="text-left font-medium px-2 py-1.5">Available</th><th className="text-left font-medium px-2 py-1.5">Notes</th></tr>
-                  </thead>
-                  <tbody>
-                    {pkgs.map((p, i) => (
-                      <tr key={`${p.name}-${i}`} className="border-t border-border">
-                        <td className="px-2 py-1 font-mono break-all">{p.name}{p.kb && <span className="text-muted-foreground"> · {p.kb}</span>}</td>
-                        <td className="px-2 py-1 font-mono text-muted-foreground">{p.current ?? (p.kb ? '' : 'new')}</td>
-                        <td className="px-2 py-1 font-mono">{p.available ?? ''}</td>
-                        <td className="px-2 py-1">
-                          {p.security && <span className="text-amber-300">security{p.severity ? ` · ${p.severity}` : ''}</span>}
-                          {p.restart && <span className="text-muted-foreground">{p.security ? ' · ' : ''}restart</span>}
-                          {p.needsUser && <span className="text-sky-300"> · needs someone at the Mac</span>}
-                          {p.heldBack && <span className="text-muted-foreground" title={HELD_BACK_HELP}>{p.security || p.restart || p.needsUser ? ' · ' : ''}held back</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            {open && <UpdatesPackages pkgs={pkgs} cves={d.cves ?? {}} m={m} />}
           </div>
         )}
 

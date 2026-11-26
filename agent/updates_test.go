@@ -270,3 +270,49 @@ func TestRealCheck(t *testing.T) {
 		t.Logf("  %+v", p)
 	}
 }
+
+func TestParseDnfAdvisories(t *testing.T) {
+	dnf4 := `RHSA-2024:1234 Important/Sec. openssl-libs-1:3.0.7-27.el9.x86_64
+FEDORA-2024-1a2b3c4d5e low/Sec.    curl-8.6.0-7.fc40.x86_64
+NetworkManager-ignored line`
+	a := parseDnfAdvisories(dnf4)
+	if got := onlyAdvisoryIDs(a["openssl-libs"]); len(got) != 1 || got[0] != "RHSA-2024:1234" {
+		t.Fatalf("advisory ids wrong: %+v", a)
+	}
+	if got := a["curl"]; len(got) != 1 || got[0] != "FEDORA-2024-1a2b3c4d5e" {
+		t.Fatalf("fedora advisory wrong: %+v", a)
+	}
+	withCve := `CVE-2024-0727 Important/Sec. openssl-libs-1:3.0.7-27.el9.x86_64
+CVE-2023-6129 Important/Sec. openssl-libs-1:3.0.7-27.el9.x86_64
+CVE-2023-6129 Important/Sec. openssl-1:3.0.7-27.el9.x86_64
+CVE-2024-2398 Moderate/Sec.  NetworkManager-1:1.46.0-8.el9.x86_64`
+	c := parseDnfAdvisories(withCve)
+	if got := onlyCVEs(c["openssl-libs"]); len(got) != 2 || got[0] != "CVE-2024-0727" {
+		t.Fatalf("cves wrong: %+v", c)
+	}
+	if got := onlyCVEs(c["NetworkManager"]); len(got) != 1 {
+		t.Fatalf("NetworkManager cves wrong: %+v", c)
+	}
+	// dnf5 advisory list --with-cve: advisory and CVE columns both present.
+	dnf5 := `Name                     Type     Severity  Package                                   Issued
+FEDORA-2025-0123456789   security Important glibc-2.40-17.fc41.x86_64 CVE-2025-0395 2025-02-03 01:02:03`
+	d := parseDnfAdvisories(dnf5)
+	if got := d["glibc"]; len(got) != 2 || onlyCVEs(got)[0] != "CVE-2025-0395" || onlyAdvisoryIDs(got)[0] != "FEDORA-2025-0123456789" {
+		t.Fatalf("dnf5 wrong: %+v", d)
+	}
+}
+
+func TestParseDpkgSources(t *testing.T) {
+	m := parseDpkgSources("libssl3\topenssl\nopenssl\topenssl\nbash\t\n")
+	if m["libssl3"] != "openssl" || m["bash"] != "" {
+		t.Fatalf("dpkg sources wrong: %+v", m)
+	}
+}
+
+func TestParseWinCheckCVEs(t *testing.T) {
+	out := `{"updates":[{"title":"2024-11 Cumulative Update","kb":"5046617","severity":"Critical","categories":["Security Updates"],"reboot":true,"cves":["CVE-2024-43451","cve-2024-49039"],"bulletins":"MS24-11"}],"rebootPending":false,"reasons":[]}`
+	p, _, _, errMsg := parseWinCheck(out)
+	if errMsg != "" || len(p) != 1 || len(p[0].CVEs) != 2 || p[0].CVEs[1] != "CVE-2024-49039" || p[0].Advisories[0] != "MS24-11" {
+		t.Fatalf("windows cves wrong: %+v %s", p, errMsg)
+	}
+}

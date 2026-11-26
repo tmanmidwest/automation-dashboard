@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **How much each OS update matters.** Health → Updates now gives every pending update a priority
+  (Patch now, Critical, Important, Security, Regular), the CVEs it fixes with links to the Ubuntu /
+  Debian / Red Hat / Microsoft advisory and NVD, CVSS, EPSS, and a **known exploited** flag from
+  CISA KEV. Machines sort worst-first with a line saying why, a new **Known exploited** tile filters
+  them, and the restart marker turns red when installed fixes for serious CVEs wait on a restart.
+  CVEs come from dnf and Windows Update directly and, for apt, from OSV.dev (cached; follows the
+  outside-in toggle). New alert `updates.known_exploited` and Posture finding after 2 days. MCP
+  `list_os_updates` / `get_os_update_machine` include it. Needs agent 0.10.0 (agents update
+  themselves). Migration `0058`.
 - **Repair… on a machine's Updates card** (apt, agent 0.9+) — stops an apt/dpkg that has held the
   package lock for 10+ minutes, runs `dpkg --configure -a` and `apt-get -f install`, then checks
   again, with the output streamed live. The card says when apt looks stuck or an install was

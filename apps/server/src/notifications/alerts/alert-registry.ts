@@ -726,6 +726,16 @@ export const ALERT_TYPES: AlertTypeDef[] = [
     connectorScoped: false,
   },
   {
+    key: 'updates.known_exploited',
+    label: 'Known-exploited CVE updates waiting',
+    description: 'A machine has had an update that fixes a CVE on CISA\'s Known Exploited Vulnerabilities list waiting for more than 2 days. Sent once per machine until it is installed.',
+    category: 'Health',
+    defaultSeverity: 'critical',
+    defaultEnabled: true,
+    defaultChannels: ['email'],
+    connectorScoped: false,
+  },
+  {
     key: 'updates.security_waiting',
     label: 'Security updates waiting',
     description: 'A server has had security updates waiting for longer than a week. Sent once per machine until they are installed.',

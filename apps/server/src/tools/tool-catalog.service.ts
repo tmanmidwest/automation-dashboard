@@ -385,7 +385,7 @@ export class ToolCatalogService {
       read({
         name: 'list_os_updates',
         description:
-          'OS updates across every machine running the Cerebro agent (Health → Updates): per machine the pending, security and held-back counts, restart needed and why, package manager, agent version and last run; plus the most recent install/restart runs (status, message, who started it), update schedules and totals. Use get_os_update_machine for one machine\'s packages and get_os_update_run for a run\'s full output.',
+          'OS updates across every machine running the Cerebro agent (Health → Updates): per machine the pending, security and held-back counts, update priority (patch-now = fixes a CISA known-exploited CVE, critical, important, security, regular), CVE count, known-exploited CVEs (kevCves), restart needed and why, package manager, agent version and last run; plus the most recent install/restart runs (status, message, who started it), update schedules and totals. Use get_os_update_machine for one machine\'s packages and get_os_update_run for a run\'s full output.',
         permission: 'fabric:read',
         inputSchema: {
           runs: z.number().optional().describe('How many recent runs to include (default 20, max 100)'),
@@ -399,7 +399,7 @@ export class ToolCatalogService {
       read({
         name: 'get_os_update_machine',
         description:
-          'One machine\'s OS updates: status (counts, restart reason, errors, Proxmox guest for snapshots), every pending package (version, security, held back) and its last 30 install/restart runs with their result messages (e.g. why a Proxmox snapshot failed). Pass the agent id or the machine name.',
+          'One machine\'s OS updates: status (counts, restart reason, errors, Proxmox guest for snapshots), every pending package (version, security, held back, priority, CVEs it fixes, advisories, max CVSS, EPSS, known exploited), details per CVE (CVSS, EPSS, CISA KEV due date) and its last 30 install/restart runs with their result messages (e.g. why a Proxmox snapshot failed). Pass the agent id or the machine name.',
         permission: 'fabric:read',
         inputSchema: { machine: z.string().describe('Agent id, or the machine name as shown on Health (case-insensitive)') },
         run: async ({ machine }) => this.osUpdates.machineDetail(await this.osUpdateAgentId(String(machine ?? ''))),

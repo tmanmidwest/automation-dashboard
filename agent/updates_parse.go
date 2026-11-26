@@ -142,6 +142,84 @@ func parseDnfSecurity(out string) map[string]string {
 	return sec
 }
 
+// parseDnfAdvisories reads `updateinfo list` rows (dnf4, dnf5 and yum lay them out a
+// little differently, so it goes by what each field looks like) and returns package
+// name → the advisory ids and CVE ids on its rows. With --with-cve, dnf4 prints the
+// CVE in place of the advisory id; dnf5 adds it as its own column.
+var cveRe = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
+var advisoryRe = regexp.MustCompile(`^[A-Z]{2,}[A-Z0-9]*(-[A-Z0-9]+)*-\d{4}[-:][A-Za-z0-9.:-]+$`)
+
+func parseDnfAdvisories(out string) map[string][]string {
+	res := map[string][]string{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) < 3 {
+			continue
+		}
+		name := ""
+		var ids []string
+		for _, x := range f {
+			if m := nevraRe.FindStringSubmatch(x); m != nil && strings.Contains(x, ".") && name == "" && !cveRe.MatchString(x) && !advisoryRe.MatchString(x) {
+				name = m[1]
+				continue
+			}
+			if cveRe.MatchString(x) || advisoryRe.MatchString(x) {
+				ids = append(ids, x)
+			}
+		}
+		if name == "" || len(ids) == 0 {
+			continue
+		}
+		for _, id := range ids {
+			if !containsStr(res[name], id) {
+				res[name] = append(res[name], id)
+			}
+		}
+	}
+	return res
+}
+
+func onlyCVEs(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if cveRe.MatchString(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func onlyAdvisoryIDs(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if !cveRe.MatchString(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// parseDpkgSources reads `dpkg-query -W -f='${Package}\t${source:Package}\n'`.
+func parseDpkgSources(out string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+		if len(parts) == 2 && parts[0] != "" {
+			m[parts[0]] = strings.TrimSpace(parts[1])
+		}
+	}
+	return m
+}
+
 // --- zypper ------------------------------------------------------------------
 
 // `zypper -n -q list-updates` table:
@@ -288,6 +366,8 @@ type winUpdate struct {
 	Severity   string          `json:"severity"`
 	Categories json.RawMessage `json:"categories"`
 	Reboot     bool            `json:"reboot"`
+	CVEs       json.RawMessage `json:"cves"`
+	Bulletins  json.RawMessage `json:"bulletins"`
 }
 
 // stringsOrOne decodes a JSON string array that PowerShell may have collapsed to a single string.
@@ -336,7 +416,16 @@ func parseWinCheck(out string) (pkgs []pkgUpdate, rebootPending bool, reason str
 		if u.KB != "" {
 			kb = "KB" + strings.TrimPrefix(u.KB, "KB")
 		}
-		pkgs = append(pkgs, pkgUpdate{Name: u.Title, KB: kb, Severity: u.Severity, Security: sec, Restart: u.Reboot, Source: strings.Join(cats, ", ")})
+		var cves []string
+		for _, c := range stringsOrOne(u.CVEs) {
+			if c = strings.ToUpper(strings.TrimSpace(c)); cveRe.MatchString(c) {
+				cves = append(cves, c)
+			}
+		}
+		if len(cves) > 0 {
+			sec = true
+		}
+		pkgs = append(pkgs, pkgUpdate{Name: u.Title, KB: kb, Severity: u.Severity, Security: sec, Restart: u.Reboot, Source: strings.Join(cats, ", "), CVEs: cves, Advisories: stringsOrOne(u.Bulletins)})
 	}
 	return pkgs, w.RebootPending, strings.Join(stringsOrOne(w.Reasons), ", "), w.Error
 }

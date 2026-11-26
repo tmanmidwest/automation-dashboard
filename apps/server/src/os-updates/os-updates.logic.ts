@@ -1,7 +1,9 @@
 import type {
   OsUpdateAgentRun,
+  OsUpdateDistro,
   OsUpdateMode,
   OsUpdatePackage,
+  OsUpdatePriority,
   OsUpdateReboot,
   OsUpdateReport,
   OsUpdateRing,
@@ -10,7 +12,7 @@ import type {
   OsUpdateStatus,
   PostureFinding,
 } from '@cerebro/shared';
-import { OS_UPDATE_REBOOT_GRACE_DAYS, OS_UPDATE_SECURITY_GRACE_DAYS } from '@cerebro/shared';
+import { OS_UPDATE_PATCH_NOW_GRACE_DAYS, OS_UPDATE_PRIORITY_ORDER, OS_UPDATE_REBOOT_GRACE_DAYS, OS_UPDATE_SECURITY_GRACE_DAYS, osUpdatePriorityRank } from '@cerebro/shared';
 
 /**
  * Pure OS-update logic (no I/O): report sanitizing, "waiting since" tracking,
@@ -46,6 +48,25 @@ const int = (v: unknown, min = 0, max = 1_000_000): number => {
   return Math.min(max, Math.max(min, n));
 };
 
+const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
+const strList = (v: unknown, maxItems: number, maxLen: number): string[] =>
+  Array.isArray(v) ? v.map((x) => str(x, maxLen)).filter((x): x is string => !!x).slice(0, maxItems) : [];
+
+function sanitizeDistro(v: unknown): OsUpdateDistro | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const d = v as Record<string, unknown>;
+  const id = str(d.id, 40)?.toLowerCase();
+  if (!id) return undefined;
+  const out: OsUpdateDistro = { id };
+  const ver = str(d.versionId, 40);
+  const code = str(d.codename, 40);
+  const like = str(d.idLike, 80);
+  if (ver) out.versionId = ver;
+  if (code) out.codename = code;
+  if (like) out.idLike = like;
+  return out;
+}
+
 /** Clamp an agent report to known fields and sane sizes. */
 export function sanitizeReport(raw: unknown): OsUpdateReport | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -72,6 +93,12 @@ export function sanitizeReport(raw: unknown): OsUpdateReport | null {
       if (x.restart === true) pkg.restart = true;
       if (x.needsUser === true) pkg.needsUser = true;
       if (x.heldBack === true) pkg.heldBack = true;
+      const srcPkg = str(x.sourcePackage, 200);
+      if (srcPkg) pkg.sourcePackage = srcPkg;
+      const cves = strList(x.cves, 60, 30).map((c) => c.toUpperCase()).filter((c) => CVE_ID.test(c));
+      if (cves.length) pkg.cves = [...new Set(cves)];
+      const adv = strList(x.advisories, 20, 60);
+      if (adv.length) pkg.advisories = [...new Set(adv)];
       pkgs.push(pkg);
     }
   }
@@ -79,6 +106,7 @@ export function sanitizeReport(raw: unknown): OsUpdateReport | null {
   return {
     checkedAt: int(r.checkedAt, 0, 8_640_000_000_000),
     manager: str(r.manager, 40),
+    distro: sanitizeDistro(r.distro),
     supported: r.supported === true,
     error: str(r.error, 500),
     note: str(r.note, 500),
@@ -140,6 +168,53 @@ export interface StoredStatus {
   installing: string | null;
   checking: boolean;
   packages: unknown;
+  distro?: unknown;
+  priority?: string | null;
+  cveCount?: number;
+  kevCount?: number;
+  kevCves?: string[];
+  patchNowSince?: Date | null;
+  restartPriority?: string | null;
+  enrichedAt?: Date | null;
+  enrichNote?: string | null;
+}
+
+const ENRICHED_FIELDS = ['cves', 'advisories', 'priority', 'maxCvss', 'kev', 'epss'] as const;
+
+/**
+ * Keep the CVE / priority detail Cerebro worked out for packages that are unchanged
+ * since the last report, so the page doesn't flash "checking" every 6 hours. The
+ * agent's own CVE / advisory ids win where it sent some.
+ */
+export function carryEnrichment(prev: OsUpdatePackage[], next: OsUpdatePackage[]): OsUpdatePackage[] {
+  const old = new Map(prev.map((p) => [`${p.name}|${p.current ?? ''}|${p.available ?? ''}`, p]));
+  return next.map((p) => {
+    const o = old.get(`${p.name}|${p.current ?? ''}|${p.available ?? ''}`);
+    if (!o) return p;
+    const out: OsUpdatePackage = { ...p };
+    for (const k of ENRICHED_FIELDS) {
+      if (out[k] === undefined && o[k] !== undefined) (out as unknown as Record<string, unknown>)[k] = o[k];
+    }
+    return out;
+  });
+}
+
+/**
+ * The priority of installed-but-not-yet-active fixes: when a restart is needed and
+ * updates that were pending last time are gone (installed), the most urgent of them.
+ * Cleared once no restart is needed.
+ */
+export function restartPriorityAfter(prev: StoredStatus | null, prevPkgs: OsUpdatePackage[], nextPkgs: OsUpdatePackage[], rebootRequired: boolean): string | null {
+  if (!rebootRequired) return null;
+  const still = new Set(nextPkgs.map((p) => p.name));
+  let best: OsUpdatePriority | null = null;
+  for (const p of prevPkgs) {
+    if (still.has(p.name) || !p.priority || p.priority === 'regular') continue;
+    if (!best || osUpdatePriorityRank(p.priority) < osUpdatePriorityRank(best)) best = p.priority;
+  }
+  const kept = prev?.restartPriority && prev.rebootRequired ? (prev.restartPriority as OsUpdatePriority) : null;
+  if (kept && (!best || osUpdatePriorityRank(kept) < osUpdatePriorityRank(best))) return kept;
+  return best;
 }
 
 /**
@@ -164,6 +239,7 @@ export function mergeReport(prev: StoredStatus | null, rep: OsUpdateReport, now:
     return { ...prev, ...live, error: rep.error, note: rep.note ?? prev.note, checkedAt };
   }
   const security = rep.security;
+  const prevPkgs = Array.isArray(prev?.packages) ? (prev!.packages as OsUpdatePackage[]) : [];
   return {
     checkedAt,
     manager: rep.manager ?? null,
@@ -181,10 +257,22 @@ export function mergeReport(prev: StoredStatus | null, rep: OsUpdateReport, now:
     securitySince: security > 0 ? (prev && prev.security > 0 && prev.securitySince ? prev.securitySince : now) : null,
     canInstall: rep.canInstall,
     proxmox: !!rep.proxmox,
-    packages: rep.packages,
+    packages: carryEnrichment(prevPkgs, rep.packages),
+    distro: rep.distro ?? prev?.distro ?? null,
+    // Summary from the last enrichment stays until the next one (seconds later) replaces it.
+    priority: prev?.priority ?? null,
+    cveCount: prev?.cveCount ?? 0,
+    kevCount: prev?.kevCount ?? 0,
+    kevCves: prev?.kevCves ?? [],
+    patchNowSince: prev?.patchNowSince ?? null,
+    restartPriority: restartPriorityAfter(prev, prevPkgs, rep.packages, rep.rebootRequired),
+    enrichedAt: prev?.enrichedAt ?? null,
+    enrichNote: prev?.enrichNote ?? null,
     ...live,
   };
 }
+
+const isPriority = (v: unknown): v is OsUpdatePriority => OS_UPDATE_PRIORITY_ORDER.includes(v as OsUpdatePriority);
 
 export function toUpdateStatus(row: StoredStatus | null | undefined): OsUpdateStatus | null {
   if (!row) return null;
@@ -208,6 +296,15 @@ export function toUpdateStatus(row: StoredStatus | null | undefined): OsUpdateSt
     mode: (MODES.includes(row.mode as OsUpdateMode) ? row.mode : 'on') as OsUpdateMode,
     installing: row.installing,
     checking: row.checking,
+    priority: isPriority(row.priority) ? row.priority : null,
+    cveCount: row.cveCount ?? 0,
+    kevCount: row.kevCount ?? 0,
+    kevCves: row.kevCves ?? [],
+    patchNowSince: row.patchNowSince?.toISOString() ?? null,
+    restartPriority: isPriority(row.restartPriority) ? row.restartPriority : null,
+    enrichedAt: row.enrichedAt?.toISOString() ?? null,
+    enrichNote: row.enrichNote ?? null,
+    distro: sanitizeDistro(row.distro) ?? null,
   };
 }
 
@@ -314,6 +411,10 @@ export interface PostureMachine {
   rebootRequired: boolean;
   rebootSince: Date | null;
   rebootReason: string | null;
+  kevCount?: number;
+  kevCves?: string[];
+  patchNowSince?: Date | null;
+  restartPriority?: string | null;
 }
 
 const days = (from: Date, now: Date) => Math.floor((now.getTime() - from.getTime()) / DAY_MS);
@@ -341,11 +442,28 @@ export function osUpdateFindings(machines: PostureMachine[], now: Date = new Dat
       hosts: sec.map((m) => m.name),
     });
   }
+  const kev = machines.filter((m) => (m.kevCount ?? 0) > 0 && m.patchNowSince && days(m.patchNowSince, now) >= OS_UPDATE_PATCH_NOW_GRACE_DAYS);
+  if (kev.length)
+    out.push({
+      id: 'os-known-exploited-updates',
+      severity: 'high',
+      category: 'patching',
+      title: `${plural(kev.length, 'machine has', 'machines have')} updates waiting that fix known-exploited vulnerabilities`,
+      why: 'These updates fix CVEs on CISA\'s Known Exploited Vulnerabilities list: attackers are already using them. They matter more than the rest of the queue.',
+      fix: 'Install them from Health → Updates (Security only covers them), then restart if asked. A restart is what makes kernel and library fixes take effect.',
+      affected: kev.map((m) => ({
+        label: m.name,
+        note: `${plural(m.kevCount ?? 0, 'update fixes', 'updates fix')} ${(m.kevCves ?? []).slice(0, 3).join(', ')}${(m.kevCves ?? []).length > 3 ? ` +${(m.kevCves ?? []).length - 3} more` : ''} · waiting ${plural(days(m.patchNowSince!, now), 'day', 'days')}`,
+        url: `/health/${m.agentId}`,
+      })),
+      source: 'Cerebro agent + CISA KEV',
+      hosts: kev.map((m) => m.name),
+    });
   const rb = machines.filter((m) => m.rebootRequired && m.rebootSince && days(m.rebootSince, now) >= OS_UPDATE_REBOOT_GRACE_DAYS);
   if (rb.length)
     out.push({
       id: 'os-restart-pending',
-      severity: 'low',
+      severity: rb.some((m) => m.restartPriority === 'patch-now' || m.restartPriority === 'critical') ? 'medium' : 'low',
       category: 'patching',
       title: `${plural(rb.length, 'machine needs', 'machines need')} a restart to finish installing updates`,
       why: 'Until it restarts, the machine keeps running the old kernel or libraries, so the fixes that were installed are not in effect yet.',
