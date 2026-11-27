@@ -18,7 +18,9 @@ import {
   Network,
   HeartPulse,
   ShieldAlert,
+  ListChecks,
 } from 'lucide-react';
+import { ACT_NOW_PERMS, TIER_STRIPE, useActNowSummary } from './ActNowTile';
 import type { Permission } from '@cerebro/shared';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from './ui/button';
@@ -29,11 +31,14 @@ interface NavItem {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   perm?: Permission;
+  /** Shown when the user holds any of these. */
+  anyPerm?: Permission[];
   code: string;
 }
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, code: '01-000' },
+  { to: '/act-now', label: 'Act Now', icon: ListChecks, anyPerm: ACT_NOW_PERMS, code: '01-ACT' },
   { to: '/computer', label: 'Computer', icon: Cpu, perm: 'assistant:use', code: '01-CMP' },
   { to: '/connectors', label: 'Connectors', icon: Puzzle, perm: 'connectors:read', code: '02-114' },
   { to: '/map', label: 'Architecture Map', icon: Network, perm: 'connectors:read', code: '02-MAP' },
@@ -67,7 +72,9 @@ export function SidebarNav({
 }) {
   const { user, logout, can } = useAuth();
   const navigate = useNavigate();
-  const items = NAV.filter((i) => !i.perm || can(i.perm));
+  const items = NAV.filter((i) => (!i.perm || can(i.perm)) && (!i.anyPerm || i.anyPerm.some(can)));
+  const actNow = useActNowSummary(ACT_NOW_PERMS.some(can));
+  const worst = actNow && ([1, 2, 3, 4] as const).find((t) => actNow.counts[t] > 0);
 
   return (
     <div className="flex flex-col gap-1.5 h-full min-h-0">
@@ -91,6 +98,12 @@ export function SidebarNav({
                   style={isActive ? { background: 'hsl(var(--primary))' } : undefined}
                 />
                 <item.icon className={cn('h-5 w-5 shrink-0 relative z-10', isActive && 'text-[hsl(222_47%_8%)]')} />
+                {item.to === '/act-now' && !!actNow?.total && worst && (
+                  <span aria-label={`${actNow.total} to act on`}
+                    className={cn('relative z-10 rounded-full px-1.5 min-w-[1.25rem] text-center text-[0.65rem] font-semibold tabular-nums text-white', TIER_STRIPE[worst], collapsed && 'absolute -top-1 -right-1')}>
+                    {actNow.total}
+                  </span>
+                )}
                 {!collapsed && (
                   <span className={cn('relative z-10 flex-1 truncate', isActive && 'text-[hsl(222_47%_8%)]')}>
                     {item.label}

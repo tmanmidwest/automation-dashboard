@@ -347,6 +347,10 @@ things had no agent-reachable surface. Added, all scope-gated as usual:
   run; one machine's packages and last 30 runs (by agent id or name); one run's result message,
   snapshot note and the agent's streamed output (last `lines` lines, default 300). Same data as
   Health → Updates. See `docs/os-updates.md`.
+- **Act Now** — `list_act_now` (any of `fabric:read`, `connectors:read`, `backup:read`; read-only):
+  the worst-first worklist across OS updates, posture and backups, in four tiers, with reasons,
+  CVEs, EPSS/CVSS, overdue flags and the in-app page to fix each item on. Only the sources the
+  caller can read. See `docs/act-now.md`.
   Lets an agent answer "what happened recently?" / investigate incidents.
 - **`delete_resource`** (`connectors:action`, destructive + confirm): the one generic connector
   verb MCP lacked. Calls `ConnectorInstanceService.deleteResource` — the same path the UI's
