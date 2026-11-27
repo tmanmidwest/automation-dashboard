@@ -21,5 +21,6 @@ import { PostureController } from './posture.controller';
   imports: [ConnectorsModule, NotificationsModule, SettingsModule, FabricModule, VulnIntelModule],
   controllers: [TopologyController, NewDevicesController, PostureController],
   providers: [TopologyService, NewDevicesService, OutsideInService, ImageScanService, VersionCveService, CtLogService, HibpService, PostureTrackingService],
+  exports: [TopologyService],
 })
 export class TopologyModule {}

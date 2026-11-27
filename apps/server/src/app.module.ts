@@ -36,6 +36,7 @@ import { OsUpdatesModule } from './os-updates/os-updates.module';
 import { ToolsModule } from './tools/tools.module';
 import { AssistantModule } from './assistant/assistant.module';
 import { TopologyModule } from './topology/topology.module';
+import { ActNowModule } from './act-now/act-now.module';
 
 import { SessionAuthGuard } from './auth/auth.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -81,6 +82,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     ToolsModule,
     AssistantModule,
     TopologyModule,
+    ActNowModule,
   ],
   providers: [
     // Order matters: authenticate first, then check permissions.

@@ -26,6 +26,7 @@ import { StackBackupService } from '../stack-backup/stack-backup.service';
 import { StackBackupSetService } from '../stack-backup/stack-backup-set.service';
 import { StackRestoreService } from '../stack-backup/stack-restore.service';
 import { OsUpdatesService } from '../os-updates/os-updates.service';
+import { ActNowService } from '../act-now/act-now.service';
 
 /**
  * One tool in the shared catalog: a name, an LLM-facing description, a zod input shape,
@@ -80,6 +81,7 @@ export class ToolCatalogService {
     private readonly stackRestores: StackRestoreService,
     private readonly stackBackupSets: StackBackupSetService,
     private readonly osUpdates: OsUpdatesService,
+    private readonly actNow: ActNowService,
   ) {}
 
   /** Every tool the given user is permitted to use. */
@@ -376,6 +378,26 @@ export class ToolCatalogService {
             before: args.before as string | undefined,
             limit: args.limit as number | undefined,
           });
+        },
+      });
+    }
+
+    // ── Act Now (any of fabric:read / connectors:read / backup:read) — docs/act-now.md ──
+    const actNowPerm = (['fabric:read', 'connectors:read', 'backup:read'] as Permission[]).find(has);
+    if (actNowPerm) {
+      read({
+        name: 'list_act_now',
+        description:
+          'The Act Now worklist: what to fix today, worst first, across OS updates, security posture and backups. Tiers: 1 exploited & exposed (CISA known-exploited and reachable from the internet), 2 known exploited (internal), 3 backups broken (repository/data check, failing backup, failed test restore, failed system backup), 4 critical / high (critical updates, high posture findings, stale backups, new stacks with no backup). Each item has a reason line, why/fix text, CVEs, EPSS/CVSS, overdue flag, evidence and the in-app page to fix it on. Only sources the caller can read are included; `sources` says which and how fresh. Also returns snoozed items and counts of what was left off on purpose.',
+        permission: actNowPerm,
+        inputSchema: {
+          limit: z.number().optional().describe('How many items to return (default 25, max 200)'),
+          refresh: z.boolean().optional().describe('Rebuild the list now instead of using the copy from the last minute'),
+        },
+        run: async ({ limit, refresh }) => {
+          const l = await this.actNow.list(user, { fresh: refresh === true });
+          const n = Math.min(Math.max(Number(limit) || 25, 1), 200);
+          return { ...l, items: l.items.slice(0, n), more: Math.max(0, l.items.length - n) };
         },
       });
     }

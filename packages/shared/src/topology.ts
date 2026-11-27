@@ -207,6 +207,8 @@ export interface PostureFinding {
   resolvedAt?: string;
   /** Machines involved (host / VM / gateway labels), for filtering and grouping by host. */
   hosts?: string[];
+  /** CVEs behind this finding that are on CISA's Known Exploited Vulnerabilities list. */
+  kevCves?: string[];
 }
 
 export type PostureStatus = 'open' | 'snoozed' | 'accepted' | 'fixed';
@@ -226,6 +228,10 @@ export interface PostureAffected {
   setBy?: string;
   setAt?: string;
   firstSeenAt?: string;
+  /** Reachable from the internet (a WAN address, or a container on an exposure path). */
+  exposed?: boolean;
+  /** This item is (or carries) a CVE on CISA's Known Exploited list. */
+  kev?: boolean;
 }
 
 /** One line of a finding's history. */

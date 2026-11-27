@@ -1504,3 +1504,19 @@ model PostureEvent {
 
   @@index([findingId, at])
 }
+
+/// Act Now (docs/act-now.md): an update or backup item set aside from the worklist.
+/// Posture items snooze through PostureItemRecord and stacks through StackCoverageEntry.ignored instead.
+model ActNowState {
+  /// The item's key, e.g. "update:<agentId>" or "backup-policy:<policyId>".
+  key       String    @id
+  /// Snoozed until; the item comes back then.
+  until     DateTime
+  note      String?
+  setBy     String?
+  setAt     DateTime  @default(now())
+  /// The item's tier when snoozed (1 = worst). A worse tier brings it back early.
+  tier      Int
+  /// Known-exploited CVEs the item had when snoozed. A new one brings it back early.
+  kevCves   String[]  @default([])
+}

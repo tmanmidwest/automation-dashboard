@@ -48,8 +48,10 @@ import { McpServers } from '@/pages/settings/McpServers';
 import { ZumaSettings } from '@/pages/settings/ZumaSettings';
 
 // The map pulls in React Flow + ELK; load it only when someone opens it.
+import { ACT_NOW_PERMS } from '@/components/ActNowTile';
 const ArchitectureMap = lazy(() => import('@/pages/ArchitectureMap'));
 const Posture = lazy(() => import('@/pages/Posture'));
+const ActNow = lazy(() => import('@/pages/ActNow'));
 
 function FullscreenBrand() {
   return (
@@ -62,6 +64,13 @@ function FullscreenBrand() {
 function RequirePerm({ perm, children }: { perm: Permission; children: React.ReactNode }) {
   const { can } = useAuth();
   if (!can(perm)) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** Act Now: readable with any of its sources' read permissions. */
+function RequireAnyPerm({ perms, children }: { perms: Permission[]; children: React.ReactNode }) {
+  const { can } = useAuth();
+  if (!perms.some(can)) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 
@@ -109,6 +118,7 @@ function Router() {
 
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/panel" element={<ProtectedBare><Panel /></ProtectedBare>} />
+      <Route path="/act-now" element={<Protected><RequireAnyPerm perms={ACT_NOW_PERMS}><Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}><ActNow /></Suspense></RequireAnyPerm></Protected>} />
       <Route path="/viewscreen" element={<Protected><RequirePerm perm="connectors:read"><Viewscreen /></RequirePerm></Protected>} />
       <Route path="/overview/:kind" element={<Protected><RequirePerm perm="connectors:read"><OverviewResources /></RequirePerm></Protected>} />
       <Route path="/connectors" element={<Protected><RequirePerm perm="connectors:read"><ConnectorsList /></RequirePerm></Protected>} />

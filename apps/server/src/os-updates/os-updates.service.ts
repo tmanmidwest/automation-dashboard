@@ -375,6 +375,11 @@ export class OsUpdatesService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** Every machine as listed on Health → Updates (one row per box), for Act Now. */
+  listMachines(): Promise<OsUpdateMachine[]> {
+    return this.machines();
+  }
+
   async overview(): Promise<OsUpdateOverview> {
     const [machines, runs, schedules, signing, names] = await Promise.all([
       this.machines(),

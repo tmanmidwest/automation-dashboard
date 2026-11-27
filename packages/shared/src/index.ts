@@ -17,3 +17,4 @@ export * from './zuma';
 export * from './agent-catalog';
 export * from './local-login';
 export * from './topology';
+export * from './act-now';

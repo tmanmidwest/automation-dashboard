@@ -117,6 +117,21 @@ export class TopologyService {
     return { ...g, imageScan, findings: await this.tracking.annotate(g.findings ?? [], g) };
   }
 
+  /**
+   * The last built graph with item snoozes applied, without waiting on a build (Act Now).
+   * With nothing built yet this starts a background build and returns null; a stale
+   * cache is served while a fresh one builds, as graph() does.
+   */
+  async peek(): Promise<{ graph: TopologyGraph; builtAt: Date } | null> {
+    if (!this.cache) {
+      if (!this.inflight) void this.rebuild(false).catch(() => { /* next call retries */ });
+      return null;
+    }
+    if (Date.now() - this.cache.at >= SERVE_MAX_MS && !this.inflight) void this.rebuild(false).catch(() => { /* keep last good */ });
+    const { graph, at } = this.cache;
+    return { graph: { ...graph, findings: await this.tracking.annotate(graph.findings ?? [], graph) }, builtAt: new Date(at) };
+  }
+
   /** Snooze every open item of a finding for `days` (the map's finding card). Returns the finding as now shown. */
   async snooze(id: string, days: number, actor?: string): Promise<PostureFinding | null> {
     if (!(await this.graph()).findings?.some((x) => x.id === id)) return null;

@@ -5,6 +5,7 @@ import type { VersionInfo, DashboardOverview, OverviewSource, MonitorSummary, Mo
 import { api } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { Button } from '@/components/ui/button';
+import { ACT_NOW_PERMS, ActNowTile } from '@/components/ActNowTile';
 import { cn, formatMoney, shortDateTime } from '@/lib/utils';
 import { eventLogLink, eventSourceLink, type ConnectorRef } from '@/lib/event-links';
 
@@ -1044,6 +1045,9 @@ export function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ── Act Now: the worst-first worklist (updates, posture, backups) ── */}
+      {ACT_NOW_PERMS.some(can) && <ActNowTile />}
 
       {/* ── Reorderable widget body (auto-bubbles problem widgets up in view mode) ── */}
       {renderOrder.map((id) => {

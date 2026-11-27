@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would remove first. Needs agent 0.8.0 (agents update themselves). Migration `0057`.
 
 ### Added
+- **Act Now: one list of what to fix today.** A new sidebar page (and a Dashboard tile) gathers
+  Patch-now and Critical OS updates, known-exploited and high-severity posture findings, and broken
+  or missing backups into one worst-first list in four tiers: exploited & exposed, known exploited,
+  backups broken, critical / high. Each row says why it's there and links to the page where you fix
+  it; update and backup items can be snoozed and come back early if they get worse. Reads only what
+  Cerebro already keeps (no new outside lookups). MCP tool `list_act_now`. Migration `0059`.
+  See [docs/act-now.md](docs/act-now.md).
 - **How much each OS update matters.** Health → Updates now gives every pending update a priority
   (Patch now, Critical, Important, Security, Regular), the CVEs it fixes with links to the Ubuntu /
   Debian / Red Hat / Microsoft advisory and NVD, CVSS, EPSS, and a **known exploited** flag from

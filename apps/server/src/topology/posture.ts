@@ -503,9 +503,10 @@ function outsideInFindings(input: BuildInput, graph: TopologyGraph, intel: Outsi
         fix: 'Update the internet-facing software (the proxy on 80/443, or whatever the port forward points at). Afterwards Shodan re-scans within a few days and the list should shrink.',
         affected: [...kev, ...w.vulns.filter((v) => !kev.includes(v))].map((v) => {
           const k = intel.kev.get(v.toUpperCase());
-          return { label: v, url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v)}`, note: k ? `CISA KEV: ${k.vulnerabilityName ?? k.product ?? ''}${k.knownRansomwareCampaignUse === 'Known' ? ' · used by ransomware' : ''}`.trim() : undefined };
+          return { label: v, url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v)}`, note: k ? `CISA KEV: ${k.vulnerabilityName ?? k.product ?? ''}${k.knownRansomwareCampaignUse === 'Known' ? ' · used by ransomware' : ''}`.trim() : undefined, exposed: true, ...(k ? { kev: true } : {}) };
         }),
         source: kev.length ? 'Shodan InternetDB + CISA KEV' : 'Shodan InternetDB',
+        ...(kev.length ? { kevCves: kev.map((v) => v.toUpperCase()) } : {}),
       });
     }
 
@@ -657,9 +658,10 @@ function imageCveFindings(input: BuildInput, graph: TopologyGraph, scans: Record
         fix: 'Update the image (pull a newer tag or digest and recreate the container). If no fixed release exists yet, limit who can reach the container.',
         affected: kevRows.map(({ r, kev }) => {
           const k = intel.kev.get(kev[0].toUpperCase());
-          return { label: r.label, nodeId: r.nodeId, url: nvd(kev[0]), note: `${kev.join(', ')}${k?.vulnerabilityName ? ` (${k.vulnerabilityName})` : ''} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` };
+          return { label: r.label, nodeId: r.nodeId, url: nvd(kev[0]), note: `${kev.join(', ')}${k?.vulnerabilityName ? ` (${k.vulnerabilityName})` : ''} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}`, kev: true, ...(r.exposed ? { exposed: true } : {}) };
         }),
         source: 'Trivy + CISA KEV',
+        kevCves: [...new Set(kevRows.flatMap((x) => x.kev.map((id) => id.toUpperCase())))],
       });
   }
 
@@ -675,7 +677,7 @@ function imageCveFindings(input: BuildInput, graph: TopologyGraph, scans: Record
       fix: 'Pull the newest image for the tag and recreate the container. If the newest image still has them, the maintainer hasn\'t rebuilt yet; check again in a few days or pin a newer tag.',
       affected: crit
         .sort((a, b) => Number(b.exposed) - Number(a.exposed) || b.scan.counts.critical - a.scan.counts.critical)
-        .map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed))} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}` })),
+        .map((r) => ({ label: r.label, nodeId: r.nodeId, url: urlOf(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed)), note: `${countsText(r.scan)} · ${example(top(r.scan, (v) => v.severity === 'CRITICAL' && !!v.fixed))} · ${r.image} · on ${r.host}${r.exposed ? ' · internet-facing' : ''}`, ...(r.exposed ? { exposed: true } : {}) })),
       source: 'Trivy',
     });
 
@@ -792,9 +794,11 @@ function versionCveFindings(vc: VersionCveInput, intel: OutsideInData | null): P
             h.kev ? 'on CISA KEV' : null,
             h.c.summary ?? null,
           ].filter(Boolean).join(' · '),
+          ...(h.kev ? { kev: true } : {}),
         })),
       ],
       source: kevN ? 'NVD + CISA KEV' : 'NVD',
+      ...(kevN ? { kevCves: hits.filter((h) => h.kev).map((h) => h.c.id.toUpperCase()) } : {}),
     });
   }
   return out;

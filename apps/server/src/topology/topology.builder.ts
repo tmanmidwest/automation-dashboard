@@ -419,7 +419,7 @@ export function buildTopology(input: BuildInput): TopologyGraph {
       status: a.online ? 'ok' : 'down',
       statusText: a.online ? 'online' : 'offline',
       details: { source: 'Fabric', items: [{ label: 'Agent', value: a.name }, { label: 'Mode', value: a.mode }, { label: 'Local IP', value: a.localIp ?? '—' }] },
-      source: { connectorId: 'fabric', name: 'Fabric' },
+      source: { connectorId: 'fabric', name: 'Fabric', kind: 'agent', resourceId: a.id },
     });
   }
 
